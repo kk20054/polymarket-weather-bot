@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WeatherBot Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>WeatherBot</h1>
+      <p>Polymarket weather signals, manual order tickets, and local paper ledger.</p>
+    </div>
+    <div class="status-pill"><span class="dot"></span><span id="last-updated">Loading</span></div>
+  </header>
+
+  <main class="layout">
+    <section class="stats" id="stats"></section>
+
+    <section class="panel wide">
+      <div class="panel-head">
+        <h2>Actionable Signals</h2>
+        <button id="refresh-btn">Refresh</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th>Action</th>
+              <th>Limit</th>
+              <th>Amount</th>
+              <th>Shares</th>
+              <th>EV</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="signals-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Open Paper Positions</h2>
+      </div>
+      <div id="positions-list" class="list"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Recent Events</h2>
+      </div>
+      <div id="events-list" class="list compact"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
