@@ -101,8 +101,8 @@ python weatherbet.py report    # full breakdown of all resolved markets
 
 ## Local Dashboard
 
-This fork adds a local FastAPI + SQLite dashboard inspired by
-`suislanchez/polymarket-kalshi-weather-bot`.
+This fork adds a local FastAPI + SQLite adapter and uses the React dashboard
+framework from `suislanchez/polymarket-kalshi-weather-bot`.
 
 The dashboard does not place real orders. It reads WeatherBot's local JSON files
 and SQLite signal records, then shows manual order tickets for human review.
@@ -110,12 +110,15 @@ and SQLite signal records, then shows manual order tickets for human review.
 ```bash
 pip install -r requirements.txt
 python -m uvicorn dashboard_server:app --host 127.0.0.1 --port 8765
+cd frontend
+npm install
+npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8765
+http://127.0.0.1:5173
 ```
 
 Local-only files such as `config.json`, `data/`, and `.venv/` are intentionally
