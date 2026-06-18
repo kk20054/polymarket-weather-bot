@@ -139,6 +139,7 @@ export interface WeatherSignal {
   shares?: number
   sim_amount?: number | null
   manual_note?: string | null
+  paper_position?: boolean
 }
 
 export interface DashboardData {

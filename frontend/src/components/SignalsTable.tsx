@@ -38,6 +38,7 @@ interface UnifiedSignal {
   shares?: number
   token?: string
   simAmount?: number | null
+  paperPosition?: boolean
 }
 
 function PlatformBadge({ platform }: { platform: string }) {
@@ -125,6 +126,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
       shares: s.shares,
       token: s.yes_token_id,
       simAmount: s.sim_amount,
+      paperPosition: s.paper_position,
     }))
 
     return [...wx, ...btc]
@@ -195,6 +197,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
           {sorted.map((sig, i) => {
             const isExpanded = expandedKey === sig.key
             const status = sig.status || (sig.actionable ? 'signal' : 'watch')
+            const locked = ['simulated', 'bought', 'skipped'].includes(status)
             const amountValue = simAmounts[sig.key] ?? String(sig.simAmount ?? sig.suggestedSize ?? '')
             const parsedAmount = Number(amountValue)
             const amountForSave = Number.isFinite(parsedAmount) ? parsedAmount : sig.suggestedSize
@@ -222,6 +225,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
                   </span>
                   <span className="text-[9px] text-neutral-600 block mt-0.5">
                     {statusLabel(status)} · {sig.direction.toUpperCase()} · 限价 {sig.limitPrice ? `${(sig.limitPrice * 100).toFixed(0)}c` : `${(sig.marketProb * 100).toFixed(0)}c`}
+                    {sig.paperPosition ? ' · 已有纸面仓位' : ''}
                   </span>
                   {sig.token && <span className="text-[9px] text-neutral-700 block">{shortToken(sig.token)}</span>}
                   {isExpanded && (
@@ -269,25 +273,28 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
                         <ExternalLink className="w-3 h-3" />
                       </a>
                     )}
-                    {sig.category === 'WX' && sig.id && sig.actionable && onSignalStatus && (
+                    {sig.category === 'WX' && sig.id && onSignalStatus && (
                       <>
                         <button
                           onClick={(e) => { e.stopPropagation(); onSignalStatus(sig.id!, 'simulated', amountForSave) }}
-                          className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-green-500/10 text-green-400 border border-green-500/20 hover:bg-green-500/20"
+                          disabled={locked}
+                          className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-green-500/10 text-green-400 border border-green-500/20 hover:bg-green-500/20 disabled:opacity-30"
                           title="模拟买入"
                         >
                           <Check className="w-3 h-3" />
                         </button>
                         <button
                           onClick={(e) => { e.stopPropagation(); onSignalStatus(sig.id!, 'bought', amountForSave) }}
-                          className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20"
+                          disabled={locked}
+                          className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 disabled:opacity-30"
                           title="标记已实盘买入"
                         >
                           $
                         </button>
                         <button
                           onClick={(e) => { e.stopPropagation(); onSignalStatus(sig.id!, 'skipped') }}
-                          className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20"
+                          disabled={locked}
+                          className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 disabled:opacity-30"
                           title="跳过"
                         >
                           <X className="w-3 h-3" />

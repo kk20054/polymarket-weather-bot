@@ -67,12 +67,12 @@ export function TradesTable({ trades }: Props) {
   }
 
   return (
-    <table className="w-full">
+    <table className="w-full table-fixed">
       <thead className="sticky top-0 bg-[#0a0a0a] z-10">
         <tr className="text-neutral-600 text-left text-[10px] border-b border-neutral-800">
           <th className="py-1.5 px-1.5 font-medium w-5"></th>
           <th
-            className="py-1.5 px-1.5 font-medium cursor-pointer hover:text-neutral-400"
+            className="py-1.5 px-1.5 font-medium cursor-pointer hover:text-neutral-400 w-12"
             onClick={() => handleSort('result')}
           >
             <div className="flex items-center gap-0.5">
@@ -80,9 +80,9 @@ export function TradesTable({ trades }: Props) {
             </div>
           </th>
           <th className="py-1.5 px-1.5 font-medium">市场</th>
-          <th className="py-1.5 px-1.5 font-medium text-center">方向</th>
+          <th className="py-1.5 px-1.5 font-medium text-center w-10">方向</th>
           <th
-            className="py-1.5 px-1.5 font-medium text-right cursor-pointer hover:text-neutral-400"
+            className="py-1.5 px-1.5 font-medium text-right cursor-pointer hover:text-neutral-400 w-14"
             onClick={() => handleSort('size')}
           >
             <div className="flex items-center justify-end gap-0.5">
@@ -90,7 +90,7 @@ export function TradesTable({ trades }: Props) {
             </div>
           </th>
           <th
-            className="py-1.5 px-1.5 font-medium text-right cursor-pointer hover:text-neutral-400"
+            className="py-1.5 px-1.5 font-medium text-right cursor-pointer hover:text-neutral-400 w-14"
             onClick={() => handleSort('pnl')}
           >
             <div className="flex items-center justify-end gap-0.5">
@@ -98,7 +98,7 @@ export function TradesTable({ trades }: Props) {
             </div>
           </th>
           <th
-            className="py-1.5 px-1.5 font-medium text-right cursor-pointer hover:text-neutral-400"
+            className="py-1.5 px-1.5 font-medium text-right cursor-pointer hover:text-neutral-400 w-14"
             onClick={() => handleSort('timestamp')}
           >
             <div className="flex items-center justify-end gap-0.5">
@@ -138,7 +138,7 @@ export function TradesTable({ trades }: Props) {
                   </span>
                 </td>
                 <td className="py-1 px-1.5">
-                  <span className="text-neutral-400 truncate block max-w-[100px]" title={trade.event_slug || trade.market_ticker}>
+                  <span className="text-neutral-400 truncate block" title={trade.event_slug || trade.market_ticker}>
                     {(trade.event_slug || trade.market_ticker).replace('btc-updown-5m-', '')}
                   </span>
                 </td>

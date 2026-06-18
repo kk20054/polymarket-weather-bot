@@ -124,10 +124,25 @@ def log_signal(signal, loc, date, horizon, bucket_label, event_url):
     columns = ", ".join(row.keys())
     placeholders = ", ".join("?" for _ in row)
     with _connect() as conn:
-        conn.execute(
+        cur = conn.execute(
             f"INSERT OR IGNORE INTO signals ({columns}) VALUES ({placeholders})",
             tuple(row.values()),
         )
+        if cur.rowcount:
+            limit_text = f"${row['limit_price']:.3f}" if row["limit_price"] is not None else "n/a"
+            amount_text = f"${row['amount']:.2f}" if row["amount"] is not None else "n/a"
+            conn.execute(
+                "INSERT INTO events (created_at, event_type, message, raw_json) VALUES (?, ?, ?, ?)",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    "trade",
+                    (
+                        f"BUY signal: {row['city_name']} {date} {bucket_label} "
+                        f"limit {limit_text} amount {amount_text}"
+                    ),
+                    row["raw_json"],
+                ),
+            )
 
 
 def list_signals(limit=200):
@@ -150,6 +165,16 @@ def list_events(limit=100):
     return [dict(row) for row in rows]
 
 
+def list_events_after(event_id=0, limit=100):
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (event_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def update_signal_status(signal_id, status, manual_note=None, sim_amount=None):
     init_db()
     with _connect() as conn:
@@ -162,6 +187,18 @@ def update_signal_status(signal_id, status, manual_note=None, sim_amount=None):
             WHERE id = ?
             """,
             (status, manual_note, sim_amount, signal_id),
+        )
+
+
+def reset_signal_marks():
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE signals
+            SET status = 'signal', manual_note = NULL, sim_amount = NULL
+            WHERE status IN ('simulated', 'bought', 'skipped')
+            """
         )
 
 

@@ -55,6 +55,9 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
   }, [btcSignals, weatherSignals])
 
   const total = btcSignals.length + weatherSignals.length
+  const actionable = weatherSignals.filter(s => s.actionable).length + btcSignals.filter(s => s.actionable).length
+  const simulated = weatherSignals.filter(s => s.status === 'simulated' || s.status === 'bought').length
+  const paperOpen = weatherSignals.filter(s => s.paper_position).length
   if (total === 0) {
     return (
       <div className="h-full flex items-center justify-center text-neutral-600 text-[10px]">
@@ -64,7 +67,29 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
   }
 
   return (
-    <div className="h-full">
+    <div className="h-full flex flex-col">
+      <div className="grid grid-cols-4 gap-1 px-1 pb-1 text-[9px]">
+        <div className="border border-neutral-800 px-1 py-0.5">
+          <div className="text-neutral-600">总数</div>
+          <div className="text-neutral-200 tabular-nums">{total}</div>
+        </div>
+        <div className="border border-neutral-800 px-1 py-0.5">
+          <div className="text-neutral-600">可操作</div>
+          <div className="text-green-400 tabular-nums">{actionable}</div>
+        </div>
+        <div className="border border-neutral-800 px-1 py-0.5">
+          <div className="text-neutral-600">已标记</div>
+          <div className="text-amber-400 tabular-nums">{simulated}</div>
+        </div>
+        <div className="border border-neutral-800 px-1 py-0.5">
+          <div className="text-neutral-600">纸面</div>
+          <div className="text-cyan-400 tabular-nums">{paperOpen}</div>
+        </div>
+      </div>
+      <div className="px-1 pb-1 text-[9px] text-neutral-600">
+        柱子按 EV 强度分桶；如果只有一根柱，说明当前信号集中在同一 EV 档。
+      </div>
+      <div className="flex-1 min-h-0">
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data} margin={{ top: 8, right: 8, left: -10, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#1a1a1a" vertical={false} />
@@ -93,6 +118,7 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
           <Bar dataKey="WX" stackId="a" fill="#06b6d4" radius={[2, 2, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
+      </div>
     </div>
   )
 }

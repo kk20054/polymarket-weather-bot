@@ -54,6 +54,11 @@ export async function bulkSimulateSignals(): Promise<{ ok: boolean; count: numbe
   return data
 }
 
+export async function resetSimulation(balance: number, clearMarks = false): Promise<{ ok: boolean; balance: number }> {
+  const { data } = await api.post('/simulation/reset', { balance, clear_marks: clearMarks })
+  return data
+}
+
 export async function updateSignalStatus(signalId: number, status: string, amount?: number): Promise<{ ok: boolean }> {
   const payload: { status: string; amount?: number } = { status }
   if (amount !== undefined && Number.isFinite(amount)) payload.amount = amount

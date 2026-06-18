@@ -4,6 +4,7 @@
 
 import json
 import asyncio
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -19,8 +20,10 @@ from dashboard_db import (
     DB_PATH,
     init_db,
     list_events,
+    list_events_after,
     list_signals,
     log_event,
+    reset_signal_marks,
     update_signal_status,
     upsert_signal_from_market,
 )
@@ -49,11 +52,21 @@ class StatusUpdate(BaseModel):
     amount: float | None = None
 
 
+class SimulationReset(BaseModel):
+    balance: float
+    clear_marks: bool = False
+
+
 def _read_json(path, fallback):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return fallback
+
+
+def _write_json(path, payload):
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def load_markets():
@@ -127,6 +140,45 @@ def _data_age_minutes(latest_iso):
 
 def _bot_running():
     return bool(bot_process and bot_process.poll() is None)
+
+
+def _event_to_payload(event):
+    return {
+        "id": event.get("id"),
+        "timestamp": event.get("created_at"),
+        "type": event.get("event_type"),
+        "message": event.get("message"),
+        "data": json.loads(event.get("raw_json") or "{}"),
+    }
+
+
+def _tail_log_lines(path, start_pos):
+    if not path.exists():
+        return start_pos, []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        handle.seek(start_pos)
+        lines = [line.rstrip() for line in handle.readlines()]
+        return handle.tell(), [line for line in lines if line]
+
+
+def _line_to_event(line):
+    event_type = "info"
+    if "[BUY]" in line:
+        event_type = "trade"
+    elif "[WIN]" in line:
+        event_type = "success"
+    elif "[LOSS]" in line:
+        event_type = "error"
+    elif "[SKIP]" in line:
+        event_type = "warning"
+    elif "Error:" in line or "error" in line.lower():
+        event_type = "error"
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "type": event_type,
+        "message": line,
+        "data": {},
+    }
 
 
 def build_dashboard_payload():
@@ -213,6 +265,7 @@ def build_dashboard_payload():
 
     today = _today_str()
     all_signals = list_signals(300)
+    signals_by_market = {str(s.get("market_id") or ""): s for s in all_signals}
     expired_signal_count = len([s for s in all_signals if (s.get("date") or "") < today])
     signals = [s for s in all_signals if (s.get("date") or "") >= today]
     weather_signals = []
@@ -228,8 +281,7 @@ def build_dashboard_payload():
         sim_amount = signal.get("sim_amount")
         display_amount = sim_amount if sim_amount is not None else amount
         effective_status = signal.get("status")
-        if str(signal.get("market_id") or "") in position_market_ids and effective_status == "signal":
-            effective_status = "paper_open"
+        paper_position = str(signal.get("market_id") or "") in position_market_ids
         weather_signals.append({
             "id": signal.get("id"),
             "market_id": signal.get("market_id"),
@@ -256,9 +308,10 @@ def build_dashboard_payload():
             "ensemble_mean": signal.get("forecast_temp") or 0,
             "ensemble_std": 0,
             "ensemble_members": 1,
-            "actionable": effective_status not in ("skipped", "simulated", "bought", "paper_open"),
+            "actionable": effective_status not in ("skipped", "simulated", "bought"),
             "platform": signal.get("platform") or "polymarket",
             "status": effective_status,
+            "paper_position": paper_position,
             "limit_price": signal.get("limit_price"),
             "bid_price": signal.get("bid_price"),
             "spread": signal.get("spread"),
@@ -266,7 +319,7 @@ def build_dashboard_payload():
             "sim_amount": sim_amount,
             "manual_note": signal.get("manual_note"),
         })
-        if signal.get("status") in ("simulated", "bought"):
+        if signal.get("status") in ("simulated", "bought") and str(signal.get("market_id") or "") not in position_market_ids:
             simulated_trades.append({
                 "id": int(signal.get("id") or 0),
                 "market_ticker": signal.get("market_id") or "",
@@ -298,11 +351,38 @@ def build_dashboard_payload():
                 "bankroll": round(starting + running_pnl, 2),
             })
 
+    settled_trades = [t for t in combined_trades if t.get("result") in ("win", "loss")]
+    wins = len([t for t in settled_trades if t.get("result") == "win"])
+    total_with_outcome = len(settled_trades)
+    brier_values = []
+    predicted_edges = []
+    actual_edges = []
+    for trade in settled_trades:
+        signal = signals_by_market.get(str(trade.get("market_ticker") or ""))
+        if signal:
+            p = signal.get("probability")
+            if p is not None:
+                y = 1.0 if trade.get("result") == "win" else 0.0
+                brier_values.append((float(p) - y) ** 2)
+            if signal.get("ev") is not None:
+                predicted_edges.append(float(signal.get("ev")))
+        if trade.get("size"):
+            actual_edges.append(float(trade.get("pnl") or 0) / float(trade.get("size")))
+
+    calibration_summary = {
+        "total_signals": len(all_signals),
+        "total_with_outcome": total_with_outcome,
+        "accuracy": (wins / total_with_outcome) if total_with_outcome else 0,
+        "avg_predicted_edge": (sum(predicted_edges) / len(predicted_edges)) if predicted_edges else 0,
+        "avg_actual_edge": (sum(actual_edges) / len(actual_edges)) if actual_edges else 0,
+        "brier_score": (sum(brier_values) / len(brier_values)) if brier_values else 0,
+    }
+
     stats = {
         "bankroll": balance,
         "total_trades": state.get("total_trades", 0) + len(simulated_trades),
-        "winning_trades": state.get("wins", 0),
-        "win_rate": (state.get("wins", 0) / state.get("total_trades", 1)) if state.get("total_trades") else 0,
+        "winning_trades": wins,
+        "win_rate": (wins / total_with_outcome) if total_with_outcome else 0,
         "total_pnl": total_pnl,
         "is_running": _bot_running(),
         "last_run": last_run,
@@ -320,14 +400,7 @@ def build_dashboard_payload():
         "active_signals": [],
         "recent_trades": sorted(combined_trades, key=lambda t: t.get("timestamp") or "", reverse=True)[:100],
         "equity_curve": equity_curve,
-        "calibration": {
-            "total_signals": len(signals),
-            "total_with_outcome": state.get("wins", 0) + state.get("losses", 0),
-            "accuracy": 0,
-            "avg_predicted_edge": 0,
-            "avg_actual_edge": 0,
-            "brier_score": 0,
-        },
+        "calibration": calibration_summary,
         "weather_signals": weather_signals,
         "weather_forecasts": list(weather_forecasts_by_city.values()),
         "events": list_events(100),
@@ -357,20 +430,14 @@ async def signals():
 
 @app.get("/api/events")
 async def events(limit: int = 50):
-    return [
-        {
-            "timestamp": event.get("created_at"),
-            "type": event.get("event_type"),
-            "message": event.get("message"),
-            "data": json.loads(event.get("raw_json") or "{}"),
-        }
-        for event in list_events(limit)
-    ]
+    return [_event_to_payload(event) for event in list_events(limit)]
 
 
 @app.websocket("/ws/events")
 async def websocket_events(websocket: WebSocket):
     await websocket.accept()
+    last_event_id = 0
+    log_pos = BOT_LOG_PATH.stat().st_size if BOT_LOG_PATH.exists() else 0
     try:
         await websocket.send_json({
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -378,12 +445,13 @@ async def websocket_events(websocket: WebSocket):
             "message": "实时日志已连接",
         })
         while True:
-            await asyncio.sleep(15)
-            await websocket.send_json({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "type": "heartbeat",
-                "message": "heartbeat",
-            })
+            for event in list_events_after(last_event_id, 50):
+                last_event_id = max(last_event_id, int(event.get("id") or 0))
+                await websocket.send_json(_event_to_payload(event))
+            log_pos, lines = _tail_log_lines(BOT_LOG_PATH, log_pos)
+            for line in lines[-30:]:
+                await websocket.send_json(_line_to_event(line))
+            await asyncio.sleep(2)
     except WebSocketDisconnect:
         return
 
@@ -401,12 +469,16 @@ async def start_bot():
         return {"status": "running", "is_running": True}
     DATA_DIR.mkdir(exist_ok=True)
     log_file = BOT_LOG_PATH.open("a", encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
     bot_process = subprocess.Popen(
-        [sys.executable, "weatherbet.py"],
+        [sys.executable, "-u", "weatherbet.py"],
         cwd=ROOT,
         stdout=log_file,
         stderr=subprocess.STDOUT,
         text=True,
+        env=env,
     )
     log_event("success", "扫描器已从看板启动；日志写入 data/weatherbet-dashboard.log")
     return {"status": "running", "is_running": True}
@@ -425,6 +497,23 @@ async def stop_bot():
     return {"status": "stopped", "is_running": False}
 
 
+@app.post("/api/simulation/reset")
+async def reset_simulation(update: SimulationReset):
+    balance = max(0.0, float(update.balance))
+    _write_json(DATA_DIR / "state.json", {
+        "balance": balance,
+        "starting_balance": balance,
+        "total_trades": 0,
+        "wins": 0,
+        "losses": 0,
+        "peak_balance": balance,
+    })
+    if update.clear_marks:
+        reset_signal_marks()
+    log_event("warning", f"模拟账户已重置为 ${balance:.2f}", update.model_dump())
+    return {"ok": True, "balance": balance}
+
+
 @app.post("/api/signals/bulk-simulate")
 async def bulk_simulate_signals():
     today = _today_str()
@@ -433,8 +522,6 @@ async def bulk_simulate_signals():
         if (signal.get("date") or "") < today:
             continue
         if signal.get("status") in ("skipped", "simulated", "bought"):
-            continue
-        if any(str(signal.get("market_id") or "") == str((m.get("position") or {}).get("market_id") or "") for m in load_markets()):
             continue
         amount = signal.get("sim_amount") or signal.get("amount") or 0
         update_signal_status(signal["id"], "simulated", f"Bulk paper amount ${amount:.2f}", amount)

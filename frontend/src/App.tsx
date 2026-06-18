@@ -1,7 +1,7 @@
-import { useState, useEffect, Suspense, lazy } from 'react'
+import { useState, useEffect, Suspense, lazy, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { bulkSimulateSignals, fetchDashboard, simulateTrade, startBot, stopBot, updateSignalStatus } from './api'
+import { bulkSimulateSignals, fetchDashboard, resetSimulation, simulateTrade, startBot, stopBot, updateSignalStatus } from './api'
 import { StatsCards } from './components/StatsCards'
 import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
@@ -11,8 +11,6 @@ import { MicrostructurePanel } from './components/MicrostructurePanel'
 import { CalibrationPanel } from './components/CalibrationPanel'
 import { WeatherPanel } from './components/WeatherPanel'
 import { EdgeDistribution } from './components/EdgeDistribution'
-import { formatCountdown } from './utils'
-import type { BtcWindow } from './types'
 
 const GlobeView = lazy(() => import('./components/GlobeView').then(m => ({ default: m.GlobeView })))
 
@@ -26,28 +24,6 @@ function LiveClock() {
     <span className="text-xs tabular-nums text-neutral-400">
       {time.toLocaleTimeString('en-US', { hour12: false })}
     </span>
-  )
-}
-
-function WindowPill({ window: w }: { window: BtcWindow }) {
-  const [countdown, setCountdown] = useState(w.time_until_end)
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setCountdown(prev => Math.max(0, prev - 1))
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [w.time_until_end])
-
-  return (
-    <div className={`flex items-center gap-2 px-2 py-1 border shrink-0 ${w.is_active ? 'border-amber-500/30 bg-amber-500/5' : 'border-neutral-800 bg-neutral-900/50'}`}>
-      {w.is_active && <span className="text-[9px] font-bold text-amber-400 uppercase">Live</span>}
-      {w.is_upcoming && <span className="text-[9px] font-medium text-blue-400 uppercase">Next</span>}
-      <span className="text-[10px] tabular-nums text-green-400">{(w.up_price * 100).toFixed(0)}c</span>
-      <span className="text-neutral-600 text-[10px]">/</span>
-      <span className="text-[10px] tabular-nums text-red-400">{(w.down_price * 100).toFixed(0)}c</span>
-      <span className="text-[10px] tabular-nums text-neutral-500">{formatCountdown(countdown)}</span>
-    </div>
   )
 }
 
@@ -77,8 +53,72 @@ function formatDataAge(minutes?: number | null) {
   return `${(minutes / 1440).toFixed(1)} 天前`
 }
 
+function SimulationPanel({
+  bankroll,
+  value,
+  clearMarks,
+  onValue,
+  onClearMarks,
+  onReset,
+  disabled,
+}: {
+  bankroll: number
+  value: string
+  clearMarks: boolean
+  onValue: (value: string) => void
+  onClearMarks: (value: boolean) => void
+  onReset: () => void
+  disabled: boolean
+}) {
+  return (
+    <div className="h-full p-2 text-[10px] text-neutral-500 space-y-2 overflow-y-auto">
+      <div className="flex items-center justify-between">
+        <span className="uppercase tracking-wider">当前模拟资金</span>
+        <span className="text-neutral-200 tabular-nums">${bankroll.toFixed(2)}</span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <input
+          type="number"
+          min="0"
+          step="1"
+          value={value}
+          onChange={(e) => onValue(e.target.value)}
+          className="w-full px-2 py-1 text-[11px] tabular-nums"
+          placeholder="输入本金"
+        />
+        <button
+          onClick={onReset}
+          disabled={disabled}
+          className="px-2 py-1 border border-green-500/30 text-green-400 hover:bg-green-500/10 disabled:opacity-40 whitespace-nowrap"
+        >
+          应用
+        </button>
+      </div>
+      <label className="flex items-center gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={clearMarks}
+          onChange={(e) => onClearMarks(e.target.checked)}
+          className="w-3 h-3 p-0"
+        />
+        <span>同时清除“模拟/跳过/实盘”标记</span>
+      </label>
+      <div className="border-t border-neutral-800 pt-2 leading-relaxed space-y-1">
+        <p>一键模拟：把当前可操作信号批量标记为模拟。</p>
+        <p>单条按钮：外链、模拟、实盘标记、跳过都会保留在每条信号右侧。</p>
+        <p>启动扫描：运行本地 WeatherBot，日志会进入系统日志区。</p>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const queryClient = useQueryClient()
+  const [rightWidth, setRightWidth] = useState(420)
+  const [simBalance, setSimBalance] = useState('40')
+  const [clearMarks, setClearMarks] = useState(false)
+  const dragRef = useRef(false)
+  const balanceInitRef = useRef(false)
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['dashboard'],
@@ -111,11 +151,37 @@ function App() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
 
+  const resetSimulationMutation = useMutation({
+    mutationFn: ({ balance, clear }: { balance: number; clear: boolean }) => resetSimulation(balance, clear),
+    onSuccess: (result) => {
+      setSimBalance(String(result.balance))
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    },
+  })
+
+  useEffect(() => {
+    const onMove = (event: MouseEvent) => {
+      if (!dragRef.current) return
+      const next = Math.max(320, Math.min(640, window.innerWidth - event.clientX))
+      setRightWidth(next)
+    }
+    const onUp = () => {
+      dragRef.current = false
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
+
   const activeSignals = data?.active_signals ?? []
   const recentTrades = data?.recent_trades ?? []
   const btcPrice = data?.btc_price
   const micro = data?.microstructure
-  const windows = data?.windows ?? []
   const weatherSignals = data?.weather_signals ?? []
   const weatherForecasts = data?.weather_forecasts ?? []
 
@@ -130,6 +196,13 @@ function App() {
   }
   const equityCurve = data?.equity_curve ?? []
   const calibration = data?.calibration ?? null
+
+  useEffect(() => {
+    if (!balanceInitRef.current && data?.stats?.bankroll !== undefined) {
+      setSimBalance(String(data.stats.bankroll.toFixed(0)))
+      balanceInitRef.current = true
+    }
+  }, [data?.stats?.bankroll])
 
   const actionableCount = activeSignals.filter(s => s.actionable).length + weatherSignals.filter(s => s.actionable).length
 
@@ -231,7 +304,10 @@ function App() {
       </motion.header>
 
       {/* ===== MAIN GRID ===== */}
-      <div className="flex-1 min-h-0 grid grid-cols-[300px_1fr_340px] grid-rows-[1fr] gap-0">
+      <div
+        className="flex-1 min-h-0 grid grid-rows-[1fr] gap-0"
+        style={{ gridTemplateColumns: `300px minmax(420px, 1fr) 6px ${rightWidth}px` }}
+      >
 
         {/* ===== LEFT COLUMN ===== */}
         <div className="flex flex-col border-r border-neutral-800 min-h-0 overflow-hidden">
@@ -292,7 +368,7 @@ function App() {
         </div>
 
         {/* ===== CENTER COLUMN ===== */}
-        <div className="flex flex-col min-h-0 border-r border-neutral-800">
+        <div className="flex flex-col min-h-0">
           {/* Globe - top 60% */}
           <div className="relative" style={{ height: '58%' }}>
             <div className="absolute inset-0">
@@ -325,22 +401,25 @@ function App() {
               </div>
             </div>
 
-            {/* BTC Windows */}
+            {/* Simulation controls */}
             <div className="border-r border-neutral-800 flex flex-col min-h-0">
               <div className="px-2 py-1 border-b border-neutral-800 shrink-0">
-                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">模拟流程</span>
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">模拟账户</span>
               </div>
-              <div className="flex-1 min-h-0 overflow-y-auto p-1 space-y-1">
-                {windows.length > 0 ? (
-                  windows.slice(0, 10).map(w => (
-                    <WindowPill key={w.slug} window={w} />
-                  ))
-                ) : (
-                  <div className="text-[10px] text-neutral-600 p-2 leading-relaxed">
-                    右侧信号表只显示今天和未来的信号。点“一键模拟”会按建议金额批量记账；外链只打开 Polymarket，不会自动下单。
-                  </div>
-                )}
-              </div>
+              <SimulationPanel
+                bankroll={stats.bankroll}
+                value={simBalance}
+                clearMarks={clearMarks}
+                onValue={setSimBalance}
+                onClearMarks={setClearMarks}
+                onReset={() => {
+                  const parsed = Number(simBalance)
+                  if (Number.isFinite(parsed) && parsed >= 0) {
+                    resetSimulationMutation.mutate({ balance: parsed, clear: clearMarks })
+                  }
+                }}
+                disabled={resetSimulationMutation.isPending}
+              />
             </div>
 
             {/* Weather Forecasts */}
@@ -355,6 +434,16 @@ function App() {
             </div>
           </div>
         </div>
+
+        <div
+          className="bg-neutral-900/60 hover:bg-green-500/30 cursor-col-resize border-l border-r border-neutral-800"
+          onMouseDown={() => {
+            dragRef.current = true
+            document.body.style.cursor = 'col-resize'
+            document.body.style.userSelect = 'none'
+          }}
+          title="拖拽调整右侧栏宽度"
+        />
 
         {/* ===== RIGHT COLUMN ===== */}
         <div className="flex flex-col min-h-0 overflow-hidden">
