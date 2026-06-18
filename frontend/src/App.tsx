@@ -1,7 +1,7 @@
 import { useState, useEffect, Suspense, lazy } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { fetchDashboard, runScan, simulateTrade, startBot, stopBot, updateSignalStatus } from './api'
+import { bulkSimulateSignals, fetchDashboard, simulateTrade, startBot, stopBot, updateSignalStatus } from './api'
 import { StatsCards } from './components/StatsCards'
 import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
@@ -70,6 +70,13 @@ function RefreshBar({ interval }: { interval: number }) {
   )
 }
 
+function formatDataAge(minutes?: number | null) {
+  if (minutes === null || minutes === undefined) return '暂无数据'
+  if (minutes < 60) return `${minutes.toFixed(0)} 分钟前`
+  if (minutes < 1440) return `${(minutes / 60).toFixed(1)} 小时前`
+  return `${(minutes / 1440).toFixed(1)} 天前`
+}
+
 function App() {
   const queryClient = useQueryClient()
 
@@ -77,11 +84,6 @@ function App() {
     queryKey: ['dashboard'],
     queryFn: fetchDashboard,
     refetchInterval: 10000,
-  })
-
-  const scanMutation = useMutation({
-    mutationFn: runScan,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
 
   const tradeMutation = useMutation({
@@ -101,6 +103,11 @@ function App() {
 
   const signalStatusMutation = useMutation({
     mutationFn: ({ signalId, status, amount }: { signalId: number; status: string; amount?: number }) => updateSignalStatus(signalId, status, amount),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+  })
+
+  const bulkSimulateMutation = useMutation({
+    mutationFn: bulkSimulateSignals,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
 
@@ -175,10 +182,17 @@ function App() {
               ? 'bg-green-500/10 text-green-500 border border-green-500/20'
               : 'bg-neutral-800 text-neutral-500 border border-neutral-700'
           }`}>
-            {stats.is_running ? '运行中' : '空闲'}
+            {stats.is_running ? '扫描中' : '扫描停止'}
           </span>
           <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20">
-            人工确认
+            模拟模式
+          </span>
+          <span className={`px-1.5 py-0.5 text-[9px] font-bold uppercase ${
+            (stats.data_age_minutes ?? 99999) <= 90
+              ? 'bg-green-500/10 text-green-500 border border-green-500/20'
+              : 'bg-red-500/10 text-red-400 border border-red-500/20'
+          }`}>
+            数据 {formatDataAge(stats.data_age_minutes)}
           </span>
         </div>
 
@@ -199,11 +213,18 @@ function App() {
 
         <div className="flex items-center gap-2 shrink-0">
           <button
-            onClick={() => scanMutation.mutate()}
-            disabled={scanMutation.isPending}
+            onClick={() => refetch()}
             className="px-2.5 py-1 bg-neutral-900 border border-neutral-700 hover:border-neutral-600 text-neutral-300 text-[10px] uppercase tracking-wider transition-colors disabled:opacity-50 whitespace-nowrap"
           >
-            {scanMutation.isPending ? '刷新中...' : '刷新'}
+            刷新
+          </button>
+          <button
+            onClick={() => bulkSimulateMutation.mutate()}
+            disabled={bulkSimulateMutation.isPending || weatherSignals.filter(s => s.actionable).length === 0}
+            className="px-2.5 py-1 bg-green-500/10 border border-green-500/30 hover:border-green-500/60 text-green-400 text-[10px] uppercase tracking-wider transition-colors disabled:opacity-40 whitespace-nowrap"
+            title="只做本地模拟记录，不会真实下单"
+          >
+            {bulkSimulateMutation.isPending ? '模拟中...' : '一键模拟'}
           </button>
           <LiveClock />
         </div>
@@ -265,7 +286,7 @@ function App() {
               stats={{ total_trades: stats.total_trades, total_pnl: stats.total_pnl }}
               onStart={() => startMutation.mutate()}
               onStop={() => stopMutation.mutate()}
-              onScan={() => scanMutation.mutate()}
+              onScan={() => refetch()}
             />
           </div>
         </div>
@@ -287,7 +308,7 @@ function App() {
             <div className="absolute top-2 left-2 z-10">
               <div className="px-2 py-1 bg-black/80 border border-neutral-800 text-[10px]">
                 <span className="text-neutral-500 uppercase tracking-wider mr-2">市场</span>
-                <span className="text-amber-500 tabular-nums">{actionableCount} 个可操作</span>
+                <span className="text-amber-500 tabular-nums">{actionableCount} 个当前信号</span>
               </div>
             </div>
           </div>
@@ -316,7 +337,7 @@ function App() {
                   ))
                 ) : (
                   <div className="text-[10px] text-neutral-600 p-2 leading-relaxed">
-                    右侧信号表输入金额，点勾号记为模拟买入；外链只打开 Polymarket，不会自动下单。
+                    右侧信号表只显示今天和未来的信号。点“一键模拟”会按建议金额批量记账；外链只打开 Polymarket，不会自动下单。
                   </div>
                 )}
               </div>
@@ -342,6 +363,9 @@ function App() {
             <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
               <span className="text-[10px] text-neutral-500 uppercase tracking-wider">信号</span>
               <div className="flex items-center gap-2">
+                {(stats.expired_signal_count ?? 0) > 0 && (
+                  <span className="text-[10px] text-neutral-600 tabular-nums">{stats.expired_signal_count} 已过期隐藏</span>
+                )}
                 <span className="text-[10px] text-amber-400 tabular-nums">{activeSignals.length} BTC</span>
                 {weatherSignals.length > 0 && (
                   <span className="text-[10px] text-cyan-400 tabular-nums">{weatherSignals.length} WX</span>

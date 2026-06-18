@@ -70,10 +70,13 @@ export function GlobeView({ forecasts, signals }: Props) {
 
   useEffect(() => {
     if (globeRef.current) {
-      globeRef.current.pointOfView({ lat: 18, lng: 24, altitude: 2.85 }, 1000)
-      globeRef.current.controls().autoRotate = true
-      globeRef.current.controls().autoRotateSpeed = 0.3
-      globeRef.current.controls().enableZoom = false
+      const controls = globeRef.current.controls()
+      globeRef.current.pointOfView({ lat: 18, lng: 24, altitude: 2.35 }, 1000)
+      controls.autoRotate = true
+      controls.autoRotateSpeed = 0.25
+      controls.enableZoom = true
+      controls.minDistance = 160
+      controls.maxDistance = 520
     }
   }, [size.width, size.height])
 

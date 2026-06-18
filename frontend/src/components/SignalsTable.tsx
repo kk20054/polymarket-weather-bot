@@ -72,6 +72,7 @@ function statusLabel(status?: string) {
   switch (status) {
     case 'simulated': return '模拟'
     case 'bought': return '实盘'
+    case 'paper_open': return '纸面持仓'
     case 'skipped': return '跳过'
     case 'signal': return '信号'
     default: return status || '观察'
@@ -268,7 +269,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
                         <ExternalLink className="w-3 h-3" />
                       </a>
                     )}
-                    {sig.category === 'WX' && sig.id && onSignalStatus && (
+                    {sig.category === 'WX' && sig.id && sig.actionable && onSignalStatus && (
                       <>
                         <button
                           onClick={(e) => { e.stopPropagation(); onSignalStatus(sig.id!, 'simulated', amountForSave) }}

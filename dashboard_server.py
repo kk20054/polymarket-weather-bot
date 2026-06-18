@@ -4,6 +4,8 @@
 
 import json
 import asyncio
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +30,8 @@ ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 MARKETS_DIR = DATA_DIR / "markets"
 DASHBOARD_DIR = ROOT / "dashboard"
+BOT_LOG_PATH = DATA_DIR / "weatherbet-dashboard.log"
+bot_process: subprocess.Popen | None = None
 
 app = FastAPI(title="WeatherBot Dashboard", version="1.0")
 app.add_middleware(
@@ -95,6 +99,36 @@ def _clean_text(value):
     return str(value).replace("Â°F", "°F").replace("Â°C", "°C").replace("Â°", "°")
 
 
+def _today_str():
+    return datetime.now().date().isoformat()
+
+
+def _latest_market_update():
+    if not MARKETS_DIR.exists():
+        return None
+    latest = None
+    for path in MARKETS_DIR.glob("*.json"):
+        ts = path.stat().st_mtime
+        latest = ts if latest is None else max(latest, ts)
+    if latest is None:
+        return None
+    return datetime.fromtimestamp(latest, timezone.utc).isoformat()
+
+
+def _data_age_minutes(latest_iso):
+    if not latest_iso:
+        return None
+    try:
+        latest = datetime.fromisoformat(latest_iso)
+        return round((datetime.now(timezone.utc) - latest).total_seconds() / 60.0, 1)
+    except Exception:
+        return None
+
+
+def _bot_running():
+    return bool(bot_process and bot_process.poll() is None)
+
+
 def build_dashboard_payload():
     init_db()
     markets = load_markets()
@@ -104,6 +138,7 @@ def build_dashboard_payload():
     state = _read_json(DATA_DIR / "state.json", {})
     open_positions = []
     recent_trades = []
+    position_market_ids = set()
     weather_forecasts_by_city = {}
     forecast_points = 0
     market_points = 0
@@ -132,6 +167,7 @@ def build_dashboard_payload():
             }
         pos = market.get("position")
         if pos:
+            position_market_ids.add(str(pos.get("market_id") or ""))
             event_url = pos.get("event_url") or market.get("event_url")
             result = "pending"
             if pos.get("status") == "closed":
@@ -175,7 +211,10 @@ def build_dashboard_payload():
                 "pnl": pos.get("pnl"),
             })
 
-    signals = list_signals(300)
+    today = _today_str()
+    all_signals = list_signals(300)
+    expired_signal_count = len([s for s in all_signals if (s.get("date") or "") < today])
+    signals = [s for s in all_signals if (s.get("date") or "") >= today]
     weather_signals = []
     simulated_trades = []
     for signal in signals:
@@ -188,6 +227,9 @@ def build_dashboard_payload():
         amount = signal.get("amount") or 0
         sim_amount = signal.get("sim_amount")
         display_amount = sim_amount if sim_amount is not None else amount
+        effective_status = signal.get("status")
+        if str(signal.get("market_id") or "") in position_market_ids and effective_status == "signal":
+            effective_status = "paper_open"
         weather_signals.append({
             "id": signal.get("id"),
             "market_id": signal.get("market_id"),
@@ -214,9 +256,9 @@ def build_dashboard_payload():
             "ensemble_mean": signal.get("forecast_temp") or 0,
             "ensemble_std": 0,
             "ensemble_members": 1,
-            "actionable": signal.get("status") not in ("skipped",),
+            "actionable": effective_status not in ("skipped", "simulated", "bought", "paper_open"),
             "platform": signal.get("platform") or "polymarket",
-            "status": signal.get("status"),
+            "status": effective_status,
             "limit_price": signal.get("limit_price"),
             "bid_price": signal.get("bid_price"),
             "spread": signal.get("spread"),
@@ -242,6 +284,8 @@ def build_dashboard_payload():
     starting = state.get("starting_balance", 0) or 0
     balance = state.get("balance", starting) or 0
     total_pnl = round(balance - starting, 2)
+    latest_update = _latest_market_update()
+    data_age = _data_age_minutes(latest_update)
     equity_curve = []
     running_pnl = 0.0
     combined_trades = recent_trades + simulated_trades
@@ -260,8 +304,12 @@ def build_dashboard_payload():
         "winning_trades": state.get("wins", 0),
         "win_rate": (state.get("wins", 0) / state.get("total_trades", 1)) if state.get("total_trades") else 0,
         "total_pnl": total_pnl,
-        "is_running": False,
+        "is_running": _bot_running(),
         "last_run": last_run,
+        "latest_market_update": latest_update,
+        "data_age_minutes": data_age,
+        "expired_signal_count": expired_signal_count,
+        "scanner_status": "running" if _bot_running() else "stopped",
     }
 
     return {
@@ -348,14 +396,51 @@ async def run_scan():
 
 @app.post("/api/bot/start")
 async def start_bot():
-    log_event("info", "Dashboard start pressed; start weatherbet.py in PowerShell to run scanner.")
-    return {"status": "manual", "is_running": False}
+    global bot_process
+    if _bot_running():
+        return {"status": "running", "is_running": True}
+    DATA_DIR.mkdir(exist_ok=True)
+    log_file = BOT_LOG_PATH.open("a", encoding="utf-8")
+    bot_process = subprocess.Popen(
+        [sys.executable, "weatherbet.py"],
+        cwd=ROOT,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    log_event("success", "扫描器已从看板启动；日志写入 data/weatherbet-dashboard.log")
+    return {"status": "running", "is_running": True}
 
 
 @app.post("/api/bot/stop")
 async def stop_bot():
-    log_event("info", "Dashboard pause pressed; stop the weatherbot PowerShell process with Ctrl+C.")
-    return {"status": "manual", "is_running": False}
+    global bot_process
+    if _bot_running():
+        bot_process.terminate()
+        try:
+            bot_process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            bot_process.kill()
+        log_event("warning", "扫描器已从看板停止")
+    return {"status": "stopped", "is_running": False}
+
+
+@app.post("/api/signals/bulk-simulate")
+async def bulk_simulate_signals():
+    today = _today_str()
+    count = 0
+    for signal in list_signals(500):
+        if (signal.get("date") or "") < today:
+            continue
+        if signal.get("status") in ("skipped", "simulated", "bought"):
+            continue
+        if any(str(signal.get("market_id") or "") == str((m.get("position") or {}).get("market_id") or "") for m in load_markets()):
+            continue
+        amount = signal.get("sim_amount") or signal.get("amount") or 0
+        update_signal_status(signal["id"], "simulated", f"Bulk paper amount ${amount:.2f}", amount)
+        count += 1
+    log_event("success", f"一键模拟买入 {count} 条当前信号")
+    return {"ok": True, "count": count}
 
 
 @app.post("/api/signals/{signal_id}/status")

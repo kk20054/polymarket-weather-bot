@@ -175,7 +175,7 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
           <div className="flex items-center gap-1.5">
             {isRunning && <div className="live-dot" />}
             <span className="text-[10px] text-neutral-600">
-              {isRunning ? '运行中' : '空闲'}
+              {isRunning ? '扫描中' : '扫描停止'}
             </span>
           </div>
         </div>
@@ -224,7 +224,7 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
               }`}
             >
               {isRunning ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
-              {isRunning ? '暂停' : '启动'}
+              {isRunning ? '停止扫描' : '启动扫描'}
             </button>
           )}
           {onScan && (
@@ -233,7 +233,7 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
               className="flex items-center gap-1.5 px-2 py-1 text-[10px] uppercase tracking-wider border border-blue-500/30 text-blue-500 hover:bg-blue-500/10 transition-colors"
             >
               <RefreshCw className="w-3 h-3" />
-              刷新
+              刷新看板
             </button>
           )}
         </div>

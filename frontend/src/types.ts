@@ -75,6 +75,10 @@ export interface BotStats {
   total_pnl: number
   is_running: boolean
   last_run: string | null
+  latest_market_update?: string | null
+  data_age_minutes?: number | null
+  expired_signal_count?: number
+  scanner_status?: string
 }
 
 export interface EquityPoint {
