@@ -133,6 +133,8 @@ export interface WeatherSignal {
   bid_price?: number
   spread?: number
   shares?: number
+  sim_amount?: number | null
+  manual_note?: string | null
 }
 
 export interface DashboardData {

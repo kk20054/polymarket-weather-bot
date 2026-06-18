@@ -9,7 +9,7 @@ interface Props {
   weatherSignals: WeatherSignal[]
   onSimulateTrade: (ticker: string) => void
   isSimulating: boolean
-  onSignalStatus?: (signalId: number, status: string) => void
+  onSignalStatus?: (signalId: number, status: string, amount?: number) => void
 }
 
 type SortKey = 'edge' | 'model_probability' | 'suggested_size'
@@ -37,16 +37,13 @@ interface UnifiedSignal {
   spread?: number
   shares?: number
   token?: string
+  simAmount?: number | null
 }
 
 function PlatformBadge({ platform }: { platform: string }) {
   const style = platformStyles[platform.toLowerCase()]
   if (!style) return null
-  return (
-    <span className={`platform-badge ${style.badge}`}>
-      {style.icon}
-    </span>
-  )
+  return <span className={`platform-badge ${style.badge}`}>{style.icon}</span>
 }
 
 function CategoryBadge({ category }: { category: 'BTC' | 'WX' }) {
@@ -71,10 +68,21 @@ function shortToken(token?: string) {
   return `${token.slice(0, 6)}...${token.slice(-4)}`
 }
 
+function statusLabel(status?: string) {
+  switch (status) {
+    case 'simulated': return '模拟'
+    case 'bought': return '实盘'
+    case 'skipped': return '跳过'
+    case 'signal': return '信号'
+    default: return status || '观察'
+  }
+}
+
 export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimulating, onSignalStatus }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>('edge')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [expandedKey, setExpandedKey] = useState<string | null>(null)
+  const [simAmounts, setSimAmounts] = useState<Record<string, string>>({})
 
   const unified: UnifiedSignal[] = useMemo(() => {
     const btc: UnifiedSignal[] = signals.map(s => ({
@@ -115,6 +123,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
       spread: s.spread,
       shares: s.shares,
       token: s.yes_token_id,
+      simAmount: s.sim_amount,
     }))
 
     return [...wx, ...btc]
@@ -156,40 +165,38 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
   if (unified.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-8 text-neutral-600">
-        <p className="text-xs">No signals generated</p>
-        <p className="text-[10px] mt-0.5 text-neutral-700">Run WeatherBot and wait for next cycle</p>
+        <p className="text-xs">暂无信号</p>
+        <p className="text-[10px] mt-0.5 text-neutral-700">运行 WeatherBot 后等待下一轮扫描</p>
       </div>
     )
   }
 
   return (
-    <table className="w-full">
+    <table className="w-full table-fixed">
       <thead className="sticky top-0 bg-[#0a0a0a] z-10">
         <tr className="text-neutral-600 text-left text-[10px] border-b border-neutral-800">
-          <th className="py-1.5 px-1.5 font-medium w-6"></th>
-          <th className="py-1.5 px-1.5 font-medium w-5"></th>
-          <th className="py-1.5 px-1.5 font-medium">Signal</th>
-          <th className="py-1.5 px-1.5 font-medium text-center w-10">Dir</th>
+          <th className="py-1.5 px-1.5 font-medium w-10"></th>
+          <th className="py-1.5 px-1.5 font-medium">信号</th>
           <th className="py-1.5 px-1.5 font-medium text-right cursor-pointer hover:text-neutral-400" onClick={() => handleSort('edge')}>
             <div className="flex items-center justify-end gap-0.5">
               EV <SortIcon column="edge" />
             </div>
           </th>
-          <th className="py-1.5 px-1.5 font-medium text-right">Limit</th>
           <th className="py-1.5 px-1.5 font-medium text-right cursor-pointer hover:text-neutral-400" onClick={() => handleSort('suggested_size')}>
             <div className="flex items-center justify-end gap-0.5">
-              Size <SortIcon column="suggested_size" />
+              模拟 <SortIcon column="suggested_size" />
             </div>
           </th>
-          <th className="py-1.5 px-1.5 font-medium text-right w-20"></th>
         </tr>
       </thead>
       <tbody>
         <AnimatePresence>
           {sorted.map((sig, i) => {
             const isExpanded = expandedKey === sig.key
-            const isBuy = sig.direction === 'yes' || sig.direction === 'up'
             const status = sig.status || (sig.actionable ? 'signal' : 'watch')
+            const amountValue = simAmounts[sig.key] ?? String(sig.simAmount ?? sig.suggestedSize ?? '')
+            const parsedAmount = Number(amountValue)
+            const amountForSave = Number.isFinite(parsedAmount) ? parsedAmount : sig.suggestedSize
 
             return (
               <motion.tr
@@ -202,48 +209,53 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
                 }`}
                 onClick={() => setExpandedKey(isExpanded ? null : sig.key)}
               >
-                <td className="py-1 px-1.5">
-                  <PlatformBadge platform={sig.platform} />
+                <td className="py-1 px-1.5 align-top">
+                  <div className="flex items-center gap-1">
+                    <PlatformBadge platform={sig.platform} />
+                    <CategoryBadge category={sig.category} />
+                  </div>
                 </td>
-                <td className="py-1 px-1.5">
-                  <CategoryBadge category={sig.category} />
-                </td>
-                <td className="py-1 px-1.5">
-                  <span className="text-neutral-300 block max-w-[160px] leading-snug" title={sig.title}>
+                <td className="py-1 px-1.5 align-top">
+                  <span className="text-neutral-300 block leading-snug break-words" title={sig.title}>
                     {sig.title}
                   </span>
-                  <span className="text-[9px] text-neutral-600">
-                    {status.toUpperCase()} {sig.token ? `· ${shortToken(sig.token)}` : ''}
+                  <span className="text-[9px] text-neutral-600 block mt-0.5">
+                    {statusLabel(status)} · {sig.direction.toUpperCase()} · 限价 {sig.limitPrice ? `${(sig.limitPrice * 100).toFixed(0)}c` : `${(sig.marketProb * 100).toFixed(0)}c`}
                   </span>
+                  {sig.token && <span className="text-[9px] text-neutral-700 block">{shortToken(sig.token)}</span>}
                   {isExpanded && (
                     <div className="mt-1 text-[10px] text-neutral-500 leading-relaxed">
                       {sig.reasoning}
                       {sig.bidPrice !== undefined && sig.spread !== undefined && (
                         <div>Bid/Ask {Math.round((sig.bidPrice || 0) * 100)}c / {Math.round((sig.limitPrice || 0) * 100)}c · spread {(sig.spread * 100).toFixed(1)}c</div>
                       )}
+                      <div>模拟买入只写入本地记录，不会向 Polymarket 下单。</div>
                     </div>
                   )}
                 </td>
-                <td className="py-1 px-1.5 text-center">
-                  <span className={`text-[10px] font-semibold uppercase ${isBuy ? 'text-green-500' : 'text-red-500'}`}>
-                    {sig.direction}
-                  </span>
-                </td>
-                <td className="py-1 px-1.5 text-right">
+                <td className="py-1 px-1.5 text-right align-top">
                   <span className={`font-semibold tabular-nums ${sig.edge > 0 ? 'text-green-500' : sig.edge < 0 ? 'text-red-500' : 'text-neutral-600'}`}>
                     {sig.edge === 0 ? '-' : `${Math.abs(sig.edge * 100).toFixed(1)}%`}
                   </span>
                   <EdgeBar edge={sig.edge} />
                 </td>
-                <td className="py-1 px-1.5 text-right text-neutral-300 tabular-nums">
-                  {sig.limitPrice ? `${(sig.limitPrice * 100).toFixed(0)}c` : `${(sig.marketProb * 100).toFixed(0)}c`}
-                </td>
-                <td className="py-1 px-1.5 text-right text-blue-400 tabular-nums">
-                  {sig.suggestedSize > 0 ? `$${sig.suggestedSize.toFixed(2)}` : '-'}
+                <td className="py-1 px-1.5 text-right text-blue-400 tabular-nums align-top">
+                  {sig.category === 'WX' ? (
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={amountValue}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setSimAmounts(prev => ({ ...prev, [sig.key]: e.target.value }))}
+                      className="w-16 px-1 py-0.5 text-[10px] text-right tabular-nums bg-black border-neutral-800 text-blue-300"
+                      title="模拟金额，单位美元"
+                    />
+                  ) : (
+                    sig.suggestedSize > 0 ? `$${sig.suggestedSize.toFixed(2)}` : '-'
+                  )}
                   {sig.shares ? <div className="text-[9px] text-neutral-600">{sig.shares.toFixed(2)} sh</div> : null}
-                </td>
-                <td className="py-1 px-1.5 text-right">
-                  <div className="flex justify-end gap-1">
+                  <div className="flex justify-end gap-1 mt-1">
                     {sig.eventUrl && (
                       <a
                         href={sig.eventUrl}
@@ -251,7 +263,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
                         rel="noreferrer"
                         onClick={(e) => e.stopPropagation()}
                         className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20"
-                        title="Open Polymarket"
+                        title="打开 Polymarket"
                       >
                         <ExternalLink className="w-3 h-3" />
                       </a>
@@ -259,16 +271,23 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
                     {sig.category === 'WX' && sig.id && onSignalStatus && (
                       <>
                         <button
-                          onClick={(e) => { e.stopPropagation(); onSignalStatus(sig.id!, 'bought') }}
+                          onClick={(e) => { e.stopPropagation(); onSignalStatus(sig.id!, 'simulated', amountForSave) }}
                           className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-green-500/10 text-green-400 border border-green-500/20 hover:bg-green-500/20"
-                          title="Mark bought"
+                          title="模拟买入"
                         >
                           <Check className="w-3 h-3" />
                         </button>
                         <button
+                          onClick={(e) => { e.stopPropagation(); onSignalStatus(sig.id!, 'bought', amountForSave) }}
+                          className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20"
+                          title="标记已实盘买入"
+                        >
+                          $
+                        </button>
+                        <button
                           onClick={(e) => { e.stopPropagation(); onSignalStatus(sig.id!, 'skipped') }}
                           className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20"
-                          title="Mark skipped"
+                          title="跳过"
                         >
                           <X className="w-3 h-3" />
                         </button>
@@ -280,7 +299,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
                         disabled={isSimulating}
                         className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 disabled:opacity-50"
                       >
-                        Trade
+                        交易
                       </button>
                     )}
                   </div>

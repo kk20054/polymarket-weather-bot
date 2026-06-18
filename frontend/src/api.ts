@@ -49,8 +49,10 @@ export async function simulateTrade(ticker: string): Promise<{ trade_id: number;
   return data
 }
 
-export async function updateSignalStatus(signalId: number, status: string): Promise<{ ok: boolean }> {
-  const { data } = await api.post(`/signals/${signalId}/status`, { status })
+export async function updateSignalStatus(signalId: number, status: string, amount?: number): Promise<{ ok: boolean }> {
+  const payload: { status: string; amount?: number } = { status }
+  if (amount !== undefined && Number.isFinite(amount)) payload.amount = amount
+  const { data } = await api.post(`/signals/${signalId}/status`, payload)
   return data
 }
 

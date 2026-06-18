@@ -265,10 +265,14 @@ th {
   background: #000000;
   position: relative;
   overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .globe-container canvas {
   outline: none !important;
+  display: block;
 }
 
 /* Progress bar */

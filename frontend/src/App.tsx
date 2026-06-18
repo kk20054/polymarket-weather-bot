@@ -100,7 +100,7 @@ function App() {
   })
 
   const signalStatusMutation = useMutation({
-    mutationFn: ({ signalId, status }: { signalId: number; status: string }) => updateSignalStatus(signalId, status),
+    mutationFn: ({ signalId, status, amount }: { signalId: number; status: string; amount?: number }) => updateSignalStatus(signalId, status, amount),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
 
@@ -134,7 +134,7 @@ function App() {
             <div className="absolute inset-0 border-2 border-neutral-800 rounded-full" />
             <div className="absolute inset-0 border-2 border-transparent border-t-green-500 rounded-full animate-spin" />
           </div>
-          <div className="text-[10px] text-neutral-500 uppercase tracking-widest font-mono">Initializing</div>
+          <div className="text-[10px] text-neutral-500 uppercase tracking-widest font-mono">正在连接看板</div>
         </div>
       </div>
     )
@@ -144,12 +144,12 @@ function App() {
     return (
       <div className="h-screen bg-black flex items-center justify-center">
         <div className="text-center">
-          <div className="text-red-500 text-xs uppercase mb-2 tracking-wider">Connection Error</div>
+          <div className="text-red-500 text-xs uppercase mb-2 tracking-wider">后端连接失败</div>
           <button
             onClick={() => refetch()}
             className="px-3 py-1.5 bg-neutral-900 border border-neutral-700 text-neutral-300 text-xs uppercase tracking-wider"
           >
-            Retry
+            重试
           </button>
         </div>
       </div>
@@ -168,17 +168,17 @@ function App() {
 
         <div className="flex items-center gap-2 shrink-0">
           <h1 className="text-xs font-bold text-neutral-100 uppercase tracking-widest whitespace-nowrap font-mono">
-            WEATHERBOT TERMINAL
+            天气交易终端
           </h1>
           <span className={`px-1.5 py-0.5 text-[9px] font-bold uppercase ${
             stats.is_running
               ? 'bg-green-500/10 text-green-500 border border-green-500/20'
               : 'bg-neutral-800 text-neutral-500 border border-neutral-700'
           }`}>
-            {stats.is_running ? 'Live' : 'Idle'}
+            {stats.is_running ? '运行中' : '空闲'}
           </span>
           <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20">
-            Manual
+            人工确认
           </span>
         </div>
 
@@ -203,7 +203,7 @@ function App() {
             disabled={scanMutation.isPending}
             className="px-2.5 py-1 bg-neutral-900 border border-neutral-700 hover:border-neutral-600 text-neutral-300 text-[10px] uppercase tracking-wider transition-colors disabled:opacity-50 whitespace-nowrap"
           >
-            {scanMutation.isPending ? 'Scanning...' : 'Scan'}
+            {scanMutation.isPending ? '刷新中...' : '刷新'}
           </button>
           <LiveClock />
         </div>
@@ -222,7 +222,7 @@ function App() {
               className="shrink-0 border-b border-neutral-800 px-2 py-2"
             >
               <div className="flex items-center justify-between mb-2">
-                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Microstructure</span>
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">盘口结构</span>
                 <span className="text-[9px] text-neutral-600 tabular-nums">{micro.source}</span>
               </div>
               <MicrostructurePanel micro={micro} />
@@ -232,7 +232,7 @@ function App() {
           {/* Equity chart */}
           <div className="border-b border-neutral-800" style={{ height: '28%', minHeight: '120px' }}>
             <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Equity</span>
+              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">资金曲线</span>
               <span className={`text-[10px] tabular-nums ${stats.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
                 {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(0)}
               </span>
@@ -250,8 +250,8 @@ function App() {
               className="shrink-0 border-b border-neutral-800 px-2 py-2"
             >
               <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Calibration</span>
-                <span className="text-[9px] text-neutral-600 tabular-nums">{calibration.total_with_outcome} settled</span>
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">校准</span>
+                <span className="text-[9px] text-neutral-600 tabular-nums">{calibration.total_with_outcome} 已结算</span>
               </div>
               <CalibrationPanel calibration={calibration} />
             </motion.div>
@@ -277,7 +277,7 @@ function App() {
             <div className="absolute inset-0">
               <Suspense fallback={
                 <div className="w-full h-full flex items-center justify-center bg-black">
-                  <span className="text-[10px] text-neutral-600 uppercase tracking-wider">Loading Globe...</span>
+                  <span className="text-[10px] text-neutral-600 uppercase tracking-wider">加载地球视图...</span>
                 </div>
               }>
                 <GlobeView forecasts={weatherForecasts} signals={weatherSignals} />
@@ -286,8 +286,8 @@ function App() {
             {/* Globe overlay: actionable count */}
             <div className="absolute top-2 left-2 z-10">
               <div className="px-2 py-1 bg-black/80 border border-neutral-800 text-[10px]">
-                <span className="text-neutral-500 uppercase tracking-wider mr-2">Markets</span>
-                <span className="text-amber-500 tabular-nums">{actionableCount} actionable</span>
+                <span className="text-neutral-500 uppercase tracking-wider mr-2">市场</span>
+                <span className="text-amber-500 tabular-nums">{actionableCount} 个可操作</span>
               </div>
             </div>
           </div>
@@ -297,7 +297,7 @@ function App() {
             {/* Edge Distribution */}
             <div className="border-r border-neutral-800 flex flex-col min-h-0">
               <div className="px-2 py-1 border-b border-neutral-800 shrink-0">
-                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">EV Distribution</span>
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">EV 分布</span>
               </div>
               <div className="flex-1 min-h-0 p-1">
                 <EdgeDistribution btcSignals={activeSignals} weatherSignals={weatherSignals} />
@@ -307,7 +307,7 @@ function App() {
             {/* BTC Windows */}
             <div className="border-r border-neutral-800 flex flex-col min-h-0">
               <div className="px-2 py-1 border-b border-neutral-800 shrink-0">
-                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">BTC Windows</span>
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">模拟流程</span>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-1 space-y-1">
                 {windows.length > 0 ? (
@@ -315,7 +315,9 @@ function App() {
                     <WindowPill key={w.slug} window={w} />
                   ))
                 ) : (
-                  <div className="text-[10px] text-neutral-600 p-2">No active windows</div>
+                  <div className="text-[10px] text-neutral-600 p-2 leading-relaxed">
+                    右侧信号表输入金额，点勾号记为模拟买入；外链只打开 Polymarket，不会自动下单。
+                  </div>
                 )}
               </div>
             </div>
@@ -323,7 +325,7 @@ function App() {
             {/* Weather Forecasts */}
             <div className="flex flex-col min-h-0">
               <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Weather</span>
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">天气</span>
                 <span className="px-1 py-0.5 text-[8px] font-bold uppercase bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">WX</span>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto">
@@ -338,7 +340,7 @@ function App() {
           {/* Signals - top portion */}
           <div className="flex flex-col min-h-0" style={{ height: '50%' }}>
             <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Signals</span>
+              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">信号</span>
               <div className="flex items-center gap-2">
                 <span className="text-[10px] text-amber-400 tabular-nums">{activeSignals.length} BTC</span>
                 {weatherSignals.length > 0 && (
@@ -352,7 +354,7 @@ function App() {
                 weatherSignals={weatherSignals}
                 onSimulateTrade={(ticker) => tradeMutation.mutate(ticker)}
                 isSimulating={tradeMutation.isPending}
-                onSignalStatus={(signalId, status) => signalStatusMutation.mutate({ signalId, status })}
+                onSignalStatus={(signalId, status, amount) => signalStatusMutation.mutate({ signalId, status, amount })}
               />
             </div>
           </div>
@@ -360,7 +362,7 @@ function App() {
           {/* Trades */}
           <div className="flex flex-col min-h-0 border-t border-neutral-800" style={{ height: '50%' }}>
             <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Trades</span>
+              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">模拟/交易记录</span>
               <span className="text-[10px] text-neutral-600 tabular-nums">{recentTrades.length}</span>
             </div>
             <div className="flex-1 overflow-y-auto min-h-0">
@@ -373,14 +375,14 @@ function App() {
       {/* ===== FOOTER ===== */}
       <footer className="shrink-0 border-t border-neutral-800 px-3 py-0.5 flex items-center justify-between">
         <span className="text-[10px] text-neutral-700 font-mono">
-          Open-Meteo | METAR | Polymarket weather buckets
+          Open-Meteo | METAR | Polymarket 天气区间
         </span>
         <div className="flex items-center gap-3">
           <RefreshBar interval={10000} />
-          <span className="text-[10px] text-neutral-700 font-mono">WeatherBot signal engine + Kalshi dashboard shell</span>
+          <span className="text-[10px] text-neutral-700 font-mono">WeatherBot 信号引擎 + Kalshi 看板框架</span>
           <div className="flex items-center gap-1">
             <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
-            <span className="text-[10px] text-neutral-600 font-mono">Connected</span>
+            <span className="text-[10px] text-neutral-600 font-mono">已连接</span>
           </div>
         </div>
       </footer>

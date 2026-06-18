@@ -35,14 +35,14 @@ export function EquityChart({ data, initialBankroll }: Props) {
   if (data.length === 0) {
     return (
       <div className="h-full flex flex-col items-center justify-center text-neutral-600">
-        <p className="text-xs">No trade history</p>
-        <p className="text-[10px] mt-0.5">Chart appears after settled trades</p>
+        <p className="text-xs">暂无结算记录</p>
+        <p className="text-[10px] mt-0.5">有结算结果后会显示曲线</p>
       </div>
     )
   }
 
   const chartData = [
-    { timestamp: 'Start', pnl: 0, bankroll: initialBankroll },
+    { timestamp: '开始', pnl: 0, bankroll: initialBankroll },
     ...data.map(d => ({
       ...d,
       timestamp: new Date(d.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })

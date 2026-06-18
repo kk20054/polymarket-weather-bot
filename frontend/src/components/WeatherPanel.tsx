@@ -20,7 +20,7 @@ export function WeatherPanel({ forecasts, signals }: Props) {
   if (forecasts.length === 0 && signals.length === 0) {
     return (
       <div className="h-full flex items-center justify-center text-neutral-600 text-[10px]">
-        No weather data
+        暂无天气数据
       </div>
     )
   }

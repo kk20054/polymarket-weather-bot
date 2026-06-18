@@ -56,7 +56,7 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
           setLogs(prev => [...prev, {
             timestamp: new Date().toISOString(),
             type: 'success',
-            message: 'WebSocket connected'
+            message: '实时日志已连接'
           }])
         }
 
@@ -163,7 +163,7 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
             <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/80" />
             <div className="w-2.5 h-2.5 rounded-full bg-green-500/80" />
           </div>
-          <span className="text-[10px] text-neutral-500 uppercase tracking-wider ml-2">System Log</span>
+          <span className="text-[10px] text-neutral-500 uppercase tracking-wider ml-2">系统日志</span>
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
@@ -175,7 +175,7 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
           <div className="flex items-center gap-1.5">
             {isRunning && <div className="live-dot" />}
             <span className="text-[10px] text-neutral-600">
-              {isRunning ? 'LIVE' : 'IDLE'}
+              {isRunning ? '运行中' : '空闲'}
             </span>
           </div>
         </div>
@@ -184,7 +184,7 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
       {/* Log content */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 space-y-0.5 min-h-0">
         {logs.length === 0 ? (
-          <div className="text-neutral-600 text-xs">Waiting for events...</div>
+          <div className="text-neutral-600 text-xs">等待事件...</div>
         ) : (
           logs.map((log, i) => (
             <div key={i} className="flex gap-2 text-xs leading-relaxed">
@@ -224,7 +224,7 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
               }`}
             >
               {isRunning ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
-              {isRunning ? 'Pause' : 'Start'}
+              {isRunning ? '暂停' : '启动'}
             </button>
           )}
           {onScan && (
@@ -233,16 +233,16 @@ export function Terminal({ isRunning, lastRun, onStart, onStop, onScan }: Props)
               className="flex items-center gap-1.5 px-2 py-1 text-[10px] uppercase tracking-wider border border-blue-500/30 text-blue-500 hover:bg-blue-500/10 transition-colors"
             >
               <RefreshCw className="w-3 h-3" />
-              Scan
+              刷新
             </button>
           )}
         </div>
         <div className="flex items-center gap-4">
           <span className="text-[10px] text-neutral-600">
-            {lastRun ? `Last: ${formatTime(lastRun)}` : 'No scans'}
+            {lastRun ? `上次: ${formatTime(lastRun)}` : '暂无扫描'}
           </span>
           <span className="text-[10px] text-neutral-600 tabular-nums">
-            {logs.length} entries
+            {logs.length} 条
           </span>
         </div>
       </div>

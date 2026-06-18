@@ -60,8 +60,8 @@ export function TradesTable({ trades }: Props) {
   if (trades.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-8 text-neutral-600">
-        <p className="text-xs">No trades yet</p>
-        <p className="text-[10px] mt-0.5">Trades will appear here</p>
+        <p className="text-xs">暂无记录</p>
+        <p className="text-[10px] mt-0.5">模拟买入后会出现在这里</p>
       </div>
     )
   }
@@ -76,17 +76,17 @@ export function TradesTable({ trades }: Props) {
             onClick={() => handleSort('result')}
           >
             <div className="flex items-center gap-0.5">
-              St <SortIcon column="result" />
+              状态 <SortIcon column="result" />
             </div>
           </th>
-          <th className="py-1.5 px-1.5 font-medium">Market</th>
-          <th className="py-1.5 px-1.5 font-medium text-center">Dir</th>
+          <th className="py-1.5 px-1.5 font-medium">市场</th>
+          <th className="py-1.5 px-1.5 font-medium text-center">方向</th>
           <th
             className="py-1.5 px-1.5 font-medium text-right cursor-pointer hover:text-neutral-400"
             onClick={() => handleSort('size')}
           >
             <div className="flex items-center justify-end gap-0.5">
-              Size <SortIcon column="size" />
+              金额 <SortIcon column="size" />
             </div>
           </th>
           <th
@@ -94,7 +94,7 @@ export function TradesTable({ trades }: Props) {
             onClick={() => handleSort('pnl')}
           >
             <div className="flex items-center justify-end gap-0.5">
-              P&L <SortIcon column="pnl" />
+              盈亏 <SortIcon column="pnl" />
             </div>
           </th>
           <th
@@ -102,7 +102,7 @@ export function TradesTable({ trades }: Props) {
             onClick={() => handleSort('timestamp')}
           >
             <div className="flex items-center justify-end gap-0.5">
-              Time <SortIcon column="timestamp" />
+              时间 <SortIcon column="timestamp" />
             </div>
           </th>
         </tr>
@@ -134,7 +134,7 @@ export function TradesTable({ trades }: Props) {
                   <span className={`text-[9px] font-medium uppercase ${
                     isPending ? 'text-amber-500' : isWin ? 'text-green-500' : 'text-red-500'
                   }`}>
-                    {isPending ? 'PND' : isWin ? 'WIN' : 'LOSS'}
+                    {isPending ? '待定' : isWin ? '赢' : '亏'}
                   </span>
                 </td>
                 <td className="py-1 px-1.5">

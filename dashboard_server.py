@@ -40,6 +40,7 @@ app.add_middleware(
 class StatusUpdate(BaseModel):
     status: str
     note: str | None = None
+    amount: float | None = None
 
 
 def _read_json(path, fallback):
@@ -84,6 +85,12 @@ def _event_slug_from_url(url):
     if not url:
         return None
     return url.rstrip("/").split("/")[-1]
+
+
+def _clean_text(value):
+    if value is None:
+        return value
+    return str(value).replace("Â°F", "°F").replace("Â°C", "°C").replace("Â°", "°")
 
 
 def build_dashboard_payload():
@@ -133,7 +140,7 @@ def build_dashboard_payload():
                 "date": market.get("date"),
                 "unit": market.get("unit"),
                 "event_url": event_url,
-                "question": pos.get("question"),
+                "question": _clean_text(pos.get("question")),
                 "market_id": pos.get("market_id"),
                 "yes_token_id": pos.get("yes_token_id"),
                 "bucket_low": pos.get("bucket_low"),
@@ -168,6 +175,7 @@ def build_dashboard_payload():
 
     signals = list_signals(300)
     weather_signals = []
+    simulated_trades = []
     for signal in signals:
         threshold = signal.get("forecast_temp")
         try:
@@ -176,13 +184,15 @@ def build_dashboard_payload():
             threshold = 0.0
         limit_price = signal.get("limit_price") or 0
         amount = signal.get("amount") or 0
+        sim_amount = signal.get("sim_amount")
+        display_amount = sim_amount if sim_amount is not None else amount
         weather_signals.append({
             "id": signal.get("id"),
             "market_id": signal.get("market_id"),
             "city_key": signal.get("city"),
-            "city_name": signal.get("city_name"),
+            "city_name": _clean_text(signal.get("city_name")),
             "target_date": signal.get("date"),
-            "question": signal.get("question"),
+            "question": _clean_text(signal.get("question")),
             "event_url": signal.get("event_url"),
             "yes_token_id": signal.get("yes_token_id"),
             "bucket_label": signal.get("bucket_label"),
@@ -193,7 +203,7 @@ def build_dashboard_payload():
             "market_probability": signal.get("limit_price") or 0,
             "edge": signal.get("ev") or 0,
             "confidence": min(0.95, max(0.05, signal.get("probability") or 0.5)),
-            "suggested_size": signal.get("amount") or 0,
+            "suggested_size": amount,
             "reasoning": (
                 f"{signal.get('city_name')} {signal.get('date')} {signal.get('bucket_label')} | "
                 f"limit ${limit_price:.3f} | amount ${amount:.2f} | "
@@ -209,14 +219,31 @@ def build_dashboard_payload():
             "bid_price": signal.get("bid_price"),
             "spread": signal.get("spread"),
             "shares": signal.get("shares"),
+            "sim_amount": sim_amount,
+            "manual_note": signal.get("manual_note"),
         })
+        if signal.get("status") in ("simulated", "bought"):
+            simulated_trades.append({
+                "id": int(signal.get("id") or 0),
+                "market_ticker": signal.get("market_id") or "",
+                "platform": "polymarket",
+                "event_slug": _event_slug_from_url(signal.get("event_url")) or _clean_text(signal.get("question", "")),
+                "direction": "yes",
+                "entry_price": signal.get("limit_price") or 0,
+                "size": display_amount or 0,
+                "timestamp": signal.get("created_at") or "",
+                "settled": False,
+                "result": "pending",
+                "pnl": None,
+            })
 
     starting = state.get("starting_balance", 0) or 0
     balance = state.get("balance", starting) or 0
     total_pnl = round(balance - starting, 2)
     equity_curve = []
     running_pnl = 0.0
-    for trade in sorted(recent_trades, key=lambda t: t.get("timestamp") or ""):
+    combined_trades = recent_trades + simulated_trades
+    for trade in sorted(combined_trades, key=lambda t: t.get("timestamp") or ""):
         if trade.get("pnl") is not None:
             running_pnl += float(trade["pnl"])
             equity_curve.append({
@@ -227,7 +254,7 @@ def build_dashboard_payload():
 
     stats = {
         "bankroll": balance,
-        "total_trades": state.get("total_trades", 0),
+        "total_trades": state.get("total_trades", 0) + len(simulated_trades),
         "winning_trades": state.get("wins", 0),
         "win_rate": (state.get("wins", 0) / state.get("total_trades", 1)) if state.get("total_trades") else 0,
         "total_pnl": total_pnl,
@@ -241,7 +268,7 @@ def build_dashboard_payload():
         "microstructure": None,
         "windows": [],
         "active_signals": [],
-        "recent_trades": sorted(recent_trades, key=lambda t: t.get("timestamp") or "", reverse=True)[:100],
+        "recent_trades": sorted(combined_trades, key=lambda t: t.get("timestamp") or "", reverse=True)[:100],
         "equity_curve": equity_curve,
         "calibration": {
             "total_signals": len(signals),
@@ -311,7 +338,10 @@ async def stop_bot():
 
 @app.post("/api/signals/{signal_id}/status")
 async def signal_status(signal_id: int, update: StatusUpdate):
-    update_signal_status(signal_id, update.status, update.note)
+    note = update.note
+    if update.amount is not None:
+        note = note or f"Paper amount ${update.amount:.2f}"
+    update_signal_status(signal_id, update.status, note, update.amount)
     log_event("info", f"Signal {signal_id} marked {update.status}", update.model_dump())
     return {"ok": True}
 

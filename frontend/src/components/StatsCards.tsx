@@ -14,7 +14,7 @@ export function StatsCards({ stats }: Props) {
   return (
     <div className="flex items-center gap-3">
       <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-        <span className="text-[10px] text-neutral-600 uppercase">Bank</span>
+        <span className="text-[10px] text-neutral-600 uppercase">资金</span>
         <span className="text-sm font-semibold tabular-nums text-neutral-100">
           ${stats.bankroll >= 1000 ? (stats.bankroll / 1000).toFixed(1) + 'K' : stats.bankroll.toFixed(0)}
         </span>
@@ -23,7 +23,7 @@ export function StatsCards({ stats }: Props) {
       <div className="w-px h-3 bg-neutral-800" />
 
       <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.05 }}>
-        <span className="text-[10px] text-neutral-600 uppercase">P&L</span>
+        <span className="text-[10px] text-neutral-600 uppercase">盈亏</span>
         <span className={`text-sm font-semibold tabular-nums ${stats.total_pnl >= 0 ? 'text-green-500 glow-green' : 'text-red-500 glow-red'}`}>
           {stats.total_pnl >= 0 ? '+' : '-'}${Math.abs(stats.total_pnl).toFixed(0)}
         </span>
@@ -35,7 +35,7 @@ export function StatsCards({ stats }: Props) {
       <div className="w-px h-3 bg-neutral-800" />
 
       <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }}>
-        <span className="text-[10px] text-neutral-600 uppercase">Win</span>
+        <span className="text-[10px] text-neutral-600 uppercase">胜率</span>
         <span className={`text-sm font-semibold tabular-nums ${winRate >= 55 ? 'text-green-500' : winRate >= 45 ? 'text-yellow-500' : 'text-red-500'}`}>
           {winRate.toFixed(0)}%
         </span>
@@ -47,7 +47,7 @@ export function StatsCards({ stats }: Props) {
       <div className="w-px h-3 bg-neutral-800" />
 
       <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.15 }}>
-        <span className="text-[10px] text-neutral-600 uppercase">Trades</span>
+        <span className="text-[10px] text-neutral-600 uppercase">记录</span>
         <span className="text-sm font-semibold tabular-nums text-neutral-100">{stats.total_trades}</span>
         {stats.is_running && <div className="live-dot" />}
       </motion.div>

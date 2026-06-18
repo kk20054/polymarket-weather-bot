@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo, useCallback } from 'react'
+import { useEffect, useRef, useMemo, useCallback, useState } from 'react'
 import Globe from 'react-globe.gl'
 import type { WeatherForecast, WeatherSignal } from '../types'
 
@@ -41,7 +41,9 @@ const CITIES: Record<string, { lat: number; lng: number; name: string }> = {
 }
 
 export function GlobeView({ forecasts, signals }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const globeRef = useRef<any>(null)
+  const [size, setSize] = useState({ width: 0, height: 0 })
 
   const markers: CityMarker[] = useMemo(() => {
     return Object.entries(CITIES).map(([key, city]) => {
@@ -68,11 +70,29 @@ export function GlobeView({ forecasts, signals }: Props) {
 
   useEffect(() => {
     if (globeRef.current) {
-      globeRef.current.pointOfView({ lat: 20, lng: 20, altitude: 2.4 }, 1000)
+      globeRef.current.pointOfView({ lat: 18, lng: 24, altitude: 2.85 }, 1000)
       globeRef.current.controls().autoRotate = true
       globeRef.current.controls().autoRotateSpeed = 0.3
       globeRef.current.controls().enableZoom = false
     }
+  }, [size.width, size.height])
+
+  useEffect(() => {
+    if (!containerRef.current) return
+
+    const updateSize = () => {
+      if (!containerRef.current) return
+      const rect = containerRef.current.getBoundingClientRect()
+      setSize({
+        width: Math.max(240, Math.floor(rect.width)),
+        height: Math.max(240, Math.floor(rect.height)),
+      })
+    }
+
+    updateSize()
+    const observer = new ResizeObserver(updateSize)
+    observer.observe(containerRef.current)
+    return () => observer.disconnect()
   }, [])
 
   const handleInteraction = useCallback(() => {
@@ -129,20 +149,22 @@ export function GlobeView({ forecasts, signals }: Props) {
   }, [])
 
   return (
-    <div className="globe-container w-full h-full">
-      <Globe
-        ref={globeRef}
-        globeImageUrl="//unpkg.com/three-globe/example/img/earth-night.jpg"
-        backgroundColor="rgba(0,0,0,0)"
-        atmosphereColor="#1a1a2e"
-        atmosphereAltitude={0.15}
-        htmlElementsData={markers}
-        htmlElement={markerElement}
-        htmlAltitude={0.01}
-        onGlobeClick={handleInteraction}
-        width={undefined}
-        height={undefined}
-      />
+    <div ref={containerRef} className="globe-container w-full h-full">
+      {size.width > 0 && size.height > 0 && (
+        <Globe
+          ref={globeRef}
+          globeImageUrl="//unpkg.com/three-globe/example/img/earth-night.jpg"
+          backgroundColor="rgba(0,0,0,0)"
+          atmosphereColor="#1a1a2e"
+          atmosphereAltitude={0.15}
+          htmlElementsData={markers}
+          htmlElement={markerElement}
+          htmlAltitude={0.01}
+          onGlobeClick={handleInteraction}
+          width={size.width}
+          height={size.height}
+        />
+      )}
     </div>
   )
 }

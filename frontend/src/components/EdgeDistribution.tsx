@@ -58,7 +58,7 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
   if (total === 0) {
     return (
       <div className="h-full flex items-center justify-center text-neutral-600 text-[10px]">
-        No signals for distribution
+        暂无可统计信号
       </div>
     )
   }

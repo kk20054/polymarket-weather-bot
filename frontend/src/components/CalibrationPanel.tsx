@@ -8,7 +8,7 @@ export function CalibrationPanel({ calibration }: Props) {
   const accuracyPct = (calibration.accuracy * 100).toFixed(0)
   const accuracyColor = calibration.accuracy >= 0.55 ? '#22c55e' : calibration.accuracy < 0.50 ? '#dc2626' : '#a1a1aa'
 
-  const brierLabel = calibration.brier_score <= 0.20 ? 'Good' : calibration.brier_score <= 0.25 ? 'OK' : 'Poor'
+  const brierLabel = calibration.brier_score <= 0.20 ? '好' : calibration.brier_score <= 0.25 ? '一般' : '差'
   const brierColor = calibration.brier_score <= 0.20 ? '#22c55e' : calibration.brier_score <= 0.25 ? '#d97706' : '#dc2626'
 
   const predEdge = (calibration.avg_predicted_edge * 100).toFixed(1)
@@ -22,7 +22,7 @@ export function CalibrationPanel({ calibration }: Props) {
           {accuracyPct}%
         </div>
         <div className="text-[10px] text-neutral-500 leading-tight">
-          <div>Accuracy</div>
+          <div>准确率</div>
           <div className="tabular-nums text-neutral-600">
             {Math.round(calibration.accuracy * calibration.total_with_outcome)}/{calibration.total_with_outcome}
           </div>
@@ -42,7 +42,7 @@ export function CalibrationPanel({ calibration }: Props) {
       {/* Predicted vs Actual edge bars */}
       <div className="space-y-1">
         <div className="flex items-center gap-2 text-[10px]">
-          <span className="text-neutral-500 w-10 shrink-0">Pred</span>
+          <span className="text-neutral-500 w-10 shrink-0">预测</span>
           <div className="flex-1 meter-bar">
             <div
               className="meter-fill"
@@ -55,7 +55,7 @@ export function CalibrationPanel({ calibration }: Props) {
           <span className="tabular-nums text-amber-500 w-10 text-right">{predEdge}%</span>
         </div>
         <div className="flex items-center gap-2 text-[10px]">
-          <span className="text-neutral-500 w-10 shrink-0">Actual</span>
+          <span className="text-neutral-500 w-10 shrink-0">实际</span>
           <div className="flex-1 meter-bar">
             <div
               className="meter-fill"
@@ -75,7 +75,7 @@ export function CalibrationPanel({ calibration }: Props) {
       </div>
 
       <div className="text-[9px] text-neutral-600 tabular-nums">
-        {calibration.total_signals} tracked / {calibration.total_with_outcome} settled
+        {calibration.total_signals} 个已跟踪 / {calibration.total_with_outcome} 个已结算
       </div>
     </div>
   )

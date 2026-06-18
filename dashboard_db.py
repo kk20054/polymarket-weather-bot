@@ -42,6 +42,7 @@ def init_db():
                 bid_price REAL,
                 spread REAL,
                 amount REAL,
+                sim_amount REAL,
                 shares REAL,
                 forecast_temp REAL,
                 forecast_src TEXT,
@@ -54,6 +55,7 @@ def init_db():
             )
             """
         )
+        _ensure_signal_columns(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS events (
@@ -65,6 +67,12 @@ def init_db():
             )
             """
         )
+
+
+def _ensure_signal_columns(conn):
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+    if "sim_amount" not in columns:
+        conn.execute("ALTER TABLE signals ADD COLUMN sim_amount REAL")
 
 
 def log_event(event_type, message, payload=None):
@@ -142,12 +150,18 @@ def list_events(limit=100):
     return [dict(row) for row in rows]
 
 
-def update_signal_status(signal_id, status, manual_note=None):
+def update_signal_status(signal_id, status, manual_note=None, sim_amount=None):
     init_db()
     with _connect() as conn:
         conn.execute(
-            "UPDATE signals SET status = ?, manual_note = COALESCE(?, manual_note) WHERE id = ?",
-            (status, manual_note, signal_id),
+            """
+            UPDATE signals
+            SET status = ?,
+                manual_note = COALESCE(?, manual_note),
+                sim_amount = COALESCE(?, sim_amount)
+            WHERE id = ?
+            """,
+            (status, manual_note, sim_amount, signal_id),
         )
 
 
