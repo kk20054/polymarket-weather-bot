@@ -3,9 +3,11 @@
 """Local dashboard server for WeatherBot."""
 
 import json
+import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -316,6 +318,26 @@ async def events(limit: int = 50):
         }
         for event in list_events(limit)
     ]
+
+
+@app.websocket("/ws/events")
+async def websocket_events(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        await websocket.send_json({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": "success",
+            "message": "实时日志已连接",
+        })
+        while True:
+            await asyncio.sleep(15)
+            await websocket.send_json({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": "heartbeat",
+                "message": "heartbeat",
+            })
+    except WebSocketDisconnect:
+        return
 
 
 @app.post("/api/run-scan")
