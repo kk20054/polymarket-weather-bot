@@ -104,13 +104,17 @@ def norm_cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 def bucket_prob(forecast, t_low, t_high, sigma=None):
-    """For regular buckets — exact match. For edge buckets — normal distribution."""
+    """Estimate the chance that the realized high lands in the market bucket."""
+    # Regular buckets use probability mass around the quoted range, not certainty.
     s = sigma or 2.0
+    forecast = float(forecast)
     if t_low == -999:
-        return norm_cdf((t_high - float(forecast)) / s)
+        return norm_cdf((float(t_high) + 0.5 - forecast) / s)
     if t_high == 999:
-        return 1.0 - norm_cdf((t_low - float(forecast)) / s)
-    return 1.0 if in_bucket(forecast, t_low, t_high) else 0.0
+        return 1.0 - norm_cdf((float(t_low) - 0.5 - forecast) / s)
+    lower = float(t_low) - 0.5
+    upper = float(t_high) + 0.5
+    return max(0.0, min(1.0, norm_cdf((upper - forecast) / s) - norm_cdf((lower - forecast) / s)))
 
 def calc_ev(p, price):
     if price <= 0 or price >= 1: return 0.0

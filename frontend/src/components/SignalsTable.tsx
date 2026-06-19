@@ -50,7 +50,7 @@ function PlatformBadge({ platform }: { platform: string }) {
 function CategoryBadge({ category }: { category: 'BTC' | 'WX' }) {
   return category === 'BTC'
     ? <span className="text-[8px] font-bold px-1 py-0.5 bg-amber-500/10 text-amber-500 border border-amber-500/20">BTC</span>
-    : <span className="text-[8px] font-bold px-1 py-0.5 bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">WX</span>
+    : <span className="text-[8px] font-bold px-1 py-0.5 bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">天气</span>
 }
 
 function EdgeBar({ edge }: { edge: number }) {

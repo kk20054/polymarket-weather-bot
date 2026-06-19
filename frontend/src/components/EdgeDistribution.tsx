@@ -7,15 +7,16 @@ interface Props {
   weatherSignals: WeatherSignal[]
 }
 
-const BUCKETS = ['0-2%', '2-5%', '5-10%', '10-20%', '20%+']
+const BUCKETS = ['0-25%', '25-50%', '50-100%', '100-200%', '200-500%', '500%+']
 
 function getBucket(edge: number): string {
   const pct = Math.abs(edge) * 100
-  if (pct < 2) return '0-2%'
-  if (pct < 5) return '2-5%'
-  if (pct < 10) return '5-10%'
-  if (pct < 20) return '10-20%'
-  return '20%+'
+  if (pct < 25) return '0-25%'
+  if (pct < 50) return '25-50%'
+  if (pct < 100) return '50-100%'
+  if (pct < 200) return '100-200%'
+  if (pct < 500) return '200-500%'
+  return '500%+'
 }
 
 const CustomTooltip = ({ active, payload, label }: any) => {
@@ -115,7 +116,7 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
             wrapperStyle={{ fontSize: '9px', fontFamily: 'JetBrains Mono' }}
           />
           <Bar dataKey="BTC" stackId="a" fill="#d97706" radius={[0, 0, 0, 0]} />
-          <Bar dataKey="WX" stackId="a" fill="#06b6d4" radius={[2, 2, 0, 0]} />
+          <Bar dataKey="WX" name="天气" stackId="a" fill="#06b6d4" radius={[2, 2, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
       </div>

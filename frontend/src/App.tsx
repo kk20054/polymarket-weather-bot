@@ -473,7 +473,7 @@ function App() {
             <div className="flex flex-col min-h-0">
               <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
                 <span className="text-[10px] text-neutral-500 uppercase tracking-wider">天气</span>
-                <span className="px-1 py-0.5 text-[8px] font-bold uppercase bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">WX</span>
+                <span className="px-1 py-0.5 text-[8px] font-bold uppercase bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">天气</span>
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto">
                 <WeatherPanel forecasts={weatherForecasts} signals={weatherSignals} />
@@ -504,7 +504,7 @@ function App() {
                 )}
                 <span className="text-[10px] text-amber-400 tabular-nums">{activeSignals.length} BTC</span>
                 {weatherSignals.length > 0 && (
-                  <span className="text-[10px] text-cyan-400 tabular-nums">{weatherSignals.length} WX</span>
+                  <span className="text-[10px] text-cyan-400 tabular-nums">{weatherSignals.length} 天气</span>
                 )}
               </div>
             </div>
