@@ -54,7 +54,7 @@ export async function bulkSimulateSignals(): Promise<{ ok: boolean; count: numbe
   return data
 }
 
-export async function resetSimulation(balance: number, clearMarks = false): Promise<{ ok: boolean; balance: number; simulation_started_at?: string }> {
+export async function resetSimulation(balance: number, clearMarks = false): Promise<{ ok: boolean; balance: number; simulation_started_at?: string; cleared_positions?: number }> {
   const { data } = await api.post('/simulation/reset', { balance, clear_marks: clearMarks })
   return data
 }

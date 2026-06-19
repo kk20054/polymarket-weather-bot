@@ -34,6 +34,7 @@ DATA_DIR = ROOT / "data"
 MARKETS_DIR = DATA_DIR / "markets"
 DASHBOARD_DIR = ROOT / "dashboard"
 BOT_LOG_PATH = DATA_DIR / "weatherbet-dashboard.log"
+BOT_PID_PATH = DATA_DIR / "weatherbet-dashboard.pid"
 bot_process: subprocess.Popen | None = None
 
 app = FastAPI(title="WeatherBot Dashboard", version="1.0")
@@ -257,8 +258,70 @@ def _open_paper_position(signal, amount, simulation_start, opened_at):
     return True
 
 
+def _clear_dashboard_positions(reset_at):
+    cleared = 0
+    if not MARKETS_DIR.exists():
+        return cleared
+    for path in MARKETS_DIR.glob("*.json"):
+        market = _read_json(path, None)
+        if not isinstance(market, dict):
+            continue
+        pos = market.get("position")
+        if not isinstance(pos, dict) or pos.get("source") != "dashboard_simulation":
+            continue
+        history = market.get("position_history")
+        if not isinstance(history, list):
+            history = []
+        archived = dict(pos)
+        archived["archived_at"] = reset_at
+        archived["archive_reason"] = "simulation_reset"
+        history.append(archived)
+        market["position_history"] = history
+        market["position"] = None
+        market["pnl"] = None
+        market["resolved_outcome"] = None
+        if market.get("status") != "resolved":
+            market["status"] = "open"
+        _write_json(path, market)
+        cleared += 1
+    return cleared
+
+
 def _bot_running():
     return bool(bot_process and bot_process.poll() is None)
+
+
+def _terminate_pid_tree(pid):
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            os.kill(int(pid), 15)
+        return True
+    except Exception:
+        return False
+
+
+def _cleanup_stale_bot_process():
+    if _bot_running():
+        return False
+    try:
+        pid = int(BOT_PID_PATH.read_text(encoding="utf-8").strip())
+    except Exception:
+        return False
+    cleaned = _terminate_pid_tree(pid)
+    try:
+        BOT_PID_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+    if cleaned:
+        log_event("warning", f"已清理残留扫描器进程 PID {pid}")
+    return cleaned
 
 
 def _event_to_payload(event):
@@ -548,6 +611,7 @@ def build_dashboard_payload():
 @app.on_event("startup")
 async def startup():
     init_db()
+    _cleanup_stale_bot_process()
     log_event("info", "Dashboard started")
 
 
@@ -605,11 +669,23 @@ async def start_bot():
     global bot_process
     if _bot_running():
         return {"status": "running", "is_running": True}
+    _cleanup_stale_bot_process()
     DATA_DIR.mkdir(exist_ok=True)
     log_file = BOT_LOG_PATH.open("a", encoding="utf-8")
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
+    for proxy_key in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        env.pop(proxy_key, None)
+    env["NO_PROXY"] = "*"
+    env["no_proxy"] = "*"
     bot_process = subprocess.Popen(
         [sys.executable, "-u", "weatherbet.py"],
         cwd=ROOT,
@@ -618,6 +694,7 @@ async def start_bot():
         text=True,
         env=env,
     )
+    BOT_PID_PATH.write_text(str(bot_process.pid), encoding="utf-8")
     log_event("success", "扫描器已从看板启动；日志写入 data/weatherbet-dashboard.log")
     return {"status": "running", "is_running": True}
 
@@ -626,11 +703,15 @@ async def start_bot():
 async def stop_bot():
     global bot_process
     if _bot_running():
-        bot_process.terminate()
+        _terminate_pid_tree(bot_process.pid)
         try:
             bot_process.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            bot_process.kill()
+            pass
+        try:
+            BOT_PID_PATH.unlink(missing_ok=True)
+        except Exception:
+            pass
         log_event("warning", "扫描器已从看板停止")
     return {"status": "stopped", "is_running": False}
 
@@ -648,10 +729,19 @@ async def reset_simulation(update: SimulationReset):
         "peak_balance": balance,
         "simulation_started_at": started_at,
     })
+    cleared_positions = 0
     if update.clear_marks:
         reset_signal_marks()
-    log_event("warning", f"模拟账户已重置为 ${balance:.2f}", update.model_dump())
-    return {"ok": True, "balance": balance, "simulation_started_at": started_at}
+        cleared_positions = _clear_dashboard_positions(started_at)
+    payload = update.model_dump()
+    payload["cleared_positions"] = cleared_positions
+    log_event("warning", f"模拟账户已重置为 ${balance:.2f}", payload)
+    return {
+        "ok": True,
+        "balance": balance,
+        "simulation_started_at": started_at,
+        "cleared_positions": cleared_positions,
+    }
 
 
 @app.post("/api/signals/bulk-simulate")
