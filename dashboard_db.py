@@ -73,6 +73,8 @@ def _ensure_signal_columns(conn):
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
     if "sim_amount" not in columns:
         conn.execute("ALTER TABLE signals ADD COLUMN sim_amount REAL")
+    if "status_updated_at" not in columns:
+        conn.execute("ALTER TABLE signals ADD COLUMN status_updated_at TEXT")
 
 
 def log_event(event_type, message, payload=None):
@@ -177,16 +179,18 @@ def list_events_after(event_id=0, limit=100):
 
 def update_signal_status(signal_id, status, manual_note=None, sim_amount=None):
     init_db()
+    updated_at = datetime.now(timezone.utc).isoformat()
     with _connect() as conn:
         conn.execute(
             """
             UPDATE signals
             SET status = ?,
                 manual_note = COALESCE(?, manual_note),
-                sim_amount = COALESCE(?, sim_amount)
+                sim_amount = COALESCE(?, sim_amount),
+                status_updated_at = ?
             WHERE id = ?
             """,
-            (status, manual_note, sim_amount, signal_id),
+            (status, manual_note, sim_amount, updated_at, signal_id),
         )
 
 
@@ -196,7 +200,10 @@ def reset_signal_marks():
         conn.execute(
             """
             UPDATE signals
-            SET status = 'signal', manual_note = NULL, sim_amount = NULL
+            SET status = 'signal',
+                manual_note = NULL,
+                sim_amount = NULL,
+                status_updated_at = NULL
             WHERE status IN ('simulated', 'bought', 'skipped')
             """
         )
@@ -205,6 +212,8 @@ def reset_signal_marks():
 def upsert_signal_from_market(market):
     pos = market.get("position") or {}
     if not pos:
+        return
+    if pos.get("source") == "dashboard_simulation":
         return
     loc = {"name": market.get("city_name", market.get("city", ""))}
     unit = "F" if market.get("unit") == "F" else "C"

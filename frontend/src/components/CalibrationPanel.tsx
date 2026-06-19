@@ -5,6 +5,18 @@ interface Props {
 }
 
 export function CalibrationPanel({ calibration }: Props) {
+  if (calibration.total_with_outcome === 0) {
+    return (
+      <div className="h-full flex flex-col justify-center text-[10px] text-neutral-500 leading-relaxed space-y-1">
+        <div className="text-neutral-300">本轮暂无已结算结果</div>
+        <div>模拟买入后，等 Polymarket 市场结算，再用胜负结果校准信号质量。</div>
+        <div className="text-[9px] text-neutral-600 tabular-nums">
+          已跟踪信号 {calibration.total_signals} 个 / 已结算 0 个
+        </div>
+      </div>
+    )
+  }
+
   const accuracyPct = (calibration.accuracy * 100).toFixed(0)
   const accuracyColor = calibration.accuracy >= 0.55 ? '#22c55e' : calibration.accuracy < 0.50 ? '#dc2626' : '#a1a1aa'
 

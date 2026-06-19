@@ -40,6 +40,7 @@ app = FastAPI(title="WeatherBot Dashboard", version="1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origin_regex=r"http://(127\.0\.0\.1|localhost):\d+",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -138,6 +139,124 @@ def _data_age_minutes(latest_iso):
         return None
 
 
+def _parse_iso(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _at_or_after(value, lower_bound):
+    if not lower_bound:
+        return True
+    parsed = _parse_iso(value)
+    return bool(parsed and parsed >= lower_bound)
+
+
+def _bucket_bounds(signal):
+    raw = _read_json_from_text(signal.get("raw_json"), {})
+    low = raw.get("bucket_low")
+    high = raw.get("bucket_high")
+    if low is not None and high is not None:
+        return low, high
+    label = str(signal.get("bucket_label") or "")
+    label = label.replace("F", "").replace("C", "")
+    try:
+        left, right = label.split("-", 1)
+        return float(left), float(right)
+    except Exception:
+        return signal.get("forecast_temp"), signal.get("forecast_temp")
+
+
+def _read_json_from_text(value, fallback):
+    try:
+        return json.loads(value or "{}")
+    except Exception:
+        return fallback
+
+
+def _is_dashboard_position_import(signal):
+    return _read_json_from_text(signal.get("raw_json"), {}).get("source") == "dashboard_simulation"
+
+
+def _market_path_for_signal(signal):
+    city = signal.get("city")
+    date = signal.get("date")
+    if not city or not date:
+        return None
+    return MARKETS_DIR / f"{city}_{date}.json"
+
+
+def _position_from_signal(signal, amount, opened_at):
+    raw = _read_json_from_text(signal.get("raw_json"), {})
+    low, high = _bucket_bounds(signal)
+    entry_price = float(signal.get("limit_price") or raw.get("entry_price") or 0)
+    bid_price = float(signal.get("bid_price") or raw.get("bid_at_entry") or entry_price)
+    shares = round(amount / entry_price, 2) if entry_price > 0 else 0
+    return {
+        "market_id": signal.get("market_id") or raw.get("market_id"),
+        "event_url": signal.get("event_url") or raw.get("event_url"),
+        "yes_token_id": signal.get("yes_token_id") or raw.get("yes_token_id"),
+        "no_token_id": raw.get("no_token_id"),
+        "question": _clean_text(signal.get("question") or raw.get("question")),
+        "bucket_low": low,
+        "bucket_high": high,
+        "entry_price": entry_price,
+        "bid_at_entry": bid_price,
+        "spread": signal.get("spread") if signal.get("spread") is not None else raw.get("spread"),
+        "shares": shares,
+        "cost": round(amount, 2),
+        "p": signal.get("probability") if signal.get("probability") is not None else raw.get("p"),
+        "ev": signal.get("ev") if signal.get("ev") is not None else raw.get("ev"),
+        "kelly": signal.get("kelly") if signal.get("kelly") is not None else raw.get("kelly"),
+        "forecast_temp": signal.get("forecast_temp") if signal.get("forecast_temp") is not None else raw.get("forecast_temp"),
+        "forecast_src": signal.get("forecast_src") or raw.get("forecast_src"),
+        "sigma": raw.get("sigma"),
+        "opened_at": opened_at,
+        "status": "open",
+        "pnl": None,
+        "exit_price": None,
+        "close_reason": None,
+        "closed_at": None,
+        "city": signal.get("city") or raw.get("city"),
+        "source": "dashboard_simulation",
+    }
+
+
+def _open_paper_position(signal, amount, simulation_start, opened_at):
+    path = _market_path_for_signal(signal)
+    if not path or amount <= 0:
+        return False
+    market = _read_json(path, None)
+    if not isinstance(market, dict):
+        return False
+
+    current = market.get("position")
+    if current:
+        current_ts = current.get("opened_at") or market.get("created_at")
+        if _at_or_after(current_ts, simulation_start):
+            return False
+        history = market.get("position_history")
+        if not isinstance(history, list):
+            history = []
+        archived = dict(current)
+        archived["archived_at"] = opened_at
+        history.append(archived)
+        market["position_history"] = history
+
+    market["position"] = _position_from_signal(signal, amount, opened_at)
+    market["status"] = "open"
+    market["pnl"] = None
+    market["resolved_outcome"] = None
+    _write_json(path, market)
+    return True
+
+
 def _bot_running():
     return bool(bot_process and bot_process.poll() is None)
 
@@ -188,6 +307,8 @@ def build_dashboard_payload():
         upsert_signal_from_market(market)
 
     state = _read_json(DATA_DIR / "state.json", {})
+    simulation_started_at = state.get("simulation_started_at")
+    simulation_start = _parse_iso(simulation_started_at)
     open_positions = []
     recent_trades = []
     position_market_ids = set()
@@ -219,7 +340,10 @@ def build_dashboard_payload():
             }
         pos = market.get("position")
         if pos:
-            position_market_ids.add(str(pos.get("market_id") or ""))
+            position_ts = pos.get("opened_at") or market.get("created_at", "")
+            position_in_window = _at_or_after(position_ts, simulation_start)
+            if position_in_window:
+                position_market_ids.add(str(pos.get("market_id") or ""))
             event_url = pos.get("event_url") or market.get("event_url")
             result = "pending"
             if pos.get("status") == "closed":
@@ -247,24 +371,25 @@ def build_dashboard_payload():
                 "pnl": pos.get("pnl"),
                 "close_reason": pos.get("close_reason"),
             }
-            if pos.get("status") == "open":
+            if pos.get("status") == "open" and position_in_window:
                 open_positions.append(item)
-            recent_trades.append({
-                "id": int(pos.get("market_id") or 0) if str(pos.get("market_id", "")).isdigit() else len(recent_trades) + 1,
-                "market_ticker": pos.get("market_id", ""),
-                "platform": "polymarket",
-                "event_slug": _event_slug_from_url(event_url) or pos.get("question", ""),
-                "direction": "yes",
-                "entry_price": pos.get("entry_price") or 0,
-                "size": pos.get("cost") or 0,
-                "timestamp": pos.get("opened_at") or market.get("created_at", ""),
-                "settled": pos.get("status") == "closed",
-                "result": result,
-                "pnl": pos.get("pnl"),
-            })
+            if position_in_window:
+                recent_trades.append({
+                    "id": int(pos.get("market_id") or 0) if str(pos.get("market_id", "")).isdigit() else len(recent_trades) + 1,
+                    "market_ticker": pos.get("market_id", ""),
+                    "platform": "polymarket",
+                    "event_slug": _event_slug_from_url(event_url) or pos.get("question", ""),
+                    "direction": "yes",
+                    "entry_price": pos.get("entry_price") or 0,
+                    "size": pos.get("cost") or 0,
+                    "timestamp": position_ts,
+                    "settled": pos.get("status") == "closed",
+                    "result": result,
+                    "pnl": pos.get("pnl"),
+                })
 
     today = _today_str()
-    all_signals = list_signals(300)
+    all_signals = [s for s in list_signals(300) if not _is_dashboard_position_import(s)]
     signals_by_market = {str(s.get("market_id") or ""): s for s in all_signals}
     expired_signal_count = len([s for s in all_signals if (s.get("date") or "") < today])
     signals = [s for s in all_signals if (s.get("date") or "") >= today]
@@ -328,20 +453,22 @@ def build_dashboard_payload():
                 "direction": "yes",
                 "entry_price": signal.get("limit_price") or 0,
                 "size": display_amount or 0,
-                "timestamp": signal.get("created_at") or "",
+                "timestamp": signal.get("status_updated_at") or signal.get("created_at") or "",
                 "settled": False,
                 "result": "pending",
                 "pnl": None,
             })
 
     starting = state.get("starting_balance", 0) or 0
-    balance = state.get("balance", starting) or 0
-    total_pnl = round(balance - starting, 2)
+    cash_balance = state.get("balance", starting) or 0
     latest_update = _latest_market_update()
     data_age = _data_age_minutes(latest_update)
     equity_curve = []
     running_pnl = 0.0
-    combined_trades = recent_trades + simulated_trades
+    combined_trades = [
+        trade for trade in (recent_trades + simulated_trades)
+        if _at_or_after(trade.get("timestamp"), simulation_start)
+    ]
     for trade in sorted(combined_trades, key=lambda t: t.get("timestamp") or ""):
         if trade.get("pnl") is not None:
             running_pnl += float(trade["pnl"])
@@ -352,6 +479,10 @@ def build_dashboard_payload():
             })
 
     settled_trades = [t for t in combined_trades if t.get("result") in ("win", "loss")]
+    open_trade_count = len([t for t in combined_trades if t.get("result") == "pending"])
+    reserved_capital = round(sum(float(t.get("size") or 0) for t in combined_trades if t.get("result") == "pending"), 2)
+    equity = round(cash_balance + reserved_capital, 2)
+    total_pnl = round(equity - starting, 2)
     wins = len([t for t in settled_trades if t.get("result") == "win"])
     total_with_outcome = len(settled_trades)
     brier_values = []
@@ -370,7 +501,7 @@ def build_dashboard_payload():
             actual_edges.append(float(trade.get("pnl") or 0) / float(trade.get("size")))
 
     calibration_summary = {
-        "total_signals": len(all_signals),
+        "total_signals": len(signals),
         "total_with_outcome": total_with_outcome,
         "accuracy": (wins / total_with_outcome) if total_with_outcome else 0,
         "avg_predicted_edge": (sum(predicted_edges) / len(predicted_edges)) if predicted_edges else 0,
@@ -379,8 +510,12 @@ def build_dashboard_payload():
     }
 
     stats = {
-        "bankroll": balance,
-        "total_trades": state.get("total_trades", 0) + len(simulated_trades),
+        "bankroll": equity,
+        "cash_balance": cash_balance,
+        "reserved_capital": reserved_capital,
+        "total_trades": len(combined_trades),
+        "open_trades": open_trade_count,
+        "settled_trades": total_with_outcome,
         "winning_trades": wins,
         "win_rate": (wins / total_with_outcome) if total_with_outcome else 0,
         "total_pnl": total_pnl,
@@ -389,6 +524,9 @@ def build_dashboard_payload():
         "latest_market_update": latest_update,
         "data_age_minutes": data_age,
         "expired_signal_count": expired_signal_count,
+        "signal_count": len(signals),
+        "actionable_count": len([s for s in weather_signals if s.get("actionable")]),
+        "simulation_started_at": simulation_started_at,
         "scanner_status": "running" if _bot_running() else "stopped",
     }
 
@@ -500,6 +638,7 @@ async def stop_bot():
 @app.post("/api/simulation/reset")
 async def reset_simulation(update: SimulationReset):
     balance = max(0.0, float(update.balance))
+    started_at = datetime.now(timezone.utc).isoformat()
     _write_json(DATA_DIR / "state.json", {
         "balance": balance,
         "starting_balance": balance,
@@ -507,35 +646,76 @@ async def reset_simulation(update: SimulationReset):
         "wins": 0,
         "losses": 0,
         "peak_balance": balance,
+        "simulation_started_at": started_at,
     })
     if update.clear_marks:
         reset_signal_marks()
     log_event("warning", f"模拟账户已重置为 ${balance:.2f}", update.model_dump())
-    return {"ok": True, "balance": balance}
+    return {"ok": True, "balance": balance, "simulation_started_at": started_at}
 
 
 @app.post("/api/signals/bulk-simulate")
 async def bulk_simulate_signals():
     today = _today_str()
     count = 0
-    for signal in list_signals(500):
+    spent = 0.0
+    state = _read_json(DATA_DIR / "state.json", {})
+    remaining = max(0.0, float(state.get("balance", state.get("starting_balance", 0)) or 0))
+    simulation_start = _parse_iso(state.get("simulation_started_at"))
+    opened_at = datetime.now(timezone.utc).isoformat()
+    current_signals = [
+        s for s in list_signals(500)
+        if (s.get("date") or "") >= today and not _is_dashboard_position_import(s)
+    ]
+    candidates = sorted(
+        [s for s in current_signals if s.get("status") not in ("skipped", "simulated", "bought")],
+        key=lambda s: float(s.get("ev") or 0),
+        reverse=True,
+    )
+    for signal in candidates:
         if (signal.get("date") or "") < today:
             continue
-        if signal.get("status") in ("skipped", "simulated", "bought"):
+        requested = float(signal.get("sim_amount") or signal.get("amount") or 0)
+        if requested <= 0 or remaining <= 0:
+            break
+        amount = min(requested, remaining)
+        if not _open_paper_position(signal, amount, simulation_start, opened_at):
             continue
-        amount = signal.get("sim_amount") or signal.get("amount") or 0
         update_signal_status(signal["id"], "simulated", f"Bulk paper amount ${amount:.2f}", amount)
         count += 1
-    log_event("success", f"一键模拟买入 {count} 条当前信号")
-    return {"ok": True, "count": count}
+        spent += amount
+        remaining -= amount
+    if spent > 0:
+        state["balance"] = round(max(0.0, float(state.get("balance", 0) or 0) - spent), 2)
+        state["total_trades"] = int(state.get("total_trades", 0) or 0) + count
+        _write_json(DATA_DIR / "state.json", state)
+    log_event("success", f"一键模拟买入 {count} 条当前信号，用额 ${spent:.2f}，剩余额度 ${remaining:.2f}")
+    return {"ok": True, "count": count, "spent": round(spent, 2), "remaining": round(remaining, 2)}
 
 
 @app.post("/api/signals/{signal_id}/status")
 async def signal_status(signal_id: int, update: StatusUpdate):
     note = update.note
-    if update.amount is not None:
-        note = note or f"Paper amount ${update.amount:.2f}"
-    update_signal_status(signal_id, update.status, note, update.amount)
+    amount = update.amount
+    if update.status == "simulated":
+        signal = next((s for s in list_signals(500) if int(s.get("id") or 0) == signal_id and not _is_dashboard_position_import(s)), None)
+        if not signal:
+            return {"ok": False, "error": "signal_not_found"}
+        state = _read_json(DATA_DIR / "state.json", {})
+        cash = max(0.0, float(state.get("balance", state.get("starting_balance", 0)) or 0))
+        requested = float(amount if amount is not None else signal.get("amount") or 0)
+        amount = min(requested, cash)
+        if amount <= 0:
+            log_event("warning", f"Signal {signal_id} skipped: no simulation cash available")
+            return {"ok": False, "error": "no_cash"}
+        opened_at = datetime.now(timezone.utc).isoformat()
+        if _open_paper_position(signal, amount, _parse_iso(state.get("simulation_started_at")), opened_at):
+            state["balance"] = round(cash - amount, 2)
+            state["total_trades"] = int(state.get("total_trades", 0) or 0) + 1
+            _write_json(DATA_DIR / "state.json", state)
+    if amount is not None:
+        note = note or f"Paper amount ${amount:.2f}"
+    update_signal_status(signal_id, update.status, note, amount)
     log_event("info", f"Signal {signal_id} marked {update.status}", update.model_dump())
     return {"ok": True}
 

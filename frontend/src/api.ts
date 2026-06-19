@@ -49,12 +49,12 @@ export async function simulateTrade(ticker: string): Promise<{ trade_id: number;
   return data
 }
 
-export async function bulkSimulateSignals(): Promise<{ ok: boolean; count: number }> {
+export async function bulkSimulateSignals(): Promise<{ ok: boolean; count: number; spent?: number; remaining?: number }> {
   const { data } = await api.post('/signals/bulk-simulate')
   return data
 }
 
-export async function resetSimulation(balance: number, clearMarks = false): Promise<{ ok: boolean; balance: number }> {
+export async function resetSimulation(balance: number, clearMarks = false): Promise<{ ok: boolean; balance: number; simulation_started_at?: string }> {
   const { data } = await api.post('/simulation/reset', { balance, clear_marks: clearMarks })
   return data
 }

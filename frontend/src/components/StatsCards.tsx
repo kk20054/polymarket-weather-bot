@@ -6,7 +6,9 @@ interface Props {
 }
 
 export function StatsCards({ stats }: Props) {
-  const winRate = stats.total_trades > 0 ? (stats.winning_trades / stats.total_trades * 100) : 0
+  const winRate = (stats.win_rate ?? 0) * 100
+  const openTrades = stats.open_trades ?? 0
+  const settledTrades = stats.settled_trades ?? 0
   const returnPercent = stats.bankroll - stats.total_pnl > 0
     ? ((stats.total_pnl / (stats.bankroll - stats.total_pnl)) * 100)
     : 0
@@ -40,15 +42,15 @@ export function StatsCards({ stats }: Props) {
           {winRate.toFixed(0)}%
         </span>
         <span className="text-[10px] text-neutral-600 tabular-nums">
-          {stats.winning_trades}/{stats.total_trades}
+          {stats.winning_trades}/{settledTrades}
         </span>
       </motion.div>
 
       <div className="w-px h-3 bg-neutral-800" />
 
       <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.15 }}>
-        <span className="text-[10px] text-neutral-600 uppercase">记录</span>
-        <span className="text-sm font-semibold tabular-nums text-neutral-100">{stats.total_trades}</span>
+        <span className="text-[10px] text-neutral-600 uppercase">持仓/结算</span>
+        <span className="text-sm font-semibold tabular-nums text-neutral-100">{openTrades}/{settledTrades}</span>
         {stats.is_running && <div className="live-dot" />}
       </motion.div>
     </div>

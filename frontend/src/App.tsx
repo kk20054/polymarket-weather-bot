@@ -53,8 +53,28 @@ function formatDataAge(minutes?: number | null) {
   return `${(minutes / 1440).toFixed(1)} 天前`
 }
 
+function formatDateTime(value?: string | null) {
+  if (!value) return '尚未重置'
+  try {
+    return new Date(value).toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
+  } catch {
+    return '时间未知'
+  }
+}
+
 function SimulationPanel({
   bankroll,
+  cashBalance,
+  reservedCapital,
+  startedAt,
+  openTrades,
+  settledTrades,
   value,
   clearMarks,
   onValue,
@@ -63,6 +83,11 @@ function SimulationPanel({
   disabled,
 }: {
   bankroll: number
+  cashBalance: number
+  reservedCapital: number
+  startedAt?: string | null
+  openTrades: number
+  settledTrades: number
   value: string
   clearMarks: boolean
   onValue: (value: string) => void
@@ -73,8 +98,20 @@ function SimulationPanel({
   return (
     <div className="h-full p-2 text-[10px] text-neutral-500 space-y-2 overflow-y-auto">
       <div className="flex items-center justify-between">
-        <span className="uppercase tracking-wider">当前模拟资金</span>
+        <span className="uppercase tracking-wider">当前总权益</span>
         <span className="text-neutral-200 tabular-nums">${bankroll.toFixed(2)}</span>
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="uppercase tracking-wider">现金/持仓</span>
+        <span className="text-neutral-300 tabular-nums">${cashBalance.toFixed(2)} / ${reservedCapital.toFixed(2)}</span>
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="uppercase tracking-wider">本轮开始</span>
+        <span className="text-neutral-300 tabular-nums">{formatDateTime(startedAt)}</span>
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="uppercase tracking-wider">持仓/结算</span>
+        <span className="text-neutral-300 tabular-nums">{openTrades}/{settledTrades}</span>
       </div>
       <div className="flex items-center gap-1.5">
         <input
@@ -104,6 +141,7 @@ function SimulationPanel({
         <span>同时清除“模拟/跳过/实盘”标记</span>
       </label>
       <div className="border-t border-neutral-800 pt-2 leading-relaxed space-y-1">
+        <p>应用本金：重置本轮模拟起点，旧交易不会再混入当前统计。</p>
         <p>一键模拟：把当前可操作信号批量标记为模拟。</p>
         <p>单条按钮：外链、模拟、实盘标记、跳过都会保留在每条信号右侧。</p>
         <p>启动扫描：运行本地 WeatherBot，日志会进入系统日志区。</p>
@@ -189,10 +227,13 @@ function App() {
     is_running: false,
     last_run: null,
     total_trades: 0,
+    open_trades: 0,
+    settled_trades: 0,
     total_pnl: 0,
     bankroll: 10000,
     winning_trades: 0,
-    win_rate: 0
+    win_rate: 0,
+    simulation_started_at: null
   }
   const equityCurve = data?.equity_curve ?? []
   const calibration = data?.calibration ?? null
@@ -408,6 +449,11 @@ function App() {
               </div>
               <SimulationPanel
                 bankroll={stats.bankroll}
+                cashBalance={stats.cash_balance ?? stats.bankroll}
+                reservedCapital={stats.reserved_capital ?? 0}
+                startedAt={stats.simulation_started_at}
+                openTrades={stats.open_trades ?? 0}
+                settledTrades={stats.settled_trades ?? 0}
                 value={simBalance}
                 clearMarks={clearMarks}
                 onValue={setSimBalance}

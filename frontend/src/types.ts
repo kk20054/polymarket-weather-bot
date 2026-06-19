@@ -69,7 +69,11 @@ export interface Trade {
 
 export interface BotStats {
   bankroll: number
+  cash_balance?: number
+  reserved_capital?: number
   total_trades: number
+  open_trades?: number
+  settled_trades?: number
   winning_trades: number
   win_rate: number
   total_pnl: number
@@ -78,6 +82,9 @@ export interface BotStats {
   latest_market_update?: string | null
   data_age_minutes?: number | null
   expired_signal_count?: number
+  signal_count?: number
+  actionable_count?: number
+  simulation_started_at?: string | null
   scanner_status?: string
 }
 
