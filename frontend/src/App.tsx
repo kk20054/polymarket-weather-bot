@@ -381,11 +381,12 @@ function App() {
           </div>
 
           {/* Calibration */}
-          {calibration && calibration.total_with_outcome > 0 && (
+          {calibration && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              className="shrink-0 border-b border-neutral-800 px-2 py-2"
+              className="border-b border-neutral-800 px-2 py-2 overflow-hidden"
+              style={{ height: '22%', minHeight: '120px' }}
             >
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-[10px] text-neutral-500 uppercase tracking-wider">校准</span>
