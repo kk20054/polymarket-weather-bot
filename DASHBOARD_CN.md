@@ -1,19 +1,19 @@
 # WeatherBot 看板使用手册
 
-这个看板使用 `suislanchez/polymarket-kalshi-weather-bot` 的 React/Tailwind 交易终端框架；天气信号仍然来自当前 `alteregoeth-ai/weatherbot` 的 `bot_v2.py` 逻辑。
+这个看板使用 `suislanchez/polymarket-kalshi-weather-bot` 的 React/Tailwind 交易终端框架；天气信号仍由本项目的 `bot_v2.py` 生成。
 
-当前版本默认是半自动和模拟记录：看板不会替你向 Polymarket 下单。
+当前版本默认是模拟盘和半自动记录：看板不会替你向 Polymarket 真实下单。
 
 ## 1. 启动看板
 
-在项目目录打开第一个 PowerShell：
+第一个 PowerShell：
 
 ```powershell
 cd C:\Users\Administrator\Documents\polymarket\weatherbot
 .\.venv\Scripts\python.exe -m uvicorn dashboard_server:app --host 127.0.0.1 --port 8765
 ```
 
-再打开第二个 PowerShell：
+第二个 PowerShell：
 
 ```powershell
 cd C:\Users\Administrator\Documents\polymarket\weatherbot\frontend
@@ -26,56 +26,66 @@ npm run dev -- --host 127.0.0.1 --port 5173
 http://127.0.0.1:5173
 ```
 
-## 2. 启动 WeatherBot 扫描
+## 2. 启动扫描器
 
-第三个 PowerShell 运行：
+可以在看板点“启动扫描”，也可以在第三个 PowerShell 手动运行：
 
 ```powershell
 cd C:\Users\Administrator\Documents\polymarket\weatherbot
 .\.venv\Scripts\python.exe weatherbet.py
 ```
 
-看板右上角“刷新”只是刷新本地看板数据，不会启动扫描器。真正持续扫描的是这个 `weatherbet.py` 窗口。
+扫描器会持续刷新天气、盘口和本地模拟仓位。看板上的“刷新”只刷新页面数据，不等于重新扫描市场。
 
-## 3. 手动模拟一笔信号
+## 3. 术语
 
-在右侧“信号”表里：
+- `P`：模型认为 YES 会赢的概率。
+- `市场P`：当前买入价近似代表的市场隐含概率，例如 24c 约等于 24%。
+- `概率差`：`模型P - 市场P`，这是判断有没有优势的核心指标。
+- `EV收益`：`模型P / 买入价 - 1`，低价合约会把这个数字放大，所以不能只看 EV。
+- `BTC`：比特币市场信号。当前这套主要用于天气，BTC 为参考框架遗留模块。
+- `WX`：weather，天气信号。
+- `31成员`：Open-Meteo GFS ensemble 的成员数。新信号会优先用 ensemble 成员分布算概率。
 
-1. 找到你想跟踪的天气信号。
-2. 看 `EV`、`限价`、`金额`。金额输入框默认填机器人建议金额，你可以改成自己的模拟金额，例如 `1.00`、`2.00`、`5.00`。
-3. 点外链按钮打开 Polymarket，只用于核对市场页面。
-4. 点绿色勾号，表示“模拟买入”。这只写入本地数据库，不会真钱下单。
-5. 点 `$`，表示你已经在 Polymarket 手动实盘买入，用于本地标记。
-6. 点 `X`，表示跳过这个信号。
+## 4. 模拟流程
 
-点“模拟买入”或“实盘标记”后，右下角“模拟/交易记录”会出现一条待定记录。
+1. 在“模拟账户”输入本金，例如 `40`，点“应用”。
+2. 勾选“同时清除标记”可以开始一轮全新的模拟。
+3. 等扫描器产生信号后，在右侧“信号”里查看 `模型P / 市场P / 概率差 / EV收益`。
+4. 点绿色按钮或“一键模拟”只会写入本地模拟记录，不会真实下单。
+5. 点外链可以打开 Polymarket 页面人工核对。
+6. 点 `$` 只是把这条信号标记为你已经实盘买入，仍不会自动交易。
+7. 市场结算后点“检查结算”，看板会尝试从 Polymarket 读取结果并更新胜率、结算率和 PnL。
 
-## 4. 本地数据保存在哪里
+## 5. 关键配置
 
-SQLite 数据库：
+配置文件：
 
 ```text
-C:\Users\Administrator\Documents\polymarket\weatherbot\data\weatherbot.db
+C:\Users\Administrator\Documents\polymarket\weatherbot\config.json
 ```
 
-里面会保存：
+常用字段：
 
-- 信号题目、Polymarket URL、YES token
-- 限价、买入价差、建议金额、模拟金额
-- 信号状态：`signal`、`simulated`、`bought`、`skipped`
-- 看板系统日志
+- `balance`：模拟本金。
+- `max_bet`：单笔模拟最大下注金额。
+- `min_ev`：最低 EV 收益率。
+- `min_prob_edge`：最低概率差，默认 `0.08` 表示模型概率至少比价格高 8 个百分点。
+- `min_model_prob`：最低模型胜率，避免买入模型概率太低的尾部票。
+- `max_price`：最高买入价。
+- `min_volume`：最低市场成交量。
+- `max_slippage`：最大 bid/ask 价差。
+- `use_gfs_ensemble`：是否优先用 GFS ensemble 概率。
+- `ensemble_min_members`：ensemble 至少需要多少成员才启用。
+- `scan_interval`：扫描间隔秒数。
 
-## 5. 建议你先怎么跑几天
+## 6. 复盘判断
 
-先不要再实盘扩大仓位。建议连续 3 到 7 天只做模拟：
+先至少模拟 3 到 7 天，不建议现在直接接实盘。重点看：
 
-1. 每天让 `weatherbet.py` 持续跑。
-2. 每次出现信号，在看板填模拟金额并点绿色勾号。
-3. 第二天 Polymarket 结算后，把结果对照记录下来。
-4. 重点看是否经常差 1 个温度桶、是否某些城市连续错、D+0 和 D+1 哪个更可靠。
+- 结算率是否足够高，否则胜率没有意义。
+- `概率差` 高的信号是否真的更准。
+- 不同城市、不同来源、不同 EV 桶的结果是否稳定。
+- 是否经常差一个温度档，如果经常差一档，说明模型概率仍过度自信。
 
-昨天全亏说明当前信号不能直接按 EV 当成确定优势。后面要优化实盘策略，优先方向应该是：降低单笔金额、提高 `min_ev`、限制只做模型一致性更高的城市/日期、记录真实结算结果后再校准。
-
-## 6. 安全提醒
-
-这个版本不会自动下单。真正下单仍然需要你打开 Polymarket 页面，人工确认市场、方向、价格和金额后提交。
+当前样本还少，而且历史样本混有旧版单点概率信号；先用看板观察，不要只按 EV 自动买。

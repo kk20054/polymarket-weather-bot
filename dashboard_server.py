@@ -604,7 +604,7 @@ def _build_backtest_summary(markets):
         "sources": sorted(source_rows, key=lambda s: s["source"]),
         "notes": [
             "本复盘基于本地保存的模拟/纸面仓位，不是逐分钟盘口回放。",
-            "参考项目使用 31 成员 GFS ensemble；当前引擎仍以 ECMWF/HRRR/METAR 单点概率为主。",
+            "新信号优先使用 31 成员 GFS ensemble；旧样本可能仍来自 ECMWF/HRRR/METAR 单点概率。",
             "样本少于 30 个已结算仓位时，胜率和 Brier 只能作观察，不能作为实盘依据。",
         ],
     }
@@ -637,16 +637,20 @@ def build_dashboard_payload():
         city_key = market.get("city", "")
         if best is not None and city_key:
             high_f = _native_to_f(best, market.get("unit"))
+            ensemble_members = int(latest_forecast.get("ensemble_members") or 0)
+            ensemble_std = latest_forecast.get("ensemble_std")
+            if ensemble_std is None:
+                ensemble_std = 2.0 if market.get("unit") == "F" else 2.2
             weather_forecasts_by_city[city_key] = {
                 "city_key": city_key,
                 "city_name": market.get("city_name", city_key),
                 "target_date": market.get("date", ""),
                 "mean_high": high_f or 0,
-                "std_high": 2.0 if market.get("unit") == "F" else 2.2,
+                "std_high": float(ensemble_std or 0),
                 "mean_low": 0,
                 "std_low": 0,
-                "num_members": 1,
-                "ensemble_agreement": 0.75,
+                "num_members": ensemble_members or 1,
+                "ensemble_agreement": None,
             }
         pos = market.get("position")
         if pos:
@@ -708,12 +712,17 @@ def build_dashboard_payload():
     weather_signals = []
     simulated_trades = []
     for signal in signals:
+        raw_signal = _read_json_from_text(signal.get("raw_json"), {})
         threshold = signal.get("forecast_temp")
         try:
             threshold = float(threshold) if threshold is not None else 0.0
         except Exception:
             threshold = 0.0
         limit_price = signal.get("limit_price") or 0
+        model_probability = signal.get("probability") or 0
+        probability_edge = raw_signal.get("prob_edge")
+        if probability_edge is None:
+            probability_edge = model_probability - limit_price
         amount = signal.get("amount") or 0
         sim_amount = signal.get("sim_amount")
         display_amount = sim_amount if sim_amount is not None else amount
@@ -732,20 +741,22 @@ def build_dashboard_payload():
             "threshold_f": threshold,
             "metric": "high",
             "direction": "yes",
-            "model_probability": signal.get("probability") or 0,
+            "model_probability": model_probability,
             "market_probability": signal.get("limit_price") or 0,
-            "probability_edge": (signal.get("probability") or 0) - (signal.get("limit_price") or 0),
+            "probability_edge": probability_edge,
             "edge": signal.get("ev") or 0,
-            "confidence": min(0.95, max(0.05, signal.get("probability") or 0.5)),
+            "confidence": raw_signal.get("confidence") or min(0.95, max(0.05, model_probability or 0.5)),
             "suggested_size": amount,
             "reasoning": (
                 f"{signal.get('city_name')} {signal.get('date')} {signal.get('bucket_label')} | "
                 f"limit ${limit_price:.3f} | amount ${amount:.2f} | "
-                f"source {(signal.get('forecast_src') or '').upper()} | token {signal.get('yes_token_id') or 'unknown'}"
+                f"source {(signal.get('forecast_src') or '').upper()} | "
+                f"method {raw_signal.get('prob_method', 'unknown')} | "
+                f"token {signal.get('yes_token_id') or 'unknown'}"
             ),
             "ensemble_mean": signal.get("forecast_temp") or 0,
-            "ensemble_std": 0,
-            "ensemble_members": 1,
+            "ensemble_std": raw_signal.get("ensemble_std") or 0,
+            "ensemble_members": raw_signal.get("ensemble_members") or 1,
             "actionable": effective_status not in ("skipped", "simulated", "bought"),
             "platform": signal.get("platform") or "polymarket",
             "status": effective_status,

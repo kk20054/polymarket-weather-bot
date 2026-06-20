@@ -16,6 +16,7 @@ import re
 import sys
 import json
 import math
+import statistics
 import time
 import requests
 from datetime import datetime, timezone, timedelta
@@ -36,12 +37,16 @@ with open("config.json", encoding="utf-8") as f:
 BALANCE          = _cfg.get("balance", 10000.0)
 MAX_BET          = _cfg.get("max_bet", 20.0)        # max bet per trade
 MIN_EV           = _cfg.get("min_ev", 0.10)
+MIN_PROB_EDGE    = _cfg.get("min_prob_edge", 0.08)
+MIN_MODEL_PROB   = _cfg.get("min_model_prob", 0.12)
 MAX_PRICE        = _cfg.get("max_price", 0.45)
 MIN_VOLUME       = _cfg.get("min_volume", 500)
 MIN_HOURS        = _cfg.get("min_hours", 2.0)
 MAX_HOURS        = _cfg.get("max_hours", 72.0)
 KELLY_FRACTION   = _cfg.get("kelly_fraction", 0.25)
 MAX_SLIPPAGE     = _cfg.get("max_slippage", 0.03)  # max allowed ask-bid spread
+USE_GFS_ENSEMBLE = _cfg.get("use_gfs_ensemble", True)
+ENSEMBLE_MIN_MEMBERS = _cfg.get("ensemble_min_members", 10)
 SCAN_INTERVAL    = _cfg.get("scan_interval", 3600)   # every hour
 CALIBRATION_MIN  = _cfg.get("calibration_min", 30)
 VC_KEY           = _cfg.get("vc_key", "")
@@ -96,6 +101,14 @@ TIMEZONES = {
 MONTHS = ["january","february","march","april","may","june",
           "july","august","september","october","november","december"]
 
+def get_json(url, timeout=(5, 10), params=None):
+    """Fetch JSON without inheriting broken system proxy settings."""
+    session = requests.Session()
+    session.trust_env = False
+    response = session.get(url, params=params, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
+
 # =============================================================================
 # MATH
 # =============================================================================
@@ -115,6 +128,25 @@ def bucket_prob(forecast, t_low, t_high, sigma=None):
     lower = float(t_low) - 0.5
     upper = float(t_high) + 0.5
     return max(0.0, min(1.0, norm_cdf((upper - forecast) / s) - norm_cdf((lower - forecast) / s)))
+
+def bucket_prob_from_members(members, t_low, t_high):
+    """Estimate bucket probability from GFS ensemble member highs."""
+    values = [float(v) for v in members if v is not None]
+    if not values:
+        return None
+    if t_low == -999:
+        wins = sum(1 for temp in values if temp <= float(t_high) + 0.5)
+    elif t_high == 999:
+        wins = sum(1 for temp in values if temp >= float(t_low) - 0.5)
+    else:
+        lower = float(t_low) - 0.5
+        upper = float(t_high) + 0.5
+        wins = sum(1 for temp in values if lower <= temp <= upper)
+    return wins / len(values)
+
+def clipped_probability(p):
+    """Avoid treating unanimous or empty ensembles as certainty."""
+    return max(0.05, min(0.95, float(p)))
 
 def calc_ev(p, price):
     if price <= 0 or price >= 1: return 0.0
@@ -196,7 +228,7 @@ def get_ecmwf(city_slug, dates):
     )
     for attempt in range(3):
         try:
-            data = requests.get(url, timeout=(5, 10)).json()
+            data = get_json(url, timeout=(5, 10))
             if "error" not in data:
                 for date, temp in zip(data["daily"]["time"], data["daily"]["temperature_2m_max"]):
                     if date in dates and temp is not None:
@@ -224,7 +256,7 @@ def get_hrrr(city_slug, dates):
     )
     for attempt in range(3):
         try:
-            data = requests.get(url, timeout=(5, 10)).json()
+            data = get_json(url, timeout=(5, 10))
             if "error" not in data:
                 for date, temp in zip(data["daily"]["time"], data["daily"]["temperature_2m_max"]):
                     if date in dates and temp is not None:
@@ -237,6 +269,56 @@ def get_hrrr(city_slug, dates):
                 print(f"  [HRRR] {city_slug}: {e}")
     return result
 
+def get_gfs_ensemble(city_slug, dates):
+    """31-member GFS ensemble via Open-Meteo, keyed by target date."""
+    if not USE_GFS_ENSEMBLE or not dates:
+        return {}
+    loc = LOCATIONS[city_slug]
+    unit = loc["unit"]
+    temp_unit = "fahrenheit" if unit == "F" else "celsius"
+    session = requests.Session()
+    session.trust_env = False
+    params = {
+        "latitude": loc["lat"],
+        "longitude": loc["lon"],
+        "daily": "temperature_2m_max",
+        "temperature_unit": temp_unit,
+        "start_date": min(dates),
+        "end_date": max(dates),
+        "timezone": TIMEZONES.get(city_slug, "UTC"),
+        "models": "gfs_seamless",
+    }
+    for attempt in range(3):
+        try:
+            response = session.get("https://ensemble-api.open-meteo.com/v1/ensemble", params=params, timeout=(5, 15))
+            response.raise_for_status()
+            data = response.json()
+            daily = data.get("daily", {})
+            date_index = {date: idx for idx, date in enumerate(daily.get("time", []))}
+            result = {date: {"members": []} for date in dates if date in date_index}
+            for key, values in daily.items():
+                if "temperature_2m_max" not in key or not isinstance(values, list):
+                    continue
+                for date, idx in date_index.items():
+                    if date not in result or idx >= len(values) or values[idx] is None:
+                        continue
+                    result[date]["members"].append(round(float(values[idx]), 1))
+            for date, item in list(result.items()):
+                members = item["members"]
+                if len(members) < ENSEMBLE_MIN_MEMBERS:
+                    result.pop(date, None)
+                    continue
+                item["mean"] = round(statistics.mean(members), 1)
+                item["std"] = round(statistics.stdev(members), 2) if len(members) > 1 else 0.0
+                item["count"] = len(members)
+            return result
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(3)
+            else:
+                print(f"  [GFS-ENS] {city_slug}: {e}")
+    return {}
+
 def get_metar(city_slug):
     """Current observed temperature from METAR station. D+0 only."""
     loc = LOCATIONS[city_slug]
@@ -244,7 +326,7 @@ def get_metar(city_slug):
     unit = loc["unit"]
     try:
         url = f"https://aviationweather.gov/api/data/metar?ids={station}&format=json"
-        data = requests.get(url, timeout=(5, 8)).json()
+        data = get_json(url, timeout=(5, 8))
         if data and isinstance(data, list):
             temp_c = data[0].get("temp")
             if temp_c is not None:
@@ -329,8 +411,7 @@ def check_market_resolved(market_id):
 def get_polymarket_event(city_slug, month, day, year):
     slug = f"highest-temperature-in-{city_slug}-on-{month}-{day}-{year}"
     try:
-        r = requests.get(f"https://gamma-api.polymarket.com/events?slug={slug}", timeout=(5, 8))
-        data = r.json()
+        data = get_json(f"https://gamma-api.polymarket.com/events?slug={slug}", timeout=(5, 8))
         if data and isinstance(data, list) and len(data) > 0:
             return data[0]
     except Exception:
@@ -364,8 +445,8 @@ def get_weather_event_url(city_slug, date_str):
 
 def get_yes_token_id(market_id):
     try:
-        r = requests.get(f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=(3, 5))
-        tokens = parse_json_list(r.json().get("clobTokenIds", "[]"))
+        data = get_json(f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=(3, 5))
+        tokens = parse_json_list(data.get("clobTokenIds", "[]"))
         if tokens:
             return str(tokens[0])
     except Exception:
@@ -387,14 +468,16 @@ def print_manual_order_instructions(signal, loc, date, horizon, bucket_label, ev
           f"(spread ${signal['spread']:.3f})")
     print(f"           Signal:   {loc['name']} {horizon} {date}, bucket {bucket_label}, "
           f"forecast {signal['forecast_temp']}, EV {signal['ev']:+.2f}, source {forecast_src}")
+    print(f"           Model:    P {signal.get('p', 0):.1%}, prob edge {signal.get('prob_edge', 0):+.1%}, "
+          f"method {signal.get('prob_method', 'unknown')}")
     print(f"           Token:    YES {yes_token_id}")
     print("           Steps:    open URL -> choose this exact temperature market -> Buy Yes -> "
           "set limit/amount -> review -> submit")
 
 def get_market_price(market_id):
     try:
-        r = requests.get(f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=(3, 5))
-        prices = json.loads(r.json().get("outcomePrices", "[0.5,0.5]"))
+        data = get_json(f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=(3, 5))
+        prices = json.loads(data.get("outcomePrices", "[0.5,0.5]"))
         return float(prices[0])
     except Exception:
         return None
@@ -502,6 +585,7 @@ def save_state(state):
 def take_forecast_snapshot(city_slug, dates):
     """Fetches forecasts from all sources and returns a snapshot."""
     now_str = datetime.now(timezone.utc).isoformat()
+    ensemble = get_gfs_ensemble(city_slug, dates)
     ecmwf   = get_ecmwf(city_slug, dates)
     hrrr    = get_hrrr(city_slug, dates)
     today   = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -510,13 +594,17 @@ def take_forecast_snapshot(city_slug, dates):
     for date in dates:
         snap = {
             "ts":    now_str,
+            "ensemble": ensemble.get(date),
             "ecmwf": ecmwf.get(date),
             "hrrr":  hrrr.get(date) if date <= (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y-%m-%d") else None,
             "metar": get_metar(city_slug) if date == today else None,
         }
-        # Best forecast: HRRR for US D+0/D+1, otherwise ECMWF
+        # Best forecast: ensemble mean first, then HRRR for US D+0/D+1, otherwise ECMWF.
         loc = LOCATIONS[city_slug]
-        if loc["region"] == "us" and snap["hrrr"] is not None:
+        if snap["ensemble"] and snap["ensemble"].get("mean") is not None:
+            snap["best"] = snap["ensemble"]["mean"]
+            snap["best_source"] = "gfs_ensemble"
+        elif loc["region"] == "us" and snap["hrrr"] is not None:
             snap["best"] = snap["hrrr"]
             snap["best_source"] = "hrrr"
         elif snap["ecmwf"] is not None:
@@ -616,6 +704,9 @@ def scan_and_update():
                 "ts":          snap.get("ts"),
                 "horizon":     horizon,
                 "hours_left":  round(hours, 1),
+                "ensemble_mean": (snap.get("ensemble") or {}).get("mean"),
+                "ensemble_std": (snap.get("ensemble") or {}).get("std"),
+                "ensemble_members": (snap.get("ensemble") or {}).get("count", 0),
                 "ecmwf":       snap.get("ecmwf"),
                 "hrrr":        snap.get("hrrr"),
                 "metar":       snap.get("metar"),
@@ -699,18 +790,24 @@ def scan_and_update():
             if not mkt.get("position") and forecast_temp is not None and hours >= MIN_HOURS:
                 sigma = get_sigma(city_slug, best_source or "ecmwf")
                 best_signal = None
+                ensemble_info = snap.get("ensemble") or {}
+                ensemble_members = ensemble_info.get("members") or []
+                use_ensemble = USE_GFS_ENSEMBLE and len(ensemble_members) >= ENSEMBLE_MIN_MEMBERS
 
-                # Find exactly ONE bucket that matches the forecast
-                # If forecast doesn't fit any bucket cleanly — skip this market
-                matched_bucket = None
-                for o in outcomes:
-                    t_low, t_high = o["range"]
-                    if in_bucket(forecast_temp, t_low, t_high):
-                        matched_bucket = o
-                        break
+                if use_ensemble:
+                    candidate_outcomes = outcomes
+                else:
+                    matched_bucket = None
+                    for o in outcomes:
+                        t_low, t_high = o["range"]
+                        if in_bucket(forecast_temp, t_low, t_high):
+                            matched_bucket = o
+                            break
+                    candidate_outcomes = [matched_bucket] if matched_bucket else []
 
-                if matched_bucket:
-                    o = matched_bucket
+                for o in candidate_outcomes:
+                    if not o:
+                        continue
                     t_low, t_high = o["range"]
                     volume = o["volume"]
                     bid    = o.get("bid", o["price"])
@@ -719,13 +816,28 @@ def scan_and_update():
 
                     # All filters — if any fails, skip this market entirely
                     if volume >= MIN_VOLUME:
-                        p  = bucket_prob(forecast_temp, t_low, t_high, sigma)
+                        if use_ensemble:
+                            raw_p = bucket_prob_from_members(ensemble_members, t_low, t_high)
+                            if raw_p is None:
+                                continue
+                            p = clipped_probability(raw_p)
+                            prob_method = "gfs_ensemble"
+                            signal_source = "gfs_ensemble"
+                            signal_forecast_temp = ensemble_info.get("mean", forecast_temp)
+                            confidence = round(max(p, 1.0 - p), 4)
+                        else:
+                            p = bucket_prob(forecast_temp, t_low, t_high, sigma)
+                            prob_method = "normal_sigma"
+                            signal_source = best_source
+                            signal_forecast_temp = forecast_temp
+                            confidence = round(max(p, 1.0 - p), 4)
+                        prob_edge = round(p - ask, 4)
                         ev = calc_ev(p, ask)
-                        if ev >= MIN_EV:
+                        if ev >= MIN_EV and prob_edge >= MIN_PROB_EDGE and p >= MIN_MODEL_PROB:
                             kelly = calc_kelly(p, ask)
                             size  = bet_size(kelly, balance)
                             if size >= 0.50:
-                                best_signal = {
+                                candidate = {
                                     "market_id":    o["market_id"],
                                     "event_url":     o["event_url"],
                                     "yes_token_id":  o["yes_token_id"],
@@ -739,10 +851,15 @@ def scan_and_update():
                                     "shares":       round(size / ask, 2),
                                     "cost":         size,
                                     "p":            round(p, 4),
+                                    "prob_edge":    prob_edge,
                                     "ev":           round(ev, 4),
                                     "kelly":        round(kelly, 4),
-                                    "forecast_temp":forecast_temp,
-                                    "forecast_src": best_source,
+                                    "confidence":   confidence,
+                                    "forecast_temp":signal_forecast_temp,
+                                    "forecast_src": signal_source,
+                                    "prob_method":  prob_method,
+                                    "ensemble_members": len(ensemble_members) if use_ensemble else 0,
+                                    "ensemble_std": ensemble_info.get("std") if use_ensemble else None,
                                     "sigma":        sigma,
                                     "opened_at":    snap.get("ts"),
                                     "status":       "open",
@@ -751,26 +868,46 @@ def scan_and_update():
                                     "close_reason": None,
                                     "closed_at":    None,
                                 }
+                                if (
+                                    best_signal is None
+                                    or candidate["prob_edge"] > best_signal.get("prob_edge", -1)
+                                    or (
+                                        candidate["prob_edge"] == best_signal.get("prob_edge")
+                                        and candidate["ev"] > best_signal.get("ev", -1)
+                                    )
+                                ):
+                                    best_signal = candidate
 
                 if best_signal:
                     # Fetch real bestAsk from Polymarket API for accurate entry price
                     skip_position = False
                     try:
-                        r = requests.get(f"https://gamma-api.polymarket.com/markets/{best_signal['market_id']}", timeout=(3, 5))
-                        mdata = r.json()
+                        mdata = get_json(f"https://gamma-api.polymarket.com/markets/{best_signal['market_id']}", timeout=(3, 5))
                         real_ask = float(mdata.get("bestAsk", best_signal["entry_price"]))
                         real_bid = float(mdata.get("bestBid", best_signal["bid_at_entry"]))
                         real_spread = round(real_ask - real_bid, 4)
+                        real_ev = round(calc_ev(best_signal["p"], real_ask), 4)
+                        real_prob_edge = round(best_signal["p"] - real_ask, 4)
                         # Re-check slippage and price with real values
-                        if real_spread > MAX_SLIPPAGE or real_ask >= MAX_PRICE:
-                            print(f"  [SKIP] {loc['name']} {date} — real ask ${real_ask:.3f} spread ${real_spread:.3f}")
+                        if (
+                            real_spread > MAX_SLIPPAGE
+                            or real_ask >= MAX_PRICE
+                            or real_ev < MIN_EV
+                            or real_prob_edge < MIN_PROB_EDGE
+                        ):
+                            print(
+                                f"  [SKIP] {loc['name']} {date} — real ask ${real_ask:.3f} "
+                                f"spread ${real_spread:.3f} EV {real_ev:+.2f} "
+                                f"prob edge {real_prob_edge:+.1%}"
+                            )
                             skip_position = True
                         else:
                             best_signal["entry_price"]  = real_ask
                             best_signal["bid_at_entry"] = real_bid
                             best_signal["spread"]       = real_spread
                             best_signal["shares"]       = round(best_signal["cost"] / real_ask, 2)
-                            best_signal["ev"]           = round(calc_ev(best_signal["p"], real_ask), 4)
+                            best_signal["ev"]           = real_ev
+                            best_signal["prob_edge"]    = real_prob_edge
                             real_tokens = parse_json_list(mdata.get("clobTokenIds", "[]"))
                             if len(real_tokens) > 0:
                                 best_signal["yes_token_id"] = str(real_tokens[0])
@@ -1000,8 +1137,7 @@ def monitor_positions():
         # Fetch real bestBid from Polymarket API — actual sell price
         current_price = None
         try:
-            r = requests.get(f"https://gamma-api.polymarket.com/markets/{mid}", timeout=(3, 5))
-            mdata = r.json()
+            mdata = get_json(f"https://gamma-api.polymarket.com/markets/{mid}", timeout=(3, 5))
             best_bid = mdata.get("bestBid")
             if best_bid is not None:
                 current_price = float(best_bid)

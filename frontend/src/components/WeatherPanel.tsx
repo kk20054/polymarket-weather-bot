@@ -47,7 +47,7 @@ export function WeatherPanel({ forecasts, signals }: Props) {
                 <span className="text-neutral-600 ml-0.5">+/-{f.std_high.toFixed(0)}</span>
               </span>
               <span className="text-neutral-600">
-                {f.num_members > 1 ? `${f.num_members}源` : '单模型'}
+                {f.num_members > 1 ? `${f.num_members}成员` : '单模型'}
               </span>
             </div>
             <div className="flex items-center gap-1 shrink-0">

@@ -89,7 +89,8 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
         </div>
       </div>
       <div className="px-1 pb-1 text-[9px] text-neutral-600">
-        天气(WX) 是 weather 信号。EV收益 = 模型胜率 / 买入价 - 1；
+        BTC 是比特币信号，天气(WX) 是 weather 信号；P 是模型胜率。
+        EV收益 = 模型胜率 / 买入价 - 1；
         当前信号分布在 {activeBuckets} 个档位，若只见一根柱，说明信号集中或前端未刷新。
       </div>
       <div className="flex-1 min-h-0">

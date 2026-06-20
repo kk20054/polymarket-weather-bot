@@ -150,7 +150,7 @@ export interface WeatherForecast {
   mean_low: number
   std_low: number
   num_members: number
-  ensemble_agreement: number
+  ensemble_agreement: number | null
 }
 
 export interface WeatherSignal {
