@@ -353,14 +353,21 @@ def _line_to_event(line):
         event_type = "success"
     elif "[LOSS]" in line:
         event_type = "error"
+    elif "[RESOLVE]" in line:
+        event_type = "warning"
     elif "[SKIP]" in line:
+        event_type = "warning"
+    elif "timed out" in line.lower() or "proxyerror" in line.lower():
         event_type = "warning"
     elif "Error:" in line or "error" in line.lower():
         event_type = "error"
+    message = line
+    if "[RESOLVE]" in line and ("timed out" in line.lower() or "proxyerror" in line.lower()):
+        message = "结算接口网络超时，稍后重试即可：" + line
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "type": event_type,
-        "message": line,
+        "message": message,
         "data": {},
     }
 
@@ -472,6 +479,135 @@ def _settle_dashboard_positions():
         _write_json(DATA_DIR / "state.json", state)
 
     return {"checked": checked, "settled": settled, "pending": pending, "errors": errors}
+
+
+def _ev_bucket(ev):
+    pct = abs(float(ev or 0)) * 100
+    if pct < 25:
+        return "0-25%"
+    if pct < 50:
+        return "25-50%"
+    if pct < 100:
+        return "50-100%"
+    return "100%+"
+
+
+def _iter_position_records(markets):
+    for market in markets:
+        positions = []
+        pos = market.get("position")
+        if isinstance(pos, dict):
+            positions.append((pos, False))
+        history = market.get("position_history")
+        if isinstance(history, list):
+            positions.extend((item, True) for item in history if isinstance(item, dict))
+
+        for item, archived in positions:
+            if not item.get("market_id"):
+                continue
+            pnl = item.get("pnl")
+            cost = float(item.get("cost") or 0)
+            result = market.get("resolved_outcome")
+            is_resolved = market.get("status") == "resolved" and result in ("win", "loss") and not archived
+            if not is_resolved and pnl is not None:
+                result = "win" if float(pnl or 0) > 0 else "loss"
+            yield {
+                "market_id": str(item.get("market_id") or ""),
+                "city": market.get("city") or item.get("city") or "",
+                "city_name": market.get("city_name") or "",
+                "date": market.get("date") or "",
+                "source": (item.get("forecast_src") or "unknown").upper(),
+                "status": item.get("status") or market.get("status") or "",
+                "entry_price": float(item.get("entry_price") or 0),
+                "cost": cost,
+                "p": item.get("p"),
+                "ev": item.get("ev"),
+                "pnl": float(pnl) if pnl is not None else None,
+                "result": result,
+                "resolved": is_resolved,
+                "archived": archived,
+            }
+
+
+def _build_backtest_summary(markets):
+    all_records = list(_iter_position_records(markets))
+    records = [
+        r for r in all_records
+        if r["pnl"] is not None or (not r["archived"] and r["status"] == "open")
+    ]
+    completed = [r for r in records if r["pnl"] is not None and r["cost"] > 0]
+    resolved = [r for r in completed if r["resolved"]]
+    wins = [r for r in resolved if r["result"] == "win"]
+    total_pnl = round(sum(r["pnl"] for r in completed), 2)
+    actual_returns = [r["pnl"] / r["cost"] for r in completed if r["cost"]]
+    predicted_edges = [float(r["ev"]) for r in completed if r.get("ev") is not None]
+    brier_values = []
+    for r in resolved:
+        if r.get("p") is None:
+            continue
+        y = 1.0 if r["result"] == "win" else 0.0
+        brier_values.append((float(r["p"]) - y) ** 2)
+
+    buckets = {}
+    for r in completed:
+        name = _ev_bucket(r.get("ev"))
+        bucket = buckets.setdefault(name, {"bucket": name, "count": 0, "resolved": 0, "wins": 0, "pnl": 0.0})
+        bucket["count"] += 1
+        bucket["pnl"] += r["pnl"]
+        if r["resolved"]:
+            bucket["resolved"] += 1
+            if r["result"] == "win":
+                bucket["wins"] += 1
+
+    sources = {}
+    for r in completed:
+        source = r["source"]
+        item = sources.setdefault(source, {"source": source, "count": 0, "resolved": 0, "wins": 0, "pnl": 0.0})
+        item["count"] += 1
+        item["pnl"] += r["pnl"]
+        if r["resolved"]:
+            item["resolved"] += 1
+            if r["result"] == "win":
+                item["wins"] += 1
+
+    bucket_rows = []
+    for bucket in buckets.values():
+        resolved_count = bucket["resolved"]
+        bucket_rows.append({
+            **bucket,
+            "pnl": round(bucket["pnl"], 2),
+            "win_rate": (bucket["wins"] / resolved_count) if resolved_count else 0,
+        })
+    source_rows = []
+    for item in sources.values():
+        resolved_count = item["resolved"]
+        source_rows.append({
+            **item,
+            "pnl": round(item["pnl"], 2),
+            "win_rate": (item["wins"] / resolved_count) if resolved_count else 0,
+        })
+
+    return {
+        "total_positions": len(records),
+        "completed_positions": len(completed),
+        "resolved_positions": len(resolved),
+        "open_positions": len([r for r in records if not r["archived"] and r["status"] == "open"]),
+        "wins": len(wins),
+        "losses": len(resolved) - len(wins),
+        "win_rate": (len(wins) / len(resolved)) if resolved else 0,
+        "settlement_rate": (len(resolved) / len(records)) if records else 0,
+        "total_pnl": total_pnl,
+        "avg_actual_return": (sum(actual_returns) / len(actual_returns)) if actual_returns else 0,
+        "avg_predicted_ev": (sum(predicted_edges) / len(predicted_edges)) if predicted_edges else 0,
+        "brier_score": (sum(brier_values) / len(brier_values)) if brier_values else 0,
+        "buckets": sorted(bucket_rows, key=lambda b: b["bucket"]),
+        "sources": sorted(source_rows, key=lambda s: s["source"]),
+        "notes": [
+            "本复盘基于本地保存的模拟/纸面仓位，不是逐分钟盘口回放。",
+            "参考项目使用 31 成员 GFS ensemble；当前引擎仍以 ECMWF/HRRR/METAR 单点概率为主。",
+            "样本少于 30 个已结算仓位时，胜率和 Brier 只能作观察，不能作为实盘依据。",
+        ],
+    }
 
 
 def build_dashboard_payload():
@@ -717,6 +853,7 @@ def build_dashboard_payload():
         "recent_trades": sorted(combined_trades, key=lambda t: t.get("timestamp") or "", reverse=True)[:100],
         "equity_curve": equity_curve,
         "calibration": calibration_summary,
+        "backtest": _build_backtest_summary(markets),
         "weather_signals": weather_signals,
         "weather_forecasts": list(weather_forecasts_by_city.values()),
         "events": list_events(100),
@@ -748,6 +885,11 @@ async def signals():
 @app.get("/api/events")
 async def events(limit: int = 50):
     return [_event_to_payload(event) for event in list_events(limit)]
+
+
+@app.get("/api/backtest")
+async def backtest():
+    return _build_backtest_summary(load_markets())
 
 
 @app.websocket("/ws/events")

@@ -11,6 +11,7 @@ import { MicrostructurePanel } from './components/MicrostructurePanel'
 import { CalibrationPanel } from './components/CalibrationPanel'
 import { WeatherPanel } from './components/WeatherPanel'
 import { EdgeDistribution } from './components/EdgeDistribution'
+import { BacktestPanel } from './components/BacktestPanel'
 
 const GlobeView = lazy(() => import('./components/GlobeView').then(m => ({ default: m.GlobeView })))
 
@@ -253,6 +254,7 @@ function App() {
   }
   const equityCurve = data?.equity_curve ?? []
   const calibration = data?.calibration ?? null
+  const backtest = data?.backtest ?? null
 
   useEffect(() => {
     if (!balanceInitRef.current && data?.stats?.bankroll !== undefined) {
@@ -447,8 +449,8 @@ function App() {
             </div>
           </div>
 
-          {/* Bottom panels - 3 side by side */}
-          <div className="flex-1 min-h-0 grid grid-cols-3 border-t border-neutral-800">
+          {/* Bottom panels */}
+          <div className="flex-1 min-h-0 grid grid-cols-4 border-t border-neutral-800">
             {/* Edge Distribution */}
             <div className="border-r border-neutral-800 flex flex-col min-h-0">
               <div className="px-2 py-1 border-b border-neutral-800 shrink-0">
@@ -485,6 +487,16 @@ function App() {
                 disabled={resetSimulationMutation.isPending}
                 settling={settleMutation.isPending}
               />
+            </div>
+
+            {/* Historical backtest/replay */}
+            <div className="border-r border-neutral-800 flex flex-col min-h-0">
+              <div className="px-2 py-1 border-b border-neutral-800 shrink-0">
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">历史复盘</span>
+              </div>
+              <div className="flex-1 min-h-0">
+                <BacktestPanel backtest={backtest} />
+              </div>
             </div>
 
             {/* Weather Forecasts */}

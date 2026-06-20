@@ -51,7 +51,7 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
     return BUCKETS.map(bucket => ({
       bucket,
       BTC: counts[bucket].btc,
-      WX: counts[bucket].weather,
+      Weather: counts[bucket].weather,
     }))
   }, [btcSignals, weatherSignals])
 
@@ -59,6 +59,7 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
   const actionable = weatherSignals.filter(s => s.actionable).length + btcSignals.filter(s => s.actionable).length
   const simulated = weatherSignals.filter(s => s.status === 'simulated' || s.status === 'bought').length
   const paperOpen = weatherSignals.filter(s => s.paper_position).length
+  const activeBuckets = data.filter(row => row.BTC + row.Weather > 0).length
   if (total === 0) {
     return (
       <div className="h-full flex items-center justify-center text-neutral-600 text-[10px]">
@@ -88,7 +89,8 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
         </div>
       </div>
       <div className="px-1 pb-1 text-[9px] text-neutral-600">
-        柱子按 EV 强度分桶；如果只有一根柱，说明当前信号集中在同一 EV 档。
+        天气(WX) 是 weather 信号。EV收益 = 模型胜率 / 买入价 - 1；
+        当前信号分布在 {activeBuckets} 个档位，若只见一根柱，说明信号集中或前端未刷新。
       </div>
       <div className="flex-1 min-h-0">
       <ResponsiveContainer width="100%" height="100%">
@@ -116,7 +118,7 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
             wrapperStyle={{ fontSize: '9px', fontFamily: 'JetBrains Mono' }}
           />
           <Bar dataKey="BTC" stackId="a" fill="#d97706" radius={[0, 0, 0, 0]} />
-          <Bar dataKey="WX" name="天气" stackId="a" fill="#06b6d4" radius={[2, 2, 0, 0]} />
+          <Bar dataKey="Weather" name="天气(WX)" stackId="a" fill="#06b6d4" radius={[2, 2, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
       </div>

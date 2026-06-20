@@ -105,6 +105,42 @@ export interface CalibrationSummary {
   brier_score: number
 }
 
+export interface BacktestBucket {
+  bucket: string
+  count: number
+  resolved: number
+  wins: number
+  win_rate: number
+  pnl: number
+}
+
+export interface BacktestSource {
+  source: string
+  count: number
+  resolved: number
+  wins: number
+  win_rate: number
+  pnl: number
+}
+
+export interface BacktestSummary {
+  total_positions: number
+  completed_positions: number
+  resolved_positions: number
+  open_positions: number
+  wins: number
+  losses: number
+  win_rate: number
+  settlement_rate: number
+  total_pnl: number
+  avg_actual_return: number
+  avg_predicted_ev: number
+  brier_score: number
+  buckets: BacktestBucket[]
+  sources: BacktestSource[]
+  notes: string[]
+}
+
 export interface WeatherForecast {
   city_key: string
   city_name: string
@@ -161,6 +197,7 @@ export interface DashboardData {
   recent_trades: Trade[]
   equity_curve: EquityPoint[]
   calibration: CalibrationSummary | null
+  backtest?: BacktestSummary | null
   weather_signals: WeatherSignal[]
   weather_forecasts: WeatherForecast[]
 }
