@@ -24,6 +24,7 @@ interface UnifiedSignal {
   category: 'BTC' | 'WX'
   direction: string
   edge: number
+  probabilityEdge?: number
   modelProb: number
   marketProb: number
   confidence: number
@@ -95,6 +96,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
       category: 'BTC',
       direction: s.direction,
       edge: s.edge,
+      probabilityEdge: s.edge,
       modelProb: s.model_probability,
       marketProb: s.market_probability,
       confidence: s.confidence,
@@ -112,6 +114,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
       category: 'WX',
       direction: s.direction,
       edge: s.edge,
+      probabilityEdge: s.probability_edge,
       modelProb: s.model_probability,
       marketProb: s.market_probability,
       confidence: s.confidence,
@@ -182,7 +185,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
           <th className="py-1.5 px-1.5 font-medium">信号</th>
           <th className="py-1.5 px-1.5 font-medium text-right cursor-pointer hover:text-neutral-400" onClick={() => handleSort('edge')}>
             <div className="flex items-center justify-end gap-0.5">
-              EV <SortIcon column="edge" />
+              EV收益 <SortIcon column="edge" />
             </div>
           </th>
           <th className="py-1.5 px-1.5 font-medium text-right cursor-pointer hover:text-neutral-400" onClick={() => handleSort('suggested_size')}>
@@ -231,6 +234,9 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
                   {isExpanded && (
                     <div className="mt-1 text-[10px] text-neutral-500 leading-relaxed">
                       {sig.reasoning}
+                      <div>
+                        模型P {(sig.modelProb * 100).toFixed(1)}% / 市场P {(sig.marketProb * 100).toFixed(1)}% / 概率差 {sig.probabilityEdge !== undefined ? `${sig.probabilityEdge > 0 ? '+' : ''}${(sig.probabilityEdge * 100).toFixed(1)}%` : '--'} / EV收益 {sig.edge > 0 ? '+' : ''}{(sig.edge * 100).toFixed(1)}%
+                      </div>
                       {sig.bidPrice !== undefined && sig.spread !== undefined && (
                         <div>Bid/Ask {Math.round((sig.bidPrice || 0) * 100)}c / {Math.round((sig.limitPrice || 0) * 100)}c · spread {(sig.spread * 100).toFixed(1)}c</div>
                       )}
@@ -240,7 +246,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
                 </td>
                 <td className="py-1 px-1.5 text-right align-top">
                   <span className={`font-semibold tabular-nums ${sig.edge > 0 ? 'text-green-500' : sig.edge < 0 ? 'text-red-500' : 'text-neutral-600'}`}>
-                    {sig.edge === 0 ? '-' : `${Math.abs(sig.edge * 100).toFixed(1)}%`}
+                    {sig.edge === 0 ? '-' : `${sig.edge > 0 ? '+' : ''}${(sig.edge * 100).toFixed(1)}%`}
                   </span>
                   <EdgeBar edge={sig.edge} />
                 </td>

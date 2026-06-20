@@ -1,7 +1,7 @@
 import { useState, useEffect, Suspense, lazy, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { bulkSimulateSignals, fetchDashboard, resetSimulation, simulateTrade, startBot, stopBot, updateSignalStatus } from './api'
+import { bulkSimulateSignals, fetchDashboard, resetSimulation, settleTradesApi, simulateTrade, startBot, stopBot, updateSignalStatus } from './api'
 import { StatsCards } from './components/StatsCards'
 import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
@@ -80,7 +80,9 @@ function SimulationPanel({
   onValue,
   onClearMarks,
   onReset,
+  onSettle,
   disabled,
+  settling,
 }: {
   bankroll: number
   cashBalance: number
@@ -93,7 +95,9 @@ function SimulationPanel({
   onValue: (value: string) => void
   onClearMarks: (value: boolean) => void
   onReset: () => void
+  onSettle: () => void
   disabled: boolean
+  settling: boolean
 }) {
   return (
     <div className="h-full p-2 text-[10px] text-neutral-500 space-y-2 overflow-y-auto">
@@ -129,6 +133,13 @@ function SimulationPanel({
           className="px-2 py-1 border border-green-500/30 text-green-400 hover:bg-green-500/10 disabled:opacity-40 whitespace-nowrap"
         >
           应用
+        </button>
+        <button
+          onClick={onSettle}
+          disabled={settling || openTrades === 0}
+          className="px-2 py-1 border border-amber-500/30 text-amber-400 hover:bg-amber-500/10 disabled:opacity-40 whitespace-nowrap"
+        >
+          检查结算
         </button>
       </div>
       <label className="flex items-center gap-2 cursor-pointer">
@@ -195,6 +206,11 @@ function App() {
       setSimBalance(String(result.balance))
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     },
+  })
+
+  const settleMutation = useMutation({
+    mutationFn: settleTradesApi,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
 
   useEffect(() => {
@@ -465,7 +481,9 @@ function App() {
                     resetSimulationMutation.mutate({ balance: parsed, clear: clearMarks })
                   }
                 }}
+                onSettle={() => settleMutation.mutate()}
                 disabled={resetSimulationMutation.isPending}
+                settling={settleMutation.isPending}
               />
             </div>
 
@@ -502,7 +520,9 @@ function App() {
                 {(stats.expired_signal_count ?? 0) > 0 && (
                   <span className="text-[10px] text-neutral-600 tabular-nums">{stats.expired_signal_count} 已过期隐藏</span>
                 )}
-                <span className="text-[10px] text-amber-400 tabular-nums">{activeSignals.length} BTC</span>
+                {activeSignals.length > 0 && (
+                  <span className="text-[10px] text-amber-400 tabular-nums">{activeSignals.length} BTC</span>
+                )}
                 {weatherSignals.length > 0 && (
                   <span className="text-[10px] text-cyan-400 tabular-nums">{weatherSignals.length} 天气</span>
                 )}

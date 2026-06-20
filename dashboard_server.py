@@ -7,9 +7,11 @@ import asyncio
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
+import requests
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -363,6 +365,115 @@ def _line_to_event(line):
     }
 
 
+def _fetch_polymarket_yes_resolution(market_id):
+    try:
+        session = requests.Session()
+        session.trust_env = False
+        response = session.get(f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=(5, 10))
+        response.raise_for_status()
+        data = response.json()
+        if not data.get("closed", False):
+            return None
+        prices = data.get("outcomePrices", "[0.5,0.5]")
+        if isinstance(prices, str):
+            prices = json.loads(prices)
+        yes_price = float(prices[0])
+        if yes_price >= 0.95:
+            return True
+        if yes_price <= 0.05:
+            return False
+    except Exception as exc:
+        return {"error": str(exc)}
+    return None
+
+
+def _settle_dashboard_positions():
+    state = _read_json(DATA_DIR / "state.json", {})
+    simulation_start = _parse_iso(state.get("simulation_started_at"))
+    balance = float(state.get("balance", state.get("starting_balance", 0)) or 0)
+    checked = 0
+    settled = 0
+    pending = 0
+    errors = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if not MARKETS_DIR.exists():
+        return {"checked": 0, "settled": 0, "pending": 0, "errors": []}
+
+    candidates = []
+    for path in MARKETS_DIR.glob("*.json"):
+        market = _read_json(path, None)
+        if not isinstance(market, dict):
+            continue
+        pos = market.get("position")
+        if not isinstance(pos, dict):
+            continue
+        if pos.get("source") != "dashboard_simulation" or pos.get("status") != "open":
+            continue
+        if not _at_or_after(pos.get("opened_at") or market.get("created_at"), simulation_start):
+            continue
+        market_id = pos.get("market_id")
+        if not market_id:
+            continue
+        candidates.append((path, market_id))
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {
+            executor.submit(_fetch_polymarket_yes_resolution, market_id): (path, market_id)
+            for path, market_id in candidates
+        }
+        for future in as_completed(futures):
+            path, market_id = futures[future]
+            try:
+                results[(str(path), market_id)] = future.result()
+            except Exception as exc:
+                results[(str(path), market_id)] = {"error": str(exc)}
+
+    for path, market_id in candidates:
+        market = _read_json(path, None)
+        if not isinstance(market, dict):
+            continue
+        pos = market.get("position")
+        if not isinstance(pos, dict) or pos.get("status") != "open":
+            continue
+        checked += 1
+        result = results.get((str(path), market_id))
+        if isinstance(result, dict) and result.get("error"):
+            errors.append({"market_id": market_id, "error": result["error"]})
+            pending += 1
+            continue
+        if result is None:
+            pending += 1
+            continue
+
+        entry_price = float(pos.get("entry_price") or 0)
+        cost = float(pos.get("cost") or 0)
+        shares = float(pos.get("shares") or 0)
+        pnl = round(shares * (1 - entry_price), 2) if result else round(-cost, 2)
+        balance += cost + pnl
+
+        pos["exit_price"] = 1.0 if result else 0.0
+        pos["pnl"] = pnl
+        pos["close_reason"] = "resolved"
+        pos["closed_at"] = now_iso
+        pos["status"] = "closed"
+        market["pnl"] = pnl
+        market["status"] = "resolved"
+        market["resolved_outcome"] = "win" if result else "loss"
+        _write_json(path, market)
+
+        state["wins" if result else "losses"] = int(state.get("wins" if result else "losses", 0) or 0) + 1
+        settled += 1
+
+    if settled:
+        state["balance"] = round(balance, 2)
+        state["peak_balance"] = max(float(state.get("peak_balance", balance) or balance), balance)
+        _write_json(DATA_DIR / "state.json", state)
+
+    return {"checked": checked, "settled": settled, "pending": pending, "errors": errors}
+
+
 def build_dashboard_payload():
     init_db()
     markets = load_markets()
@@ -453,7 +564,9 @@ def build_dashboard_payload():
 
     today = _today_str()
     all_signals = [s for s in list_signals(300) if not _is_dashboard_position_import(s)]
-    signals_by_market = {str(s.get("market_id") or ""): s for s in all_signals}
+    signals_by_market = {}
+    for signal in all_signals:
+        signals_by_market.setdefault(str(signal.get("market_id") or ""), signal)
     expired_signal_count = len([s for s in all_signals if (s.get("date") or "") < today])
     signals = [s for s in all_signals if (s.get("date") or "") >= today]
     weather_signals = []
@@ -485,6 +598,7 @@ def build_dashboard_payload():
             "direction": "yes",
             "model_probability": signal.get("probability") or 0,
             "market_probability": signal.get("limit_price") or 0,
+            "probability_edge": (signal.get("probability") or 0) - (signal.get("limit_price") or 0),
             "edge": signal.get("ev") or 0,
             "confidence": min(0.95, max(0.05, signal.get("probability") or 0.5)),
             "suggested_size": amount,
@@ -564,8 +678,9 @@ def build_dashboard_payload():
             actual_edges.append(float(trade.get("pnl") or 0) / float(trade.get("size")))
 
     calibration_summary = {
-        "total_signals": len(signals),
+        "total_signals": len(combined_trades),
         "total_with_outcome": total_with_outcome,
+        "settlement_rate": (total_with_outcome / len(combined_trades)) if combined_trades else 0,
         "accuracy": (wins / total_with_outcome) if total_with_outcome else 0,
         "avg_predicted_edge": (sum(predicted_edges) / len(predicted_edges)) if predicted_edges else 0,
         "avg_actual_edge": (sum(actual_edges) / len(actual_edges)) if actual_edges else 0,
@@ -662,6 +777,25 @@ async def websocket_events(websocket: WebSocket):
 async def run_scan():
     log_event("info", "Manual scan requested from dashboard; run weatherbet.py for live scanning.")
     return {"total_signals": len(list_signals(500)), "actionable_signals": len(list_signals(500))}
+
+
+@app.post("/api/settle-trades")
+async def settle_trades():
+    result = _settle_dashboard_positions()
+    message = (
+        f"结算检查：已检查 {result['checked']} 个模拟仓位，"
+        f"结算 {result['settled']} 个，待结算 {result['pending']} 个"
+    )
+    if result["errors"]:
+        message += f"，错误 {len(result['errors'])} 个"
+    log_event("info" if not result["errors"] else "warning", message, result)
+    return {
+        "ok": True,
+        "checked": result["checked"],
+        "settled_count": result["settled"],
+        "pending_count": result["pending"],
+        "errors": result["errors"],
+    }
 
 
 @app.post("/api/bot/start")

@@ -6,16 +6,6 @@ interface Props {
   signals: WeatherSignal[]
 }
 
-function AgreementBar({ value }: { value: number }) {
-  const pct = Math.max(0, Math.min(100, value * 100))
-  const color = value > 0.7 ? '#22c55e' : value > 0.5 ? '#d97706' : '#dc2626'
-  return (
-    <div className="edge-bar w-12">
-      <div className="edge-fill" style={{ width: `${pct}%`, backgroundColor: color }} />
-    </div>
-  )
-}
-
 export function WeatherPanel({ forecasts, signals }: Props) {
   if (forecasts.length === 0 && signals.length === 0) {
     return (
@@ -56,15 +46,14 @@ export function WeatherPanel({ forecasts, signals }: Props) {
                 {f.mean_high.toFixed(0)}F
                 <span className="text-neutral-600 ml-0.5">+/-{f.std_high.toFixed(0)}</span>
               </span>
-              <AgreementBar value={f.ensemble_agreement} />
-              <span className={`${f.ensemble_agreement > 0.7 ? 'text-green-500' : 'text-amber-500'}`}>
-                {(f.ensemble_agreement * 100).toFixed(0)}%
+              <span className="text-neutral-600">
+                {f.num_members > 1 ? `${f.num_members}源` : '单模型'}
               </span>
             </div>
             <div className="flex items-center gap-1 shrink-0">
               {bestEdge && (
                 <span className={`text-[10px] tabular-nums ${bestEdge.edge > 0 ? 'text-green-500' : 'text-red-500'}`}>
-                  {bestEdge.edge > 0 ? '+' : ''}{(bestEdge.edge * 100).toFixed(1)}%
+                  EV {bestEdge.edge > 0 ? '+' : ''}{(bestEdge.edge * 100).toFixed(1)}%
                 </span>
               )}
               {citySignals.length > 0 && citySignals[0].platform && (

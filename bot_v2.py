@@ -149,7 +149,7 @@ def get_sigma(city_slug, source="ecmwf"):
 
 def run_calibration(markets):
     """Recalculates sigma from resolved markets."""
-    resolved = [m for m in markets if m.get("resolved") and m.get("actual_temp") is not None]
+    resolved = [m for m in markets if m.get("status") == "resolved" and m.get("actual_temp") is not None]
     cal = load_cal()
     updated = []
 
@@ -256,10 +256,32 @@ def get_metar(city_slug):
     return None
 
 def get_actual_temp(city_slug, date_str):
-    """Actual temperature via Visual Crossing for closed markets."""
+    """Actual high temperature for closed-market calibration."""
     loc = LOCATIONS[city_slug]
     station = loc["station"]
     unit = loc["unit"]
+    session = requests.Session()
+    session.trust_env = False
+
+    temp_unit = "fahrenheit" if unit == "F" else "celsius"
+    archive_url = (
+        "https://archive-api.open-meteo.com/v1/archive"
+        f"?latitude={loc['lat']}&longitude={loc['lon']}"
+        f"&start_date={date_str}&end_date={date_str}"
+        f"&daily=temperature_2m_max&temperature_unit={temp_unit}"
+        f"&timezone={TIMEZONES.get(city_slug, 'UTC')}"
+    )
+    try:
+        data = session.get(archive_url, timeout=(5, 12)).json()
+        temps = data.get("daily", {}).get("temperature_2m_max", [])
+        if temps and temps[0] is not None:
+            return round(float(temps[0]), 1)
+    except Exception as e:
+        print(f"  [ARCHIVE] {city_slug} {date_str}: {e}")
+
+    if not VC_KEY:
+        return None
+
     vc_unit = "us" if unit == "F" else "metric"
     url = (
         f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline"
@@ -267,7 +289,7 @@ def get_actual_temp(city_slug, date_str):
         f"?unitGroup={vc_unit}&key={VC_KEY}&include=days&elements=tempmax"
     )
     try:
-        data = requests.get(url, timeout=(5, 8)).json()
+        data = session.get(url, timeout=(5, 8)).json()
         days = data.get("days", [])
         if days and days[0].get("tempmax") is not None:
             return round(float(days[0]["tempmax"]), 1)
@@ -281,7 +303,9 @@ def check_market_resolved(market_id):
     Returns: None (still open), True (YES won), False (NO won)
     """
     try:
-        r = requests.get(f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=(5, 8))
+        session = requests.Session()
+        session.trust_env = False
+        r = session.get(f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=(8, 15))
         data = r.json()
         closed = data.get("closed", False)
         if not closed:
@@ -815,6 +839,8 @@ def scan_and_update():
         mkt["pnl"]          = pnl
         mkt["status"]       = "resolved"
         mkt["resolved_outcome"] = "win" if won else "loss"
+        if mkt.get("actual_temp") is None:
+            mkt["actual_temp"] = get_actual_temp(mkt["city"], mkt["date"])
 
         if won:
             state["wins"] += 1

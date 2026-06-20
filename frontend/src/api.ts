@@ -76,7 +76,7 @@ export async function stopBot(): Promise<{ status: string; is_running: boolean }
   return data
 }
 
-export async function settleTradesApi(): Promise<{ settled_count: number }> {
+export async function settleTradesApi(): Promise<{ ok: boolean; checked: number; settled_count: number; pending_count: number; errors?: unknown[] }> {
   const { data } = await api.post('/settle-trades')
   return data
 }

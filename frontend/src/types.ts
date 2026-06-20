@@ -40,6 +40,7 @@ export interface Signal {
   direction: string
   model_probability: number
   market_probability: number
+  probability_edge?: number
   edge: number
   confidence: number
   suggested_size: number
@@ -97,6 +98,7 @@ export interface EquityPoint {
 export interface CalibrationSummary {
   total_signals: number
   total_with_outcome: number
+  settlement_rate?: number
   accuracy: number
   avg_predicted_edge: number
   avg_actual_edge: number
@@ -130,6 +132,7 @@ export interface WeatherSignal {
   direction: string
   model_probability: number
   market_probability: number
+  probability_edge?: number
   edge: number
   confidence: number
   suggested_size: number
