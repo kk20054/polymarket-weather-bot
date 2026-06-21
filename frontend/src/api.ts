@@ -66,6 +66,18 @@ export async function updateSignalStatus(signalId: number, status: string, amoun
   return data
 }
 
+export async function placeLiveOrder(signalId: number, amount?: number): Promise<{ ok: boolean; status: string; reason?: string | null }> {
+  const payload: { signal_id: number; amount?: number } = { signal_id: signalId }
+  if (amount !== undefined && Number.isFinite(amount)) payload.amount = amount
+  const { data } = await api.post('/v3/live-order', payload)
+  return data
+}
+
+export async function notifyDailySummary(): Promise<{ ok: boolean; sent: boolean }> {
+  const { data } = await api.post('/v3/notify-daily')
+  return data
+}
+
 export async function startBot(): Promise<{ status: string; is_running: boolean }> {
   const { data } = await api.post('/bot/start')
   return data

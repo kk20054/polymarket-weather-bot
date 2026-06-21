@@ -1,0 +1,73 @@
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from weatherbot_v3.ai_review import AIReviewer
+from weatherbot_v3.db import connect, init_v3_db
+from weatherbot_v3.executor import PaperExecutor
+from weatherbot_v3.polymarket import quote_from_market_payload, validate_order_constraints
+
+
+class V3CoreTests(unittest.TestCase):
+    def test_quote_uses_best_bid_ask_and_constraints(self):
+        quote = quote_from_market_payload({
+            "id": "1",
+            "outcomePrices": '["0.20", "0.80"]',
+            "bestBid": "0.19",
+            "bestAsk": "0.21",
+            "spread": "0.02",
+            "volume": "1000",
+            "orderMinSize": "5",
+            "orderPriceMinTickSize": "0.01",
+            "enableOrderBook": True,
+            "clobTokenIds": '["yes", "no"]',
+        })
+        self.assertEqual(quote.best_bid, 0.19)
+        self.assertEqual(quote.best_ask, 0.21)
+        self.assertEqual(validate_order_constraints(quote, 5.0, 0.21), [])
+        self.assertIn("below_order_min_size", validate_order_constraints(quote, 1.0, 0.21))
+
+    def test_ai_disabled_default_allows_quant_flow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"AI_REVIEW_ENABLED": "false", "V3_DB_PATH": str(Path(tmp) / "v3.db")}, clear=False):
+                review = AIReviewer().review(0, {"market_id": "1"})
+        self.assertTrue(review["approve"])
+        self.assertEqual(review["provider"], "none")
+
+    def test_v3_db_schema_initializes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "v3.db"
+            init_v3_db(db_path)
+            with connect(db_path) as conn:
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertIn("signals", tables)
+        self.assertIn("paper_orders", tables)
+        self.assertIn("live_orders", tables)
+
+    def test_paper_executor_rejects_bad_orderbook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"V3_DB_PATH": str(Path(tmp) / "v3.db")}, clear=False):
+                signal = {"id": 1, "market_id": "1", "amount": 1.0, "limit_price": 0.21, "created_at": "now"}
+                quote = quote_from_market_payload({
+                    "id": "1",
+                    "outcomePrices": '["0.20", "0.80"]',
+                    "bestBid": "0.19",
+                    "bestAsk": "0.21",
+                    "spread": "0.20",
+                    "volume": "1000",
+                    "orderMinSize": "5",
+                    "orderPriceMinTickSize": "0.01",
+                    "enableOrderBook": True,
+                    "clobTokenIds": '["yes", "no"]',
+                })
+                with patch("weatherbot_v3.executor.PolymarketDataClient") as client_cls:
+                    client_cls.return_value.quote.return_value = quote
+                    result = PaperExecutor().place_order(signal, 1.0)
+        self.assertFalse(result.ok)
+        self.assertIn("spread_above_max_slippage", result.reason)
+
+
+if __name__ == "__main__":
+    unittest.main()

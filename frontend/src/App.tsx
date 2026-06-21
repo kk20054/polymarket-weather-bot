@@ -1,7 +1,7 @@
 import { useState, useEffect, Suspense, lazy, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { bulkSimulateSignals, fetchDashboard, resetSimulation, settleTradesApi, simulateTrade, startBot, stopBot, updateSignalStatus } from './api'
+import { bulkSimulateSignals, fetchDashboard, notifyDailySummary, placeLiveOrder, resetSimulation, settleTradesApi, simulateTrade, startBot, stopBot, updateSignalStatus } from './api'
 import { StatsCards } from './components/StatsCards'
 import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
@@ -196,6 +196,16 @@ function App() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
 
+  const liveOrderMutation = useMutation({
+    mutationFn: ({ signalId, amount }: { signalId: number; amount?: number }) => placeLiveOrder(signalId, amount),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+  })
+
+  const notifyDailyMutation = useMutation({
+    mutationFn: notifyDailySummary,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+  })
+
   const bulkSimulateMutation = useMutation({
     mutationFn: bulkSimulateSignals,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
@@ -357,6 +367,14 @@ function App() {
             title="只做本地模拟记录，不会真实下单"
           >
             {bulkSimulateMutation.isPending ? '模拟中...' : '一键模拟'}
+          </button>
+          <button
+            onClick={() => notifyDailyMutation.mutate()}
+            disabled={notifyDailyMutation.isPending}
+            className="px-2.5 py-1 bg-blue-500/10 border border-blue-500/30 hover:border-blue-500/60 text-blue-400 text-[10px] uppercase tracking-wider transition-colors disabled:opacity-40 whitespace-nowrap"
+            title="Send daily Feishu summary; without webhook it records locally only"
+          >
+            {notifyDailyMutation.isPending ? 'Sending' : 'Daily'}
           </button>
           <LiveClock />
         </div>
@@ -547,6 +565,7 @@ function App() {
                 onSimulateTrade={(ticker) => tradeMutation.mutate(ticker)}
                 isSimulating={tradeMutation.isPending}
                 onSignalStatus={(signalId, status, amount) => signalStatusMutation.mutate({ signalId, status, amount })}
+                onLiveOrder={(signalId, amount) => liveOrderMutation.mutate({ signalId, amount })}
               />
             </div>
           </div>

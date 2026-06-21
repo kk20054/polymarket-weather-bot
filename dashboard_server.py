@@ -29,6 +29,12 @@ from dashboard_db import (
     update_signal_status,
     upsert_signal_from_market,
 )
+from weatherbot_v3.config import load_config as load_v3_config
+from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
+from weatherbot_v3.db import init_v3_db
+from weatherbot_v3.executor import LiveExecutor, PaperExecutor
+from weatherbot_v3.migration import migrate_legacy_signals
+from weatherbot_v3.notifier import FeishuNotifier
 
 
 ROOT = Path(__file__).resolve().parent
@@ -59,6 +65,11 @@ class StatusUpdate(BaseModel):
 class SimulationReset(BaseModel):
     balance: float
     clear_marks: bool = False
+
+
+class LiveOrderUpdate(BaseModel):
+    signal_id: int
+    amount: float | None = None
 
 
 def _read_json(path, fallback):
@@ -871,6 +882,7 @@ def build_dashboard_payload():
 
     return {
         "stats": stats,
+        "v3": v3_dashboard_summary(),
         "btc_price": None,
         "microstructure": None,
         "windows": [],
@@ -888,6 +900,8 @@ def build_dashboard_payload():
 @app.on_event("startup")
 async def startup():
     init_db()
+    init_v3_db()
+    migrate_legacy_signals(500)
     _cleanup_stale_bot_process()
     log_event("info", "Dashboard started")
 
@@ -1070,6 +1084,10 @@ async def bulk_simulate_signals():
         if requested <= 0 or remaining <= 0:
             break
         amount = min(requested, remaining)
+        result = PaperExecutor().place_order(signal, amount)
+        if not result.ok:
+            update_signal_status(signal["id"], "skipped", f"v3 paper rejected: {result.reason}", amount)
+            continue
         if not _open_paper_position(signal, amount, simulation_start, opened_at):
             continue
         update_signal_status(signal["id"], "simulated", f"Bulk paper amount ${amount:.2f}", amount)
@@ -1099,6 +1117,11 @@ async def signal_status(signal_id: int, update: StatusUpdate):
         if amount <= 0:
             log_event("warning", f"Signal {signal_id} skipped: no simulation cash available")
             return {"ok": False, "error": "no_cash"}
+        result = PaperExecutor().place_order(signal, amount)
+        if not result.ok:
+            update_signal_status(signal_id, "skipped", f"v3 paper rejected: {result.reason}", amount)
+            log_event("warning", f"Signal {signal_id} v3 paper rejected: {result.reason}", result.payload)
+            return {"ok": False, "error": result.reason or "paper_rejected"}
         opened_at = datetime.now(timezone.utc).isoformat()
         if _open_paper_position(signal, amount, _parse_iso(state.get("simulation_started_at")), opened_at):
             state["balance"] = round(cash - amount, 2)
@@ -1109,6 +1132,55 @@ async def signal_status(signal_id: int, update: StatusUpdate):
     update_signal_status(signal_id, update.status, note, amount)
     log_event("info", f"Signal {signal_id} marked {update.status}", update.model_dump())
     return {"ok": True}
+
+
+@app.get("/api/v3/status")
+async def v3_status():
+    cfg = load_v3_config()
+    summary = v3_dashboard_summary()
+    summary["config"] = {
+        "live_trading": cfg.live_trading,
+        "live_dry_run": cfg.live_dry_run,
+        "ai_review_enabled": cfg.ai_review_enabled,
+        "ai_required_for_live": cfg.ai_required_for_live,
+        "max_order_usd": cfg.live_max_order_usd,
+        "daily_max_usd": cfg.live_daily_max_usd,
+        "max_open_positions": cfg.live_max_open_positions,
+        "feishu_configured": bool(cfg.feishu_webhook_url),
+        "minimax_configured": bool(cfg.minimax_api_key),
+    }
+    return summary
+
+
+@app.post("/api/v3/live-order")
+async def v3_live_order(update: LiveOrderUpdate):
+    signal = next(
+        (
+            s for s in list_signals(500)
+            if int(s.get("id") or 0) == update.signal_id and not _is_dashboard_position_import(s)
+        ),
+        None,
+    )
+    if not signal:
+        return {"ok": False, "error": "signal_not_found"}
+    result = LiveExecutor().place_order(signal, update.amount)
+    log_event("info" if result.ok else "warning", f"v3 live order {result.status}: {result.reason or 'ok'}", result.payload)
+    return {
+        "ok": result.ok,
+        "mode": result.mode,
+        "status": result.status,
+        "order_id": result.order_id,
+        "reason": result.reason,
+        "payload": result.payload,
+    }
+
+
+@app.post("/api/v3/notify-daily")
+async def v3_notify_daily():
+    summary = v3_dashboard_summary()
+    sent = FeishuNotifier().daily_summary(summary)
+    log_event("success" if sent else "warning", "v3 daily summary notification requested", {"sent": sent})
+    return {"ok": True, "sent": sent, "summary": summary}
 
 
 app.mount("/static", StaticFiles(directory=DASHBOARD_DIR), name="static")

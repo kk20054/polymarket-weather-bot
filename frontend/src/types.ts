@@ -190,6 +190,7 @@ export interface WeatherSignal {
 
 export interface DashboardData {
   stats: BotStats
+  v3?: V3Summary
   btc_price: BtcPrice | null
   microstructure: Microstructure | null
   windows: BtcWindow[]
@@ -200,4 +201,25 @@ export interface DashboardData {
   backtest?: BacktestSummary | null
   weather_signals: WeatherSignal[]
   weather_forecasts: WeatherForecast[]
+}
+
+export interface V3Summary {
+  signals: number
+  ai_reviews: number
+  paper_orders: number
+  live_orders: number
+  live_open_orders: number
+  risk_events: number
+  notifications: number
+  config?: {
+    live_trading: boolean
+    live_dry_run: boolean
+    ai_review_enabled: boolean
+    ai_required_for_live: boolean
+    max_order_usd: number
+    daily_max_usd: number
+    max_open_positions: number
+    feishu_configured: boolean
+    minimax_configured: boolean
+  }
 }

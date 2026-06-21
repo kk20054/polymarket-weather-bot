@@ -7,6 +7,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from weatherbot_v3.db import upsert_signal as upsert_v3_signal
+
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -131,6 +133,10 @@ def log_signal(signal, loc, date, horizon, bucket_label, event_url):
             tuple(row.values()),
         )
         if cur.rowcount:
+            try:
+                upsert_v3_signal({**row, "id": cur.lastrowid}, cur.lastrowid)
+            except Exception:
+                pass
             limit_text = f"${row['limit_price']:.3f}" if row["limit_price"] is not None else "n/a"
             amount_text = f"${row['amount']:.2f}" if row["amount"] is not None else "n/a"
             conn.execute(

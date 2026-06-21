@@ -10,6 +10,7 @@ interface Props {
   onSimulateTrade: (ticker: string) => void
   isSimulating: boolean
   onSignalStatus?: (signalId: number, status: string, amount?: number) => void
+  onLiveOrder?: (signalId: number, amount?: number) => void
 }
 
 type SortKey = 'edge' | 'model_probability' | 'suggested_size'
@@ -81,7 +82,7 @@ function statusLabel(status?: string) {
   }
 }
 
-export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimulating, onSignalStatus }: Props) {
+export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimulating, onSignalStatus, onLiveOrder }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>('edge')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [expandedKey, setExpandedKey] = useState<string | null>(null)
@@ -290,7 +291,7 @@ export function SignalsTable({ signals, weatherSignals, onSimulateTrade, isSimul
                           <Check className="w-3 h-3" />
                         </button>
                         <button
-                          onClick={(e) => { e.stopPropagation(); onSignalStatus(sig.id!, 'bought', amountForSave) }}
+                          onClick={(e) => { e.stopPropagation(); onLiveOrder ? onLiveOrder(sig.id!, amountForSave) : onSignalStatus(sig.id!, 'bought', amountForSave) }}
                           disabled={locked}
                           className="px-1.5 py-0.5 text-[8px] font-medium uppercase bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 disabled:opacity-30"
                           title="标记已实盘买入"
