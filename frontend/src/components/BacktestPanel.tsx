@@ -1,7 +1,9 @@
+import { BarChart3 } from 'lucide-react'
 import type { BacktestSummary } from '../types'
 
 interface Props {
   backtest?: BacktestSummary | null
+  onOpenFit?: () => void
 }
 
 function pct(value: number) {
@@ -12,11 +14,18 @@ function money(value: number) {
   return `${value >= 0 ? '+' : '-'}$${Math.abs(value).toFixed(2)}`
 }
 
-export function BacktestPanel({ backtest }: Props) {
+export function BacktestPanel({ backtest, onOpenFit }: Props) {
   if (!backtest || backtest.total_positions === 0) {
     return (
-      <div className="h-full flex items-center justify-center text-neutral-600 text-[10px]">
-        暂无可复盘样本
+      <div className="flex h-full flex-col items-center justify-center gap-2 px-3 text-center text-[10px] text-neutral-600">
+        <div>暂无可复盘样本</div>
+        <button
+          onClick={onOpenFit}
+          className="inline-flex items-center gap-1 border border-cyan-500/30 px-2 py-1 text-cyan-400 hover:bg-cyan-500/10"
+        >
+          <BarChart3 className="h-3 w-3" />
+          温度拟合分析
+        </button>
       </div>
     )
   }
@@ -25,25 +34,33 @@ export function BacktestPanel({ backtest }: Props) {
   const topSources = backtest.sources.slice(0, 3)
 
   return (
-    <div className="h-full overflow-y-auto p-2 text-[10px] text-neutral-500 space-y-2">
+    <div className="h-full space-y-2 overflow-y-auto p-2 text-[10px] text-neutral-500">
+      <button
+        onClick={onOpenFit}
+        className="flex w-full items-center justify-center gap-1 border border-cyan-500/30 px-2 py-1 text-cyan-400 hover:bg-cyan-500/10"
+      >
+        <BarChart3 className="h-3 w-3" />
+        查看城市温度拟合
+      </button>
+
       <div className="grid grid-cols-3 gap-1">
         <div className="border border-neutral-800 px-1 py-1">
           <div className="text-neutral-600">样本</div>
-          <div className="text-neutral-200 text-sm font-bold tabular-nums">
+          <div className="tabular-nums text-sm font-bold text-neutral-200">
             {backtest.resolved_positions}/{backtest.total_positions}
           </div>
-          <div className="text-[9px] text-neutral-600">已结算/总仓位</div>
+          <div className="text-[9px] text-neutral-600">已结算 / 总仓位</div>
         </div>
         <div className="border border-neutral-800 px-1 py-1">
           <div className="text-neutral-600">胜率</div>
-          <div className={`text-sm font-bold tabular-nums ${backtest.win_rate >= 0.55 ? 'text-green-500' : 'text-red-500'}`}>
+          <div className={`tabular-nums text-sm font-bold ${backtest.win_rate >= 0.55 ? 'text-green-500' : 'text-red-500'}`}>
             {pct(backtest.win_rate)}
           </div>
           <div className="text-[9px] text-neutral-600">{backtest.wins}/{backtest.resolved_positions}</div>
         </div>
         <div className="border border-neutral-800 px-1 py-1">
           <div className="text-neutral-600">PnL</div>
-          <div className={`text-sm font-bold tabular-nums ${backtest.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+          <div className={`tabular-nums text-sm font-bold ${backtest.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
             {money(backtest.total_pnl)}
           </div>
           <div className="text-[9px] text-neutral-600">已完成仓位</div>
@@ -53,11 +70,11 @@ export function BacktestPanel({ backtest }: Props) {
       <div className="grid grid-cols-3 gap-1">
         <div>
           <div className="text-neutral-600">结算率</div>
-          <div className="text-neutral-300 tabular-nums">{pct(backtest.settlement_rate)}</div>
+          <div className="tabular-nums text-neutral-300">{pct(backtest.settlement_rate)}</div>
         </div>
         <div>
           <div className="text-neutral-600">Brier</div>
-          <div className="text-neutral-300 tabular-nums">{backtest.brier_score.toFixed(3)}</div>
+          <div className="tabular-nums text-neutral-300">{backtest.brier_score.toFixed(3)}</div>
         </div>
         <div>
           <div className="text-neutral-600">实际EV</div>
@@ -67,7 +84,7 @@ export function BacktestPanel({ backtest }: Props) {
         </div>
       </div>
 
-      <div className="border-t border-neutral-800 pt-1 space-y-1">
+      <div className="space-y-1 border-t border-neutral-800 pt-1">
         <div className="text-neutral-600">来源表现</div>
         {topSources.length === 0 ? (
           <div className="text-neutral-700">暂无来源样本</div>
@@ -80,9 +97,9 @@ export function BacktestPanel({ backtest }: Props) {
         ))}
       </div>
 
-      <div className="border-t border-neutral-800 pt-1 leading-relaxed text-[9px] text-neutral-600">
-        {sampleWeak ? '样本还少，先观察，不建议接实盘。' : '样本量开始可用于评估。'}
-        {' '}P 是模型胜率，EV收益是赔率折算后的期望回报；参考项目的 edge 更接近这里的“概率差”。
+      <div className="border-t border-neutral-800 pt-1 text-[9px] leading-relaxed text-neutral-600">
+        {sampleWeak ? '样本仍少，先观察，不建议接实盘。' : '样本量开始可用于初步评估。'}
+        {' '}胜率和 Brier 只看已结算仓位；温度拟合页用于判断天气模型本身是否偏。
       </div>
     </div>
   )

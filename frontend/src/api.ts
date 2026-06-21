@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal } from './types'
+import type { DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -90,6 +90,11 @@ export async function stopBot(): Promise<{ status: string; is_running: boolean }
 
 export async function settleTradesApi(): Promise<{ ok: boolean; checked: number; settled_count: number; pending_count: number; errors?: unknown[] }> {
   const { data } = await api.post('/settle-trades')
+  return data
+}
+
+export async function fetchTemperatureFit(): Promise<TemperatureFitData> {
+  const { data } = await api.get<TemperatureFitData>('/temperature-fit')
   return data
 }
 

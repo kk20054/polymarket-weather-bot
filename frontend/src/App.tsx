@@ -4,6 +4,7 @@ import { motion } from 'framer-motion'
 import {
   bulkSimulateSignals,
   fetchDashboard,
+  fetchTemperatureFit,
   notifyDailySummary,
   placeLiveOrder,
   resetSimulation,
@@ -22,6 +23,7 @@ import { SignalsTable } from './components/SignalsTable'
 import { StatsCards } from './components/StatsCards'
 import { Terminal } from './components/Terminal'
 import { TradesTable } from './components/TradesTable'
+import { TemperatureFitPage } from './components/TemperatureFitPage'
 import { WeatherPanel } from './components/WeatherPanel'
 import type { BotStats } from './types'
 
@@ -194,6 +196,7 @@ function App() {
   const [rightWidth, setRightWidth] = useState(420)
   const [simBalance, setSimBalance] = useState('40')
   const [clearMarks, setClearMarks] = useState(false)
+  const [view, setView] = useState<'dashboard' | 'temperature-fit'>('dashboard')
   const leftDragRef = useRef(false)
   const rightDragRef = useRef(false)
   const balanceInitRef = useRef(false)
@@ -202,6 +205,13 @@ function App() {
     queryKey: ['dashboard'],
     queryFn: fetchDashboard,
     refetchInterval: 10000,
+  })
+
+  const temperatureFitQuery = useQuery({
+    queryKey: ['temperature-fit'],
+    queryFn: fetchTemperatureFit,
+    enabled: view === 'temperature-fit',
+    refetchInterval: view === 'temperature-fit' ? 30000 : false,
   })
 
   const tradeMutation = useMutation({
@@ -320,6 +330,16 @@ function App() {
           </button>
         </div>
       </div>
+    )
+  }
+
+  if (view === 'temperature-fit') {
+    return (
+      <TemperatureFitPage
+        data={temperatureFitQuery.data}
+        loading={temperatureFitQuery.isLoading}
+        onBack={() => setView('dashboard')}
+      />
     )
   }
 
@@ -509,7 +529,7 @@ function App() {
                 <span className="text-[10px] uppercase tracking-wider text-neutral-500">历史复盘</span>
               </div>
               <div className="min-h-0 flex-1">
-                <BacktestPanel backtest={backtest} />
+                <BacktestPanel backtest={backtest} onOpenFit={() => setView('temperature-fit')} />
               </div>
             </div>
 

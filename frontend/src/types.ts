@@ -147,6 +147,56 @@ export interface BacktestSummary {
   notes: string[]
 }
 
+export interface TemperatureFitRecord {
+  city_key: string
+  city_name: string
+  target_date: string
+  unit: string
+  source: string
+  best_source: string
+  timestamp?: string | null
+  horizon?: string | null
+  hours_left: number
+  forecast: number
+  actual: number
+  forecast_f: number
+  actual_f: number
+  error: number
+  error_f: number
+  abs_error_f: number
+}
+
+export interface TemperatureFitGroup {
+  city_key?: string
+  city_name?: string
+  source?: string
+  unit?: string
+  markets: number
+  samples: number
+  mae_f: number
+  bias_f: number
+  rmse_f: number
+  latest_date?: string
+  latest_forecast?: number
+  latest_actual?: number
+}
+
+export interface TemperatureFitSummary {
+  markets: number
+  samples: number
+  mae_f: number
+  bias_f: number
+  rmse_f: number
+}
+
+export interface TemperatureFitData {
+  summary: TemperatureFitSummary
+  cities: TemperatureFitGroup[]
+  sources: TemperatureFitGroup[]
+  records: TemperatureFitRecord[]
+  notes: string[]
+}
+
 export interface WeatherForecast {
   city_key: string
   city_name: string
@@ -192,6 +242,10 @@ export interface WeatherSignal {
   sim_amount?: number | null
   manual_note?: string | null
   paper_position?: boolean
+  fit_samples?: number
+  fit_mae_f?: number
+  fit_bias_f?: number
+  quality_flags?: string[]
 }
 
 export interface DashboardData {

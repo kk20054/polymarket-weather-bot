@@ -640,6 +640,115 @@ def _build_backtest_summary(markets):
     }
 
 
+def _metric_summary(records):
+    if not records:
+        return {"samples": 0, "mae_f": 0, "bias_f": 0, "rmse_f": 0}
+    errors = [float(r["error_f"]) for r in records]
+    abs_errors = [abs(e) for e in errors]
+    return {
+        "samples": len(records),
+        "mae_f": round(sum(abs_errors) / len(abs_errors), 2),
+        "bias_f": round(sum(errors) / len(errors), 2),
+        "rmse_f": round((sum(e * e for e in errors) / len(errors)) ** 0.5, 2),
+    }
+
+
+def _build_temperature_fit(markets):
+    records = []
+    market_keys = set()
+    for market in markets:
+        actual = market.get("actual_temp")
+        snapshots = market.get("forecast_snapshots") or []
+        if actual is None or not snapshots:
+            continue
+        try:
+            actual_native = float(actual)
+        except Exception:
+            continue
+        unit = market.get("unit") or "F"
+        actual_f = _native_to_f(actual_native, unit) or actual_native
+        city = market.get("city") or ""
+        date = market.get("date") or ""
+        market_keys.add(f"{city}:{date}")
+        for snap in snapshots:
+            for source in ("best", "ecmwf", "hrrr", "metar"):
+                forecast = snap.get(source)
+                if forecast is None:
+                    continue
+                try:
+                    forecast_native = float(forecast)
+                except Exception:
+                    continue
+                forecast_f = _native_to_f(forecast_native, unit) or forecast_native
+                error_native = forecast_native - actual_native
+                error_f = forecast_f - actual_f
+                records.append({
+                    "city_key": city,
+                    "city_name": market.get("city_name") or city,
+                    "target_date": date,
+                    "unit": unit,
+                    "source": "model_best" if source == "best" else source.upper(),
+                    "best_source": (snap.get("best_source") or "").upper(),
+                    "timestamp": snap.get("ts"),
+                    "horizon": snap.get("horizon"),
+                    "hours_left": float(snap.get("hours_left") or 0),
+                    "forecast": round(forecast_native, 2),
+                    "actual": round(actual_native, 2),
+                    "forecast_f": round(forecast_f, 2),
+                    "actual_f": round(actual_f, 2),
+                    "error": round(error_native, 2),
+                    "error_f": round(error_f, 2),
+                    "abs_error_f": round(abs(error_f), 2),
+                })
+
+    best_records = [r for r in records if r["source"] == "model_best"]
+    by_city = {}
+    for record in best_records:
+        key = record["city_key"] or record["city_name"]
+        by_city.setdefault(key, []).append(record)
+
+    city_rows = []
+    for key, items in by_city.items():
+        summary = _metric_summary(items)
+        latest = sorted(items, key=lambda r: r.get("timestamp") or "")[-1]
+        city_rows.append({
+            "city_key": key,
+            "city_name": latest["city_name"],
+            "unit": latest["unit"],
+            "markets": len({f"{r['city_key']}:{r['target_date']}" for r in items}),
+            "latest_date": latest["target_date"],
+            "latest_forecast": latest["forecast"],
+            "latest_actual": latest["actual"],
+            **summary,
+        })
+
+    by_source = {}
+    for record in records:
+        by_source.setdefault(record["source"], []).append(record)
+    source_rows = []
+    for source, items in by_source.items():
+        source_rows.append({
+            "source": source,
+            "markets": len({f"{r['city_key']}:{r['target_date']}" for r in items}),
+            **_metric_summary(items),
+        })
+
+    return {
+        "summary": {
+            "markets": len(market_keys),
+            **_metric_summary(best_records),
+        },
+        "cities": sorted(city_rows, key=lambda row: row["mae_f"], reverse=True),
+        "sources": sorted(source_rows, key=lambda row: row["mae_f"]),
+        "records": sorted(best_records, key=lambda r: (r["target_date"], r["city_name"], r["hours_left"])),
+        "notes": [
+            "拟合页基于本地 forecast_snapshots 与 actual_temp，适合发现模型偏差，不等同于完整盘口回放。",
+            "MAE/RMSE 统一折算为华氏度，便于跨 °C/°F 城市比较；表格仍展示原市场单位。",
+            "下一步交易过滤应要求：样本数足够、城市 MAE 可控、数据源分歧低、盘口 spread/orderMinSize/tick size 合格。",
+        ],
+    }
+
+
 def build_dashboard_payload():
     init_db()
     markets = load_markets()
@@ -653,6 +762,8 @@ def build_dashboard_payload():
     recent_trades = []
     position_market_ids = set()
     weather_forecasts_by_city = {}
+    temperature_fit = _build_temperature_fit(markets)
+    fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
     forecast_points = 0
     market_points = 0
     last_run = None
@@ -764,6 +875,17 @@ def build_dashboard_payload():
         display_amount = sim_amount if sim_amount is not None else amount
         effective_status = signal.get("status")
         paper_position = str(signal.get("market_id") or "") in position_market_ids
+        fit = fit_by_city.get(signal.get("city")) or {}
+        quality_flags = []
+        if fit:
+            if int(fit.get("samples") or 0) < 10:
+                quality_flags.append("fit_sample_low")
+            if float(fit.get("mae_f") or 0) > 3.0:
+                quality_flags.append("city_mae_high")
+            if abs(float(fit.get("bias_f") or 0)) > 2.0:
+                quality_flags.append("city_bias_high")
+        else:
+            quality_flags.append("fit_missing")
         weather_signals.append({
             "id": signal.get("id"),
             "market_id": signal.get("market_id"),
@@ -803,6 +925,10 @@ def build_dashboard_payload():
             "shares": signal.get("shares"),
             "sim_amount": sim_amount,
             "manual_note": signal.get("manual_note"),
+            "fit_samples": fit.get("samples"),
+            "fit_mae_f": fit.get("mae_f"),
+            "fit_bias_f": fit.get("bias_f"),
+            "quality_flags": quality_flags,
         })
         if signal.get("status") in ("simulated", "bought") and str(signal.get("market_id") or "") not in position_market_ids:
             simulated_trades.append({
@@ -950,6 +1076,11 @@ async def events(limit: int = 50):
 @app.get("/api/backtest")
 async def backtest():
     return _build_backtest_summary(load_markets())
+
+
+@app.get("/api/temperature-fit")
+async def temperature_fit():
+    return _build_temperature_fit(load_markets())
 
 
 @app.websocket("/ws/events")
