@@ -2,6 +2,18 @@
 
 日期：2026-06-21
 
+## 2026-06-21 追加：模拟盈亏口径与实盘门槛
+
+本轮修正了两个会直接影响使用判断的问题：
+
+- 模拟账户顶部权益现在采用 `起始本金 + 已实现盈亏 + 未实现盈亏`。未实现盈亏按当前可卖出的 `bid` 估值，找不到当前 bid 时才回退到入场 bid。因此刚买入后出现小幅亏损通常是 bid/ask spread 成本，不再被顶部误显示为盈利。
+- 交易记录行支持展开，展示 Polymarket 链接、买入 ask、入场 bid、当前估值 bid、spread、份额、数据源和未实现盈亏。
+- 天气信号表移除了 BTC 混入，只显示 WeatherBot 天气信号。
+- 每条天气信号新增 `live_allowed / live_risk_level / live_block_reasons / live_cautions`。前端实盘 `$` 按钮会按该门槛禁用，后端 `/api/v3/live-order` 也会在调用 CLOB executor 前复查同一门槛。
+- 当前硬拦截包括：缺少城市拟合、城市 MAE 过高、城市 Bias 过高、D+0 缺少 METAR、策略分过低、价格低于 3c、价格高于 45c、spread 大于 3c、信号过期。`fit_sample_low` 和 `spread_missing` 暂作为 caution，允许继续模拟观察。
+
+注意：这只是实盘前的第一层看板风控，不替代 CLOB executor 内部的 tick size、orderMinSize、余额、AI 审核和 dry-run/live-trading 开关校验。
+
 ## 当前结论
 
 当前系统已经能作为本地模拟和人工观察工具使用，但还没有达到“无人值守自动赚钱”的生产级标准。主要原因不是界面不够漂亮，而是证据链还不够闭合：

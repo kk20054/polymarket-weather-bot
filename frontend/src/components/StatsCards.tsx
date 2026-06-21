@@ -10,14 +10,15 @@ export function StatsCards({ stats }: Props) {
   const openTrades = stats.open_trades ?? 0
   const settledTrades = stats.settled_trades ?? 0
   const hasSettled = settledTrades > 0
-  const returnPercent = stats.bankroll - stats.total_pnl > 0
-    ? ((stats.total_pnl / (stats.bankroll - stats.total_pnl)) * 100)
-    : 0
+  const starting = stats.bankroll - stats.total_pnl
+  const returnPercent = starting > 0 ? (stats.total_pnl / starting) * 100 : 0
+  const realized = stats.realized_pnl ?? stats.total_pnl
+  const unrealized = stats.unrealized_pnl ?? 0
 
   return (
     <div className="flex items-center gap-3">
       <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-        <span className="text-[10px] text-neutral-600 uppercase">资金</span>
+        <span className="text-[10px] text-neutral-600 uppercase">权益</span>
         <span className="text-sm font-semibold tabular-nums text-neutral-100">
           ${stats.bankroll >= 1000 ? (stats.bankroll / 1000).toFixed(1) + 'K' : stats.bankroll.toFixed(2)}
         </span>
@@ -26,7 +27,7 @@ export function StatsCards({ stats }: Props) {
       <div className="w-px h-3 bg-neutral-800" />
 
       <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.05 }}>
-        <span className="text-[10px] text-neutral-600 uppercase">盈亏</span>
+        <span className="text-[10px] text-neutral-600 uppercase">总盈亏</span>
         <span className={`text-sm font-semibold tabular-nums ${stats.total_pnl >= 0 ? 'text-green-500 glow-green' : 'text-red-500 glow-red'}`}>
           {stats.total_pnl >= 0 ? '+' : '-'}${Math.abs(stats.total_pnl).toFixed(2)}
         </span>
@@ -38,6 +39,30 @@ export function StatsCards({ stats }: Props) {
       <div className="w-px h-3 bg-neutral-800" />
 
       <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }}>
+        <span className="text-[10px] text-neutral-600 uppercase">已/未实现</span>
+        <span className={`text-sm font-semibold tabular-nums ${realized >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+          {realized >= 0 ? '+' : '-'}${Math.abs(realized).toFixed(2)}
+        </span>
+        <span className={`text-[10px] tabular-nums ${unrealized >= 0 ? 'text-green-500/70' : 'text-red-500/70'}`}>
+          {unrealized >= 0 ? '+' : '-'}${Math.abs(unrealized).toFixed(2)}
+        </span>
+      </motion.div>
+
+      <div className="w-px h-3 bg-neutral-800" />
+
+      <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.15 }}>
+        <span className="text-[10px] text-neutral-600 uppercase">现金/占用</span>
+        <span className="text-sm font-semibold tabular-nums text-neutral-100">
+          ${(stats.cash_balance ?? stats.bankroll).toFixed(2)}
+        </span>
+        <span className="text-[10px] tabular-nums text-neutral-600">
+          / ${(stats.reserved_capital ?? 0).toFixed(2)}
+        </span>
+      </motion.div>
+
+      <div className="w-px h-3 bg-neutral-800" />
+
+      <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }}>
         <span className="text-[10px] text-neutral-600 uppercase">胜率</span>
         <span className={`text-sm font-semibold tabular-nums ${!hasSettled ? 'text-neutral-400' : winRate >= 55 ? 'text-green-500' : winRate >= 45 ? 'text-yellow-500' : 'text-red-500'}`}>
           {hasSettled ? `${winRate.toFixed(0)}%` : '--'}
@@ -49,9 +74,9 @@ export function StatsCards({ stats }: Props) {
 
       <div className="w-px h-3 bg-neutral-800" />
 
-      <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.15 }}>
-        <span className="text-[10px] text-neutral-600 uppercase">持仓/结算</span>
-        <span className="text-sm font-semibold tabular-nums text-neutral-100">{openTrades}/{settledTrades}</span>
+      <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.25 }}>
+        <span className="text-[10px] text-neutral-600 uppercase">持仓/实盘候选</span>
+        <span className="text-sm font-semibold tabular-nums text-neutral-100">{openTrades}/{stats.live_candidate_count ?? 0}</span>
         {stats.is_running && <div className="live-dot" />}
       </motion.div>
     </div>

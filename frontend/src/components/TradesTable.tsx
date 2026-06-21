@@ -26,6 +26,13 @@ function titleFor(trade: Trade) {
   return String(trade.market_title || trade.event_slug || trade.market_ticker || trade.id)
 }
 
+function resultText(result: string) {
+  if (result === 'pending') return '待定'
+  if (result === 'win') return '盈利'
+  if (result === 'loss') return '亏损'
+  return result
+}
+
 export function TradesTable({ trades }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>('timestamp')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
@@ -54,8 +61,8 @@ export function TradesTable({ trades }: Props) {
           bVal = b.size
           break
         case 'pnl':
-          aVal = a.pnl ?? 0
-          bVal = b.pnl ?? 0
+          aVal = a.pnl ?? a.unrealized_pnl ?? 0
+          bVal = b.pnl ?? b.unrealized_pnl ?? 0
           break
         case 'result':
           aVal = a.result
@@ -136,10 +143,10 @@ export function TradesTable({ trades }: Props) {
             const tradeKey = String(trade.id)
             const isPending = trade.result === 'pending'
             const isWin = trade.result === 'win'
-            const isUp = trade.direction === 'up'
             const style = platformStyles[trade.platform?.toLowerCase()]
             const expanded = expandedId === tradeKey
             const tradeTitle = titleFor(trade)
+            const displayPnl = trade.pnl ?? trade.unrealized_pnl ?? null
 
             return (
               <motion.tr
@@ -160,7 +167,7 @@ export function TradesTable({ trades }: Props) {
                   <span className={`text-[9px] font-medium uppercase ${
                     isPending ? 'text-amber-500' : isWin ? 'text-green-500' : 'text-red-500'
                   }`}>
-                    {isPending ? '待定' : isWin ? '赢' : '亏'}
+                    {resultText(trade.result)}
                   </span>
                 </td>
                 <td className="px-1.5 py-1">
@@ -184,16 +191,23 @@ export function TradesTable({ trades }: Props) {
                   {expanded && (
                     <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 border-l border-neutral-800 pl-2 text-[10px] text-neutral-500">
                       <span>ID</span><span className="truncate text-neutral-400" title={tradeKey}>{tradeKey}</span>
-                      <span>入场价</span><span className="text-neutral-300 tabular-nums">{price(trade.entry_price)}</span>
-                      <span>退出价</span><span className="text-neutral-300 tabular-nums">{price(trade.exit_price)}</span>
-                      <span>份额</span><span className="text-neutral-300 tabular-nums">{trade.shares?.toFixed(2) ?? '-'}</span>
+                      <span>Polymarket</span>
+                      <span className="truncate text-cyan-400">
+                        {trade.event_url ? <a href={trade.event_url} target="_blank" rel="noreferrer" onClick={event => event.stopPropagation()}>打开市场</a> : '-'}
+                      </span>
+                      <span>买入价 ask</span><span className="tabular-nums text-neutral-300">{price(trade.entry_price)}</span>
+                      <span>入场 bid</span><span className="tabular-nums text-neutral-300">{price(trade.bid_at_entry)}</span>
+                      <span>当前估值 bid</span><span className="tabular-nums text-neutral-300">{price(trade.mark_price)}</span>
+                      <span>spread</span><span className="tabular-nums text-neutral-300">{price(trade.spread)}</span>
+                      <span>份额</span><span className="tabular-nums text-neutral-300">{trade.shares?.toFixed(2) ?? '-'}</span>
                       <span>数据源</span><span className="text-neutral-300">{trade.source || '-'}</span>
+                      <span>未实现盈亏</span><span className={`tabular-nums ${Number(trade.unrealized_pnl ?? 0) >= 0 ? 'text-green-500' : 'text-red-500'}`}>{money(trade.unrealized_pnl)}</span>
                       <span>结算原因</span><span className="text-neutral-300">{trade.close_reason || (isPending ? '等待结算' : '-')}</span>
                     </div>
                   )}
                 </td>
                 <td className="px-1.5 py-1 text-center">
-                  <span className={`text-[10px] font-semibold uppercase ${isUp ? 'text-green-500' : 'text-red-500'}`}>
+                  <span className="text-[10px] font-semibold uppercase text-cyan-400">
                     {trade.direction}
                   </span>
                 </td>
@@ -201,11 +215,11 @@ export function TradesTable({ trades }: Props) {
                   ${trade.size.toFixed(2)}
                 </td>
                 <td className="px-1.5 py-1 text-right">
-                  {trade.pnl !== null ? (
+                  {displayPnl !== null ? (
                     <span className={`font-semibold tabular-nums ${
-                      trade.pnl >= 0 ? 'text-green-500' : 'text-red-500'
+                      displayPnl >= 0 ? 'text-green-500' : 'text-red-500'
                     }`}>
-                      {money(trade.pnl)}
+                      {money(displayPnl)}
                     </span>
                   ) : (
                     <span className="text-neutral-600">-</span>

@@ -63,6 +63,10 @@ export interface Trade {
   event_url?: string | null
   direction: string
   entry_price: number
+  bid_at_entry?: number | null
+  spread?: number | null
+  mark_price?: number | null
+  unrealized_pnl?: number | null
   exit_price?: number | null
   size: number
   shares?: number | null
@@ -78,6 +82,8 @@ export interface BotStats {
   bankroll: number
   cash_balance?: number
   reserved_capital?: number
+  realized_pnl?: number
+  unrealized_pnl?: number
   total_trades: number
   open_trades?: number
   settled_trades?: number
@@ -91,6 +97,8 @@ export interface BotStats {
   expired_signal_count?: number
   signal_count?: number
   actionable_count?: number
+  live_candidate_count?: number
+  live_blocked_count?: number
   simulation_started_at?: string | null
   scanner_status?: string
 }
@@ -267,6 +275,10 @@ export interface WeatherSignal {
   strategy_score?: number
   strategy_notes?: string[]
   dispersion_ratio?: number | null
+  live_allowed?: boolean
+  live_risk_level?: 'eligible' | 'caution' | 'blocked'
+  live_block_reasons?: string[]
+  live_cautions?: string[]
   near_lock?: {
     hours_left: number
     observed_temp: number

@@ -296,6 +296,43 @@ def _open_paper_position(signal, amount, simulation_start, opened_at):
     return True
 
 
+def _find_outcome(market, market_id=None, yes_token_id=None):
+    for outcome in market.get("all_outcomes") or []:
+        if market_id and str(outcome.get("market_id") or "") == str(market_id):
+            return outcome
+        if yes_token_id and str(outcome.get("yes_token_id") or "") == str(yes_token_id):
+            return outcome
+    return {}
+
+
+def _position_mark_price(market, pos):
+    outcome = _find_outcome(
+        market,
+        market_id=pos.get("market_id"),
+        yes_token_id=pos.get("yes_token_id"),
+    )
+    bid = outcome.get("bid")
+    if bid is None:
+        bid = pos.get("bid_at_entry")
+    if bid is None:
+        bid = pos.get("entry_price")
+    try:
+        return max(0.0, min(1.0, float(bid)))
+    except Exception:
+        return None
+
+
+def _unrealized_pnl(pos, mark_price):
+    if mark_price is None:
+        return None
+    try:
+        shares = float(pos.get("shares") or 0)
+        cost = float(pos.get("cost") or 0)
+        return round((shares * float(mark_price)) - cost, 2)
+    except Exception:
+        return None
+
+
 def _clear_dashboard_positions(reset_at):
     cleared = 0
     if not MARKETS_DIR.exists():
@@ -875,6 +912,84 @@ def _strategy_diagnostics(signal, raw_signal, market, fit):
     }
 
 
+def _fit_quality_flags(fit):
+    flags = []
+    if fit:
+        if int(fit.get("samples") or 0) < 10:
+            flags.append("fit_sample_low")
+        if float(fit.get("mae_f") or 0) > 3.0:
+            flags.append("city_mae_high")
+        if abs(float(fit.get("bias_f") or 0)) > 2.0:
+            flags.append("city_bias_high")
+    else:
+        flags.append("fit_missing")
+    return flags
+
+
+def _live_gate(signal, quality_flags, strategy):
+    reasons = []
+    cautions = []
+    tags = set(strategy.get("strategy_tags") or [])
+
+    if "fit_missing" in quality_flags:
+        reasons.append("fit_missing")
+    if "city_mae_high" in quality_flags:
+        reasons.append("city_mae_high")
+    if "city_bias_high" in quality_flags:
+        reasons.append("city_bias_high")
+    if "fit_sample_low" in quality_flags:
+        cautions.append("fit_sample_low")
+    if "near_lock_missing_metar" in tags:
+        reasons.append("near_lock_missing_metar")
+
+    try:
+        score = float(strategy.get("strategy_score") or 0)
+    except Exception:
+        score = 0.0
+    if score < 0.35:
+        reasons.append("strategy_score_low")
+
+    try:
+        limit_price = float(signal.get("limit_price") or 0)
+    except Exception:
+        limit_price = 0.0
+    if limit_price < 0.03:
+        reasons.append("price_below_min")
+    if limit_price > 0.45:
+        reasons.append("price_above_max")
+
+    spread = signal.get("spread")
+    try:
+        spread = float(spread) if spread is not None else None
+    except Exception:
+        spread = None
+    if spread is None:
+        cautions.append("spread_missing")
+    elif spread > 0.03:
+        reasons.append("spread_above_limit")
+
+    if (signal.get("date") or "") < _today_str():
+        reasons.append("expired_signal")
+    if signal.get("status") in ("simulated", "bought", "skipped"):
+        cautions.append(f"already_{signal.get('status')}")
+
+    return {
+        "live_allowed": not reasons,
+        "live_risk_level": "blocked" if reasons else ("caution" if cautions else "eligible"),
+        "live_block_reasons": reasons,
+        "live_cautions": cautions,
+    }
+
+
+def _signal_diagnostics_payload(signal, raw_signal, fit_by_city, market_by_city_date):
+    fit = fit_by_city.get(signal.get("city")) or {}
+    quality_flags = _fit_quality_flags(fit)
+    market_for_signal = market_by_city_date.get((signal.get("city"), signal.get("date")), {})
+    strategy = _strategy_diagnostics(signal, raw_signal, market_for_signal, fit)
+    gate = _live_gate(signal, quality_flags, strategy)
+    return fit, quality_flags, strategy, gate
+
+
 def build_dashboard_payload():
     init_db()
     markets = load_markets()
@@ -931,6 +1046,8 @@ def build_dashboard_payload():
             if position_in_window:
                 position_market_ids.add(str(pos.get("market_id") or ""))
             event_url = pos.get("event_url") or market.get("event_url")
+            mark_price = _position_mark_price(market, pos)
+            unrealized = _unrealized_pnl(pos, mark_price)
             result = "pending"
             if pos.get("status") == "closed":
                 result = "win" if (pos.get("pnl") or 0) > 0 else "loss"
@@ -955,6 +1072,8 @@ def build_dashboard_payload():
                 "ev": pos.get("ev"),
                 "status": pos.get("status"),
                 "pnl": pos.get("pnl"),
+                "mark_price": mark_price,
+                "unrealized_pnl": unrealized,
                 "close_reason": pos.get("close_reason"),
             }
             if pos.get("status") == "open" and position_in_window:
@@ -973,6 +1092,10 @@ def build_dashboard_payload():
                     "source": pos.get("forecast_src"),
                     "direction": "yes",
                     "entry_price": pos.get("entry_price") or 0,
+                    "bid_at_entry": pos.get("bid_at_entry"),
+                    "spread": pos.get("spread"),
+                    "mark_price": mark_price,
+                    "unrealized_pnl": unrealized,
                     "size": pos.get("cost") or 0,
                     "timestamp": position_ts,
                     "settled": pos.get("status") == "closed",
@@ -1006,19 +1129,12 @@ def build_dashboard_payload():
         display_amount = sim_amount if sim_amount is not None else amount
         effective_status = signal.get("status")
         paper_position = str(signal.get("market_id") or "") in position_market_ids
-        fit = fit_by_city.get(signal.get("city")) or {}
-        quality_flags = []
-        if fit:
-            if int(fit.get("samples") or 0) < 10:
-                quality_flags.append("fit_sample_low")
-            if float(fit.get("mae_f") or 0) > 3.0:
-                quality_flags.append("city_mae_high")
-            if abs(float(fit.get("bias_f") or 0)) > 2.0:
-                quality_flags.append("city_bias_high")
-        else:
-            quality_flags.append("fit_missing")
-        market_for_signal = market_by_city_date.get((signal.get("city"), signal.get("date")), {})
-        strategy = _strategy_diagnostics(signal, raw_signal, market_for_signal, fit)
+        fit, quality_flags, strategy, live_gate = _signal_diagnostics_payload(
+            signal,
+            raw_signal,
+            fit_by_city,
+            market_by_city_date,
+        )
         weather_signals.append({
             "id": signal.get("id"),
             "market_id": signal.get("market_id"),
@@ -1063,8 +1179,28 @@ def build_dashboard_payload():
             "fit_bias_f": fit.get("bias_f"),
             "quality_flags": quality_flags,
             **strategy,
+            **live_gate,
         })
         if signal.get("status") in ("simulated", "bought") and str(signal.get("market_id") or "") not in position_market_ids:
+            market_for_signal = market_by_city_date.get((signal.get("city"), signal.get("date")), {})
+            outcome = _find_outcome(
+                market_for_signal,
+                market_id=signal.get("market_id"),
+                yes_token_id=signal.get("yes_token_id"),
+            )
+            mark_price = outcome.get("bid")
+            if mark_price is None:
+                mark_price = signal.get("bid_price")
+            if mark_price is None:
+                mark_price = signal.get("limit_price")
+            try:
+                mark_price = float(mark_price)
+            except Exception:
+                mark_price = None
+            try:
+                unrealized = round((float(signal.get("shares") or 0) * float(mark_price)) - float(display_amount or 0), 2) if mark_price is not None else None
+            except Exception:
+                unrealized = None
             simulated_trades.append({
                 "id": int(signal.get("id") or 0),
                 "market_ticker": signal.get("market_id") or "",
@@ -1078,6 +1214,10 @@ def build_dashboard_payload():
                 "source": signal.get("forecast_src"),
                 "direction": "yes",
                 "entry_price": signal.get("limit_price") or 0,
+                "bid_at_entry": signal.get("bid_price"),
+                "spread": signal.get("spread"),
+                "mark_price": mark_price,
+                "unrealized_pnl": unrealized,
                 "size": display_amount or 0,
                 "timestamp": signal.get("status_updated_at") or signal.get("created_at") or "",
                 "settled": False,
@@ -1107,12 +1247,16 @@ def build_dashboard_payload():
     settled_trades = [t for t in combined_trades if t.get("result") in ("win", "loss")]
     open_trade_count = len([t for t in combined_trades if t.get("result") == "pending"])
     reserved_capital = round(sum(float(t.get("size") or 0) for t in combined_trades if t.get("result") == "pending"), 2)
-    # Treat pending stake as capital at risk, not profit. The old display added
-    # cash + reserved stake and made freshly opened positions look like gains.
+    unrealized_pnl = round(
+        sum(float(t.get("unrealized_pnl") or 0) for t in combined_trades if t.get("result") == "pending"),
+        2,
+    )
+    # Pending stake is marked conservatively at the current bid, so a fresh
+    # paper fill can show the bid/ask spread as immediate unrealized loss.
     realized_pnl = round(sum(float(t.get("pnl") or 0) for t in combined_trades if t.get("pnl") is not None), 2)
-    total_pnl = realized_pnl
-    equity = round(starting + realized_pnl, 2)
-    cash_balance = round(max(0.0, equity - reserved_capital), 2)
+    total_pnl = round(realized_pnl + unrealized_pnl, 2)
+    equity = round(starting + total_pnl, 2)
+    cash_balance = round(max(0.0, starting + realized_pnl - reserved_capital), 2)
     wins = len([t for t in settled_trades if t.get("result") == "win"])
     total_with_outcome = len(settled_trades)
     brier_values = []
@@ -1144,6 +1288,8 @@ def build_dashboard_payload():
         "bankroll": equity,
         "cash_balance": cash_balance,
         "reserved_capital": reserved_capital,
+        "realized_pnl": realized_pnl,
+        "unrealized_pnl": unrealized_pnl,
         "total_trades": len(combined_trades),
         "open_trades": open_trade_count,
         "settled_trades": total_with_outcome,
@@ -1157,6 +1303,8 @@ def build_dashboard_payload():
         "expired_signal_count": expired_signal_count,
         "signal_count": len(signals),
         "actionable_count": len([s for s in weather_signals if s.get("actionable")]),
+        "live_candidate_count": len([s for s in weather_signals if s.get("actionable") and s.get("live_allowed")]),
+        "live_blocked_count": len([s for s in weather_signals if s.get("actionable") and not s.get("live_allowed")]),
         "simulation_started_at": simulation_started_at,
         "scanner_status": "running" if _bot_running() else "stopped",
     }
@@ -1449,6 +1597,36 @@ async def v3_live_order(update: LiveOrderUpdate):
     )
     if not signal:
         return {"ok": False, "error": "signal_not_found"}
+    markets = load_markets()
+    temperature_fit = _build_temperature_fit(markets)
+    fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
+    market_by_city_date = {
+        (market.get("city"), market.get("date")): market
+        for market in markets
+        if market.get("city") and market.get("date")
+    }
+    raw_signal = _read_json_from_text(signal.get("raw_json"), {})
+    _fit, _quality_flags, _strategy, gate = _signal_diagnostics_payload(
+        signal,
+        raw_signal,
+        fit_by_city,
+        market_by_city_date,
+    )
+    if not gate.get("live_allowed"):
+        payload = {
+            "signal_id": update.signal_id,
+            "market_id": signal.get("market_id"),
+            "question": signal.get("question"),
+            "gate": gate,
+        }
+        log_event("warning", "v3 live order blocked by dashboard gate", payload)
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "dashboard_live_gate",
+            "gate": gate,
+            "payload": payload,
+        }
     result = LiveExecutor().place_order(signal, update.amount)
     log_event("info" if result.ok else "warning", f"v3 live order {result.status}: {result.reason or 'ok'}", result.payload)
     return {
