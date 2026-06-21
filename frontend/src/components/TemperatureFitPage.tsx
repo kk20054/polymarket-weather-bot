@@ -72,6 +72,7 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
   const worstCities = cities.slice(0, 10)
   const sourceRows = fit?.sources ?? []
   const summary = fit?.summary ?? { markets: 0, samples: 0, mae_f: 0, bias_f: 0, rmse_f: 0 }
+  const strategySummary = fit?.strategy_summary
   const sampleWeak = (summary?.markets ?? 0) < 30
 
   return (
@@ -149,6 +150,32 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
                 </div>
               ))}
             </div>
+
+            {strategySummary && (
+              <div className="mt-3 border-t border-neutral-800 pt-2">
+                <div className="mb-2 text-neutral-600">策略回测切片</div>
+                <div className="space-y-1">
+                  <div className="border border-neutral-800 px-2 py-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-neutral-300">NEAR-LOCK / METAR</span>
+                      <span className="tabular-nums text-cyan-300">{f(strategySummary.near_lock.mae_f)}</span>
+                    </div>
+                    <div className="text-[9px] text-neutral-600">
+                      {strategySummary.near_lock.samples} 点 · Bias {f(strategySummary.near_lock.bias_f)}
+                    </div>
+                  </div>
+                  <div className="border border-neutral-800 px-2 py-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-neutral-300">离散度不足</span>
+                      <span className="tabular-nums text-amber-300">{(strategySummary.dispersion.underdispersed_rate * 100).toFixed(0)}%</span>
+                    </div>
+                    <div className="text-[9px] text-neutral-600">
+                      {strategySummary.dispersion.underdispersed_cases}/{strategySummary.dispersion.samples} 个 D+1/D+2 样本超过 1.5x std
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="mt-3 space-y-1 border-t border-neutral-800 pt-2 text-[9px] leading-relaxed text-neutral-600">
               {fit.notes.map(note => <p key={note}>{note}</p>)}

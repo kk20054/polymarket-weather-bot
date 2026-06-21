@@ -45,6 +45,16 @@ interface UnifiedSignal {
   fitMaeF?: number
   fitBiasF?: number
   qualityFlags?: string[]
+  strategyTags?: string[]
+  strategyScore?: number
+  strategyNotes?: string[]
+  dispersionRatio?: number | null
+  nearLock?: {
+    hours_left: number
+    observed_temp: number
+    model_best: number
+    remaining_potential: number
+  } | null
 }
 
 function PlatformBadge({ platform }: { platform: string }) {
@@ -93,6 +103,20 @@ function flagLabel(flag: string) {
     case 'city_bias_high': return '城市偏差高'
     case 'fit_missing': return '无拟合样本'
     default: return flag
+  }
+}
+
+function strategyLabel(tag: string) {
+  switch (tag) {
+    case 'near_lock_watch': return '临近结算观察'
+    case 'near_lock_strong': return '临近结算强信号'
+    case 'near_lock_missing_metar': return '缺少METAR'
+    case 'dispersion_underpricing_watch': return '离散度不足'
+    case 'cheap_tail_candidate': return '低价尾部'
+    case 'fit_risk': return '拟合风险'
+    case 'bias_risk': return '偏差风险'
+    case 'standard_ev': return '普通EV'
+    default: return tag
   }
 }
 
@@ -156,6 +180,11 @@ export function SignalsTable({
       fitMaeF: signal.fit_mae_f,
       fitBiasF: signal.fit_bias_f,
       qualityFlags: signal.quality_flags,
+      strategyTags: signal.strategy_tags,
+      strategyScore: signal.strategy_score,
+      strategyNotes: signal.strategy_notes,
+      dispersionRatio: signal.dispersion_ratio,
+      nearLock: signal.near_lock,
     }))
 
     return [...wx, ...btc]
@@ -271,6 +300,22 @@ export function SignalsTable({
                         <div className="border-l border-neutral-800 pl-2">
                           拟合质量：样本 {sig.fitSamples ?? 0} / MAE {sig.fitMaeF !== undefined ? `${sig.fitMaeF.toFixed(1)}F` : '--'} / Bias {sig.fitBiasF !== undefined ? `${sig.fitBiasF.toFixed(1)}F` : '--'}
                           {flags.length ? ` / 提示 ${flags.map(flagLabel).join('、')}` : ' / 暂无硬性风险提示'}
+                        </div>
+                      )}
+                      {sig.category === 'WX' && (
+                        <div className="border-l border-cyan-500/30 pl-2">
+                          <div>
+                            策略诊断：分数 {sig.strategyScore !== undefined ? sig.strategyScore.toFixed(2) : '--'} / {(sig.strategyTags ?? []).map(strategyLabel).join('、') || '普通EV'}
+                            {sig.dispersionRatio ? ` / 离散度比 ${sig.dispersionRatio.toFixed(2)}` : ''}
+                          </div>
+                          {sig.nearLock && (
+                            <div>
+                              NEAR-LOCK：剩余 {sig.nearLock.hours_left.toFixed(1)}h / METAR {sig.nearLock.observed_temp.toFixed(1)} / 模型 {sig.nearLock.model_best.toFixed(1)} / 剩余潜力 {sig.nearLock.remaining_potential.toFixed(1)}
+                            </div>
+                          )}
+                          {(sig.strategyNotes ?? []).map(note => (
+                            <div key={note} className="text-neutral-600">{note}</div>
+                          ))}
                         </div>
                       )}
                       <div>模拟买入只写入本地记录，不会向 Polymarket 下单。</div>

@@ -110,6 +110,12 @@ def _native_to_f(value, unit):
     return _c_to_f(value) if unit == "C" else float(value)
 
 
+def _delta_to_f(value, unit):
+    if value is None:
+        return None
+    return float(value) * 9.0 / 5.0 if unit == "C" else float(value)
+
+
 def _latest_snapshot(market, key):
     items = market.get(key, [])
     return items[-1] if items else {}
@@ -682,6 +688,8 @@ def _build_temperature_fit(markets):
                 forecast_f = _native_to_f(forecast_native, unit) or forecast_native
                 error_native = forecast_native - actual_native
                 error_f = forecast_f - actual_f
+                ensemble_std = snap.get("ensemble_std")
+                ensemble_std_f = _delta_to_f(ensemble_std, unit) if ensemble_std is not None else None
                 records.append({
                     "city_key": city,
                     "city_name": market.get("city_name") or city,
@@ -699,6 +707,8 @@ def _build_temperature_fit(markets):
                     "error": round(error_native, 2),
                     "error_f": round(error_f, 2),
                     "abs_error_f": round(abs(error_f), 2),
+                    "ensemble_std": round(float(ensemble_std), 2) if ensemble_std is not None else None,
+                    "ensemble_std_f": round(float(ensemble_std_f), 2) if ensemble_std_f is not None else None,
                 })
 
     best_records = [r for r in records if r["source"] == "model_best"]
@@ -733,6 +743,19 @@ def _build_temperature_fit(markets):
             **_metric_summary(items),
         })
 
+    near_lock_records = [
+        r for r in records
+        if r["source"] == "METAR" and r["hours_left"] <= 18
+    ]
+    dispersion_records = [
+        r for r in best_records
+        if r.get("horizon") in ("D+1", "D+2") and r.get("ensemble_std_f") is not None
+    ]
+    underdispersed = [
+        r for r in dispersion_records
+        if r["abs_error_f"] > max(1.0, float(r.get("ensemble_std_f") or 0) * 1.5)
+    ]
+
     return {
         "summary": {
             "markets": len(market_keys),
@@ -741,11 +764,114 @@ def _build_temperature_fit(markets):
         "cities": sorted(city_rows, key=lambda row: row["mae_f"], reverse=True),
         "sources": sorted(source_rows, key=lambda row: row["mae_f"]),
         "records": sorted(best_records, key=lambda r: (r["target_date"], r["city_name"], r["hours_left"])),
+        "strategy_summary": {
+            "near_lock": {
+                **_metric_summary(near_lock_records),
+                "description": "D+0 <=18h METAR versus final actual temperature.",
+            },
+            "dispersion": {
+                "samples": len(dispersion_records),
+                "underdispersed_cases": len(underdispersed),
+                "underdispersed_rate": round((len(underdispersed) / len(dispersion_records)) if dispersion_records else 0, 3),
+                "description": "D+1/D+2 cases where actual error exceeded 1.5x ensemble std.",
+            },
+        },
         "notes": [
             "拟合页基于本地 forecast_snapshots 与 actual_temp，适合发现模型偏差，不等同于完整盘口回放。",
             "MAE/RMSE 统一折算为华氏度，便于跨 °C/°F 城市比较；表格仍展示原市场单位。",
             "下一步交易过滤应要求：样本数足够、城市 MAE 可控、数据源分歧低、盘口 spread/orderMinSize/tick size 合格。",
         ],
+    }
+
+
+def _strategy_diagnostics(signal, raw_signal, market, fit):
+    tags = []
+    notes = []
+    score_parts = []
+    near_lock = None
+    unit = (market or {}).get("unit") or ("F" if (signal.get("bucket_label") or "").endswith("F") else "C")
+    latest = _latest_snapshot(market or {}, "forecast_snapshots")
+    horizon = signal.get("horizon") or latest.get("horizon") or raw_signal.get("horizon") or ""
+    limit_price = float(signal.get("limit_price") or 0)
+    hours_left = latest.get("hours_left")
+    try:
+        hours_left = float(hours_left) if hours_left is not None else None
+    except Exception:
+        hours_left = None
+
+    if horizon == "D+0" or (hours_left is not None and hours_left <= 18):
+        metar = latest.get("metar")
+        best = latest.get("best")
+        if metar is not None and hours_left is not None:
+            try:
+                metar_value = float(metar)
+                best_value = float(best) if best is not None else metar_value
+                remaining_native = max(0.0, best_value - metar_value)
+                near_lock = {
+                    "hours_left": round(hours_left, 2),
+                    "observed_temp": round(metar_value, 2),
+                    "model_best": round(best_value, 2),
+                    "remaining_potential": round(remaining_native, 2),
+                }
+                if hours_left <= 18:
+                    tags.append("near_lock_watch")
+                    score_parts.append(0.2)
+                    notes.append(f"NEAR-LOCK watch: {hours_left:.1f}h left with METAR {metar_value:.1f}{unit}.")
+                if hours_left <= 8 and remaining_native <= (1.0 if unit == "F" else 0.6):
+                    tags.append("near_lock_strong")
+                    score_parts.append(0.35)
+                    notes.append("METAR suggests limited remaining upside; check exact bucket before buying.")
+            except Exception:
+                notes.append("NEAR-LOCK data present but could not be parsed.")
+        elif horizon == "D+0":
+            tags.append("near_lock_missing_metar")
+            notes.append("D+0 market without usable METAR; do not treat as near-lock.")
+
+    ensemble_std = raw_signal.get("ensemble_std")
+    dispersion_ratio = None
+    fit_rmse = fit.get("rmse_f")
+    fit_mae = fit.get("mae_f")
+    if ensemble_std is not None and fit:
+        try:
+            ensemble_std_f = max(0.1, _delta_to_f(float(ensemble_std), unit) or 0.1)
+            historical_spread_f = max(3.0, float(fit_rmse or 0) * 2.0, float(fit_mae or 0) * 3.0)
+            ensemble_spread_f = max(0.2, ensemble_std_f * 2.0)
+            dispersion_ratio = historical_spread_f / ensemble_spread_f
+            if horizon in ("D+1", "D+2") and dispersion_ratio > 1.6:
+                tags.append("dispersion_underpricing_watch")
+                score_parts.append(min(0.3, (dispersion_ratio - 1.6) * 0.12))
+                notes.append(f"Ensemble may be under-dispersed: ratio {dispersion_ratio:.2f}.")
+                if limit_price <= 0.14:
+                    tags.append("cheap_tail_candidate")
+                    score_parts.append(0.2)
+                    notes.append("Low-priced tail bucket matches dispersion-underpricing playbook.")
+        except Exception:
+            notes.append("Dispersion diagnostics could not be parsed.")
+
+    samples = int(fit.get("samples") or 0) if fit else 0
+    mae = float(fit.get("mae_f") or 0) if fit else None
+    bias = float(fit.get("bias_f") or 0) if fit else None
+    if samples < 10:
+        score_parts.append(-0.15)
+        notes.append("City fit sample is still thin; keep in paper unless other evidence is strong.")
+    if mae is not None and mae > 3.0:
+        tags.append("fit_risk")
+        score_parts.append(-0.2)
+        notes.append(f"City MAE is high at {mae:.1f}F.")
+    if bias is not None and abs(bias) > 2.0:
+        tags.append("bias_risk")
+        score_parts.append(-0.1)
+        notes.append(f"City bias is elevated at {bias:+.1f}F.")
+
+    if not tags:
+        tags.append("standard_ev")
+    score = max(0.0, min(1.0, 0.45 + sum(score_parts)))
+    return {
+        "strategy_tags": tags,
+        "strategy_score": round(score, 2),
+        "strategy_notes": notes[:6],
+        "near_lock": near_lock,
+        "dispersion_ratio": round(dispersion_ratio, 2) if dispersion_ratio is not None else None,
     }
 
 
@@ -764,6 +890,11 @@ def build_dashboard_payload():
     weather_forecasts_by_city = {}
     temperature_fit = _build_temperature_fit(markets)
     fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
+    market_by_city_date = {
+        (market.get("city"), market.get("date")): market
+        for market in markets
+        if market.get("city") and market.get("date")
+    }
     forecast_points = 0
     market_points = 0
     last_run = None
@@ -886,6 +1017,8 @@ def build_dashboard_payload():
                 quality_flags.append("city_bias_high")
         else:
             quality_flags.append("fit_missing")
+        market_for_signal = market_by_city_date.get((signal.get("city"), signal.get("date")), {})
+        strategy = _strategy_diagnostics(signal, raw_signal, market_for_signal, fit)
         weather_signals.append({
             "id": signal.get("id"),
             "market_id": signal.get("market_id"),
@@ -929,6 +1062,7 @@ def build_dashboard_payload():
             "fit_mae_f": fit.get("mae_f"),
             "fit_bias_f": fit.get("bias_f"),
             "quality_flags": quality_flags,
+            **strategy,
         })
         if signal.get("status") in ("simulated", "bought") and str(signal.get("market_id") or "") not in position_market_ids:
             simulated_trades.append({

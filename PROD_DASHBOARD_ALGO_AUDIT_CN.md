@@ -61,9 +61,11 @@
 
 1. 当前已完成：城市温度拟合页，显示 MAE、Bias、RMSE、城市排行、数据源排行。
 2. 当前已完成：每条天气信号附带城市拟合质量：样本数、MAE、Bias、质量旗标。
-3. 下一步：把 `fit_sample_low / city_mae_high / city_bias_high` 接入实盘风控；模拟盘继续允许记录，用来积累样本。
-4. 下一步：新增 `near_lock` 模块，用 METAR 当前最高温、剩余升温潜力、TAF 云量/风速过滤 D+0 临近结算市场。
-5. 下一步：新增 `dispersion_underpricing` 模块，比较集合 spread 与城市历史 spread，专门寻找尾部错价。
+3. 当前已完成：每条天气信号附带策略诊断：`near_lock_watch`、`near_lock_strong`、`dispersion_underpricing_watch`、`cheap_tail_candidate`、拟合风险等。
+4. 当前已完成：温度拟合页增加策略回测切片，展示 NEAR-LOCK/METAR 误差和 D+1/D+2 离散度不足比例。
+5. 下一步：把 `fit_sample_low / city_mae_high / city_bias_high / near_lock_missing_metar` 接入实盘风控；模拟盘继续允许记录，用来积累样本。
+6. 下一步：新增独立 `near_lock` 扫描模块，用 METAR 当前最高温、剩余升温潜力、TAF 云量/风速过滤 D+0 临近结算市场。
+7. 下一步：新增独立 `dispersion_underpricing` 模块，比较集合 spread 与城市历史 spread，专门寻找尾部错价。
 
 ### 1. 概率模型从单点预测升级为校准分布
 

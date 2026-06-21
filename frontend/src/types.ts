@@ -164,6 +164,8 @@ export interface TemperatureFitRecord {
   error: number
   error_f: number
   abs_error_f: number
+  ensemble_std?: number | null
+  ensemble_std_f?: number | null
 }
 
 export interface TemperatureFitGroup {
@@ -194,6 +196,21 @@ export interface TemperatureFitData {
   cities: TemperatureFitGroup[]
   sources: TemperatureFitGroup[]
   records: TemperatureFitRecord[]
+  strategy_summary?: {
+    near_lock: {
+      samples: number
+      mae_f: number
+      bias_f: number
+      rmse_f: number
+      description: string
+    }
+    dispersion: {
+      samples: number
+      underdispersed_cases: number
+      underdispersed_rate: number
+      description: string
+    }
+  }
   notes: string[]
 }
 
@@ -246,6 +263,16 @@ export interface WeatherSignal {
   fit_mae_f?: number
   fit_bias_f?: number
   quality_flags?: string[]
+  strategy_tags?: string[]
+  strategy_score?: number
+  strategy_notes?: string[]
+  dispersion_ratio?: number | null
+  near_lock?: {
+    hours_left: number
+    observed_temp: number
+    model_best: number
+    remaining_potential: number
+  } | null
 }
 
 export interface DashboardData {
