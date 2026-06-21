@@ -40,6 +40,7 @@ MIN_EV           = _cfg.get("min_ev", 0.10)
 MIN_PROB_EDGE    = _cfg.get("min_prob_edge", 0.08)
 MIN_MODEL_PROB   = _cfg.get("min_model_prob", 0.12)
 MAX_PRICE        = _cfg.get("max_price", 0.45)
+MIN_PRICE        = _cfg.get("min_price", 0.03)
 MIN_VOLUME       = _cfg.get("min_volume", 500)
 MIN_HOURS        = _cfg.get("min_hours", 2.0)
 MAX_HOURS        = _cfg.get("max_hours", 72.0)
@@ -892,6 +893,7 @@ def scan_and_update():
                         # Re-check slippage and price with real values
                         if (
                             real_spread > MAX_SLIPPAGE
+                            or real_ask < MIN_PRICE
                             or real_ask >= MAX_PRICE
                             or real_ev < MIN_EV
                             or real_prob_edge < MIN_PROB_EDGE

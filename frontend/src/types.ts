@@ -57,15 +57,21 @@ export interface Signal {
 export interface Trade {
   id: number
   market_ticker: string
+  market_title?: string | null
   platform: string
   event_slug?: string | null
+  event_url?: string | null
   direction: string
   entry_price: number
+  exit_price?: number | null
   size: number
+  shares?: number | null
   timestamp: string
   settled: boolean
   result: string
   pnl: number | null
+  close_reason?: string | null
+  source?: string | null
 }
 
 export interface BotStats {

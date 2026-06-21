@@ -59,6 +59,7 @@ class V3Config:
     live_daily_loss_limit: float
     live_max_drawdown_pct: float
     max_price: float
+    min_price: float
     max_slippage: float
     orderbook_max_age_minutes: float
     default_order_min_size: float
@@ -90,10 +91,10 @@ def load_config() -> V3Config:
         live_daily_loss_limit=_float(get("LIVE_DAILY_LOSS_LIMIT", 5.0), 5.0),
         live_max_drawdown_pct=_float(get("LIVE_MAX_DRAWDOWN_PCT", 0.15), 0.15),
         max_price=_float(get("MAX_PRICE", file_cfg.get("max_price", 0.45)), 0.45),
+        min_price=_float(get("MIN_PRICE", file_cfg.get("min_price", 0.03)), 0.03),
         max_slippage=_float(get("MAX_SLIPPAGE", file_cfg.get("max_slippage", 0.03)), 0.03),
         orderbook_max_age_minutes=_float(get("ORDERBOOK_MAX_AGE_MINUTES", 10.0), 10.0),
         default_order_min_size=_float(get("DEFAULT_ORDER_MIN_SIZE", 5.0), 5.0),
         default_tick_size=_float(get("DEFAULT_TICK_SIZE", 0.01), 0.01),
         v3_db_path=Path(str(get("V3_DB_PATH", DATA_DIR / "weatherbot_v3.db"))),
     )
-

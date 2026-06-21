@@ -124,7 +124,12 @@ def _event_slug_from_url(url):
 def _clean_text(value):
     if value is None:
         return value
-    return str(value).replace("Â°F", "°F").replace("Â°C", "°C").replace("Â°", "°")
+    return (
+        str(value)
+        .replace("\u00c2\u00b0F", "\u00b0F")
+        .replace("\u00c2\u00b0C", "\u00b0C")
+        .replace("\u00c2\u00b0", "\u00b0")
+    )
 
 
 def _repair_display_text(value):
@@ -718,6 +723,12 @@ def build_dashboard_payload():
                     "market_ticker": pos.get("market_id", ""),
                     "platform": "polymarket",
                     "event_slug": _event_slug_from_url(event_url) or pos.get("question", ""),
+                    "event_url": event_url,
+                    "market_title": _clean_text(pos.get("question")),
+                    "shares": pos.get("shares"),
+                    "close_reason": pos.get("close_reason"),
+                    "exit_price": pos.get("exit_price"),
+                    "source": pos.get("forecast_src"),
                     "direction": "yes",
                     "entry_price": pos.get("entry_price") or 0,
                     "size": pos.get("cost") or 0,
@@ -799,6 +810,12 @@ def build_dashboard_payload():
                 "market_ticker": signal.get("market_id") or "",
                 "platform": "polymarket",
                 "event_slug": _event_slug_from_url(signal.get("event_url")) or _clean_text(signal.get("question", "")),
+                "event_url": signal.get("event_url"),
+                "market_title": _clean_text(signal.get("question", "")),
+                "shares": signal.get("shares"),
+                "close_reason": None,
+                "exit_price": None,
+                "source": signal.get("forecast_src"),
                 "direction": "yes",
                 "entry_price": signal.get("limit_price") or 0,
                 "size": display_amount or 0,
@@ -830,8 +847,12 @@ def build_dashboard_payload():
     settled_trades = [t for t in combined_trades if t.get("result") in ("win", "loss")]
     open_trade_count = len([t for t in combined_trades if t.get("result") == "pending"])
     reserved_capital = round(sum(float(t.get("size") or 0) for t in combined_trades if t.get("result") == "pending"), 2)
-    equity = round(cash_balance + reserved_capital, 2)
-    total_pnl = round(equity - starting, 2)
+    # Treat pending stake as capital at risk, not profit. The old display added
+    # cash + reserved stake and made freshly opened positions look like gains.
+    realized_pnl = round(sum(float(t.get("pnl") or 0) for t in combined_trades if t.get("pnl") is not None), 2)
+    total_pnl = realized_pnl
+    equity = round(starting + realized_pnl, 2)
+    cash_balance = round(max(0.0, equity - reserved_capital), 2)
     wins = len([t for t in settled_trades if t.get("result") == "win"])
     total_with_outcome = len(settled_trades)
     brier_values = []

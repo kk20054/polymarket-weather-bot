@@ -5,6 +5,7 @@
   "min_prob_edge": 0.08,
   "min_model_prob": 0.12,
   "max_price": 0.45,
+  "min_price": 0.03,
   "min_volume": 500,
   "min_hours": 2.0,
   "max_hours": 72.0,

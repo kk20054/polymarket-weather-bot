@@ -75,6 +75,8 @@ def validate_order_constraints(quote: MarketQuote, amount: float, limit_price: f
         errors.append("invalid_best_ask")
     if quote.best_ask > cfg.max_price:
         errors.append("ask_above_max_price")
+    if quote.best_ask < cfg.min_price:
+        errors.append("ask_below_min_price")
     if quote.spread > cfg.max_slippage:
         errors.append("spread_above_max_slippage")
     if not price_matches_tick(limit_price, quote.tick_size):
@@ -122,4 +124,3 @@ def _to_float(value: Any, default: float) -> float:
         return float(value)
     except Exception:
         return default
-

@@ -19,7 +19,7 @@ export function StatsCards({ stats }: Props) {
       <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
         <span className="text-[10px] text-neutral-600 uppercase">资金</span>
         <span className="text-sm font-semibold tabular-nums text-neutral-100">
-          ${stats.bankroll >= 1000 ? (stats.bankroll / 1000).toFixed(1) + 'K' : stats.bankroll.toFixed(0)}
+          ${stats.bankroll >= 1000 ? (stats.bankroll / 1000).toFixed(1) + 'K' : stats.bankroll.toFixed(2)}
         </span>
       </motion.div>
 
@@ -28,7 +28,7 @@ export function StatsCards({ stats }: Props) {
       <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.05 }}>
         <span className="text-[10px] text-neutral-600 uppercase">盈亏</span>
         <span className={`text-sm font-semibold tabular-nums ${stats.total_pnl >= 0 ? 'text-green-500 glow-green' : 'text-red-500 glow-red'}`}>
-          {stats.total_pnl >= 0 ? '+' : '-'}${Math.abs(stats.total_pnl).toFixed(0)}
+          {stats.total_pnl >= 0 ? '+' : '-'}${Math.abs(stats.total_pnl).toFixed(2)}
         </span>
         <span className={`text-[10px] tabular-nums ${returnPercent >= 0 ? 'text-green-500/60' : 'text-red-500/60'}`}>
           {returnPercent >= 0 ? '+' : ''}{returnPercent.toFixed(1)}%
