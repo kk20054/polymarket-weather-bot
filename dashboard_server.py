@@ -116,6 +116,20 @@ def _clean_text(value):
     return str(value).replace("Â°F", "°F").replace("Â°C", "°C").replace("Â°", "°")
 
 
+def _repair_display_text(value):
+    """Repair old mojibake strings at the API boundary without rewriting history."""
+    if value is None:
+        return value
+    text = str(value)
+    try:
+        repaired = text.encode("latin1").decode("utf-8")
+    except UnicodeError:
+        return _clean_text(text)
+    if any(ch in text for ch in ("Ã", "Â", "æ", "ç", "å", "è", "é")):
+        return _clean_text(repaired)
+    return _clean_text(text)
+
+
 def _today_str():
     return datetime.now().date().isoformat()
 
@@ -331,7 +345,7 @@ def _event_to_payload(event):
         "id": event.get("id"),
         "timestamp": event.get("created_at"),
         "type": event.get("event_type"),
-        "message": event.get("message"),
+        "message": _repair_display_text(event.get("message")),
         "data": json.loads(event.get("raw_json") or "{}"),
     }
 

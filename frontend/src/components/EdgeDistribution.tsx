@@ -8,6 +8,7 @@ interface Props {
 }
 
 const BUCKETS = ['0-25%', '25-50%', '50-100%', '100-200%', '200-500%', '500%+']
+const EXPLAINER = 'BTC 是比特币信号，天气(WX) 是 weather 信号；P 是模型胜率。EV收益 = 模型胜率 / 买入价 - 1。'
 
 function getBucket(edge: number): string {
   const pct = Math.abs(edge) * 100
@@ -62,8 +63,9 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
   const activeBuckets = data.filter(row => row.BTC + row.Weather > 0).length
   if (total === 0) {
     return (
-      <div className="h-full flex items-center justify-center text-neutral-600 text-[10px]">
-        暂无可统计信号
+      <div className="h-full flex flex-col items-center justify-center text-neutral-600 text-[10px] px-3 text-center leading-relaxed">
+        <div>暂无可统计信号</div>
+        <div className="mt-2 text-[9px]">{EXPLAINER}</div>
       </div>
     )
   }
@@ -89,8 +91,7 @@ export function EdgeDistribution({ btcSignals, weatherSignals }: Props) {
         </div>
       </div>
       <div className="px-1 pb-1 text-[9px] text-neutral-600">
-        BTC 是比特币信号，天气(WX) 是 weather 信号；P 是模型胜率。
-        EV收益 = 模型胜率 / 买入价 - 1；
+        {EXPLAINER}
         当前信号分布在 {activeBuckets} 个档位，若只见一根柱，说明信号集中或前端未刷新。
       </div>
       <div className="flex-1 min-h-0">
