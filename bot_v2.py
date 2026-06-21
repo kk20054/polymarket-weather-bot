@@ -674,8 +674,9 @@ def scan_and_update():
                     continue
                 try:
                     prices = json.loads(market.get("outcomePrices", "[0.5,0.5]"))
-                    bid = float(prices[0])
-                    ask = float(prices[1]) if len(prices) > 1 else bid
+                    yes_price = float(prices[0])
+                    bid = float(market.get("bestBid") or yes_price)
+                    ask = float(market.get("bestAsk") or yes_price)
                 except Exception:
                     continue
                 clob_token_ids = parse_json_list(market.get("clobTokenIds", "[]"))
