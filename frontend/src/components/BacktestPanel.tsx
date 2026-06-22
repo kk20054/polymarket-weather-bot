@@ -34,21 +34,59 @@ function sliceName(name: string) {
     case 'price_above_max': return '价格高于 45c'
     case 'spread_above_limit': return 'spread 过宽'
     case 'spread_missing': return '缺 spread'
+    case 'all_completed': return '全部仓位'
+    case 'current_gate_allowed': return '当前允许组'
+    case 'price_3_45c': return '3-45c'
+    case 'price_10_45c': return '10-45c'
+    case 'price_10_25c': return '10-25c'
+    case 'not_fit_missing': return '排除缺拟合'
+    case 'gate_allowed_10_45c': return '允许组 + 10-45c'
+    case 'gate_allowed_fit_ok': return '允许组 + 拟合可用'
+    case 'gate_allowed_fit_ok_10_45c': return '允许组 + 拟合可用 + 10-45c'
     default: return name
   }
 }
 
-function SliceRow({ row }: { row: BacktestRiskSlice }) {
+function warnLabel(warning: string) {
+  switch (warning) {
+    case 'settled_sample_missing': return '无结算样本'
+    case 'sample_low': return '样本少'
+    case 'pnl_negative': return '亏损'
+    case 'roi_negative': return 'ROI 负'
+    case 'win_rate_low': return '胜率低'
+    default: return warning
+  }
+}
+
+function SliceRow({ row, showRoi = false }: { row: BacktestRiskSlice; showRoi?: boolean }) {
   return (
     <div className="grid grid-cols-[1fr_36px_48px_52px] items-center gap-1">
       <span className="truncate text-neutral-400" title={row.name}>{sliceName(row.name)}</span>
       <span className="text-right tabular-nums text-neutral-500">{row.resolved}/{row.count}</span>
       <span className={`text-right tabular-nums ${row.win_rate >= 0.55 ? 'text-green-500' : row.resolved ? 'text-red-500' : 'text-neutral-600'}`}>
-        {row.resolved ? pct(row.win_rate) : '--'}
+        {showRoi ? pct(row.roi) : row.resolved ? pct(row.win_rate) : '--'}
       </span>
       <span className={`text-right tabular-nums ${row.pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
         {money(row.pnl)}
       </span>
+    </div>
+  )
+}
+
+function PolicyCandidateRow({ row }: { row: BacktestRiskSlice }) {
+  const warnings = row.warnings ?? []
+  return (
+    <div className="space-y-0.5 border-b border-neutral-900 pb-1 last:border-b-0">
+      <div className="grid grid-cols-[1fr_38px_48px_52px] items-center gap-1">
+        <span className="truncate text-neutral-300" title={row.description || row.name}>{sliceName(row.name)}</span>
+        <span className="text-right tabular-nums text-neutral-500">{row.resolved}/{row.count}</span>
+        <span className={`text-right tabular-nums ${row.roi >= 0 ? 'text-green-500' : 'text-red-500'}`}>{pct(row.roi)}</span>
+        <span className={`text-right tabular-nums ${row.pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>{money(row.pnl)}</span>
+      </div>
+      <div className="flex items-center justify-between gap-2 text-[9px] text-neutral-600">
+        <span className="truncate">{row.description}</span>
+        {warnings.length > 0 && <span className="shrink-0 text-amber-500/80">{warnings.map(warnLabel).join('、')}</span>}
+      </div>
     </div>
   )
 }
@@ -75,6 +113,7 @@ export function BacktestPanel({ backtest, onOpenFit }: Props) {
   const priceRows = (backtest.risk_slices ?? []).filter(row => row.kind === 'price_bucket')
   const fitRows = (backtest.risk_slices ?? []).filter(row => row.kind === 'fit_band')
   const blockerRows = (backtest.block_reasons ?? []).slice(0, 4)
+  const policyRows = (backtest.policy_candidates ?? []).slice(0, 5)
 
   return (
     <div className="h-full space-y-2 overflow-y-auto p-2 text-[10px] text-neutral-500">
@@ -145,8 +184,15 @@ export function BacktestPanel({ backtest, onOpenFit }: Props) {
       )}
 
       <div className="space-y-1 border-t border-neutral-800 pt-1">
+        <div className="text-neutral-600">规则候选</div>
+        {policyRows.length === 0 ? (
+          <div className="text-neutral-700">暂无候选规则</div>
+        ) : policyRows.map(row => <PolicyCandidateRow key={row.name} row={row} />)}
+      </div>
+
+      <div className="space-y-1 border-t border-neutral-800 pt-1">
         <div className="text-neutral-600">价格桶表现</div>
-        {priceRows.slice(0, 5).map(row => <SliceRow key={`${row.kind}-${row.name}`} row={row} />)}
+        {priceRows.slice(0, 5).map(row => <SliceRow key={`${row.kind}-${row.name}`} row={row} showRoi />)}
       </div>
 
       <div className="space-y-1 border-t border-neutral-800 pt-1">

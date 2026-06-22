@@ -613,6 +613,85 @@ def _slice_row(name, records, kind):
     }
 
 
+def _policy_candidate_row(name, description, records):
+    row = _slice_row(name, records, "policy_candidate")
+    resolved = int(row.get("resolved") or 0)
+    roi = float(row.get("roi") or 0)
+    sample_factor = min(1.0, resolved / 20) if resolved else 0.0
+    warnings = []
+    if resolved == 0:
+        warnings.append("settled_sample_missing")
+    if resolved < 20:
+        warnings.append("sample_low")
+    if row["pnl"] <= 0:
+        warnings.append("pnl_negative")
+    if roi <= 0:
+        warnings.append("roi_negative")
+    if row["win_rate"] < 0.52:
+        warnings.append("win_rate_low")
+    row.update({
+        "description": description,
+        "score": round((roi * sample_factor) if resolved else -999.0, 4),
+        "warnings": warnings,
+    })
+    return row
+
+
+def _build_policy_candidates(completed):
+    def price_between(low=None, high=None):
+        def _inner(record):
+            price = float(record.get("entry_price") or 0)
+            if low is not None and price < low:
+                return False
+            if high is not None and price > high:
+                return False
+            return True
+        return _inner
+
+    candidates = [
+        ("all_completed", "全部已完成仓位基线", lambda r: True),
+        ("current_gate_allowed", "当前风控允许组", lambda r: bool(r.get("live_allowed_replay"))),
+        ("price_3_45c", "只做 3-45c，排除极低价和高价", price_between(0.03, 0.45)),
+        ("price_10_45c", "只做 10-45c，压制低价虚高 EV", price_between(0.10, 0.45)),
+        ("price_10_25c", "只做 10-25c 中低价区间", price_between(0.10, 0.25)),
+        ("fit_ok", "只做城市拟合可用样本", lambda r: r.get("fit_band") == "fit_ok"),
+        ("not_fit_missing", "排除缺少城市拟合样本", lambda r: r.get("fit_band") != "fit_missing"),
+        (
+            "gate_allowed_10_45c",
+            "当前允许组 + 只做 10-45c",
+            lambda r: bool(r.get("live_allowed_replay")) and price_between(0.10, 0.45)(r),
+        ),
+        (
+            "gate_allowed_fit_ok",
+            "当前允许组 + 城市拟合可用",
+            lambda r: bool(r.get("live_allowed_replay")) and r.get("fit_band") == "fit_ok",
+        ),
+        (
+            "gate_allowed_fit_ok_10_45c",
+            "当前允许组 + 拟合可用 + 10-45c",
+            lambda r: bool(r.get("live_allowed_replay")) and r.get("fit_band") == "fit_ok" and price_between(0.10, 0.45)(r),
+        ),
+    ]
+
+    for source in sorted({r.get("source") for r in completed if r.get("source")}):
+        source_records = [r for r in completed if r.get("source") == source]
+        if len(source_records) >= 3:
+            candidates.append((f"source_{source}", f"只做 {source} 来源", lambda r, source=source: r.get("source") == source))
+
+    rows = []
+    seen = set()
+    for name, description, predicate in candidates:
+        group = [r for r in completed if predicate(r)]
+        if not group:
+            continue
+        key = tuple(sorted(r.get("market_id") or "" for r in group))
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(_policy_candidate_row(name, description, group))
+    return sorted(rows, key=lambda row: (row["resolved"] > 0, row["score"], row["pnl"], row["resolved"]), reverse=True)
+
+
 def _strategy_readiness(backtest):
     risk_slices = backtest.get("risk_slices") or []
     allowed = next((row for row in risk_slices if row.get("kind") == "gate" and row.get("name") == "gate_allowed"), {})
@@ -848,6 +927,7 @@ def _build_backtest_summary(markets):
         "sources": sorted(source_rows, key=lambda s: s["source"]),
         "risk_slices": sorted(slice_rows, key=lambda row: (row["kind"], row["name"])),
         "block_reasons": sorted(block_reason_rows, key=lambda row: row["pnl"]),
+        "policy_candidates": _build_policy_candidates(completed),
         "notes": [
             "本复盘基于本地保存的模拟/纸面仓位，不是逐分钟盘口回放。",
             "风控回放使用当前城市拟合与盘口门槛反推历史仓位会被允许还是拦截，用来验证规则方向。",

@@ -146,12 +146,15 @@ export interface BacktestSource {
 export interface BacktestRiskSlice {
   kind: string
   name: string
+  description?: string
   count: number
   resolved: number
   wins: number
   win_rate: number
   pnl: number
   roi: number
+  score?: number
+  warnings?: string[]
 }
 
 export interface BacktestSummary {
@@ -171,6 +174,7 @@ export interface BacktestSummary {
   sources: BacktestSource[]
   risk_slices?: BacktestRiskSlice[]
   block_reasons?: BacktestRiskSlice[]
+  policy_candidates?: BacktestRiskSlice[]
   strategy_readiness?: {
     live_ready: boolean
     status: 'ready' | 'watch' | 'blocked'
