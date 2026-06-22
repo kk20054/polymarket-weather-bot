@@ -24,9 +24,15 @@ interface UnifiedSignal {
   platform: string
   direction: string
   edge: number
+  rawEdge?: number | null
+  calibratedEdge?: number | null
   probabilityEdge?: number
   modelProb: number
+  rawModelProb?: number | null
+  calibratedProb?: number | null
   marketProb: number
+  calibratedSigmaF?: number | null
+  calibrationBiasF?: number | null
   confidence: number
   suggestedSize: number
   reasoning: string
@@ -84,6 +90,20 @@ function EdgeBar({ edge }: { edge: number }) {
 function shortToken(token?: string) {
   if (!token) return ''
   return `${token.slice(0, 6)}...${token.slice(-4)}`
+}
+
+function isNum(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function pct(value?: number | null, signed = false) {
+  if (!isNum(value)) return '--'
+  return `${signed && value > 0 ? '+' : ''}${(value * 100).toFixed(1)}%`
+}
+
+function cents(value?: number | null) {
+  if (!isNum(value)) return '--'
+  return `${(value * 100).toFixed(1)}c`
 }
 
 function statusLabel(status?: string) {
@@ -170,10 +190,16 @@ export function SignalsTable({
       title: signal.question || `${signal.city_name} ${signal.bucket_label || `${signal.threshold_f}F`}`,
       platform: signal.platform || 'polymarket',
       direction: signal.direction,
-      edge: signal.edge,
+      edge: signal.edge ?? 0,
+      rawEdge: signal.raw_edge,
+      calibratedEdge: signal.calibrated_edge,
       probabilityEdge: signal.probability_edge,
-      modelProb: signal.model_probability,
-      marketProb: signal.market_probability,
+      modelProb: signal.model_probability ?? 0,
+      rawModelProb: signal.raw_model_probability,
+      calibratedProb: signal.calibrated_probability,
+      marketProb: signal.market_probability ?? 0,
+      calibratedSigmaF: signal.calibrated_sigma_f,
+      calibrationBiasF: signal.calibration_bias_f,
       confidence: signal.confidence,
       suggestedSize: signal.suggested_size,
       reasoning: signal.reasoning,
@@ -257,7 +283,7 @@ export function SignalsTable({
           <th className="px-1.5 py-1.5 font-medium">信号</th>
           <th className="w-16 cursor-pointer px-1.5 py-1.5 text-right font-medium hover:text-neutral-400" onClick={() => handleSort('edge')}>
             <div className="flex items-center justify-end gap-0.5">
-              EV <SortIcon column="edge" />
+              校准EV <SortIcon column="edge" />
             </div>
           </th>
           <th className="w-16 cursor-pointer px-1.5 py-1.5 text-right font-medium hover:text-neutral-400" onClick={() => handleSort('strategy_score')}>
@@ -307,7 +333,7 @@ export function SignalsTable({
                     {sig.title}
                   </span>
                   <span className="mt-0.5 block text-[9px] text-neutral-600">
-                    {statusLabel(status)} · {sig.direction.toUpperCase()} · 限价 {sig.limitPrice ? `${(sig.limitPrice * 100).toFixed(1)}c` : `${(sig.marketProb * 100).toFixed(1)}c`}
+                    {statusLabel(status)} · {sig.direction.toUpperCase()} · 限价 {sig.limitPrice ? cents(sig.limitPrice) : cents(sig.marketProb)}
                     {sig.paperPosition ? ' · 已有纸面仓位' : ''}
                   </span>
                   {sig.token && <span className="block text-[9px] text-neutral-700">{shortToken(sig.token)}</span>}
@@ -315,19 +341,29 @@ export function SignalsTable({
                     <div className="mt-1 space-y-1 text-[10px] leading-relaxed text-neutral-500">
                       <div>{sig.reasoning}</div>
                       <div>
-                        模型P {(sig.modelProb * 100).toFixed(1)}% / 市场P {(sig.marketProb * 100).toFixed(1)}% / 概率差 {sig.probabilityEdge !== undefined ? `${sig.probabilityEdge > 0 ? '+' : ''}${(sig.probabilityEdge * 100).toFixed(1)}%` : '--'} / EV {sig.edge > 0 ? '+' : ''}{(sig.edge * 100).toFixed(1)}%
+                        模型P {pct(sig.modelProb)} / 市场P {pct(sig.marketProb)} / 概率差 {pct(sig.probabilityEdge, true)} / EV {pct(sig.edge, true)}
                       </div>
+                      {(sig.calibratedSigmaF !== undefined || sig.rawEdge !== undefined) && (
+                        <div className="border-l border-amber-500/30 pl-2 text-amber-200/80">
+                          校准：P {pct(sig.calibratedProb ?? sig.modelProb)}
+                          {' / '}EV {pct(sig.calibratedEdge ?? sig.edge, true)}
+                          {isNum(sig.rawModelProb) ? ` / 原始P ${pct(sig.rawModelProb)}` : ''}
+                          {isNum(sig.rawEdge) ? ` / 原始EV ${pct(sig.rawEdge, true)}` : ''}
+                          {isNum(sig.calibratedSigmaF) ? ` / sigma ${sig.calibratedSigmaF.toFixed(2)}F` : ''}
+                          {isNum(sig.calibrationBiasF) ? ` / bias ${sig.calibrationBiasF >= 0 ? '+' : ''}${sig.calibrationBiasF.toFixed(2)}F` : ''}
+                        </div>
+                      )}
                       {sig.bidPrice !== undefined && sig.spread !== undefined && (
-                        <div>Bid/Ask {((sig.bidPrice || 0) * 100).toFixed(1)}c / {((sig.limitPrice || 0) * 100).toFixed(1)}c · spread {(sig.spread * 100).toFixed(1)}c</div>
+                        <div>Bid/Ask {cents(sig.bidPrice)} / {cents(sig.limitPrice)} · spread {cents(sig.spread)}</div>
                       )}
                       <div className="border-l border-neutral-800 pl-2">
-                        拟合质量：样本 {sig.fitSamples ?? 0} / MAE {sig.fitMaeF !== undefined ? `${sig.fitMaeF.toFixed(1)}F` : '--'} / Bias {sig.fitBiasF !== undefined ? `${sig.fitBiasF.toFixed(1)}F` : '--'}
+                        拟合质量：样本 {sig.fitSamples ?? 0} / MAE {isNum(sig.fitMaeF) ? `${sig.fitMaeF.toFixed(1)}F` : '--'} / Bias {isNum(sig.fitBiasF) ? `${sig.fitBiasF.toFixed(1)}F` : '--'}
                         {flags.length ? ` / 提示 ${flags.map(flagLabel).join('、')}` : ' / 暂无硬风险提示'}
                       </div>
                       <div className="border-l border-cyan-500/30 pl-2">
                         <div>
-                          策略诊断：分数 {sig.strategyScore !== undefined ? sig.strategyScore.toFixed(2) : '--'} / {(sig.strategyTags ?? []).map(strategyLabel).join('、') || '普通 EV'}
-                          {sig.dispersionRatio ? ` / 离散度比 ${sig.dispersionRatio.toFixed(2)}` : ''}
+                          策略诊断：分数 {isNum(sig.strategyScore) ? sig.strategyScore.toFixed(2) : '--'} / {(sig.strategyTags ?? []).map(strategyLabel).join('、') || '普通 EV'}
+                          {isNum(sig.dispersionRatio) ? ` / 离散度比 ${sig.dispersionRatio.toFixed(2)}` : ''}
                         </div>
                         {sig.nearLock && (
                           <div>
@@ -349,7 +385,7 @@ export function SignalsTable({
                 </td>
                 <td className="px-1.5 py-1 text-right align-top">
                   <span className={`font-semibold tabular-nums ${sig.edge > 0 ? 'text-green-500' : sig.edge < 0 ? 'text-red-500' : 'text-neutral-600'}`}>
-                    {sig.edge === 0 ? '-' : `${sig.edge > 0 ? '+' : ''}${(sig.edge * 100).toFixed(1)}%`}
+                    {isNum(sig.edge) && sig.edge !== 0 ? pct(sig.edge, true) : '-'}
                   </span>
                   <EdgeBar edge={sig.edge} />
                 </td>
@@ -360,7 +396,7 @@ export function SignalsTable({
                     {liveGateText(sig)}
                   </span>
                   <div className="text-[9px] text-neutral-600">
-                    {sig.strategyScore !== undefined ? sig.strategyScore.toFixed(2) : '--'}
+                    {isNum(sig.strategyScore) ? sig.strategyScore.toFixed(2) : '--'}
                   </div>
                 </td>
                 <td className="px-1.5 py-1 text-right align-top tabular-nums text-blue-400">
@@ -373,7 +409,7 @@ export function SignalsTable({
                     onChange={event => setSimAmounts(prev => ({ ...prev, [sig.key]: event.target.value }))}
                     className="w-14 border border-neutral-800 bg-black px-1 py-0.5 text-right text-[10px] text-blue-300"
                   />
-                  {sig.shares ? <div className="text-[9px] text-neutral-600">{sig.shares.toFixed(2)} sh</div> : null}
+                  {isNum(sig.shares) && sig.shares > 0 ? <div className="text-[9px] text-neutral-600">{sig.shares.toFixed(2)} sh</div> : null}
                   <div className="mt-1 flex items-center justify-end gap-1">
                     {sig.eventUrl && (
                       <a

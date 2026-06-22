@@ -42,6 +42,12 @@ export interface Signal {
   market_probability: number
   probability_edge?: number
   edge: number
+  raw_model_probability?: number | null
+  raw_edge?: number | null
+  calibrated_probability?: number | null
+  calibrated_edge?: number | null
+  calibrated_sigma_f?: number | null
+  calibration_bias_f?: number | null
   confidence: number
   suggested_size: number
   reasoning: string
@@ -288,6 +294,12 @@ export interface WeatherSignal {
   market_probability: number
   probability_edge?: number
   edge: number
+  raw_model_probability?: number | null
+  raw_edge?: number | null
+  calibrated_probability?: number | null
+  calibrated_edge?: number | null
+  calibrated_sigma_f?: number | null
+  calibration_bias_f?: number | null
   confidence: number
   suggested_size: number
   reasoning: string

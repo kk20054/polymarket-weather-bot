@@ -8,6 +8,7 @@ from weatherbot_v3.db import connect, init_v3_db
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import quote_from_market_payload, validate_order_constraints
 from dashboard_server import _augment_strategy_replay_record, _bucket_probability_f, _bucket_value_in_range, _entry_snapshot_features
+from bot_v2 import bucket_prob, calibrated_bucket_probability
 
 
 TEST_DB_DIR = Path(__file__).resolve().parents[1] / ".tmp-tests"
@@ -125,6 +126,26 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(record["calibrated_sigma_f"], 4.0)
         self.assertLess(record["calibrated_probability"], round(narrow, 4))
         self.assertIn("calibrated_ev", record)
+
+    def test_scanner_uses_calibrated_sigma_for_signal_probability(self):
+        raw = bucket_prob(70, 70, 71, 2.0)
+        calibration = {
+            "cities": {"seattle": {"samples": 20, "mae_f": 4.0, "bias_f": 0.0, "rmse_f": 4.5}},
+            "sources": {"GFS_ENSEMBLE": {"samples": 20, "mae_f": 3.5, "bias_f": 0.0, "rmse_f": 4.0}},
+        }
+        calibrated = calibrated_bucket_probability(
+            "seattle",
+            "gfs_ensemble",
+            70,
+            70,
+            71,
+            "F",
+            0.6,
+            calibration,
+        )
+        self.assertEqual(calibrated["sigma_f"], 4.0)
+        self.assertLess(calibrated["p"], raw)
+        self.assertEqual(calibrated["city_fit_samples"], 20)
 
 
 if __name__ == "__main__":

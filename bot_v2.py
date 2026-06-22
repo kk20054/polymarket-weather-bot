@@ -163,6 +163,100 @@ def bet_size(kelly, balance):
     raw = kelly * balance
     return round(min(raw, MAX_BET), 2)
 
+def native_to_f(value, unit):
+    if value is None:
+        return None
+    value = float(value)
+    return value * 9.0 / 5.0 + 32.0 if unit == "C" else value
+
+def delta_to_f(value, unit):
+    if value is None:
+        return None
+    value = float(value)
+    return value * 9.0 / 5.0 if unit == "C" else value
+
+def f_to_native(value, unit):
+    if value is None:
+        return None
+    value = float(value)
+    return (value - 32.0) * 5.0 / 9.0 if unit == "C" else value
+
+def calibration_metric(records):
+    if not records:
+        return {"samples": 0, "mae_f": 0.0, "bias_f": 0.0, "rmse_f": 0.0}
+    errors = [float(item) for item in records]
+    abs_errors = [abs(item) for item in errors]
+    return {
+        "samples": len(errors),
+        "mae_f": sum(abs_errors) / len(abs_errors),
+        "bias_f": sum(errors) / len(errors),
+        "rmse_f": (sum(item * item for item in errors) / len(errors)) ** 0.5,
+    }
+
+def build_signal_calibration(markets):
+    by_city = {}
+    by_source = {}
+    for market in markets:
+        actual = market.get("actual_temp")
+        if actual is None:
+            continue
+        unit = market.get("unit") or "F"
+        try:
+            actual_f = native_to_f(float(actual), unit)
+        except Exception:
+            continue
+        city = market.get("city") or ""
+        for snap in market.get("forecast_snapshots", []):
+            for source in ("best", "ecmwf", "hrrr", "metar"):
+                forecast = snap.get(source)
+                if forecast is None:
+                    continue
+                try:
+                    forecast_f = native_to_f(float(forecast), unit)
+                except Exception:
+                    continue
+                error_f = forecast_f - actual_f
+                if source == "best":
+                    by_city.setdefault(city, []).append(error_f)
+                    best_source = (snap.get("best_source") or "model_best").upper()
+                    by_source.setdefault(best_source, []).append(error_f)
+                else:
+                    by_source.setdefault(source.upper(), []).append(error_f)
+    return {
+        "cities": {city: calibration_metric(errors) for city, errors in by_city.items()},
+        "sources": {source: calibration_metric(errors) for source, errors in by_source.items()},
+    }
+
+def calibrated_bucket_probability(city_slug, source, forecast, t_low, t_high, unit, ensemble_std=None, calibration=None):
+    calibration = calibration or {}
+    city_fit = (calibration.get("cities") or {}).get(city_slug, {})
+    source_fit = (calibration.get("sources") or {}).get((source or "").upper(), {})
+    bias_f = float(city_fit.get("bias_f") or 0.0)
+    forecast_f = native_to_f(forecast, unit)
+    adjusted_f = forecast_f - bias_f
+    low_f = native_to_f(t_low, unit) if t_low != -999 else -999
+    high_f = native_to_f(t_high, unit) if t_high != 999 else 999
+    default_sigma_f = delta_to_f(SIGMA_C if unit == "C" else SIGMA_F, unit) or 2.0
+    sigma_candidates = [1.5, default_sigma_f]
+    if ensemble_std is not None:
+        sigma_candidates.append(delta_to_f(ensemble_std, unit) or 0.0)
+    if city_fit:
+        sigma_candidates.append(float(city_fit.get("mae_f") or 0.0))
+        sigma_candidates.append(float(city_fit.get("rmse_f") or 0.0) * 0.75)
+    if source_fit:
+        sigma_candidates.append(float(source_fit.get("mae_f") or 0.0))
+    sigma_f = max(sigma_candidates)
+    p = bucket_prob(adjusted_f, low_f, high_f, sigma_f)
+    return {
+        "p": clipped_probability(p),
+        "sigma_f": round(sigma_f, 3),
+        "forecast_f": round(forecast_f, 3),
+        "adjusted_forecast_f": round(adjusted_f, 3),
+        "bias_f": round(bias_f, 3),
+        "city_fit_samples": int(city_fit.get("samples") or 0),
+        "source_fit_samples": int(source_fit.get("samples") or 0),
+    }
+
 # =============================================================================
 # CALIBRATION
 # =============================================================================
@@ -471,6 +565,10 @@ def print_manual_order_instructions(signal, loc, date, horizon, bucket_label, ev
           f"forecast {signal['forecast_temp']}, EV {signal['ev']:+.2f}, source {forecast_src}")
     print(f"           Model:    P {signal.get('p', 0):.1%}, prob edge {signal.get('prob_edge', 0):+.1%}, "
           f"method {signal.get('prob_method', 'unknown')}")
+    if signal.get("calibrated_sigma_f") is not None:
+        print(f"           Calib:    sigma {signal.get('calibrated_sigma_f'):.2f}F, "
+              f"bias {signal.get('calibration_bias_f', 0):+.2f}F, "
+              f"raw EV {signal.get('raw_ev', 0):+.2f}, raw P {signal.get('raw_p', 0):.1%}")
     print(f"           Token:    YES {yes_token_id}")
     print("           Steps:    open URL -> choose this exact temperature market -> Buy Yes -> "
           "set limit/amount -> review -> submit")
@@ -626,6 +724,7 @@ def scan_and_update():
     new_pos  = 0
     closed   = 0
     resolved = 0
+    signal_calibration = build_signal_calibration(load_all_markets())
 
     for city_slug, loc in LOCATIONS.items():
         unit = loc["unit"]
@@ -822,19 +921,41 @@ def scan_and_update():
                             raw_p = bucket_prob_from_members(ensemble_members, t_low, t_high)
                             if raw_p is None:
                                 continue
-                            p = clipped_probability(raw_p)
-                            prob_method = "gfs_ensemble"
+                            raw_p = clipped_probability(raw_p)
+                            prob_method = "calibrated_gfs_ensemble"
                             signal_source = "gfs_ensemble"
                             signal_forecast_temp = ensemble_info.get("mean", forecast_temp)
-                            confidence = round(max(p, 1.0 - p), 4)
+                            calibration_info = calibrated_bucket_probability(
+                                city_slug,
+                                signal_source,
+                                signal_forecast_temp,
+                                t_low,
+                                t_high,
+                                unit,
+                                ensemble_info.get("std"),
+                                signal_calibration,
+                            )
                         else:
-                            p = bucket_prob(forecast_temp, t_low, t_high, sigma)
-                            prob_method = "normal_sigma"
+                            raw_p = clipped_probability(bucket_prob(forecast_temp, t_low, t_high, sigma))
+                            prob_method = "calibrated_normal_sigma"
                             signal_source = best_source
                             signal_forecast_temp = forecast_temp
-                            confidence = round(max(p, 1.0 - p), 4)
+                            calibration_info = calibrated_bucket_probability(
+                                city_slug,
+                                signal_source,
+                                signal_forecast_temp,
+                                t_low,
+                                t_high,
+                                unit,
+                                sigma,
+                                signal_calibration,
+                            )
+                        p = calibration_info["p"]
+                        raw_prob_edge = round(raw_p - ask, 4)
+                        raw_ev = calc_ev(raw_p, ask)
                         prob_edge = round(p - ask, 4)
                         ev = calc_ev(p, ask)
+                        confidence = round(max(p, 1.0 - p), 4)
                         if ev >= MIN_EV and prob_edge >= MIN_PROB_EDGE and p >= MIN_MODEL_PROB:
                             kelly = calc_kelly(p, ask)
                             size  = bet_size(kelly, balance)
@@ -855,6 +976,17 @@ def scan_and_update():
                                     "p":            round(p, 4),
                                     "prob_edge":    prob_edge,
                                     "ev":           round(ev, 4),
+                                    "raw_p":        round(raw_p, 4),
+                                    "raw_prob_edge": raw_prob_edge,
+                                    "raw_ev":       round(raw_ev, 4),
+                                    "calibrated_probability": round(p, 4),
+                                    "calibrated_prob_edge": prob_edge,
+                                    "calibrated_ev": round(ev, 4),
+                                    "calibrated_sigma_f": calibration_info.get("sigma_f"),
+                                    "bias_adjusted_forecast_f": calibration_info.get("adjusted_forecast_f"),
+                                    "calibration_bias_f": calibration_info.get("bias_f"),
+                                    "city_fit_samples": calibration_info.get("city_fit_samples"),
+                                    "source_fit_samples": calibration_info.get("source_fit_samples"),
                                     "kelly":        round(kelly, 4),
                                     "confidence":   confidence,
                                     "forecast_temp":signal_forecast_temp,
@@ -890,6 +1022,8 @@ def scan_and_update():
                         real_spread = round(real_ask - real_bid, 4)
                         real_ev = round(calc_ev(best_signal["p"], real_ask), 4)
                         real_prob_edge = round(best_signal["p"] - real_ask, 4)
+                        real_raw_ev = round(calc_ev(best_signal.get("raw_p", best_signal["p"]), real_ask), 4)
+                        real_raw_prob_edge = round(best_signal.get("raw_p", best_signal["p"]) - real_ask, 4)
                         # Re-check slippage and price with real values
                         if (
                             real_spread > MAX_SLIPPAGE
@@ -911,6 +1045,10 @@ def scan_and_update():
                             best_signal["shares"]       = round(best_signal["cost"] / real_ask, 2)
                             best_signal["ev"]           = real_ev
                             best_signal["prob_edge"]    = real_prob_edge
+                            best_signal["calibrated_ev"] = real_ev
+                            best_signal["calibrated_prob_edge"] = real_prob_edge
+                            best_signal["raw_ev"]       = real_raw_ev
+                            best_signal["raw_prob_edge"] = real_raw_prob_edge
                             real_tokens = parse_json_list(mdata.get("clobTokenIds", "[]"))
                             if len(real_tokens) > 0:
                                 best_signal["yes_token_id"] = str(real_tokens[0])
@@ -926,7 +1064,7 @@ def scan_and_update():
                         new_pos += 1
                         bucket_label = f"{best_signal['bucket_low']}-{best_signal['bucket_high']}{unit_sym}"
                         print(f"  [BUY]  {loc['name']} {horizon} {date} | {bucket_label} | "
-                              f"${best_signal['entry_price']:.3f} | EV {best_signal['ev']:+.2f} | "
+                              f"${best_signal['entry_price']:.3f} | Cal EV {best_signal['ev']:+.2f} | "
                               f"${best_signal['cost']:.2f} ({best_signal['forecast_src'].upper()})")
                         if MANUAL_ORDER_INSTRUCTIONS:
                             print_manual_order_instructions(best_signal, loc, date, horizon, bucket_label, event_url)

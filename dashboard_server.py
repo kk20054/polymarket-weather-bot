@@ -1487,6 +1487,63 @@ def _signal_diagnostics_payload(signal, raw_signal, fit_by_city, market_by_city_
     return fit, quality_flags, strategy, gate
 
 
+def _signal_calibration_payload(signal, raw_signal, fit, source_fit, market):
+    unit = (market or {}).get("unit") or ("F" if str(signal.get("bucket_label") or "").endswith("F") else "C")
+    low, high = _bucket_bounds(signal)
+    forecast = signal.get("forecast_temp") if signal.get("forecast_temp") is not None else raw_signal.get("forecast_temp")
+    price = float(signal.get("limit_price") or raw_signal.get("entry_price") or 0)
+    raw_p = raw_signal.get("raw_p")
+    if raw_p is None:
+        raw_p = signal.get("probability") if signal.get("probability") is not None else raw_signal.get("p")
+    raw_ev = raw_signal.get("raw_ev")
+    if raw_ev is None and raw_p is not None:
+        raw_ev = _calc_ev(raw_p, price)
+
+    try:
+        forecast_f = _native_to_f(float(forecast), unit)
+        low_f = -999 if low == -999 else _native_to_f(float(low), unit)
+        high_f = 999 if high == 999 else _native_to_f(float(high), unit)
+    except Exception:
+        return {
+            "raw_model_probability": raw_p,
+            "raw_edge": raw_ev,
+            "calibrated_probability": raw_signal.get("calibrated_probability") or signal.get("probability"),
+            "calibrated_edge": raw_signal.get("calibrated_ev") or signal.get("ev"),
+            "calibrated_sigma_f": raw_signal.get("calibrated_sigma_f"),
+            "calibration_bias_f": raw_signal.get("calibration_bias_f"),
+        }
+
+    bias_f = float((fit or {}).get("bias_f") or raw_signal.get("calibration_bias_f") or 0.0)
+    adjusted_f = forecast_f - bias_f
+    latest = _latest_snapshot(market or {}, "forecast_snapshots")
+    ensemble_std = raw_signal.get("ensemble_std")
+    if ensemble_std is None:
+        ensemble_std = latest.get("ensemble_std")
+    default_sigma_f = 2.16 if unit == "C" else 2.0
+    sigma_candidates = [1.5, default_sigma_f]
+    if ensemble_std is not None:
+        try:
+            sigma_candidates.append(float(_delta_to_f(float(ensemble_std), unit) or 0))
+        except Exception:
+            pass
+    if fit:
+        sigma_candidates.append(float(fit.get("mae_f") or 0))
+        sigma_candidates.append(float(fit.get("rmse_f") or 0) * 0.75)
+    if source_fit:
+        sigma_candidates.append(float(source_fit.get("mae_f") or 0))
+    sigma_f = max(sigma_candidates)
+    calibrated_p = _bucket_probability_f(adjusted_f, low_f, high_f, sigma_f)
+    calibrated_ev = _calc_ev(calibrated_p, price) if calibrated_p is not None else None
+    return {
+        "raw_model_probability": round(float(raw_p), 4) if raw_p is not None else None,
+        "raw_edge": round(float(raw_ev), 4) if raw_ev is not None else None,
+        "calibrated_probability": round(float(raw_signal.get("calibrated_probability") or calibrated_p or 0), 4) if calibrated_p is not None or raw_signal.get("calibrated_probability") is not None else None,
+        "calibrated_edge": round(float(raw_signal.get("calibrated_ev") or calibrated_ev or 0), 4) if calibrated_ev is not None or raw_signal.get("calibrated_ev") is not None else None,
+        "calibrated_sigma_f": round(float(raw_signal.get("calibrated_sigma_f") or sigma_f), 2),
+        "calibration_bias_f": round(float(raw_signal.get("calibration_bias_f") if raw_signal.get("calibration_bias_f") is not None else bias_f), 2),
+    }
+
+
 def build_dashboard_payload():
     init_db()
     markets = load_markets()
@@ -1502,6 +1559,7 @@ def build_dashboard_payload():
     weather_forecasts_by_city = {}
     temperature_fit = _build_temperature_fit(markets)
     fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
+    fit_by_source = {str(row.get("source") or "").upper(): row for row in temperature_fit.get("sources", [])}
     market_by_city_date = {
         (market.get("city"), market.get("date")): market
         for market in markets
@@ -1632,6 +1690,22 @@ def build_dashboard_payload():
             fit_by_city,
             market_by_city_date,
         )
+        market_for_signal = market_by_city_date.get((signal.get("city"), signal.get("date")), {})
+        source_key = str(signal.get("forecast_src") or raw_signal.get("forecast_src") or "").upper()
+        calibration_payload = _signal_calibration_payload(
+            signal,
+            raw_signal,
+            fit,
+            fit_by_source.get(source_key) or fit_by_source.get("MODEL_BEST"),
+            market_for_signal,
+        )
+        display_probability = calibration_payload.get("calibrated_probability")
+        if display_probability is None:
+            display_probability = model_probability
+        display_edge = calibration_payload.get("calibrated_edge")
+        if display_edge is None:
+            display_edge = signal.get("ev") or 0
+        display_probability_edge = (display_probability - limit_price) if display_probability is not None else probability_edge
         weather_signals.append({
             "id": signal.get("id"),
             "market_id": signal.get("market_id"),
@@ -1645,10 +1719,11 @@ def build_dashboard_payload():
             "threshold_f": threshold,
             "metric": "high",
             "direction": "yes",
-            "model_probability": model_probability,
+            "model_probability": display_probability,
             "market_probability": signal.get("limit_price") or 0,
-            "probability_edge": probability_edge,
-            "edge": signal.get("ev") or 0,
+            "probability_edge": display_probability_edge,
+            "edge": display_edge,
+            **calibration_payload,
             "confidence": raw_signal.get("confidence") or min(0.95, max(0.05, model_probability or 0.5)),
             "suggested_size": amount,
             "reasoning": (
