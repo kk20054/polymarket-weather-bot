@@ -337,6 +337,26 @@ export interface WeatherSignal {
   } | null
 }
 
+export interface BulkSimulateSkipExample {
+  id?: number
+  reason: string
+  city?: string | null
+  target_date?: string | null
+  title?: string | null
+  event_url?: string | null
+}
+
+export interface BulkSimulateResult {
+  ok: boolean
+  count: number
+  spent: number
+  remaining: number
+  total_current: number
+  skipped: number
+  reason_counts: Record<string, number>
+  examples: BulkSimulateSkipExample[]
+}
+
 export interface DashboardData {
   stats: BotStats
   v3?: V3Summary

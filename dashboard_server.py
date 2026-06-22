@@ -8,6 +8,7 @@ import math
 import os
 import subprocess
 import sys
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -189,6 +190,32 @@ def _repair_display_text(value):
 
 def _today_str():
     return datetime.now().date().isoformat()
+
+
+def _bulk_simulation_skip_reason(signal, dashboard_signal, today):
+    status = str(signal.get("status") or dashboard_signal.get("status") or "signal")
+    if (signal.get("date") or dashboard_signal.get("target_date") or "") < today:
+        return "expired_signal"
+    if status in ("skipped", "simulated", "bought"):
+        return f"already_{status}"
+    if bool(dashboard_signal.get("paper_position")):
+        return "already_paper_position"
+    if not bool(dashboard_signal.get("actionable", True)):
+        return "not_actionable"
+    try:
+        display_edge = float(dashboard_signal.get("edge") or 0)
+    except Exception:
+        display_edge = 0.0
+    if display_edge <= 0:
+        return "calibrated_ev_nonpositive"
+    pre_strategy_allowed = dashboard_signal.get("live_pre_strategy_allowed")
+    if pre_strategy_allowed is False:
+        reasons = dashboard_signal.get("live_block_reasons") or []
+        hard_reasons = [r for r in reasons if r != "strategy_not_ready"]
+        if hard_reasons:
+            return f"risk_gate:{hard_reasons[0]}"
+        return "risk_gate_blocked"
+    return None
 
 
 def _latest_market_update():
@@ -754,7 +781,9 @@ def _augment_strategy_replay_record(record, fit, source_fit=None):
         and float(record.get("entry_price") or 0) <= 0.14
     )
 
-    sigma_candidates = [1.5]
+    unit = record.get("unit") or "F"
+    default_sigma_f = 2.16 if unit == "C" else 2.0
+    sigma_candidates = [1.5, default_sigma_f]
     if record.get("entry_ensemble_std_f") is not None:
         sigma_candidates.append(float(record.get("entry_ensemble_std_f") or 0))
     if fit:
@@ -781,6 +810,8 @@ def _augment_strategy_replay_record(record, fit, source_fit=None):
         and calibrated_probability - entry_price >= 0.08
         and calibrated_ev >= 0.10
     )
+    record["city_fit_samples"] = int(fit.get("samples") or 0) if fit else 0
+    record["source_fit_samples"] = int(source_fit.get("samples") or 0) if source_fit else 0
     return record
 
 
@@ -834,6 +865,21 @@ def _build_policy_candidates(completed):
             if high is not None and price > high:
                 return False
             return True
+        return _inner
+
+    def calibrated_threshold(ev_min=0.10, edge_min=0.08, sample_min=0, price_low=0.10, price_high=0.45):
+        def _inner(record):
+            if not bool(record.get("live_allowed_replay")):
+                return False
+            if not price_between(price_low, price_high)(record):
+                return False
+            if int(record.get("city_fit_samples") or 0) < sample_min:
+                return False
+            ev = record.get("calibrated_ev")
+            edge = record.get("calibrated_prob_edge")
+            if ev is None or edge is None:
+                return False
+            return float(ev) >= ev_min and float(edge) >= edge_min
         return _inner
 
     candidates = [
@@ -900,6 +946,12 @@ def _build_policy_candidates(completed):
             lambda r: bool(r.get("live_allowed_replay")) and price_between(0.10, 0.45)(r) and bool(r.get("calibrated_positive_edge")),
         ),
     ]
+
+    for sample_min in (0, 5, 10, 20):
+        for ev_min, edge_min in ((0.10, 0.08), (0.25, 0.12), (0.50, 0.18)):
+            name = f"cal_ev{int(ev_min * 100)}_edge{int(edge_min * 100)}_s{sample_min}"
+            description = f"允许组 + 10-45c + 校准EV>={ev_min:.0%} + 概率差>={edge_min:.0%} + 城市样本>={sample_min}"
+            candidates.append((name, description, calibrated_threshold(ev_min, edge_min, sample_min)))
 
     for source in sorted({r.get("source") for r in completed if r.get("source")}):
         source_records = [r for r in completed if r.get("source") == source]
@@ -2087,42 +2139,102 @@ async def bulk_simulate_signals():
     today = _today_str()
     count = 0
     spent = 0.0
+    skipped = []
     state = _read_json(DATA_DIR / "state.json", {})
-    remaining = max(0.0, float(state.get("balance", state.get("starting_balance", 0)) or 0))
     simulation_start = _parse_iso(state.get("simulation_started_at"))
     opened_at = datetime.now(timezone.utc).isoformat()
+    dashboard = build_dashboard_payload()
+    remaining = max(
+        0.0,
+        float((dashboard.get("stats") or {}).get("cash_balance") or state.get("balance", state.get("starting_balance", 0)) or 0),
+    )
+    dashboard_by_id = {
+        int(s.get("id")): s
+        for s in dashboard.get("weather_signals", [])
+        if s.get("id") is not None
+    }
     current_signals = [
         s for s in list_signals(500)
         if (s.get("date") or "") >= today and not _is_dashboard_position_import(s)
     ]
+
+    def skip(signal, reason):
+        skipped.append({
+            "id": signal.get("id"),
+            "reason": reason,
+            "city": _clean_text(signal.get("city_name") or signal.get("city")),
+            "target_date": signal.get("date"),
+            "title": _clean_text(signal.get("question")),
+            "event_url": signal.get("event_url"),
+        })
+
+    def sort_edge(signal):
+        try:
+            signal_id = int(signal.get("id") or 0)
+            return float((dashboard_by_id.get(signal_id) or {}).get("edge") or signal.get("ev") or 0)
+        except Exception:
+            return 0.0
+
     candidates = sorted(
-        [s for s in current_signals if s.get("status") not in ("skipped", "simulated", "bought")],
-        key=lambda s: float(s.get("ev") or 0),
+        current_signals,
+        key=sort_edge,
         reverse=True,
     )
     for signal in candidates:
-        if (signal.get("date") or "") < today:
+        signal_id = int(signal.get("id") or 0)
+        dashboard_signal = dashboard_by_id.get(signal_id) or {}
+        reason = _bulk_simulation_skip_reason(signal, dashboard_signal, today)
+        if reason:
+            skip(signal, reason)
             continue
-        requested = float(signal.get("sim_amount") or signal.get("amount") or 0)
-        if requested <= 0 or remaining <= 0:
+        requested = float(
+            signal.get("sim_amount")
+            or dashboard_signal.get("suggested_size")
+            or signal.get("amount")
+            or 0
+        )
+        if requested <= 0:
+            skip(signal, "no_requested_amount")
+            continue
+        if remaining <= 0:
+            skip(signal, "no_simulation_cash")
             break
         amount = min(requested, remaining)
         result = PaperExecutor().place_order(signal, amount)
         if not result.ok:
             update_signal_status(signal["id"], "skipped", f"v3 paper rejected: {result.reason}", amount)
+            skip(signal, f"paper_rejected:{result.reason or 'unknown'}")
             continue
         if not _open_paper_position(signal, amount, simulation_start, opened_at):
+            skip(signal, "position_write_failed")
             continue
         update_signal_status(signal["id"], "simulated", f"Bulk paper amount ${amount:.2f}", amount)
         count += 1
         spent += amount
         remaining -= amount
     if spent > 0:
-        state["balance"] = round(max(0.0, float(state.get("balance", 0) or 0) - spent), 2)
+        state["balance"] = round(max(0.0, remaining), 2)
         state["total_trades"] = int(state.get("total_trades", 0) or 0) + count
         _write_json(DATA_DIR / "state.json", state)
-    log_event("success", f"一键模拟买入 {count} 条当前信号，用额 ${spent:.2f}，剩余额度 ${remaining:.2f}")
-    return {"ok": True, "count": count, "spent": round(spent, 2), "remaining": round(remaining, 2)}
+    reason_counts = dict(Counter(item["reason"] for item in skipped))
+    reason_summary = ", ".join(f"{key}={value}" for key, value in sorted(reason_counts.items()))
+    message = (
+        f"One-click paper simulate: bought {count}, skipped {len(skipped)}, "
+        f"spent ${spent:.2f}, remaining ${remaining:.2f}"
+    )
+    if reason_summary:
+        message += f"; reasons: {reason_summary}"
+    payload = {
+        "count": count,
+        "spent": round(spent, 2),
+        "remaining": round(remaining, 2),
+        "total_current": len(current_signals),
+        "skipped": len(skipped),
+        "reason_counts": reason_counts,
+        "examples": skipped[:10],
+    }
+    log_event("success" if count else "warning", message, payload)
+    return {"ok": True, **payload}
 
 
 @app.post("/api/signals/{signal_id}/status")

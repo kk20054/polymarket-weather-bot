@@ -15,6 +15,10 @@ function money(value: number) {
 }
 
 function sliceName(name: string) {
+  const calibratedMatch = name.match(/^cal_ev(\d+)_edge(\d+)_s(\d+)$/)
+  if (calibratedMatch) {
+    return `校准EV${calibratedMatch[1]} / 差${calibratedMatch[2]} / 样本${calibratedMatch[3]}`
+  }
   switch (name) {
     case 'gate_allowed': return '规则允许'
     case 'gate_blocked': return '规则拦截'
@@ -126,6 +130,7 @@ export function BacktestPanel({ backtest, onOpenFit }: Props) {
   const policyRows = [
     ...policyCandidates.slice(0, 6),
     ...policyCandidates.filter(row => mustShowPolicyNames.has(row.name)),
+    ...policyCandidates.filter(row => row.name.startsWith('cal_ev')).slice(0, 4),
   ].filter((row, index, rows) => rows.findIndex(item => item.name === row.name) === index).slice(0, 8)
   const calibratedBrier = backtest.calibrated_brier_score ?? 0
   const calibratedEv = backtest.avg_calibrated_ev ?? 0

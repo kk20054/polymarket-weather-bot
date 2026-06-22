@@ -25,7 +25,7 @@ import { Terminal } from './components/Terminal'
 import { TradesTable } from './components/TradesTable'
 import { TemperatureFitPage } from './components/TemperatureFitPage'
 import { WeatherPanel } from './components/WeatherPanel'
-import type { BotStats } from './types'
+import type { BotStats, BulkSimulateResult } from './types'
 
 const GlobeView = lazy(() => import('./components/GlobeView').then(module => ({ default: module.GlobeView })))
 
@@ -81,6 +81,25 @@ function formatDataAge(minutes?: number | null) {
   if (minutes < 60) return `${minutes.toFixed(0)} 分钟前`
   if (minutes < 1440) return `${(minutes / 60).toFixed(1)} 小时前`
   return `${(minutes / 1440).toFixed(1)} 天前`
+}
+
+function bulkReasonLabel(reason: string) {
+  if (reason.startsWith('risk_gate:')) return `风控拦截：${reason.slice('risk_gate:'.length)}`
+  if (reason.startsWith('paper_rejected:')) return `盘口拒单：${reason.slice('paper_rejected:'.length)}`
+  switch (reason) {
+    case 'already_paper_position': return '已有纸面仓位'
+    case 'already_simulated': return '已模拟'
+    case 'already_bought': return '已实盘标记'
+    case 'already_skipped': return '已跳过'
+    case 'expired_signal': return '已过期'
+    case 'not_actionable': return '不可行动'
+    case 'calibrated_ev_nonpositive': return '校准EV非正'
+    case 'risk_gate_blocked': return '风控拦截'
+    case 'no_requested_amount': return '无模拟金额'
+    case 'no_simulation_cash': return '余额不足'
+    case 'position_write_failed': return '持仓写入失败'
+    default: return reason
+  }
 }
 
 function formatDateTime(value?: string | null) {
@@ -197,6 +216,7 @@ function App() {
   const [simBalance, setSimBalance] = useState('40')
   const [clearMarks, setClearMarks] = useState(false)
   const [view, setView] = useState<'dashboard' | 'temperature-fit'>('dashboard')
+  const [lastBulkResult, setLastBulkResult] = useState<BulkSimulateResult | null>(null)
   const leftDragRef = useRef(false)
   const rightDragRef = useRef(false)
   const balanceInitRef = useRef(false)
@@ -247,7 +267,10 @@ function App() {
 
   const bulkSimulateMutation = useMutation({
     mutationFn: bulkSimulateSignals,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+    onSuccess: result => {
+      setLastBulkResult(result)
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    },
   })
 
   const resetSimulationMutation = useMutation({
@@ -386,7 +409,7 @@ function App() {
           </button>
           <button
             onClick={() => bulkSimulateMutation.mutate()}
-            disabled={bulkSimulateMutation.isPending || actionableCount === 0}
+            disabled={bulkSimulateMutation.isPending}
             className="whitespace-nowrap border border-green-500/30 bg-green-500/10 px-2.5 py-1 text-[10px] uppercase tracking-wider text-green-400 transition-colors hover:border-green-500/60 disabled:opacity-40"
             title="只写入本地模拟记录，不会真实下单"
           >
@@ -403,6 +426,22 @@ function App() {
           <LiveClock />
         </div>
       </motion.header>
+
+      {lastBulkResult && (
+        <div className="flex shrink-0 items-center gap-3 overflow-x-auto border-b border-neutral-800 bg-neutral-950 px-3 py-1 text-[10px] text-neutral-400">
+          <span className="whitespace-nowrap text-neutral-300">一键模拟结果</span>
+          <span className="whitespace-nowrap tabular-nums text-green-400">买入 {lastBulkResult.count}</span>
+          <span className="whitespace-nowrap tabular-nums text-amber-400">跳过 {lastBulkResult.skipped}/{lastBulkResult.total_current}</span>
+          <span className="whitespace-nowrap tabular-nums text-blue-300">
+            用额 ${lastBulkResult.spent.toFixed(2)} / 剩余 ${lastBulkResult.remaining.toFixed(2)}
+          </span>
+          {Object.entries(lastBulkResult.reason_counts).slice(0, 5).map(([reason, value]) => (
+            <span key={reason} className="whitespace-nowrap border border-neutral-800 bg-black px-1.5 py-0.5 text-neutral-500">
+              {bulkReasonLabel(reason)} × {value}
+            </span>
+          ))}
+        </div>
+      )}
 
       <div
         className="grid min-h-0 flex-1 grid-rows-[1fr] gap-0"

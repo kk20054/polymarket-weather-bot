@@ -7,7 +7,7 @@ from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.db import connect, init_v3_db
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import quote_from_market_payload, validate_order_constraints
-from dashboard_server import _augment_strategy_replay_record, _bucket_probability_f, _bucket_value_in_range, _entry_snapshot_features
+from dashboard_server import _augment_strategy_replay_record, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _entry_snapshot_features
 from bot_v2 import bucket_prob, calibrated_bucket_probability
 
 
@@ -146,6 +146,67 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(calibrated["sigma_f"], 4.0)
         self.assertLess(calibrated["p"], raw)
         self.assertEqual(calibrated["city_fit_samples"], 20)
+
+    def test_policy_candidates_include_calibrated_threshold_grid(self):
+        records = [
+            {
+                "market_id": "m1",
+                "resolved": True,
+                "result": "win",
+                "pnl": 1.0,
+                "cost": 2.0,
+                "entry_price": 0.20,
+                "live_allowed_replay": True,
+                "calibrated_ev": 0.30,
+                "calibrated_prob_edge": 0.13,
+                "city_fit_samples": 12,
+                "source": "ECMWF",
+            },
+            {
+                "market_id": "m2",
+                "resolved": True,
+                "result": "loss",
+                "pnl": -2.0,
+                "cost": 2.0,
+                "entry_price": 0.20,
+                "live_allowed_replay": True,
+                "calibrated_ev": -0.10,
+                "calibrated_prob_edge": -0.02,
+                "city_fit_samples": 12,
+                "source": "ECMWF",
+            },
+        ]
+        candidates = _build_policy_candidates(records)
+        names = {row["name"] for row in candidates}
+        self.assertIn("cal_ev10_edge8_s0", names)
+        self.assertTrue(any(name.startswith("cal_ev") for name in names))
+        self.assertNotIn("cal_ev50_edge18_s10", names)
+
+    def test_bulk_simulation_skip_reason_explains_duplicates_and_calibration(self):
+        self.assertEqual(
+            _bulk_simulation_skip_reason(
+                {"status": "signal", "date": "2026-06-22"},
+                {"paper_position": True, "actionable": True, "edge": 0.3},
+                "2026-06-22",
+            ),
+            "already_paper_position",
+        )
+        self.assertEqual(
+            _bulk_simulation_skip_reason(
+                {"status": "signal", "date": "2026-06-22"},
+                {"paper_position": False, "actionable": True, "edge": -0.1},
+                "2026-06-22",
+            ),
+            "calibrated_ev_nonpositive",
+        )
+        self.assertEqual(
+            _bulk_simulation_skip_reason(
+                {"status": "signal", "date": "2026-06-22"},
+                {"paper_position": False, "actionable": True, "edge": 0.2, "live_pre_strategy_allowed": False, "live_block_reasons": ["fit_missing", "strategy_not_ready"]},
+                "2026-06-22",
+            ),
+            "risk_gate:fit_missing",
+        )
 
 
 if __name__ == "__main__":
