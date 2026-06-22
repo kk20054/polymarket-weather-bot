@@ -1,10 +1,11 @@
-import type { CalibrationSummary } from '../types'
+import type { BacktestSummary, CalibrationSummary } from '../types'
 
 interface Props {
   calibration: CalibrationSummary
+  backtest?: BacktestSummary | null
 }
 
-export function CalibrationPanel({ calibration }: Props) {
+export function CalibrationPanel({ calibration, backtest }: Props) {
   const settled = calibration.total_with_outcome
   const tracked = calibration.total_signals
   const settlementRate = calibration.settlement_rate ?? (tracked > 0 ? settled / tracked : 0)
@@ -22,6 +23,10 @@ export function CalibrationPanel({ calibration }: Props) {
     : calibration.brier_score <= 0.20 ? '#22c55e' : calibration.brier_score <= 0.25 ? '#d97706' : '#dc2626'
 
   const predEdge = (calibration.avg_predicted_edge * 100).toFixed(1)
+  const calibratedEdgeValue = backtest?.avg_calibrated_ev
+  const calibratedEdge = calibratedEdgeValue !== undefined ? (calibratedEdgeValue * 100).toFixed(1) : null
+  const calibrationGap = calibratedEdgeValue !== undefined ? calibratedEdgeValue - calibration.avg_actual_edge : null
+  const calibrationGapPct = calibrationGap !== null ? (calibrationGap * 100).toFixed(1) : null
   const actualEdge = (calibration.avg_actual_edge * 100).toFixed(1)
 
   return (
@@ -53,8 +58,28 @@ export function CalibrationPanel({ calibration }: Props) {
       </div>
 
       <div className="space-y-1">
+        {calibratedEdge !== null && (
+          <div className="flex items-center gap-2 text-[10px]">
+            <span className="w-12 shrink-0 text-neutral-500">校准EV</span>
+            <div className="meter-bar flex-1">
+              <div
+                className="meter-fill"
+                style={{
+                  width: `${Math.min(100, Math.abs(calibratedEdgeValue ?? 0) * 200)}%`,
+                  backgroundColor: (calibratedEdgeValue ?? 0) >= 0 ? '#22c55e' : '#dc2626'
+                }}
+              />
+            </div>
+            <span
+              className="w-12 text-right tabular-nums"
+              style={{ color: (calibratedEdgeValue ?? 0) >= 0 ? '#22c55e' : '#dc2626' }}
+            >
+              {calibratedEdge}%
+            </span>
+          </div>
+        )}
         <div className="flex items-center gap-2 text-[10px]">
-          <span className="text-neutral-500 w-12 shrink-0">预测EV</span>
+          <span className="text-neutral-500 w-12 shrink-0">原始EV</span>
           <div className="flex-1 meter-bar">
             <div
               className="meter-fill"
@@ -84,7 +109,32 @@ export function CalibrationPanel({ calibration }: Props) {
             {actualEdge}%
           </span>
         </div>
+        {calibrationGapPct !== null && (
+          <div className="flex items-center gap-2 text-[10px]">
+            <span className="w-12 shrink-0 text-neutral-500">校准差</span>
+            <div className="meter-bar flex-1">
+              <div
+                className="meter-fill"
+                style={{
+                  width: `${Math.min(100, Math.abs(calibrationGap ?? 0) * 100)}%`,
+                  backgroundColor: Math.abs(calibrationGap ?? 0) <= 0.2 ? '#22c55e' : '#dc2626'
+                }}
+              />
+            </div>
+            <span
+              className="w-12 text-right tabular-nums"
+              style={{ color: Math.abs(calibrationGap ?? 0) <= 0.2 ? '#22c55e' : '#dc2626' }}
+            >
+              {calibrationGapPct}%
+            </span>
+          </div>
+        )}
       </div>
+      {calibratedEdge !== null && (
+        <div className="text-[9px] leading-relaxed text-neutral-600">
+          自动交易判断以校准EV和校准差共同判断；校准差过大时，说明模型仍在高估，不作为放大实盘依据。
+        </div>
+      )}
     </div>
   )
 }

@@ -37,6 +37,37 @@ function biasLabel(value: number) {
   return '中性'
 }
 
+function fitStatusLabel(status?: string) {
+  switch (status) {
+    case 'eligible': return '可交易'
+    case 'watch': return '观察'
+    case 'blocked': return '禁用'
+    default: return '未知'
+  }
+}
+
+function fitStatusClass(status?: string) {
+  switch (status) {
+    case 'eligible': return 'border-green-500/30 bg-green-500/10 text-green-400'
+    case 'watch': return 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+    case 'blocked': return 'border-red-500/30 bg-red-500/10 text-red-400'
+    default: return 'border-neutral-700 bg-neutral-900 text-neutral-500'
+  }
+}
+
+function fitReasonLabel(reason: string) {
+  switch (reason) {
+    case 'fit_samples_too_low': return '样本过少'
+    case 'fit_samples_low': return '样本偏少'
+    case 'fit_markets_low': return '市场天数少'
+    case 'fit_mae_block': return 'MAE过高'
+    case 'fit_mae_watch': return 'MAE偏高'
+    case 'fit_bias_block': return 'Bias过高'
+    case 'fit_bias_watch': return 'Bias偏高'
+    default: return reason
+  }
+}
+
 function ErrorTooltip({ active, payload }: any) {
   if (!active || !payload?.length) return null
   const row = payload[0].payload as TemperatureFitRecord
@@ -56,7 +87,11 @@ function CityTooltip({ active, payload }: any) {
     <div className="border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-[10px] text-neutral-300">
       <div className="mb-1 text-neutral-100">{row.city_name || row.source}</div>
       <div>MAE {f(row.mae_f)} / RMSE {f(row.rmse_f)}</div>
-      <div>Bias {f(row.bias_f)} · 样本 {row.samples}</div>
+      <div>Bias {f(row.bias_f)} · 衰减 {f(row.decayed_bias_f)} · 样本 {row.samples}</div>
+      <div>{fitStatusLabel(row.fit_status)} · score {((row.trade_score ?? 0) * 100).toFixed(0)}</div>
+      {(row.fit_reasons ?? []).length > 0 && (
+        <div className="text-amber-300">{(row.fit_reasons ?? []).map(fitReasonLabel).join('、')}</div>
+      )}
     </div>
   )
 }
@@ -69,9 +104,13 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
   const visibleRecords = useMemo(() => {
     return selectedCity === 'all' ? records : records.filter(row => row.city_key === selectedCity)
   }, [records, selectedCity])
+  const cityByKey = useMemo(() => {
+    return new Map(cities.map(city => [city.city_key, city]))
+  }, [cities])
   const worstCities = cities.slice(0, 10)
   const sourceRows = fit?.sources ?? []
   const summary = fit?.summary ?? { markets: 0, samples: 0, mae_f: 0, bias_f: 0, rmse_f: 0 }
+  const readiness = fit?.readiness_counts ?? { eligible: 0, watch: 0, blocked: 0 }
   const strategySummary = fit?.strategy_summary
   const sampleWeak = (summary?.markets ?? 0) < 30
 
@@ -121,6 +160,28 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
                 <div className={`tabular-nums text-lg font-bold ${Math.abs(summary.bias_f) <= 0.5 ? 'text-green-400' : 'text-amber-300'}`}>
                   {f(summary.bias_f)}
                 </div>
+                <div className="text-[9px] text-neutral-600">衰减 {f(summary.decayed_bias_f)}</div>
+              </div>
+            </div>
+
+            <div className="mb-3 border border-neutral-800 p-2">
+              <div className="mb-1 text-neutral-600">交易可用分层</div>
+              <div className="grid grid-cols-3 gap-1 text-center">
+                <div className="border border-green-500/20 bg-green-500/5 px-1 py-1">
+                  <div className="tabular-nums text-sm font-bold text-green-400">{readiness.eligible}</div>
+                  <div className="text-[9px] text-neutral-600">可交易</div>
+                </div>
+                <div className="border border-amber-500/20 bg-amber-500/5 px-1 py-1">
+                  <div className="tabular-nums text-sm font-bold text-amber-300">{readiness.watch}</div>
+                  <div className="text-[9px] text-neutral-600">观察</div>
+                </div>
+                <div className="border border-red-500/20 bg-red-500/5 px-1 py-1">
+                  <div className="tabular-nums text-sm font-bold text-red-400">{readiness.blocked}</div>
+                  <div className="text-[9px] text-neutral-600">禁用</div>
+                </div>
+              </div>
+              <div className="mt-1 text-[9px] leading-relaxed text-neutral-600">
+                自动实盘只应考虑“可交易”城市；观察/禁用城市最多进入模拟池。
               </div>
             </div>
 
@@ -142,10 +203,12 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
                 <div key={source.source} className="border border-neutral-800 px-2 py-1">
                   <div className="flex items-center justify-between">
                     <span className="text-neutral-300">{source.source}</span>
-                    <span className="tabular-nums text-cyan-300">{f(source.mae_f)}</span>
+                    <span className={`border px-1 py-0.5 text-[8px] ${fitStatusClass(source.fit_status)}`}>
+                      {fitStatusLabel(source.fit_status)}
+                    </span>
                   </div>
                   <div className="text-[9px] text-neutral-600">
-                    Bias {f(source.bias_f)} · RMSE {f(source.rmse_f)} · {source.samples} 点
+                    MAE {f(source.mae_f)} · Bias {f(source.bias_f)} · 衰减 {f(source.decayed_bias_f)} · score {((source.trade_score ?? 0) * 100).toFixed(0)}
                   </div>
                 </div>
               ))}
@@ -216,7 +279,10 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
                   <Tooltip content={<CityTooltip />} />
                   <Bar dataKey="mae_f" name="MAE">
                     {worstCities.map(city => (
-                      <Cell key={city.city_key} fill={city.mae_f <= 2 ? '#22c55e' : city.mae_f <= 4 ? '#f59e0b' : '#ef4444'} />
+                      <Cell
+                        key={city.city_key}
+                        fill={city.fit_status === 'eligible' ? '#22c55e' : city.fit_status === 'watch' ? '#f59e0b' : '#ef4444'}
+                      />
                     ))}
                   </Bar>
                 </BarChart>
@@ -233,23 +299,32 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
                     <th className="w-16 py-1 text-right">实际</th>
                     <th className="w-16 py-1 text-right">误差</th>
                     <th className="w-20 py-1 text-right">窗口</th>
+                    <th className="w-16 py-1 text-right">分层</th>
                     <th className="py-1 text-right">判断</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleRecords.slice(-80).reverse().map(row => (
-                    <tr key={`${row.city_key}-${row.target_date}-${row.timestamp}-${row.hours_left}`} className="border-b border-neutral-900 text-neutral-400">
-                      <td className="truncate py-1">{row.city_name}</td>
-                      <td className="py-1 tabular-nums text-neutral-500">{row.target_date}</td>
-                      <td className="py-1 text-right tabular-nums">{nativeTemp(row.forecast, row.unit)}</td>
-                      <td className="py-1 text-right tabular-nums">{nativeTemp(row.actual, row.unit)}</td>
-                      <td className={`py-1 text-right tabular-nums ${Math.abs(row.error_f) <= 2 ? 'text-green-400' : Math.abs(row.error_f) <= 4 ? 'text-amber-300' : 'text-red-400'}`}>
-                        {f(row.error_f)}
-                      </td>
-                      <td className="py-1 text-right tabular-nums text-neutral-500">{row.horizon || '-'} / {row.hours_left.toFixed(1)}h</td>
-                      <td className="py-1 text-right text-neutral-500">{biasLabel(row.error_f)}</td>
-                    </tr>
-                  ))}
+                  {visibleRecords.slice(-80).reverse().map(row => {
+                    const cityFit = cityByKey.get(row.city_key)
+                    return (
+                      <tr key={`${row.city_key}-${row.target_date}-${row.timestamp}-${row.hours_left}`} className="border-b border-neutral-900 text-neutral-400">
+                        <td className="truncate py-1">{row.city_name}</td>
+                        <td className="py-1 tabular-nums text-neutral-500">{row.target_date}</td>
+                        <td className="py-1 text-right tabular-nums">{nativeTemp(row.forecast, row.unit)}</td>
+                        <td className="py-1 text-right tabular-nums">{nativeTemp(row.actual, row.unit)}</td>
+                        <td className={`py-1 text-right tabular-nums ${Math.abs(row.error_f) <= 2 ? 'text-green-400' : Math.abs(row.error_f) <= 4 ? 'text-amber-300' : 'text-red-400'}`}>
+                          {f(row.error_f)}
+                        </td>
+                        <td className="py-1 text-right tabular-nums text-neutral-500">{row.horizon || '-'} / {row.hours_left.toFixed(1)}h</td>
+                        <td className="py-1 text-right">
+                          <span className={`border px-1 py-0.5 text-[8px] ${fitStatusClass(cityFit?.fit_status)}`}>
+                            {fitStatusLabel(cityFit?.fit_status)}
+                          </span>
+                        </td>
+                        <td className="py-1 text-right text-neutral-500">{biasLabel(row.error_f)}</td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

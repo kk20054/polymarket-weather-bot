@@ -481,7 +481,7 @@ function App() {
                 <span className="text-[10px] uppercase tracking-wider text-neutral-500">校准</span>
                 <span className="tabular-nums text-[9px] text-neutral-600">{calibration.total_with_outcome} 已结算</span>
               </div>
-              <CalibrationPanel calibration={calibration} />
+              <CalibrationPanel calibration={calibration} backtest={backtest} />
             </motion.div>
           )}
 

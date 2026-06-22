@@ -228,7 +228,11 @@ export interface TemperatureFitGroup {
   samples: number
   mae_f: number
   bias_f: number
+  decayed_bias_f?: number
   rmse_f: number
+  fit_status?: 'eligible' | 'watch' | 'blocked'
+  fit_reasons?: string[]
+  trade_score?: number
   latest_date?: string
   latest_forecast?: number
   latest_actual?: number
@@ -239,11 +243,17 @@ export interface TemperatureFitSummary {
   samples: number
   mae_f: number
   bias_f: number
+  decayed_bias_f?: number
   rmse_f: number
 }
 
 export interface TemperatureFitData {
   summary: TemperatureFitSummary
+  readiness_counts?: {
+    eligible: number
+    watch: number
+    blocked: number
+  }
   cities: TemperatureFitGroup[]
   sources: TemperatureFitGroup[]
   records: TemperatureFitRecord[]
@@ -319,6 +329,7 @@ export interface WeatherSignal {
   fit_samples?: number
   fit_mae_f?: number
   fit_bias_f?: number
+  fit_decayed_bias_f?: number
   quality_flags?: string[]
   strategy_tags?: string[]
   strategy_score?: number

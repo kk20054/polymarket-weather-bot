@@ -183,13 +183,18 @@ def f_to_native(value, unit):
 
 def calibration_metric(records):
     if not records:
-        return {"samples": 0, "mae_f": 0.0, "bias_f": 0.0, "rmse_f": 0.0}
+        return {"samples": 0, "mae_f": 0.0, "bias_f": 0.0, "decayed_bias_f": 0.0, "rmse_f": 0.0}
     errors = [float(item) for item in records]
     abs_errors = [abs(item) for item in errors]
+    decayed_bias = errors[0]
+    alpha = 0.97
+    for error in errors[1:]:
+        decayed_bias = alpha * decayed_bias + (1.0 - alpha) * error
     return {
         "samples": len(errors),
         "mae_f": sum(abs_errors) / len(abs_errors),
         "bias_f": sum(errors) / len(errors),
+        "decayed_bias_f": decayed_bias,
         "rmse_f": (sum(item * item for item in errors) / len(errors)) ** 0.5,
     }
 
@@ -231,7 +236,7 @@ def calibrated_bucket_probability(city_slug, source, forecast, t_low, t_high, un
     calibration = calibration or {}
     city_fit = (calibration.get("cities") or {}).get(city_slug, {})
     source_fit = (calibration.get("sources") or {}).get((source or "").upper(), {})
-    bias_f = float(city_fit.get("bias_f") or 0.0)
+    bias_f = float(city_fit.get("decayed_bias_f", city_fit.get("bias_f") or 0.0) or 0.0)
     forecast_f = native_to_f(forecast, unit)
     adjusted_f = forecast_f - bias_f
     low_f = native_to_f(t_low, unit) if t_low != -999 else -999

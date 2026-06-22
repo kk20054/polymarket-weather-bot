@@ -49,6 +49,7 @@ interface UnifiedSignal {
   fitSamples?: number
   fitMaeF?: number
   fitBiasF?: number
+  fitDecayedBiasF?: number
   qualityFlags?: string[]
   strategyTags?: string[]
   strategyScore?: number
@@ -216,6 +217,7 @@ export function SignalsTable({
       fitSamples: signal.fit_samples,
       fitMaeF: signal.fit_mae_f,
       fitBiasF: signal.fit_bias_f,
+      fitDecayedBiasF: signal.fit_decayed_bias_f,
       qualityFlags: signal.quality_flags,
       strategyTags: signal.strategy_tags,
       strategyScore: signal.strategy_score,
@@ -358,6 +360,7 @@ export function SignalsTable({
                       )}
                       <div className="border-l border-neutral-800 pl-2">
                         拟合质量：样本 {sig.fitSamples ?? 0} / MAE {isNum(sig.fitMaeF) ? `${sig.fitMaeF.toFixed(1)}F` : '--'} / Bias {isNum(sig.fitBiasF) ? `${sig.fitBiasF.toFixed(1)}F` : '--'}
+                        {isNum(sig.fitDecayedBiasF) ? ` / 衰减Bias ${sig.fitDecayedBiasF >= 0 ? '+' : ''}${sig.fitDecayedBiasF.toFixed(1)}F` : ''}
                         {flags.length ? ` / 提示 ${flags.map(flagLabel).join('、')}` : ' / 暂无硬风险提示'}
                       </div>
                       <div className="border-l border-cyan-500/30 pl-2">

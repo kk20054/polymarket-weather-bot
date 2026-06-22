@@ -757,7 +757,7 @@ def _entry_snapshot_features(market, item):
 
 
 def _augment_strategy_replay_record(record, fit, source_fit=None):
-    bias = float(fit.get("bias_f") or 0) if fit else 0.0
+    bias = _fit_bias_for_calibration(fit)
     forecast_f = record.get("forecast_temp_f")
     adjusted = forecast_f - bias if forecast_f is not None else None
     record["bias_adjusted_forecast_f"] = round(adjusted, 2) if adjusted is not None else None
@@ -801,6 +801,7 @@ def _augment_strategy_replay_record(record, fit, source_fit=None):
     entry_price = float(record.get("entry_price") or 0)
     calibrated_ev = _calc_ev(calibrated_probability, entry_price) if calibrated_probability is not None else None
     record["calibrated_sigma_f"] = round(sigma_f, 2)
+    record["calibration_bias_f"] = round(bias, 2)
     record["calibrated_probability"] = round(calibrated_probability, 4) if calibrated_probability is not None else None
     record["calibrated_prob_edge"] = round(calibrated_probability - entry_price, 4) if calibrated_probability is not None else None
     record["calibrated_ev"] = round(calibrated_ev, 4) if calibrated_ev is not None else None
@@ -1234,14 +1235,64 @@ def _build_backtest_summary(markets):
 
 def _metric_summary(records):
     if not records:
-        return {"samples": 0, "mae_f": 0, "bias_f": 0, "rmse_f": 0}
-    errors = [float(r["error_f"]) for r in records]
+        return {"samples": 0, "mae_f": 0, "bias_f": 0, "decayed_bias_f": 0, "rmse_f": 0}
+    ordered = sorted(records, key=lambda r: (r.get("target_date") or "", r.get("timestamp") or ""))
+    errors = [float(r["error_f"]) for r in ordered]
     abs_errors = [abs(e) for e in errors]
+    decayed_bias = errors[0]
+    alpha = 0.97
+    for error in errors[1:]:
+        decayed_bias = alpha * decayed_bias + (1.0 - alpha) * error
     return {
         "samples": len(records),
         "mae_f": round(sum(abs_errors) / len(abs_errors), 2),
         "bias_f": round(sum(errors) / len(errors), 2),
+        "decayed_bias_f": round(decayed_bias, 2),
         "rmse_f": round((sum(e * e for e in errors) / len(errors)) ** 0.5, 2),
+    }
+
+
+def _fit_bias_for_calibration(fit):
+    if not fit:
+        return 0.0
+    if fit.get("decayed_bias_f") is not None:
+        return float(fit.get("decayed_bias_f") or 0.0)
+    return float(fit.get("bias_f") or 0.0)
+
+
+def _fit_trade_readiness(summary, market_count=0):
+    samples = int(summary.get("samples") or 0)
+    mae = float(summary.get("mae_f") or 0)
+    bias_abs = abs(float(summary.get("decayed_bias_f", summary.get("bias_f") or 0) or 0))
+    reasons = []
+    hard_block = False
+
+    if samples < 6:
+        reasons.append("fit_samples_too_low")
+        hard_block = True
+    elif samples < 15:
+        reasons.append("fit_samples_low")
+    if market_count < 3:
+        reasons.append("fit_markets_low")
+    if mae > 4.5:
+        reasons.append("fit_mae_block")
+        hard_block = True
+    elif mae > 3.0:
+        reasons.append("fit_mae_watch")
+    if bias_abs > 3.5:
+        reasons.append("fit_bias_block")
+        hard_block = True
+    elif bias_abs > 2.0:
+        reasons.append("fit_bias_watch")
+
+    score = max(0.0, min(1.0, 1.0 - (mae / 6.0)))
+    score *= max(0.3, min(1.0, samples / 20.0))
+    score *= max(0.4, min(1.0, 1.0 - (bias_abs / 6.0)))
+    status = "blocked" if hard_block else ("watch" if reasons else "eligible")
+    return {
+        "fit_status": status,
+        "fit_reasons": reasons,
+        "trade_score": round(score, 3),
     }
 
 
@@ -1307,15 +1358,17 @@ def _build_temperature_fit(markets):
     for key, items in by_city.items():
         summary = _metric_summary(items)
         latest = sorted(items, key=lambda r: r.get("timestamp") or "")[-1]
+        market_count = len({f"{r['city_key']}:{r['target_date']}" for r in items})
         city_rows.append({
             "city_key": key,
             "city_name": latest["city_name"],
             "unit": latest["unit"],
-            "markets": len({f"{r['city_key']}:{r['target_date']}" for r in items}),
+            "markets": market_count,
             "latest_date": latest["target_date"],
             "latest_forecast": latest["forecast"],
             "latest_actual": latest["actual"],
             **summary,
+            **_fit_trade_readiness(summary, market_count),
         })
 
     by_source = {}
@@ -1323,10 +1376,13 @@ def _build_temperature_fit(markets):
         by_source.setdefault(record["source"], []).append(record)
     source_rows = []
     for source, items in by_source.items():
+        source_market_count = len({f"{r['city_key']}:{r['target_date']}" for r in items})
+        source_summary = _metric_summary(items)
         source_rows.append({
             "source": source,
-            "markets": len({f"{r['city_key']}:{r['target_date']}" for r in items}),
-            **_metric_summary(items),
+            "markets": source_market_count,
+            **source_summary,
+            **_fit_trade_readiness(source_summary, source_market_count),
         })
 
     near_lock_records = [
@@ -1342,10 +1398,16 @@ def _build_temperature_fit(markets):
         if r["abs_error_f"] > max(1.0, float(r.get("ensemble_std_f") or 0) * 1.5)
     ]
 
+    readiness_counts = dict(Counter(row["fit_status"] for row in city_rows))
     return {
         "summary": {
             "markets": len(market_keys),
             **_metric_summary(best_records),
+        },
+        "readiness_counts": {
+            "eligible": int(readiness_counts.get("eligible", 0)),
+            "watch": int(readiness_counts.get("watch", 0)),
+            "blocked": int(readiness_counts.get("blocked", 0)),
         },
         "cities": sorted(city_rows, key=lambda row: row["mae_f"], reverse=True),
         "sources": sorted(source_rows, key=lambda row: row["mae_f"]),
@@ -1436,7 +1498,7 @@ def _strategy_diagnostics(signal, raw_signal, market, fit):
 
     samples = int(fit.get("samples") or 0) if fit else 0
     mae = float(fit.get("mae_f") or 0) if fit else None
-    bias = float(fit.get("bias_f") or 0) if fit else None
+    bias = _fit_bias_for_calibration(fit) if fit else None
     if samples < 10:
         score_parts.append(-0.15)
         notes.append("City fit sample is still thin; keep in paper unless other evidence is strong.")
@@ -1447,7 +1509,7 @@ def _strategy_diagnostics(signal, raw_signal, market, fit):
     if bias is not None and abs(bias) > 2.0:
         tags.append("bias_risk")
         score_parts.append(-0.1)
-        notes.append(f"City bias is elevated at {bias:+.1f}F.")
+        notes.append(f"City decayed bias is elevated at {bias:+.1f}F.")
 
     if not tags:
         tags.append("standard_ev")
@@ -1468,7 +1530,7 @@ def _fit_quality_flags(fit):
             flags.append("fit_sample_low")
         if float(fit.get("mae_f") or 0) > 3.0:
             flags.append("city_mae_high")
-        if abs(float(fit.get("bias_f") or 0)) > 2.0:
+        if abs(_fit_bias_for_calibration(fit)) > 2.0:
             flags.append("city_bias_high")
     else:
         flags.append("fit_missing")
@@ -1565,7 +1627,7 @@ def _signal_calibration_payload(signal, raw_signal, fit, source_fit, market):
             "calibration_bias_f": raw_signal.get("calibration_bias_f"),
         }
 
-    bias_f = float((fit or {}).get("bias_f") or raw_signal.get("calibration_bias_f") or 0.0)
+    bias_f = _fit_bias_for_calibration(fit) if fit else float(raw_signal.get("calibration_bias_f") or 0.0)
     adjusted_f = forecast_f - bias_f
     latest = _latest_snapshot(market or {}, "forecast_snapshots")
     ensemble_std = raw_signal.get("ensemble_std")
@@ -1801,6 +1863,7 @@ def build_dashboard_payload():
             "fit_samples": fit.get("samples"),
             "fit_mae_f": fit.get("mae_f"),
             "fit_bias_f": fit.get("bias_f"),
+            "fit_decayed_bias_f": fit.get("decayed_bias_f"),
             "quality_flags": quality_flags,
             **strategy,
             **live_gate,
