@@ -613,6 +613,56 @@ def _slice_row(name, records, kind):
     }
 
 
+def _strategy_readiness(backtest):
+    risk_slices = backtest.get("risk_slices") or []
+    allowed = next((row for row in risk_slices if row.get("kind") == "gate" and row.get("name") == "gate_allowed"), {})
+    blocked = next((row for row in risk_slices if row.get("kind") == "gate" and row.get("name") == "gate_blocked"), {})
+    resolved = int(backtest.get("resolved_positions") or 0)
+    allowed_resolved = int(allowed.get("resolved") or 0)
+    allowed_pnl = float(allowed.get("pnl") or 0)
+    allowed_roi = float(allowed.get("roi") or 0)
+    allowed_win_rate = float(allowed.get("win_rate") or 0)
+    blocked_roi = float(blocked.get("roi") or 0)
+    brier = float(backtest.get("brier_score") or 0)
+    reasons = []
+
+    if resolved < 30:
+        reasons.append("resolved_sample_below_30")
+    if allowed_resolved < 20:
+        reasons.append("allowed_sample_below_20")
+    if allowed_pnl <= 0:
+        reasons.append("allowed_group_pnl_negative")
+    if allowed_roi <= 0:
+        reasons.append("allowed_group_roi_negative")
+    if allowed_win_rate < 0.52:
+        reasons.append("allowed_win_rate_low")
+    if allowed_resolved and blocked and allowed_roi <= blocked_roi:
+        reasons.append("allowed_not_outperforming_blocked")
+    if brier and brier > 0.25:
+        reasons.append("brier_too_high")
+
+    live_ready = not reasons
+    if live_ready:
+        status = "ready"
+    elif "allowed_group_pnl_negative" in reasons or "allowed_group_roi_negative" in reasons:
+        status = "blocked"
+    else:
+        status = "watch"
+
+    return {
+        "live_ready": live_ready,
+        "status": status,
+        "reasons": reasons,
+        "resolved_positions": resolved,
+        "allowed_resolved": allowed_resolved,
+        "allowed_pnl": round(allowed_pnl, 2),
+        "allowed_roi": round(allowed_roi, 4),
+        "allowed_win_rate": round(allowed_win_rate, 4),
+        "blocked_roi": round(blocked_roi, 4),
+        "brier_score": round(brier, 4),
+    }
+
+
 def _historical_gate_replay(record, fit):
     reasons = []
     cautions = []
@@ -781,7 +831,7 @@ def _build_backtest_summary(markets):
         for reason, group in block_reasons.items()
     ]
 
-    return {
+    summary = {
         "total_positions": len(records),
         "completed_positions": len(completed),
         "resolved_positions": len(resolved),
@@ -804,6 +854,8 @@ def _build_backtest_summary(markets):
             "样本少于 30 个已结算仓位时，胜率、Brier 和风控切片只能作观察，不能作为实盘放大依据。",
         ],
     }
+    summary["strategy_readiness"] = _strategy_readiness(summary)
+    return summary
 
 
 def _metric_summary(records):
@@ -1406,6 +1458,17 @@ def build_dashboard_payload():
         "avg_actual_edge": (sum(actual_edges) / len(actual_edges)) if actual_edges else 0,
         "brier_score": (sum(brier_values) / len(brier_values)) if brier_values else 0,
     }
+    backtest_summary = _build_backtest_summary(markets)
+    strategy_readiness = backtest_summary.get("strategy_readiness") or {}
+    if not strategy_readiness.get("live_ready"):
+        for signal in weather_signals:
+            reasons = list(signal.get("live_block_reasons") or [])
+            if "strategy_not_ready" not in reasons:
+                reasons.append("strategy_not_ready")
+            signal["live_pre_strategy_allowed"] = bool(signal.get("live_allowed"))
+            signal["live_allowed"] = False
+            signal["live_risk_level"] = "blocked"
+            signal["live_block_reasons"] = reasons
 
     stats = {
         "bankroll": equity,
@@ -1428,6 +1491,12 @@ def build_dashboard_payload():
         "actionable_count": len([s for s in weather_signals if s.get("actionable")]),
         "live_candidate_count": len([s for s in weather_signals if s.get("actionable") and s.get("live_allowed")]),
         "live_blocked_count": len([s for s in weather_signals if s.get("actionable") and not s.get("live_allowed")]),
+        "strategy_live_ready": bool(strategy_readiness.get("live_ready")),
+        "strategy_readiness_status": strategy_readiness.get("status") or "watch",
+        "strategy_readiness_reasons": strategy_readiness.get("reasons") or [],
+        "strategy_allowed_pnl": strategy_readiness.get("allowed_pnl"),
+        "strategy_allowed_roi": strategy_readiness.get("allowed_roi"),
+        "strategy_allowed_resolved": strategy_readiness.get("allowed_resolved"),
         "simulation_started_at": simulation_started_at,
         "scanner_status": "running" if _bot_running() else "stopped",
     }
@@ -1442,7 +1511,7 @@ def build_dashboard_payload():
         "recent_trades": sorted(combined_trades, key=lambda t: t.get("timestamp") or "", reverse=True)[:100],
         "equity_curve": equity_curve,
         "calibration": calibration_summary,
-        "backtest": _build_backtest_summary(markets),
+        "backtest": backtest_summary,
         "weather_signals": weather_signals,
         "weather_forecasts": list(weather_forecasts_by_city.values()),
         "events": list_events(100),
@@ -1721,6 +1790,23 @@ async def v3_live_order(update: LiveOrderUpdate):
     if not signal:
         return {"ok": False, "error": "signal_not_found"}
     markets = load_markets()
+    backtest_summary = _build_backtest_summary(markets)
+    strategy_readiness = backtest_summary.get("strategy_readiness") or {}
+    if not strategy_readiness.get("live_ready"):
+        payload = {
+            "signal_id": update.signal_id,
+            "market_id": signal.get("market_id"),
+            "question": signal.get("question"),
+            "strategy_readiness": strategy_readiness,
+        }
+        log_event("warning", "v3 live order blocked: strategy not ready", payload)
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "strategy_not_ready",
+            "strategy_readiness": strategy_readiness,
+            "payload": payload,
+        }
     temperature_fit = _build_temperature_fit(markets)
     fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
     market_by_city_date = {

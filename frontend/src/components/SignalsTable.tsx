@@ -134,6 +134,7 @@ function gateLabel(reason: string) {
     case 'spread_missing': return '缺少 spread'
     case 'spread_above_limit': return 'spread 过宽'
     case 'expired_signal': return '信号已过期'
+    case 'strategy_not_ready': return '策略回放未达实盘标准'
     case 'already_simulated': return '已模拟'
     case 'already_bought': return '已买入'
     case 'already_skipped': return '已跳过'

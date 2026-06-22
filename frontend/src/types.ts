@@ -99,6 +99,12 @@ export interface BotStats {
   actionable_count?: number
   live_candidate_count?: number
   live_blocked_count?: number
+  strategy_live_ready?: boolean
+  strategy_readiness_status?: 'ready' | 'watch' | 'blocked'
+  strategy_readiness_reasons?: string[]
+  strategy_allowed_pnl?: number
+  strategy_allowed_roi?: number
+  strategy_allowed_resolved?: number
   simulation_started_at?: string | null
   scanner_status?: string
 }
@@ -165,6 +171,18 @@ export interface BacktestSummary {
   sources: BacktestSource[]
   risk_slices?: BacktestRiskSlice[]
   block_reasons?: BacktestRiskSlice[]
+  strategy_readiness?: {
+    live_ready: boolean
+    status: 'ready' | 'watch' | 'blocked'
+    reasons: string[]
+    resolved_positions: number
+    allowed_resolved: number
+    allowed_pnl: number
+    allowed_roi: number
+    allowed_win_rate: number
+    blocked_roi: number
+    brier_score: number
+  }
   notes: string[]
 }
 
@@ -292,6 +310,7 @@ export interface WeatherSignal {
   live_risk_level?: 'eligible' | 'caution' | 'blocked'
   live_block_reasons?: string[]
   live_cautions?: string[]
+  live_pre_strategy_allowed?: boolean
   near_lock?: {
     hours_left: number
     observed_temp: number
