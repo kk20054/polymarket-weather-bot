@@ -7,7 +7,7 @@ from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.db import connect, init_v3_db
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import quote_from_market_payload, validate_order_constraints
-from dashboard_server import _augment_strategy_replay_record, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _entry_snapshot_features, _fit_trade_readiness, _metric_summary
+from dashboard_server import _augment_strategy_replay_record, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _entry_snapshot_features, _fit_trade_readiness, _live_gate, _metric_summary
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric
 
 
@@ -255,19 +255,36 @@ class V3CoreTests(unittest.TestCase):
         )
 
     def test_temperature_fit_readiness_gates_live_candidates(self):
-        eligible = _fit_trade_readiness({"samples": 20, "mae_f": 2.0, "bias_f": 0.2, "rmse_f": 2.5}, 5)
+        eligible = _fit_trade_readiness({"samples": 30, "mae_f": 2.0, "bias_f": 0.2, "rmse_f": 2.5}, 20)
         self.assertEqual(eligible["fit_status"], "eligible")
         self.assertGreater(eligible["trade_score"], 0.4)
 
-        watch = _fit_trade_readiness({"samples": 12, "mae_f": 3.4, "bias_f": 2.2, "rmse_f": 3.8}, 3)
+        watch = _fit_trade_readiness({"samples": 25, "mae_f": 2.4, "bias_f": 0.5, "rmse_f": 3.0}, 12)
         self.assertEqual(watch["fit_status"], "watch")
-        self.assertIn("fit_samples_low", watch["fit_reasons"])
-        self.assertIn("fit_mae_watch", watch["fit_reasons"])
+        self.assertIn("fit_independent_days_low", watch["fit_reasons"])
 
         blocked = _fit_trade_readiness({"samples": 4, "mae_f": 5.1, "bias_f": 4.0, "rmse_f": 5.5}, 1)
         self.assertEqual(blocked["fit_status"], "blocked")
+        self.assertIn("fit_independent_days_too_low", blocked["fit_reasons"])
         self.assertIn("fit_samples_too_low", blocked["fit_reasons"])
         self.assertIn("fit_mae_block", blocked["fit_reasons"])
+
+    def test_live_gate_blocks_thin_independent_days_and_spread_cost(self):
+        thin = _live_gate(
+            {"limit_price": 0.20, "spread": 0.01, "date": "2026-06-22", "status": "signal"},
+            ["fit_independent_days_low"],
+            {"strategy_score": 0.8, "strategy_tags": []},
+        )
+        self.assertFalse(thin["live_allowed"])
+        self.assertIn("fit_independent_days_low", thin["live_block_reasons"])
+
+        spread_cost = _live_gate(
+            {"limit_price": 0.07, "spread": 0.03, "date": "2026-06-22", "status": "signal"},
+            [],
+            {"strategy_score": 0.8, "strategy_tags": ["cheap_tail_candidate"]},
+        )
+        self.assertFalse(spread_cost["live_allowed"])
+        self.assertIn("spread_cost_too_high", spread_cost["live_block_reasons"])
 
 
 if __name__ == "__main__":

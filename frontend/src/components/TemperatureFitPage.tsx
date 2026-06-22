@@ -59,6 +59,8 @@ function fitReasonLabel(reason: string) {
   switch (reason) {
     case 'fit_samples_too_low': return '样本过少'
     case 'fit_samples_low': return '样本偏少'
+    case 'fit_independent_days_too_low': return '独立日过少'
+    case 'fit_independent_days_low': return '独立日不足'
     case 'fit_markets_low': return '市场天数少'
     case 'fit_mae_block': return 'MAE过高'
     case 'fit_mae_watch': return 'MAE偏高'

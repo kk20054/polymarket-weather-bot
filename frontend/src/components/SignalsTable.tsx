@@ -46,6 +46,7 @@ interface UnifiedSignal {
   token?: string
   simAmount?: number | null
   paperPosition?: boolean
+  fitMarkets?: number
   fitSamples?: number
   fitMaeF?: number
   fitBiasF?: number
@@ -120,6 +121,8 @@ function statusLabel(status?: string) {
 
 function flagLabel(flag: string) {
   switch (flag) {
+    case 'fit_independent_days_too_low': return '独立日过少'
+    case 'fit_independent_days_low': return '独立日不足'
     case 'fit_sample_low': return '拟合样本少'
     case 'city_mae_high': return '城市误差高'
     case 'city_bias_high': return '城市偏差高'
@@ -135,6 +138,8 @@ function strategyLabel(tag: string) {
     case 'near_lock_missing_metar': return '缺少 METAR'
     case 'dispersion_underpricing_watch': return '离散度不足'
     case 'cheap_tail_candidate': return '低价尾部'
+    case 'low_price_tail_watch': return '低价尾部审查'
+    case 'independent_history_thin': return '独立日不足'
     case 'fit_risk': return '拟合风险'
     case 'bias_risk': return '偏差风险'
     case 'standard_ev': return '普通 EV'
@@ -145,6 +150,8 @@ function strategyLabel(tag: string) {
 function gateLabel(reason: string) {
   switch (reason) {
     case 'fit_missing': return '缺少城市拟合'
+    case 'fit_independent_days_too_low': return '独立结算日过少'
+    case 'fit_independent_days_low': return '独立结算日不足'
     case 'city_mae_high': return '城市 MAE 过高'
     case 'city_bias_high': return '城市 Bias 过高'
     case 'fit_sample_low': return '拟合样本偏少'
@@ -152,6 +159,8 @@ function gateLabel(reason: string) {
     case 'strategy_score_low': return '策略分过低'
     case 'price_below_min': return '价格低于最小阈值'
     case 'price_above_max': return '价格高于上限'
+    case 'low_price_tail_unverified': return '低价尾部未验证'
+    case 'spread_cost_too_high': return 'spread 成本过高'
     case 'spread_missing': return '缺少 spread'
     case 'spread_above_limit': return 'spread 过宽'
     case 'expired_signal': return '信号已过期'
@@ -214,6 +223,7 @@ export function SignalsTable({
       token: signal.yes_token_id,
       simAmount: signal.sim_amount,
       paperPosition: signal.paper_position,
+      fitMarkets: signal.fit_markets,
       fitSamples: signal.fit_samples,
       fitMaeF: signal.fit_mae_f,
       fitBiasF: signal.fit_bias_f,
@@ -359,7 +369,7 @@ export function SignalsTable({
                         <div>Bid/Ask {cents(sig.bidPrice)} / {cents(sig.limitPrice)} · spread {cents(sig.spread)}</div>
                       )}
                       <div className="border-l border-neutral-800 pl-2">
-                        拟合质量：样本 {sig.fitSamples ?? 0} / MAE {isNum(sig.fitMaeF) ? `${sig.fitMaeF.toFixed(1)}F` : '--'} / Bias {isNum(sig.fitBiasF) ? `${sig.fitBiasF.toFixed(1)}F` : '--'}
+                        拟合质量：独立日 {sig.fitMarkets ?? 0} / 快照 {sig.fitSamples ?? 0} / MAE {isNum(sig.fitMaeF) ? `${sig.fitMaeF.toFixed(1)}F` : '--'} / Bias {isNum(sig.fitBiasF) ? `${sig.fitBiasF.toFixed(1)}F` : '--'}
                         {isNum(sig.fitDecayedBiasF) ? ` / 衰减Bias ${sig.fitDecayedBiasF >= 0 ? '+' : ''}${sig.fitDecayedBiasF.toFixed(1)}F` : ''}
                         {flags.length ? ` / 提示 ${flags.map(flagLabel).join('、')}` : ' / 暂无硬风险提示'}
                       </div>

@@ -338,6 +338,7 @@ export interface WeatherSignal {
   sim_amount?: number | null
   manual_note?: string | null
   paper_position?: boolean
+  fit_markets?: number
   fit_samples?: number
   fit_mae_f?: number
   fit_bias_f?: number

@@ -1074,6 +1074,11 @@ def _historical_gate_replay(record, fit):
     if not fit:
         reasons.append("fit_missing")
     else:
+        markets = int(fit.get("markets") or 0)
+        if markets < 10:
+            reasons.append("fit_independent_days_too_low")
+        elif markets < 20:
+            reasons.append("fit_independent_days_low")
         if int(fit.get("samples") or 0) < 10:
             cautions.append("fit_sample_low")
         if float(fit.get("mae_f") or 0) > 3.0:
@@ -1086,6 +1091,8 @@ def _historical_gate_replay(record, fit):
         reasons.append("price_below_min")
     if price > 0.45:
         reasons.append("price_above_max")
+    if 0 < price < 0.10 and not bool(record.get("cheap_underdispersed_tail")):
+        reasons.append("low_price_tail_unverified")
 
     spread = record.get("spread")
     try:
@@ -1096,6 +1103,8 @@ def _historical_gate_replay(record, fit):
         cautions.append("spread_missing")
     elif spread > 0.03:
         reasons.append("spread_above_limit")
+    elif price > 0 and price <= 0.10 and (spread >= 0.02 or (spread / price) >= 0.25):
+        reasons.append("spread_cost_too_high")
 
     return {
         "live_allowed": not reasons,
@@ -1160,10 +1169,10 @@ def _build_backtest_summary(markets):
     fit_by_source = {str(row.get("source") or "").upper(): row for row in temperature_fit.get("sources", [])}
     for record in records:
         fit = fit_by_city.get(record.get("city")) or {}
-        gate = _historical_gate_replay(record, fit)
         source_key = str(record.get("source") or "").upper()
         source_fit = fit_by_source.get(source_key) or fit_by_source.get("MODEL_BEST")
         _augment_strategy_replay_record(record, fit, source_fit)
+        gate = _historical_gate_replay(record, fit)
         record["fit_band"] = _fit_band(fit)
         record["price_bucket"] = _price_bucket(record.get("entry_price"))
         record["live_allowed_replay"] = gate["live_allowed"]
@@ -1382,6 +1391,11 @@ def _fit_trade_readiness(summary, market_count=0):
     reasons = []
     hard_block = False
 
+    if market_count < 10:
+        reasons.append("fit_independent_days_too_low")
+        hard_block = True
+    elif market_count < 20:
+        reasons.append("fit_independent_days_low")
     if samples < 6:
         reasons.append("fit_samples_too_low")
         hard_block = True
@@ -1402,6 +1416,7 @@ def _fit_trade_readiness(summary, market_count=0):
 
     score = max(0.0, min(1.0, 1.0 - (mae / 6.0)))
     score *= max(0.3, min(1.0, samples / 20.0))
+    score *= max(0.2, min(1.0, market_count / 20.0))
     score *= max(0.4, min(1.0, 1.0 - (bias_abs / 6.0)))
     status = "blocked" if hard_block else ("watch" if reasons else "eligible")
     return {
@@ -1612,8 +1627,14 @@ def _strategy_diagnostics(signal, raw_signal, market, fit):
             notes.append("Dispersion diagnostics could not be parsed.")
 
     samples = int(fit.get("samples") or 0) if fit else 0
+    market_count = int(fit.get("markets") or 0) if fit else 0
     mae = float(fit.get("mae_f") or 0) if fit else None
     bias = _fit_bias_for_calibration(fit) if fit else None
+    if market_count < 20:
+        score_parts.append(-0.25)
+        notes.append(f"Independent settled city-days only {market_count}; keep in paper until >=20.")
+        if market_count < 10:
+            tags.append("independent_history_thin")
     if samples < 10:
         score_parts.append(-0.15)
         notes.append("City fit sample is still thin; keep in paper unless other evidence is strong.")
@@ -1628,6 +1649,9 @@ def _strategy_diagnostics(signal, raw_signal, market, fit):
 
     if not tags:
         tags.append("standard_ev")
+    if limit_price < 0.10:
+        tags.append("low_price_tail_watch")
+        notes.append("Low-price bucket: edge must survive spread cost, depth, and independent-day checks.")
     score = max(0.0, min(1.0, 0.45 + sum(score_parts)))
     return {
         "strategy_tags": tags,
@@ -1641,6 +1665,11 @@ def _strategy_diagnostics(signal, raw_signal, market, fit):
 def _fit_quality_flags(fit):
     flags = []
     if fit:
+        markets = int(fit.get("markets") or 0)
+        if markets < 10:
+            flags.append("fit_independent_days_too_low")
+        elif markets < 20:
+            flags.append("fit_independent_days_low")
         if int(fit.get("samples") or 0) < 10:
             flags.append("fit_sample_low")
         if float(fit.get("mae_f") or 0) > 3.0:
@@ -1659,6 +1688,10 @@ def _live_gate(signal, quality_flags, strategy):
 
     if "fit_missing" in quality_flags:
         reasons.append("fit_missing")
+    if "fit_independent_days_too_low" in quality_flags:
+        reasons.append("fit_independent_days_too_low")
+    if "fit_independent_days_low" in quality_flags:
+        reasons.append("fit_independent_days_low")
     if "city_mae_high" in quality_flags:
         reasons.append("city_mae_high")
     if "city_bias_high" in quality_flags:
@@ -1683,6 +1716,8 @@ def _live_gate(signal, quality_flags, strategy):
         reasons.append("price_below_min")
     if limit_price > 0.45:
         reasons.append("price_above_max")
+    if 0 < limit_price < 0.10 and "cheap_tail_candidate" not in tags:
+        reasons.append("low_price_tail_unverified")
 
     spread = signal.get("spread")
     try:
@@ -1693,6 +1728,8 @@ def _live_gate(signal, quality_flags, strategy):
         cautions.append("spread_missing")
     elif spread > 0.03:
         reasons.append("spread_above_limit")
+    elif limit_price > 0 and limit_price <= 0.10 and (spread >= 0.02 or (spread / limit_price) >= 0.25):
+        reasons.append("spread_cost_too_high")
 
     if (signal.get("date") or "") < _today_str():
         reasons.append("expired_signal")
@@ -1975,6 +2012,7 @@ def build_dashboard_payload():
             "shares": signal.get("shares"),
             "sim_amount": sim_amount,
             "manual_note": signal.get("manual_note"),
+            "fit_markets": fit.get("markets"),
             "fit_samples": fit.get("samples"),
             "fit_mae_f": fit.get("mae_f"),
             "fit_bias_f": fit.get("bias_f"),
