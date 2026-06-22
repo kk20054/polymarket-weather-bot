@@ -7,6 +7,7 @@ from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.db import connect, init_v3_db
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import quote_from_market_payload, validate_order_constraints
+from dashboard_server import _bucket_value_in_range, _entry_snapshot_features
 
 
 TEST_DB_DIR = Path(__file__).resolve().parents[1] / ".tmp-tests"
@@ -78,6 +79,34 @@ class V3CoreTests(unittest.TestCase):
                 result = PaperExecutor().place_order(signal, 1.0)
         self.assertFalse(result.ok)
         self.assertIn("spread_above_max_slippage", result.reason)
+
+    def test_near_lock_replay_detects_metar_gap(self):
+        market = {
+            "unit": "F",
+            "created_at": "2026-06-16T07:00:00+00:00",
+            "forecast_snapshots": [
+                {
+                    "ts": "2026-06-16T09:00:00+00:00",
+                    "horizon": "D+0",
+                    "hours_left": 3.0,
+                    "best": 70,
+                    "metar": 64,
+                    "ensemble_std": 1.0,
+                }
+            ],
+        }
+        item = {
+            "opened_at": "2026-06-16T09:10:00+00:00",
+            "bucket_low": 70,
+            "bucket_high": 71,
+            "forecast_temp": 70,
+        }
+        features = _entry_snapshot_features(market, item)
+        self.assertTrue(features["near_lock_8h"])
+        self.assertTrue(features["near_lock_gap_risk"])
+        self.assertFalse(features["near_lock_metar_aligned"])
+        self.assertTrue(features["raw_forecast_in_bucket"])
+        self.assertTrue(_bucket_value_in_range(70, 70, 71))
 
 
 if __name__ == "__main__":

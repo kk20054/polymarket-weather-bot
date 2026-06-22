@@ -596,6 +596,131 @@ def _fit_band(fit):
     return "fit_ok"
 
 
+def _snapshot_at_or_before(snapshots, timestamp):
+    if not snapshots:
+        return {}
+    target = _parse_iso(timestamp)
+    if not target:
+        return snapshots[-1]
+    best = None
+    for snap in snapshots:
+        snap_ts = _parse_iso(snap.get("ts"))
+        if not snap_ts:
+            continue
+        if snap_ts <= target:
+            best = snap
+        elif best is not None:
+            break
+    return best or snapshots[0]
+
+
+def _bucket_value_in_range(value, low, high):
+    if value is None or low is None or high is None:
+        return False
+    try:
+        value = float(value)
+        low = float(low)
+        high = float(high)
+    except Exception:
+        return False
+    if low == high:
+        return (low - 0.5) <= value < (high + 0.5)
+    return low <= value <= high
+
+
+def _entry_snapshot_features(market, item):
+    unit = market.get("unit") or "F"
+    opened_at = item.get("opened_at") or market.get("created_at")
+    snap = _snapshot_at_or_before(market.get("forecast_snapshots") or [], opened_at)
+    horizon = snap.get("horizon") or item.get("horizon") or ""
+    try:
+        hours_left = float(snap.get("hours_left")) if snap.get("hours_left") is not None else None
+    except Exception:
+        hours_left = None
+
+    best_native = snap.get("best")
+    metar_native = snap.get("metar")
+    try:
+        best_f = _native_to_f(float(best_native), unit) if best_native is not None else None
+    except Exception:
+        best_f = None
+    try:
+        metar_f = _native_to_f(float(metar_native), unit) if metar_native is not None else None
+    except Exception:
+        metar_f = None
+
+    gap_f = abs(best_f - metar_f) if best_f is not None and metar_f is not None else None
+    near_lock = horizon == "D+0" or (hours_left is not None and hours_left <= 18)
+    near_lock_8h = bool(near_lock and hours_left is not None and hours_left <= 8)
+
+    low = item.get("bucket_low")
+    high = item.get("bucket_high")
+    try:
+        low_f = _native_to_f(float(low), unit) if low is not None else None
+        high_f = _native_to_f(float(high), unit) if high is not None else None
+    except Exception:
+        low_f = high_f = None
+
+    forecast_native = item.get("forecast_temp")
+    try:
+        forecast_f = _native_to_f(float(forecast_native), unit) if forecast_native is not None else None
+    except Exception:
+        forecast_f = None
+
+    ensemble_std = snap.get("ensemble_std")
+    try:
+        ensemble_std_f = _delta_to_f(float(ensemble_std), unit) if ensemble_std is not None else None
+    except Exception:
+        ensemble_std_f = None
+
+    return {
+        "opened_at": opened_at,
+        "unit": unit,
+        "horizon_at_entry": horizon,
+        "hours_left_at_entry": hours_left,
+        "entry_best_f": best_f,
+        "entry_metar_f": metar_f,
+        "entry_model_metar_gap_f": gap_f,
+        "entry_ensemble_std_f": ensemble_std_f,
+        "near_lock_window": bool(near_lock),
+        "near_lock_8h": near_lock_8h,
+        "near_lock_metar_available": metar_f is not None,
+        "near_lock_gap_risk": bool(near_lock_8h and gap_f is not None and gap_f > 3.0),
+        "near_lock_metar_aligned": bool(near_lock_8h and gap_f is not None and gap_f <= 2.0),
+        "bucket_low_f": low_f,
+        "bucket_high_f": high_f,
+        "forecast_temp_f": forecast_f,
+        "raw_forecast_in_bucket": _bucket_value_in_range(forecast_f, low_f, high_f),
+    }
+
+
+def _augment_strategy_replay_record(record, fit):
+    bias = float(fit.get("bias_f") or 0) if fit else 0.0
+    forecast_f = record.get("forecast_temp_f")
+    adjusted = forecast_f - bias if forecast_f is not None else None
+    record["bias_adjusted_forecast_f"] = round(adjusted, 2) if adjusted is not None else None
+    record["bias_adjusted_in_bucket"] = _bucket_value_in_range(
+        adjusted,
+        record.get("bucket_low_f"),
+        record.get("bucket_high_f"),
+    )
+
+    ensemble_std_f = record.get("entry_ensemble_std_f")
+    dispersion_ratio = None
+    if ensemble_std_f is not None and fit:
+        historical_spread_f = max(3.0, float(fit.get("rmse_f") or 0) * 2.0, float(fit.get("mae_f") or 0) * 3.0)
+        ensemble_spread_f = max(0.2, float(ensemble_std_f) * 2.0)
+        dispersion_ratio = historical_spread_f / ensemble_spread_f
+    record["historical_dispersion_ratio"] = round(dispersion_ratio, 2) if dispersion_ratio is not None else None
+    record["cheap_underdispersed_tail"] = bool(
+        record.get("horizon_at_entry") in ("D+1", "D+2")
+        and dispersion_ratio is not None
+        and dispersion_ratio > 1.6
+        and float(record.get("entry_price") or 0) <= 0.14
+    )
+    return record
+
+
 def _slice_row(name, records, kind):
     resolved = [r for r in records if r["resolved"]]
     wins = [r for r in resolved if r["result"] == "win"]
@@ -670,6 +795,36 @@ def _build_policy_candidates(completed):
             "gate_allowed_fit_ok_10_45c",
             "当前允许组 + 拟合可用 + 10-45c",
             lambda r: bool(r.get("live_allowed_replay")) and r.get("fit_band") == "fit_ok" and price_between(0.10, 0.45)(r),
+        ),
+        (
+            "avoid_d0_metar_gap",
+            "排除 D+0 临近结算时模型与 METAR 背离 >3F",
+            lambda r: not bool(r.get("near_lock_gap_risk")),
+        ),
+        (
+            "gate_avoid_d0_metar_gap_10_45c",
+            "当前允许组 + 10-45c + 排除临近 METAR 背离",
+            lambda r: bool(r.get("live_allowed_replay")) and price_between(0.10, 0.45)(r) and not bool(r.get("near_lock_gap_risk")),
+        ),
+        (
+            "near_lock_metar_aligned",
+            "只做 D+0 <=8h 且模型与 METAR 差距 <=2F",
+            lambda r: bool(r.get("near_lock_metar_aligned")),
+        ),
+        (
+            "bias_adjusted_in_bucket",
+            "偏差校正后预测仍落在目标温度桶",
+            lambda r: bool(r.get("bias_adjusted_in_bucket")),
+        ),
+        (
+            "gate_bias_adjusted_10_45c",
+            "当前允许组 + 10-45c + 偏差校正仍落桶",
+            lambda r: bool(r.get("live_allowed_replay")) and price_between(0.10, 0.45)(r) and bool(r.get("bias_adjusted_in_bucket")),
+        ),
+        (
+            "cheap_underdispersed_tail",
+            "D+1/D+2 低价尾部 + 历史波动大于 ensemble",
+            lambda r: bool(r.get("cheap_underdispersed_tail")),
         ),
     ]
 
@@ -792,6 +947,7 @@ def _iter_position_records(markets):
         for item, archived in positions:
             if not item.get("market_id"):
                 continue
+            entry_features = _entry_snapshot_features(market, item)
             pnl = item.get("pnl")
             cost = float(item.get("cost") or 0)
             result = market.get("resolved_outcome")
@@ -811,10 +967,14 @@ def _iter_position_records(markets):
                 "cost": cost,
                 "p": item.get("p"),
                 "ev": item.get("ev"),
+                "forecast_temp": item.get("forecast_temp"),
+                "bucket_low": item.get("bucket_low"),
+                "bucket_high": item.get("bucket_high"),
                 "pnl": float(pnl) if pnl is not None else None,
                 "result": result,
                 "resolved": is_resolved,
                 "archived": archived,
+                **entry_features,
             }
 
 
@@ -829,6 +989,7 @@ def _build_backtest_summary(markets):
     for record in records:
         fit = fit_by_city.get(record.get("city")) or {}
         gate = _historical_gate_replay(record, fit)
+        _augment_strategy_replay_record(record, fit)
         record["fit_band"] = _fit_band(fit)
         record["price_bucket"] = _price_bucket(record.get("entry_price"))
         record["live_allowed_replay"] = gate["live_allowed"]

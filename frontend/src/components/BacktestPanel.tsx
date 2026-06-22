@@ -43,6 +43,12 @@ function sliceName(name: string) {
     case 'gate_allowed_10_45c': return '允许组 + 10-45c'
     case 'gate_allowed_fit_ok': return '允许组 + 拟合可用'
     case 'gate_allowed_fit_ok_10_45c': return '允许组 + 拟合可用 + 10-45c'
+    case 'avoid_d0_metar_gap': return '排除临近背离'
+    case 'gate_avoid_d0_metar_gap_10_45c': return '允许组 + 排除背离'
+    case 'near_lock_metar_aligned': return 'Near-lock 对齐'
+    case 'bias_adjusted_in_bucket': return '校正后仍落桶'
+    case 'gate_bias_adjusted_10_45c': return '允许组 + 校正落桶'
+    case 'cheap_underdispersed_tail': return '低价波动尾部'
     default: return name
   }
 }
