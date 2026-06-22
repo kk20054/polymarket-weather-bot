@@ -565,6 +565,91 @@ def _ev_bucket(ev):
     return "100%+"
 
 
+def _price_bucket(price):
+    try:
+        value = float(price)
+    except Exception:
+        return "unknown"
+    if value < 0.03:
+        return "<3c"
+    if value < 0.1:
+        return "3-10c"
+    if value < 0.25:
+        return "10-25c"
+    if value <= 0.45:
+        return "25-45c"
+    return ">45c"
+
+
+def _fit_band(fit):
+    if not fit:
+        return "fit_missing"
+    samples = int(fit.get("samples") or 0)
+    mae = float(fit.get("mae_f") or 0)
+    bias = abs(float(fit.get("bias_f") or 0))
+    if samples < 10:
+        return "sample_low"
+    if mae > 3.0:
+        return "mae_high"
+    if bias > 2.0:
+        return "bias_high"
+    return "fit_ok"
+
+
+def _slice_row(name, records, kind):
+    resolved = [r for r in records if r["resolved"]]
+    wins = [r for r in resolved if r["result"] == "win"]
+    pnl = round(sum(float(r.get("pnl") or 0) for r in records if r.get("pnl") is not None), 2)
+    cost = sum(float(r.get("cost") or 0) for r in records)
+    return {
+        "kind": kind,
+        "name": name,
+        "count": len(records),
+        "resolved": len(resolved),
+        "wins": len(wins),
+        "win_rate": (len(wins) / len(resolved)) if resolved else 0,
+        "pnl": pnl,
+        "roi": (pnl / cost) if cost else 0,
+    }
+
+
+def _historical_gate_replay(record, fit):
+    reasons = []
+    cautions = []
+    if not fit:
+        reasons.append("fit_missing")
+    else:
+        if int(fit.get("samples") or 0) < 10:
+            cautions.append("fit_sample_low")
+        if float(fit.get("mae_f") or 0) > 3.0:
+            reasons.append("city_mae_high")
+        if abs(float(fit.get("bias_f") or 0)) > 2.0:
+            reasons.append("city_bias_high")
+
+    price = float(record.get("entry_price") or 0)
+    if price < 0.03:
+        reasons.append("price_below_min")
+    if price > 0.45:
+        reasons.append("price_above_max")
+
+    spread = record.get("spread")
+    try:
+        spread = float(spread) if spread is not None else None
+    except Exception:
+        spread = None
+    if spread is None:
+        cautions.append("spread_missing")
+    elif spread > 0.03:
+        reasons.append("spread_above_limit")
+
+    return {
+        "live_allowed": not reasons,
+        "risk_level": "blocked" if reasons else ("caution" if cautions else "eligible"),
+        "block_reasons": reasons,
+        "cautions": cautions,
+    }
+
+
 def _iter_position_records(markets):
     for market in markets:
         positions = []
@@ -592,6 +677,8 @@ def _iter_position_records(markets):
                 "source": (item.get("forecast_src") or "unknown").upper(),
                 "status": item.get("status") or market.get("status") or "",
                 "entry_price": float(item.get("entry_price") or 0),
+                "bid_at_entry": item.get("bid_at_entry"),
+                "spread": item.get("spread"),
                 "cost": cost,
                 "p": item.get("p"),
                 "ev": item.get("ev"),
@@ -608,6 +695,18 @@ def _build_backtest_summary(markets):
         r for r in all_records
         if r["pnl"] is not None or (not r["archived"] and r["status"] == "open")
     ]
+    temperature_fit = _build_temperature_fit(markets)
+    fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
+    for record in records:
+        fit = fit_by_city.get(record.get("city")) or {}
+        gate = _historical_gate_replay(record, fit)
+        record["fit_band"] = _fit_band(fit)
+        record["price_bucket"] = _price_bucket(record.get("entry_price"))
+        record["live_allowed_replay"] = gate["live_allowed"]
+        record["risk_level"] = gate["risk_level"]
+        record["block_reasons"] = gate["block_reasons"]
+        record["cautions"] = gate["cautions"]
+
     completed = [r for r in records if r["pnl"] is not None and r["cost"] > 0]
     resolved = [r for r in completed if r["resolved"]]
     wins = [r for r in resolved if r["result"] == "win"]
@@ -660,6 +759,28 @@ def _build_backtest_summary(markets):
             "win_rate": (item["wins"] / resolved_count) if resolved_count else 0,
         })
 
+    slice_rows = []
+    for allowed in (True, False):
+        group = [r for r in completed if bool(r.get("live_allowed_replay")) is allowed]
+        slice_rows.append(_slice_row("gate_allowed" if allowed else "gate_blocked", group, "gate"))
+
+    for bucket_name in sorted({r.get("price_bucket") for r in completed if r.get("price_bucket")}):
+        group = [r for r in completed if r.get("price_bucket") == bucket_name]
+        slice_rows.append(_slice_row(bucket_name, group, "price_bucket"))
+
+    for band in sorted({r.get("fit_band") for r in completed if r.get("fit_band")}):
+        group = [r for r in completed if r.get("fit_band") == band]
+        slice_rows.append(_slice_row(band, group, "fit_band"))
+
+    block_reasons = {}
+    for r in completed:
+        for reason in r.get("block_reasons") or []:
+            block_reasons.setdefault(reason, []).append(r)
+    block_reason_rows = [
+        _slice_row(reason, group, "block_reason")
+        for reason, group in block_reasons.items()
+    ]
+
     return {
         "total_positions": len(records),
         "completed_positions": len(completed),
@@ -675,10 +796,12 @@ def _build_backtest_summary(markets):
         "brier_score": (sum(brier_values) / len(brier_values)) if brier_values else 0,
         "buckets": sorted(bucket_rows, key=lambda b: b["bucket"]),
         "sources": sorted(source_rows, key=lambda s: s["source"]),
+        "risk_slices": sorted(slice_rows, key=lambda row: (row["kind"], row["name"])),
+        "block_reasons": sorted(block_reason_rows, key=lambda row: row["pnl"]),
         "notes": [
             "本复盘基于本地保存的模拟/纸面仓位，不是逐分钟盘口回放。",
-            "新信号优先使用 31 成员 GFS ensemble；旧样本可能仍来自 ECMWF/HRRR/METAR 单点概率。",
-            "样本少于 30 个已结算仓位时，胜率和 Brier 只能作观察，不能作为实盘依据。",
+            "风控回放使用当前城市拟合与盘口门槛反推历史仓位会被允许还是拦截，用来验证规则方向。",
+            "样本少于 30 个已结算仓位时，胜率、Brier 和风控切片只能作观察，不能作为实盘放大依据。",
         ],
     }
 

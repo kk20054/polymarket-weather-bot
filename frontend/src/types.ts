@@ -137,6 +137,17 @@ export interface BacktestSource {
   pnl: number
 }
 
+export interface BacktestRiskSlice {
+  kind: string
+  name: string
+  count: number
+  resolved: number
+  wins: number
+  win_rate: number
+  pnl: number
+  roi: number
+}
+
 export interface BacktestSummary {
   total_positions: number
   completed_positions: number
@@ -152,6 +163,8 @@ export interface BacktestSummary {
   brier_score: number
   buckets: BacktestBucket[]
   sources: BacktestSource[]
+  risk_slices?: BacktestRiskSlice[]
+  block_reasons?: BacktestRiskSlice[]
   notes: string[]
 }
 
