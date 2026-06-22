@@ -169,7 +169,9 @@ export interface BacktestSummary {
   total_pnl: number
   avg_actual_return: number
   avg_predicted_ev: number
+  avg_calibrated_ev?: number
   brier_score: number
+  calibrated_brier_score?: number
   buckets: BacktestBucket[]
   sources: BacktestSource[]
   risk_slices?: BacktestRiskSlice[]

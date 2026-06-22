@@ -4,6 +4,7 @@
 
 import json
 import asyncio
+import math
 import os
 import subprocess
 import sys
@@ -114,6 +115,40 @@ def _delta_to_f(value, unit):
     if value is None:
         return None
     return float(value) * 9.0 / 5.0 if unit == "C" else float(value)
+
+
+def _norm_cdf(value):
+    return 0.5 * (1.0 + math.erf(float(value) / math.sqrt(2.0)))
+
+
+def _bucket_probability_f(forecast_f, low_f, high_f, sigma_f):
+    if forecast_f is None or low_f is None or high_f is None:
+        return None
+    try:
+        forecast_f = float(forecast_f)
+        low_f = float(low_f)
+        high_f = float(high_f)
+        sigma_f = max(0.5, float(sigma_f or 0))
+    except Exception:
+        return None
+    if low_f <= -900:
+        return max(0.0, min(1.0, _norm_cdf((high_f + 0.5 - forecast_f) / sigma_f)))
+    if high_f >= 900:
+        return max(0.0, min(1.0, 1.0 - _norm_cdf((low_f - 0.5 - forecast_f) / sigma_f)))
+    lower = low_f - 0.5
+    upper = high_f + 0.5
+    return max(0.0, min(1.0, _norm_cdf((upper - forecast_f) / sigma_f) - _norm_cdf((lower - forecast_f) / sigma_f)))
+
+
+def _calc_ev(probability, price):
+    try:
+        probability = float(probability)
+        price = float(price)
+    except Exception:
+        return None
+    if price <= 0 or price >= 1:
+        return 0.0
+    return probability * (1.0 / price - 1.0) - (1.0 - probability)
 
 
 def _latest_snapshot(market, key):
@@ -694,7 +729,7 @@ def _entry_snapshot_features(market, item):
     }
 
 
-def _augment_strategy_replay_record(record, fit):
+def _augment_strategy_replay_record(record, fit, source_fit=None):
     bias = float(fit.get("bias_f") or 0) if fit else 0.0
     forecast_f = record.get("forecast_temp_f")
     adjusted = forecast_f - bias if forecast_f is not None else None
@@ -717,6 +752,34 @@ def _augment_strategy_replay_record(record, fit):
         and dispersion_ratio is not None
         and dispersion_ratio > 1.6
         and float(record.get("entry_price") or 0) <= 0.14
+    )
+
+    sigma_candidates = [1.5]
+    if record.get("entry_ensemble_std_f") is not None:
+        sigma_candidates.append(float(record.get("entry_ensemble_std_f") or 0))
+    if fit:
+        sigma_candidates.append(float(fit.get("mae_f") or 0))
+        sigma_candidates.append(float(fit.get("rmse_f") or 0) * 0.75)
+    if source_fit:
+        sigma_candidates.append(float(source_fit.get("mae_f") or 0))
+    sigma_f = max(sigma_candidates)
+    calibrated_probability = _bucket_probability_f(
+        adjusted,
+        record.get("bucket_low_f"),
+        record.get("bucket_high_f"),
+        sigma_f,
+    )
+    entry_price = float(record.get("entry_price") or 0)
+    calibrated_ev = _calc_ev(calibrated_probability, entry_price) if calibrated_probability is not None else None
+    record["calibrated_sigma_f"] = round(sigma_f, 2)
+    record["calibrated_probability"] = round(calibrated_probability, 4) if calibrated_probability is not None else None
+    record["calibrated_prob_edge"] = round(calibrated_probability - entry_price, 4) if calibrated_probability is not None else None
+    record["calibrated_ev"] = round(calibrated_ev, 4) if calibrated_ev is not None else None
+    record["calibrated_positive_edge"] = bool(
+        calibrated_probability is not None
+        and calibrated_ev is not None
+        and calibrated_probability - entry_price >= 0.08
+        and calibrated_ev >= 0.10
     )
     return record
 
@@ -825,6 +888,16 @@ def _build_policy_candidates(completed):
             "cheap_underdispersed_tail",
             "D+1/D+2 低价尾部 + 历史波动大于 ensemble",
             lambda r: bool(r.get("cheap_underdispersed_tail")),
+        ),
+        (
+            "calibrated_positive_edge",
+            "校准概率后仍满足 EV/概率差",
+            lambda r: bool(r.get("calibrated_positive_edge")),
+        ),
+        (
+            "gate_calibrated_positive_10_45c",
+            "当前允许组 + 10-45c + 校准后仍有优势",
+            lambda r: bool(r.get("live_allowed_replay")) and price_between(0.10, 0.45)(r) and bool(r.get("calibrated_positive_edge")),
         ),
     ]
 
@@ -986,10 +1059,13 @@ def _build_backtest_summary(markets):
     ]
     temperature_fit = _build_temperature_fit(markets)
     fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
+    fit_by_source = {str(row.get("source") or "").upper(): row for row in temperature_fit.get("sources", [])}
     for record in records:
         fit = fit_by_city.get(record.get("city")) or {}
         gate = _historical_gate_replay(record, fit)
-        _augment_strategy_replay_record(record, fit)
+        source_key = str(record.get("source") or "").upper()
+        source_fit = fit_by_source.get(source_key) or fit_by_source.get("MODEL_BEST")
+        _augment_strategy_replay_record(record, fit, source_fit)
         record["fit_band"] = _fit_band(fit)
         record["price_bucket"] = _price_bucket(record.get("entry_price"))
         record["live_allowed_replay"] = gate["live_allowed"]
@@ -1003,12 +1079,15 @@ def _build_backtest_summary(markets):
     total_pnl = round(sum(r["pnl"] for r in completed), 2)
     actual_returns = [r["pnl"] / r["cost"] for r in completed if r["cost"]]
     predicted_edges = [float(r["ev"]) for r in completed if r.get("ev") is not None]
+    calibrated_edges = [float(r["calibrated_ev"]) for r in completed if r.get("calibrated_ev") is not None]
     brier_values = []
+    calibrated_brier_values = []
     for r in resolved:
-        if r.get("p") is None:
-            continue
         y = 1.0 if r["result"] == "win" else 0.0
-        brier_values.append((float(r["p"]) - y) ** 2)
+        if r.get("p") is not None:
+            brier_values.append((float(r["p"]) - y) ** 2)
+        if r.get("calibrated_probability") is not None:
+            calibrated_brier_values.append((float(r["calibrated_probability"]) - y) ** 2)
 
     buckets = {}
     for r in completed:
@@ -1083,7 +1162,9 @@ def _build_backtest_summary(markets):
         "total_pnl": total_pnl,
         "avg_actual_return": (sum(actual_returns) / len(actual_returns)) if actual_returns else 0,
         "avg_predicted_ev": (sum(predicted_edges) / len(predicted_edges)) if predicted_edges else 0,
+        "avg_calibrated_ev": (sum(calibrated_edges) / len(calibrated_edges)) if calibrated_edges else 0,
         "brier_score": (sum(brier_values) / len(brier_values)) if brier_values else 0,
+        "calibrated_brier_score": (sum(calibrated_brier_values) / len(calibrated_brier_values)) if calibrated_brier_values else 0,
         "buckets": sorted(bucket_rows, key=lambda b: b["bucket"]),
         "sources": sorted(source_rows, key=lambda s: s["source"]),
         "risk_slices": sorted(slice_rows, key=lambda row: (row["kind"], row["name"])),

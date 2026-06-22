@@ -49,6 +49,8 @@ function sliceName(name: string) {
     case 'bias_adjusted_in_bucket': return '校正后仍落桶'
     case 'gate_bias_adjusted_10_45c': return '允许组 + 校正落桶'
     case 'cheap_underdispersed_tail': return '低价波动尾部'
+    case 'calibrated_positive_edge': return '校准后仍有优势'
+    case 'gate_calibrated_positive_10_45c': return '允许组 + 校准优势'
     default: return name
   }
 }
@@ -119,7 +121,14 @@ export function BacktestPanel({ backtest, onOpenFit }: Props) {
   const priceRows = (backtest.risk_slices ?? []).filter(row => row.kind === 'price_bucket')
   const fitRows = (backtest.risk_slices ?? []).filter(row => row.kind === 'fit_band')
   const blockerRows = (backtest.block_reasons ?? []).slice(0, 4)
-  const policyRows = (backtest.policy_candidates ?? []).slice(0, 5)
+  const policyCandidates = backtest.policy_candidates ?? []
+  const mustShowPolicyNames = new Set(['calibrated_positive_edge', 'gate_calibrated_positive_10_45c'])
+  const policyRows = [
+    ...policyCandidates.slice(0, 6),
+    ...policyCandidates.filter(row => mustShowPolicyNames.has(row.name)),
+  ].filter((row, index, rows) => rows.findIndex(item => item.name === row.name) === index).slice(0, 8)
+  const calibratedBrier = backtest.calibrated_brier_score ?? 0
+  const calibratedEv = backtest.avg_calibrated_ev ?? 0
 
   return (
     <div className="h-full space-y-2 overflow-y-auto p-2 text-[10px] text-neutral-500">
@@ -163,11 +172,17 @@ export function BacktestPanel({ backtest, onOpenFit }: Props) {
         <div>
           <div className="text-neutral-600">Brier</div>
           <div className="tabular-nums text-neutral-300">{backtest.brier_score.toFixed(3)}</div>
+          <div className={`text-[9px] tabular-nums ${calibratedBrier && calibratedBrier <= backtest.brier_score ? 'text-green-500' : 'text-neutral-600'}`}>
+            校准 {calibratedBrier ? calibratedBrier.toFixed(3) : '--'}
+          </div>
         </div>
         <div>
           <div className="text-neutral-600">实际 EV</div>
           <div className={`${backtest.avg_actual_return >= 0 ? 'text-green-500' : 'text-red-500'} tabular-nums`}>
             {pct(backtest.avg_actual_return)}
+          </div>
+          <div className={`${calibratedEv >= 0 ? 'text-green-500' : 'text-red-500'} text-[9px] tabular-nums`}>
+            校准预测EV {pct(calibratedEv)}
           </div>
         </div>
       </div>

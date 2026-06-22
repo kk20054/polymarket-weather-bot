@@ -7,7 +7,7 @@ from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.db import connect, init_v3_db
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import quote_from_market_payload, validate_order_constraints
-from dashboard_server import _bucket_value_in_range, _entry_snapshot_features
+from dashboard_server import _augment_strategy_replay_record, _bucket_probability_f, _bucket_value_in_range, _entry_snapshot_features
 
 
 TEST_DB_DIR = Path(__file__).resolve().parents[1] / ".tmp-tests"
@@ -107,6 +107,24 @@ class V3CoreTests(unittest.TestCase):
         self.assertFalse(features["near_lock_metar_aligned"])
         self.assertTrue(features["raw_forecast_in_bucket"])
         self.assertTrue(_bucket_value_in_range(70, 70, 71))
+
+    def test_calibrated_probability_uses_wider_error_sigma(self):
+        narrow = _bucket_probability_f(70, 70, 71, 1.5)
+        wide = _bucket_probability_f(70, 70, 71, 4.0)
+        self.assertGreater(narrow, wide)
+
+        record = {
+            "forecast_temp_f": 70,
+            "bucket_low_f": 70,
+            "bucket_high_f": 71,
+            "entry_price": 0.30,
+            "entry_ensemble_std_f": 0.8,
+        }
+        fit = {"bias_f": 0.0, "mae_f": 4.0, "rmse_f": 4.5}
+        _augment_strategy_replay_record(record, fit)
+        self.assertEqual(record["calibrated_sigma_f"], 4.0)
+        self.assertLess(record["calibrated_probability"], round(narrow, 4))
+        self.assertIn("calibrated_ev", record)
 
 
 if __name__ == "__main__":
