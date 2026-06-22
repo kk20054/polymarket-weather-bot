@@ -19,6 +19,10 @@ function sliceName(name: string) {
   if (calibratedMatch) {
     return `校准EV${calibratedMatch[1]} / 差${calibratedMatch[2]} / 样本${calibratedMatch[3]}`
   }
+  const mosMatch = name.match(/^mos_ev(\d+)_edge(\d+)_s(\d+)$/)
+  if (mosMatch) {
+    return `MOS EV${mosMatch[1]} / 差${mosMatch[2]} / 样本${mosMatch[3]}`
+  }
   switch (name) {
     case 'gate_allowed': return '规则允许'
     case 'gate_blocked': return '规则拦截'
@@ -55,6 +59,8 @@ function sliceName(name: string) {
     case 'cheap_underdispersed_tail': return '低价波动尾部'
     case 'calibrated_positive_edge': return '校准后仍有优势'
     case 'gate_calibrated_positive_10_45c': return '允许组 + 校准优势'
+    case 'mos_positive_edge': return 'MOS 后仍有优势'
+    case 'gate_mos_positive_10_45c': return '允许组 + MOS 优势'
     default: return name
   }
 }
@@ -126,14 +132,22 @@ export function BacktestPanel({ backtest, onOpenFit }: Props) {
   const fitRows = (backtest.risk_slices ?? []).filter(row => row.kind === 'fit_band')
   const blockerRows = (backtest.block_reasons ?? []).slice(0, 4)
   const policyCandidates = backtest.policy_candidates ?? []
-  const mustShowPolicyNames = new Set(['calibrated_positive_edge', 'gate_calibrated_positive_10_45c'])
+  const mustShowPolicyNames = new Set([
+    'calibrated_positive_edge',
+    'gate_calibrated_positive_10_45c',
+    'mos_positive_edge',
+    'gate_mos_positive_10_45c',
+  ])
   const policyRows = [
     ...policyCandidates.slice(0, 6),
     ...policyCandidates.filter(row => mustShowPolicyNames.has(row.name)),
     ...policyCandidates.filter(row => row.name.startsWith('cal_ev')).slice(0, 4),
-  ].filter((row, index, rows) => rows.findIndex(item => item.name === row.name) === index).slice(0, 8)
+    ...policyCandidates.filter(row => row.name.startsWith('mos_ev')).slice(0, 4),
+  ].filter((row, index, rows) => rows.findIndex(item => item.name === row.name) === index).slice(0, 10)
   const calibratedBrier = backtest.calibrated_brier_score ?? 0
   const calibratedEv = backtest.avg_calibrated_ev ?? 0
+  const mosBrier = backtest.mos_brier_score ?? 0
+  const mosEv = backtest.avg_mos_ev ?? 0
 
   return (
     <div className="h-full space-y-2 overflow-y-auto p-2 text-[10px] text-neutral-500">
@@ -180,6 +194,9 @@ export function BacktestPanel({ backtest, onOpenFit }: Props) {
           <div className={`text-[9px] tabular-nums ${calibratedBrier && calibratedBrier <= backtest.brier_score ? 'text-green-500' : 'text-neutral-600'}`}>
             校准 {calibratedBrier ? calibratedBrier.toFixed(3) : '--'}
           </div>
+          <div className={`text-[9px] tabular-nums ${mosBrier && mosBrier <= backtest.brier_score ? 'text-green-500' : 'text-neutral-600'}`}>
+            MOS {mosBrier ? mosBrier.toFixed(3) : '--'}
+          </div>
         </div>
         <div>
           <div className="text-neutral-600">实际 EV</div>
@@ -188,6 +205,9 @@ export function BacktestPanel({ backtest, onOpenFit }: Props) {
           </div>
           <div className={`${calibratedEv >= 0 ? 'text-green-500' : 'text-red-500'} text-[9px] tabular-nums`}>
             校准预测EV {pct(calibratedEv)}
+          </div>
+          <div className={`${mosEv >= 0 ? 'text-green-500' : 'text-red-500'} text-[9px] tabular-nums`}>
+            MOS预测EV {pct(mosEv)}
           </div>
         </div>
       </div>

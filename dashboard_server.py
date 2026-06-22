@@ -766,6 +766,18 @@ def _augment_strategy_replay_record(record, fit, source_fit=None):
         record.get("bucket_low_f"),
         record.get("bucket_high_f"),
     )
+    mos_adjusted = None
+    if forecast_f is not None and fit and fit.get("mos_slope") is not None and fit.get("mos_intercept_f") is not None:
+        try:
+            mos_adjusted = float(fit.get("mos_slope")) * float(forecast_f) + float(fit.get("mos_intercept_f"))
+        except Exception:
+            mos_adjusted = None
+    record["mos_adjusted_forecast_f"] = round(mos_adjusted, 2) if mos_adjusted is not None else None
+    record["mos_adjusted_in_bucket"] = _bucket_value_in_range(
+        mos_adjusted,
+        record.get("bucket_low_f"),
+        record.get("bucket_high_f"),
+    )
 
     ensemble_std_f = record.get("entry_ensemble_std_f")
     dispersion_ratio = None
@@ -800,16 +812,32 @@ def _augment_strategy_replay_record(record, fit, source_fit=None):
     )
     entry_price = float(record.get("entry_price") or 0)
     calibrated_ev = _calc_ev(calibrated_probability, entry_price) if calibrated_probability is not None else None
+    mos_probability = _bucket_probability_f(
+        mos_adjusted,
+        record.get("bucket_low_f"),
+        record.get("bucket_high_f"),
+        sigma_f,
+    ) if mos_adjusted is not None else None
+    mos_ev = _calc_ev(mos_probability, entry_price) if mos_probability is not None else None
     record["calibrated_sigma_f"] = round(sigma_f, 2)
     record["calibration_bias_f"] = round(bias, 2)
     record["calibrated_probability"] = round(calibrated_probability, 4) if calibrated_probability is not None else None
     record["calibrated_prob_edge"] = round(calibrated_probability - entry_price, 4) if calibrated_probability is not None else None
     record["calibrated_ev"] = round(calibrated_ev, 4) if calibrated_ev is not None else None
+    record["mos_probability"] = round(mos_probability, 4) if mos_probability is not None else None
+    record["mos_prob_edge"] = round(mos_probability - entry_price, 4) if mos_probability is not None else None
+    record["mos_ev"] = round(mos_ev, 4) if mos_ev is not None else None
     record["calibrated_positive_edge"] = bool(
         calibrated_probability is not None
         and calibrated_ev is not None
         and calibrated_probability - entry_price >= 0.08
         and calibrated_ev >= 0.10
+    )
+    record["mos_positive_edge"] = bool(
+        mos_probability is not None
+        and mos_ev is not None
+        and mos_probability - entry_price >= 0.08
+        and mos_ev >= 0.10
     )
     record["city_fit_samples"] = int(fit.get("samples") or 0) if fit else 0
     record["source_fit_samples"] = int(source_fit.get("samples") or 0) if source_fit else 0
@@ -868,7 +896,7 @@ def _build_policy_candidates(completed):
             return True
         return _inner
 
-    def calibrated_threshold(ev_min=0.10, edge_min=0.08, sample_min=0, price_low=0.10, price_high=0.45):
+    def edge_threshold(ev_field, edge_field, ev_min=0.10, edge_min=0.08, sample_min=0, price_low=0.10, price_high=0.45):
         def _inner(record):
             if not bool(record.get("live_allowed_replay")):
                 return False
@@ -876,12 +904,18 @@ def _build_policy_candidates(completed):
                 return False
             if int(record.get("city_fit_samples") or 0) < sample_min:
                 return False
-            ev = record.get("calibrated_ev")
-            edge = record.get("calibrated_prob_edge")
+            ev = record.get(ev_field)
+            edge = record.get(edge_field)
             if ev is None or edge is None:
                 return False
             return float(ev) >= ev_min and float(edge) >= edge_min
         return _inner
+
+    def calibrated_threshold(ev_min=0.10, edge_min=0.08, sample_min=0, price_low=0.10, price_high=0.45):
+        return edge_threshold("calibrated_ev", "calibrated_prob_edge", ev_min, edge_min, sample_min, price_low, price_high)
+
+    def mos_threshold(ev_min=0.10, edge_min=0.08, sample_min=0, price_low=0.10, price_high=0.45):
+        return edge_threshold("mos_ev", "mos_prob_edge", ev_min, edge_min, sample_min, price_low, price_high)
 
     candidates = [
         ("all_completed", "全部已完成仓位基线", lambda r: True),
@@ -946,6 +980,16 @@ def _build_policy_candidates(completed):
             "当前允许组 + 10-45c + 校准后仍有优势",
             lambda r: bool(r.get("live_allowed_replay")) and price_between(0.10, 0.45)(r) and bool(r.get("calibrated_positive_edge")),
         ),
+        (
+            "mos_positive_edge",
+            "MOS线性校正后仍满足 EV/概率差",
+            lambda r: bool(r.get("mos_positive_edge")),
+        ),
+        (
+            "gate_mos_positive_10_45c",
+            "当前允许组 + 10-45c + MOS校正后仍有优势",
+            lambda r: bool(r.get("live_allowed_replay")) and price_between(0.10, 0.45)(r) and bool(r.get("mos_positive_edge")),
+        ),
     ]
 
     for sample_min in (0, 5, 10, 20):
@@ -954,21 +998,22 @@ def _build_policy_candidates(completed):
             description = f"允许组 + 10-45c + 校准EV>={ev_min:.0%} + 概率差>={edge_min:.0%} + 城市样本>={sample_min}"
             candidates.append((name, description, calibrated_threshold(ev_min, edge_min, sample_min)))
 
+    for sample_min in (0, 5, 10):
+        for ev_min, edge_min in ((0.10, 0.08), (0.25, 0.12)):
+            name = f"mos_ev{int(ev_min * 100)}_edge{int(edge_min * 100)}_s{sample_min}"
+            description = f"允许组 + 10-45c + MOS EV>={ev_min:.0%} + 概率差>={edge_min:.0%} + 城市样本>={sample_min}"
+            candidates.append((name, description, mos_threshold(ev_min, edge_min, sample_min)))
+
     for source in sorted({r.get("source") for r in completed if r.get("source")}):
         source_records = [r for r in completed if r.get("source") == source]
         if len(source_records) >= 3:
             candidates.append((f"source_{source}", f"只做 {source} 来源", lambda r, source=source: r.get("source") == source))
 
     rows = []
-    seen = set()
     for name, description, predicate in candidates:
         group = [r for r in completed if predicate(r)]
         if not group:
             continue
-        key = tuple(sorted(r.get("market_id") or "" for r in group))
-        if key in seen:
-            continue
-        seen.add(key)
         rows.append(_policy_candidate_row(name, description, group))
     return sorted(rows, key=lambda row: (row["resolved"] > 0, row["score"], row["pnl"], row["resolved"]), reverse=True)
 
@@ -1133,14 +1178,18 @@ def _build_backtest_summary(markets):
     actual_returns = [r["pnl"] / r["cost"] for r in completed if r["cost"]]
     predicted_edges = [float(r["ev"]) for r in completed if r.get("ev") is not None]
     calibrated_edges = [float(r["calibrated_ev"]) for r in completed if r.get("calibrated_ev") is not None]
+    mos_edges = [float(r["mos_ev"]) for r in completed if r.get("mos_ev") is not None]
     brier_values = []
     calibrated_brier_values = []
+    mos_brier_values = []
     for r in resolved:
         y = 1.0 if r["result"] == "win" else 0.0
         if r.get("p") is not None:
             brier_values.append((float(r["p"]) - y) ** 2)
         if r.get("calibrated_probability") is not None:
             calibrated_brier_values.append((float(r["calibrated_probability"]) - y) ** 2)
+        if r.get("mos_probability") is not None:
+            mos_brier_values.append((float(r["mos_probability"]) - y) ** 2)
 
     buckets = {}
     for r in completed:
@@ -1194,6 +1243,15 @@ def _build_backtest_summary(markets):
         group = [r for r in completed if r.get("fit_band") == band]
         slice_rows.append(_slice_row(band, group, "fit_band"))
 
+    for name, predicate in (
+        ("calibrated_positive_edge", lambda r: bool(r.get("calibrated_positive_edge"))),
+        ("mos_positive_edge", lambda r: bool(r.get("mos_positive_edge"))),
+        ("bias_adjusted_in_bucket", lambda r: bool(r.get("bias_adjusted_in_bucket"))),
+    ):
+        group = [r for r in completed if predicate(r)]
+        if group:
+            slice_rows.append(_slice_row(name, group, "strategy_feature"))
+
     block_reasons = {}
     for r in completed:
         for reason in r.get("block_reasons") or []:
@@ -1216,8 +1274,10 @@ def _build_backtest_summary(markets):
         "avg_actual_return": (sum(actual_returns) / len(actual_returns)) if actual_returns else 0,
         "avg_predicted_ev": (sum(predicted_edges) / len(predicted_edges)) if predicted_edges else 0,
         "avg_calibrated_ev": (sum(calibrated_edges) / len(calibrated_edges)) if calibrated_edges else 0,
+        "avg_mos_ev": (sum(mos_edges) / len(mos_edges)) if mos_edges else 0,
         "brier_score": (sum(brier_values) / len(brier_values)) if brier_values else 0,
         "calibrated_brier_score": (sum(calibrated_brier_values) / len(calibrated_brier_values)) if calibrated_brier_values else 0,
+        "mos_brier_score": (sum(mos_brier_values) / len(mos_brier_values)) if mos_brier_values else 0,
         "buckets": sorted(bucket_rows, key=lambda b: b["bucket"]),
         "sources": sorted(source_rows, key=lambda s: s["source"]),
         "risk_slices": sorted(slice_rows, key=lambda row: (row["kind"], row["name"])),
@@ -1235,7 +1295,18 @@ def _build_backtest_summary(markets):
 
 def _metric_summary(records):
     if not records:
-        return {"samples": 0, "mae_f": 0, "bias_f": 0, "decayed_bias_f": 0, "rmse_f": 0}
+        return {
+            "samples": 0,
+            "mae_f": 0,
+            "bias_f": 0,
+            "decayed_bias_f": 0,
+            "rmse_f": 0,
+            "mos_slope": None,
+            "mos_intercept_f": None,
+            "mos_mae_f": None,
+            "mos_rmse_f": None,
+            "mos_improvement_f": None,
+        }
     ordered = sorted(records, key=lambda r: (r.get("target_date") or "", r.get("timestamp") or ""))
     errors = [float(r["error_f"]) for r in ordered]
     abs_errors = [abs(e) for e in errors]
@@ -1243,12 +1314,56 @@ def _metric_summary(records):
     alpha = 0.97
     for error in errors[1:]:
         decayed_bias = alpha * decayed_bias + (1.0 - alpha) * error
-    return {
+    summary = {
         "samples": len(records),
         "mae_f": round(sum(abs_errors) / len(abs_errors), 2),
         "bias_f": round(sum(errors) / len(errors), 2),
         "decayed_bias_f": round(decayed_bias, 2),
         "rmse_f": round((sum(e * e for e in errors) / len(errors)) ** 0.5, 2),
+    }
+    summary.update(_mos_summary(ordered, summary["mae_f"]))
+    return summary
+
+
+def _mos_summary(records, baseline_mae_f):
+    pairs = [
+        (float(r["forecast_f"]), float(r["actual_f"]))
+        for r in records
+        if r.get("forecast_f") is not None and r.get("actual_f") is not None
+    ]
+    if len(pairs) < 20:
+        return {
+            "mos_slope": None,
+            "mos_intercept_f": None,
+            "mos_mae_f": None,
+            "mos_rmse_f": None,
+            "mos_improvement_f": None,
+        }
+    xs = [x for x, _ in pairs]
+    ys = [y for _, y in pairs]
+    x_mean = sum(xs) / len(xs)
+    y_mean = sum(ys) / len(ys)
+    variance = sum((x - x_mean) ** 2 for x in xs)
+    if variance <= 1e-9:
+        return {
+            "mos_slope": None,
+            "mos_intercept_f": None,
+            "mos_mae_f": None,
+            "mos_rmse_f": None,
+            "mos_improvement_f": None,
+        }
+    slope = sum((x - x_mean) * (y - y_mean) for x, y in pairs) / variance
+    intercept = y_mean - slope * x_mean
+    mos_errors = [(slope * x + intercept) - y for x, y in pairs]
+    mos_abs = [abs(e) for e in mos_errors]
+    mos_mae = sum(mos_abs) / len(mos_abs)
+    mos_rmse = (sum(e * e for e in mos_errors) / len(mos_errors)) ** 0.5
+    return {
+        "mos_slope": round(slope, 4),
+        "mos_intercept_f": round(intercept, 2),
+        "mos_mae_f": round(mos_mae, 2),
+        "mos_rmse_f": round(mos_rmse, 2),
+        "mos_improvement_f": round(float(baseline_mae_f or 0) - mos_mae, 2),
     }
 
 

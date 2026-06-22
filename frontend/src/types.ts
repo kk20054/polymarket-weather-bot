@@ -176,8 +176,10 @@ export interface BacktestSummary {
   avg_actual_return: number
   avg_predicted_ev: number
   avg_calibrated_ev?: number
+  avg_mos_ev?: number
   brier_score: number
   calibrated_brier_score?: number
+  mos_brier_score?: number
   buckets: BacktestBucket[]
   sources: BacktestSource[]
   risk_slices?: BacktestRiskSlice[]
@@ -230,6 +232,11 @@ export interface TemperatureFitGroup {
   bias_f: number
   decayed_bias_f?: number
   rmse_f: number
+  mos_slope?: number | null
+  mos_intercept_f?: number | null
+  mos_mae_f?: number | null
+  mos_rmse_f?: number | null
+  mos_improvement_f?: number | null
   fit_status?: 'eligible' | 'watch' | 'blocked'
   fit_reasons?: string[]
   trade_score?: number
@@ -245,6 +252,11 @@ export interface TemperatureFitSummary {
   bias_f: number
   decayed_bias_f?: number
   rmse_f: number
+  mos_slope?: number | null
+  mos_intercept_f?: number | null
+  mos_mae_f?: number | null
+  mos_rmse_f?: number | null
+  mos_improvement_f?: number | null
 }
 
 export interface TemperatureFitData {

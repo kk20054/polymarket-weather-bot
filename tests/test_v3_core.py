@@ -7,7 +7,7 @@ from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.db import connect, init_v3_db
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import quote_from_market_payload, validate_order_constraints
-from dashboard_server import _augment_strategy_replay_record, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _entry_snapshot_features, _fit_trade_readiness
+from dashboard_server import _augment_strategy_replay_record, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _entry_snapshot_features, _fit_trade_readiness, _metric_summary
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric
 
 
@@ -153,6 +153,37 @@ class V3CoreTests(unittest.TestCase):
         self.assertNotEqual(round(metric["decayed_bias_f"], 3), round(metric["bias_f"], 3))
         self.assertLess(metric["decayed_bias_f"], 4.0)
 
+    def test_metric_summary_adds_mos_linear_fit(self):
+        records = [
+            {
+                "forecast_f": 60.0 + i,
+                "actual_f": 62.0 + i,
+                "error_f": -2.0,
+                "target_date": f"2026-06-{i + 1:02d}",
+            }
+            for i in range(20)
+        ]
+        metric = _metric_summary(records)
+        self.assertAlmostEqual(metric["mos_slope"], 1.0)
+        self.assertAlmostEqual(metric["mos_intercept_f"], 2.0)
+        self.assertEqual(metric["mos_mae_f"], 0.0)
+        self.assertGreater(metric["mos_improvement_f"], 0)
+
+    def test_replay_record_adds_mos_probability_and_ev(self):
+        record = {
+            "forecast_temp_f": 70,
+            "bucket_low_f": 72,
+            "bucket_high_f": 73,
+            "entry_price": 0.30,
+            "entry_ensemble_std_f": 0.8,
+        }
+        fit = {"bias_f": 0.0, "mae_f": 2.0, "rmse_f": 2.5, "mos_slope": 1.0, "mos_intercept_f": 2.0}
+        _augment_strategy_replay_record(record, fit)
+        self.assertEqual(record["mos_adjusted_forecast_f"], 72.0)
+        self.assertTrue(record["mos_adjusted_in_bucket"])
+        self.assertIn("mos_ev", record)
+        self.assertGreater(record["mos_probability"], 0)
+
     def test_policy_candidates_include_calibrated_threshold_grid(self):
         records = [
             {
@@ -165,6 +196,9 @@ class V3CoreTests(unittest.TestCase):
                 "live_allowed_replay": True,
                 "calibrated_ev": 0.30,
                 "calibrated_prob_edge": 0.13,
+                "mos_ev": 0.28,
+                "mos_prob_edge": 0.12,
+                "mos_positive_edge": True,
                 "city_fit_samples": 12,
                 "source": "ECMWF",
             },
@@ -178,6 +212,9 @@ class V3CoreTests(unittest.TestCase):
                 "live_allowed_replay": True,
                 "calibrated_ev": -0.10,
                 "calibrated_prob_edge": -0.02,
+                "mos_ev": -0.08,
+                "mos_prob_edge": -0.01,
+                "mos_positive_edge": False,
                 "city_fit_samples": 12,
                 "source": "ECMWF",
             },
@@ -185,7 +222,10 @@ class V3CoreTests(unittest.TestCase):
         candidates = _build_policy_candidates(records)
         names = {row["name"] for row in candidates}
         self.assertIn("cal_ev10_edge8_s0", names)
+        self.assertIn("mos_ev10_edge8_s0", names)
+        self.assertIn("mos_positive_edge", names)
         self.assertTrue(any(name.startswith("cal_ev") for name in names))
+        self.assertTrue(any(name.startswith("mos_ev") for name in names))
         self.assertNotIn("cal_ev50_edge18_s10", names)
 
     def test_bulk_simulation_skip_reason_explains_duplicates_and_calibration(self):

@@ -21,8 +21,8 @@ interface Props {
   onBack: () => void
 }
 
-function f(value?: number) {
-  if (value === undefined || Number.isNaN(value)) return '-'
+function f(value?: number | null) {
+  if (value === undefined || value === null || Number.isNaN(value)) return '-'
   return `${value.toFixed(1)}F`
 }
 
@@ -162,6 +162,20 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
                 </div>
                 <div className="text-[9px] text-neutral-600">衰减 {f(summary.decayed_bias_f)}</div>
               </div>
+              <div className="border border-neutral-800 p-2">
+                <div className="text-neutral-600">MOS MAE</div>
+                <div className="tabular-nums text-lg font-bold text-violet-300">{f(summary.mos_mae_f)}</div>
+                <div className={`${(summary.mos_improvement_f ?? 0) > 0 ? 'text-green-400' : 'text-neutral-600'} text-[9px] tabular-nums`}>
+                  改善 {f(summary.mos_improvement_f)}
+                </div>
+              </div>
+              <div className="border border-neutral-800 p-2">
+                <div className="text-neutral-600">MOS 公式</div>
+                <div className="tabular-nums text-sm font-bold text-neutral-200">
+                  {summary.mos_slope !== null && summary.mos_slope !== undefined ? summary.mos_slope.toFixed(2) : '-'}x
+                </div>
+                <div className="text-[9px] text-neutral-600">截距 {f(summary.mos_intercept_f)}</div>
+              </div>
             </div>
 
             <div className="mb-3 border border-neutral-800 p-2">
@@ -210,6 +224,11 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
                   <div className="text-[9px] text-neutral-600">
                     MAE {f(source.mae_f)} · Bias {f(source.bias_f)} · 衰减 {f(source.decayed_bias_f)} · score {((source.trade_score ?? 0) * 100).toFixed(0)}
                   </div>
+                  {source.mos_mae_f !== null && source.mos_mae_f !== undefined && (
+                    <div className="text-[9px] text-violet-300/80">
+                      MOS MAE {f(source.mos_mae_f)} · 改善 {f(source.mos_improvement_f)}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

@@ -83,9 +83,9 @@ function formatDataAge(minutes?: number | null) {
   return `${(minutes / 1440).toFixed(1)} 天前`
 }
 
-function bulkReasonLabel(reason: string) {
+function bulkReasonLabel(reason: string): string {
   if (reason.startsWith('risk_gate:')) return `风控拦截：${reason.slice('risk_gate:'.length)}`
-  if (reason.startsWith('paper_rejected:')) return `盘口拒单：${reason.slice('paper_rejected:'.length)}`
+  if (reason.startsWith('paper_rejected:')) return `盘口拒单：${bulkReasonLabel(reason.slice('paper_rejected:'.length))}`
   switch (reason) {
     case 'already_paper_position': return '已有纸面仓位'
     case 'already_simulated': return '已模拟'
@@ -98,6 +98,12 @@ function bulkReasonLabel(reason: string) {
     case 'no_requested_amount': return '无模拟金额'
     case 'no_simulation_cash': return '余额不足'
     case 'position_write_failed': return '持仓写入失败'
+    case 'below_order_min_size': return '低于最小订单'
+    case 'spread_above_max_slippage': return 'spread 太宽'
+    case 'best_ask_above_limit': return '卖一高于限价'
+    case 'orderbook_disabled': return '盘口未开启'
+    case 'invalid_tick_size': return '价格不符合 tick'
+    case 'quote_stale': return '盘口过期'
     default: return reason
   }
 }
@@ -428,18 +434,36 @@ function App() {
       </motion.header>
 
       {lastBulkResult && (
-        <div className="flex shrink-0 items-center gap-3 overflow-x-auto border-b border-neutral-800 bg-neutral-950 px-3 py-1 text-[10px] text-neutral-400">
-          <span className="whitespace-nowrap text-neutral-300">一键模拟结果</span>
-          <span className="whitespace-nowrap tabular-nums text-green-400">买入 {lastBulkResult.count}</span>
-          <span className="whitespace-nowrap tabular-nums text-amber-400">跳过 {lastBulkResult.skipped}/{lastBulkResult.total_current}</span>
-          <span className="whitespace-nowrap tabular-nums text-blue-300">
-            用额 ${lastBulkResult.spent.toFixed(2)} / 剩余 ${lastBulkResult.remaining.toFixed(2)}
-          </span>
-          {Object.entries(lastBulkResult.reason_counts).slice(0, 5).map(([reason, value]) => (
-            <span key={reason} className="whitespace-nowrap border border-neutral-800 bg-black px-1.5 py-0.5 text-neutral-500">
-              {bulkReasonLabel(reason)} × {value}
+        <div className="shrink-0 border-b border-neutral-800 bg-neutral-950 px-3 py-1 text-[10px] text-neutral-400">
+          <div className="flex items-center gap-3 overflow-x-auto">
+            <span className="whitespace-nowrap text-neutral-300">一键模拟结果</span>
+            <span className="whitespace-nowrap tabular-nums text-green-400">买入 {lastBulkResult.count}</span>
+            <span className="whitespace-nowrap tabular-nums text-amber-400">跳过 {lastBulkResult.skipped}/{lastBulkResult.total_current}</span>
+            <span className="whitespace-nowrap tabular-nums text-blue-300">
+              用额 ${lastBulkResult.spent.toFixed(2)} / 剩余 ${lastBulkResult.remaining.toFixed(2)}
             </span>
-          ))}
+            {Object.entries(lastBulkResult.reason_counts).slice(0, 5).map(([reason, value]) => (
+              <span key={reason} className="whitespace-nowrap border border-neutral-800 bg-black px-1.5 py-0.5 text-neutral-500">
+                {bulkReasonLabel(reason)} × {value}
+              </span>
+            ))}
+          </div>
+          {lastBulkResult.examples.length > 0 && (
+            <div className="mt-1 flex gap-2 overflow-x-auto text-[9px] text-neutral-600">
+              {lastBulkResult.examples.slice(0, 4).map(example => (
+                <a
+                  key={`${example.id}-${example.reason}`}
+                  href={example.event_url || undefined}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="max-w-[260px] shrink-0 truncate border border-neutral-900 bg-black px-1.5 py-0.5 hover:text-cyan-400"
+                  title={`${example.title || example.city || '信号'}：${bulkReasonLabel(example.reason)}`}
+                >
+                  {bulkReasonLabel(example.reason)} · {example.city || example.title || `#${example.id}`}
+                </a>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
