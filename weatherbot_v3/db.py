@@ -171,9 +171,101 @@ def init_v3_db(path: Path | None = None) -> None:
                 market_id TEXT,
                 result TEXT,
                 actual_temp REAL,
+                actual_provider TEXT,
+                actual_station TEXT,
+                actual_confidence REAL,
+                calibration_eligible INTEGER,
                 pnl REAL,
                 raw_json TEXT,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS market_rules (
+                market_id TEXT PRIMARY KEY,
+                event_slug TEXT,
+                market_slug TEXT,
+                question TEXT,
+                city TEXT,
+                city_name TEXT,
+                station_id TEXT,
+                station_name TEXT,
+                timezone TEXT,
+                unit TEXT,
+                bucket_low REAL,
+                bucket_high REAL,
+                metric TEXT,
+                resolution_source_text TEXT,
+                source_url TEXT,
+                truth_confidence REAL,
+                confidence_reason TEXT,
+                raw_json TEXT,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS truth_observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT,
+                city_name TEXT,
+                target_date TEXT,
+                station_id TEXT,
+                station_name TEXT,
+                unit TEXT,
+                actual_temp REAL,
+                provider TEXT,
+                source_url TEXT,
+                observation_count INTEGER,
+                source_confidence REAL,
+                calibration_eligible INTEGER,
+                reason_if_ineligible TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(city, target_date, station_id, provider)
+            );
+
+            CREATE TABLE IF NOT EXISTS forecast_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT,
+                target_date TEXT,
+                source TEXT,
+                run_at TEXT,
+                horizon TEXT,
+                mean_high REAL,
+                std_high REAL,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS forecast_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER,
+                member_name TEXT,
+                high_temp REAL,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS event_distributions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id TEXT,
+                event_slug TEXT,
+                signal_id INTEGER,
+                sum_probability REAL,
+                normalized INTEGER,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS signal_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER UNIQUE,
+                market_id TEXT,
+                action TEXT,
+                live_allowed INTEGER,
+                paper_allowed INTEGER,
+                reasons TEXT,
+                cautions TEXT,
+                raw_json TEXT,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS risk_events (
@@ -196,6 +288,30 @@ def init_v3_db(path: Path | None = None) -> None:
             );
             """
         )
+        _ensure_columns(conn)
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    ensure = {
+        "settlements": {
+            "actual_provider": "TEXT",
+            "actual_station": "TEXT",
+            "actual_confidence": "REAL",
+            "calibration_eligible": "INTEGER",
+        },
+        "signals": {
+            "decision_json": "TEXT",
+        },
+        "markets": {
+            "station_id": "TEXT",
+            "truth_confidence": "REAL",
+        },
+    }
+    for table, columns in ensure.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, ddl in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
 def dump_json(payload: Any) -> str:
@@ -321,6 +437,289 @@ def insert_ai_review(signal_id: int, review: dict[str, Any]) -> None:
                 utc_now(),
             ),
         )
+
+
+def upsert_market_rule(rule: dict[str, Any]) -> None:
+    init_v3_db()
+    now = utc_now()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO market_rules (
+                market_id, event_slug, market_slug, question, city, city_name,
+                station_id, station_name, timezone, unit, bucket_low, bucket_high,
+                metric, resolution_source_text, source_url, truth_confidence,
+                confidence_reason, raw_json, updated_at
+            ) VALUES (
+                :market_id, :event_slug, :market_slug, :question, :city, :city_name,
+                :station_id, :station_name, :timezone, :unit, :bucket_low, :bucket_high,
+                :metric, :resolution_source_text, :source_url, :truth_confidence,
+                :confidence_reason, :raw_json, :updated_at
+            )
+            ON CONFLICT(market_id) DO UPDATE SET
+                event_slug=excluded.event_slug,
+                market_slug=excluded.market_slug,
+                question=excluded.question,
+                city=excluded.city,
+                city_name=excluded.city_name,
+                station_id=excluded.station_id,
+                station_name=excluded.station_name,
+                timezone=excluded.timezone,
+                unit=excluded.unit,
+                bucket_low=excluded.bucket_low,
+                bucket_high=excluded.bucket_high,
+                metric=excluded.metric,
+                resolution_source_text=excluded.resolution_source_text,
+                source_url=excluded.source_url,
+                truth_confidence=excluded.truth_confidence,
+                confidence_reason=excluded.confidence_reason,
+                raw_json=excluded.raw_json,
+                updated_at=excluded.updated_at
+            """,
+            {**rule, "raw_json": dump_json(rule), "updated_at": now},
+        )
+
+
+def upsert_market_rules(rules: list[dict[str, Any]]) -> None:
+    if not rules:
+        return
+    init_v3_db()
+    now = utc_now()
+    with connect() as conn:
+        conn.executemany(
+            """
+            INSERT INTO market_rules (
+                market_id, event_slug, market_slug, question, city, city_name,
+                station_id, station_name, timezone, unit, bucket_low, bucket_high,
+                metric, resolution_source_text, source_url, truth_confidence,
+                confidence_reason, raw_json, updated_at
+            ) VALUES (
+                :market_id, :event_slug, :market_slug, :question, :city, :city_name,
+                :station_id, :station_name, :timezone, :unit, :bucket_low, :bucket_high,
+                :metric, :resolution_source_text, :source_url, :truth_confidence,
+                :confidence_reason, :raw_json, :updated_at
+            )
+            ON CONFLICT(market_id) DO UPDATE SET
+                event_slug=excluded.event_slug,
+                market_slug=excluded.market_slug,
+                question=excluded.question,
+                city=excluded.city,
+                city_name=excluded.city_name,
+                station_id=excluded.station_id,
+                station_name=excluded.station_name,
+                timezone=excluded.timezone,
+                unit=excluded.unit,
+                bucket_low=excluded.bucket_low,
+                bucket_high=excluded.bucket_high,
+                metric=excluded.metric,
+                resolution_source_text=excluded.resolution_source_text,
+                source_url=excluded.source_url,
+                truth_confidence=excluded.truth_confidence,
+                confidence_reason=excluded.confidence_reason,
+                raw_json=excluded.raw_json,
+                updated_at=excluded.updated_at
+            """,
+            [{**rule, "raw_json": dump_json(rule), "updated_at": now} for rule in rules],
+        )
+
+
+def upsert_truth_observation(observation: dict[str, Any]) -> None:
+    init_v3_db()
+    now = utc_now()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO truth_observations (
+                city, city_name, target_date, station_id, station_name, unit,
+                actual_temp, provider, source_url, observation_count,
+                source_confidence, calibration_eligible, reason_if_ineligible,
+                raw_json, created_at
+            ) VALUES (
+                :city, :city_name, :target_date, :station_id, :station_name, :unit,
+                :actual_temp, :provider, :source_url, :observation_count,
+                :source_confidence, :calibration_eligible, :reason_if_ineligible,
+                :raw_json, :created_at
+            )
+            ON CONFLICT(city, target_date, station_id, provider) DO UPDATE SET
+                actual_temp=excluded.actual_temp,
+                source_url=excluded.source_url,
+                observation_count=excluded.observation_count,
+                source_confidence=excluded.source_confidence,
+                calibration_eligible=excluded.calibration_eligible,
+                reason_if_ineligible=excluded.reason_if_ineligible,
+                raw_json=excluded.raw_json,
+                created_at=excluded.created_at
+            """,
+            {
+                **observation,
+                "calibration_eligible": 1 if observation.get("calibration_eligible") else 0,
+                "raw_json": dump_json(observation),
+                "created_at": now,
+            },
+        )
+
+
+def insert_forecast_run(run: dict[str, Any], members: list[dict[str, Any]] | None = None) -> int:
+    init_v3_db()
+    now = utc_now()
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO forecast_runs (
+                city, target_date, source, run_at, horizon, mean_high,
+                std_high, raw_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run.get("city"),
+                run.get("target_date"),
+                run.get("source"),
+                run.get("run_at"),
+                run.get("horizon"),
+                _num(run.get("mean_high"), 0.0),
+                _num(run.get("std_high"), 0.0),
+                dump_json(run),
+                now,
+            ),
+        )
+        run_id = int(cur.lastrowid)
+        for member in members or []:
+            conn.execute(
+                "INSERT INTO forecast_members (run_id, member_name, high_temp, raw_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (run_id, member.get("member_name"), _num(member.get("high_temp"), 0.0), dump_json(member), now),
+            )
+        return run_id
+
+
+def insert_event_distribution(market_id: str, event_slug: str, distribution: dict[str, Any], signal_id: int | None = None) -> None:
+    init_v3_db()
+    with connect() as conn:
+        if signal_id is None:
+            conn.execute("DELETE FROM event_distributions WHERE market_id = ? AND signal_id IS NULL", (market_id,))
+        else:
+            conn.execute("DELETE FROM event_distributions WHERE market_id = ? AND signal_id = ?", (market_id, signal_id))
+        conn.execute(
+            """
+            INSERT INTO event_distributions (
+                market_id, event_slug, signal_id, sum_probability,
+                normalized, raw_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                market_id,
+                event_slug,
+                signal_id,
+                _num(distribution.get("sum_probability"), 0.0),
+                1 if distribution.get("normalized") else 0,
+                dump_json(distribution),
+                utc_now(),
+            ),
+        )
+
+
+def upsert_signal_decision(signal_id: int, decision: dict[str, Any]) -> None:
+    init_v3_db()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO signal_decisions (
+                signal_id, market_id, action, live_allowed, paper_allowed,
+                reasons, cautions, raw_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(signal_id) DO UPDATE SET
+                market_id=excluded.market_id,
+                action=excluded.action,
+                live_allowed=excluded.live_allowed,
+                paper_allowed=excluded.paper_allowed,
+                reasons=excluded.reasons,
+                cautions=excluded.cautions,
+                raw_json=excluded.raw_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                signal_id,
+                decision.get("market_id"),
+                decision.get("action"),
+                1 if decision.get("live_allowed") else 0,
+                1 if decision.get("paper_allowed", True) else 0,
+                dump_json(decision.get("reasons", [])),
+                dump_json(decision.get("cautions", [])),
+                dump_json(decision),
+                utc_now(),
+            ),
+        )
+        conn.execute("UPDATE signals SET decision_json = ? WHERE id = ?", (dump_json(decision), signal_id))
+
+
+def latest_event_distribution(market_id: str) -> dict[str, Any] | None:
+    init_v3_db()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT raw_json FROM event_distributions WHERE market_id = ? ORDER BY id DESC LIMIT 1",
+            (market_id,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row["raw_json"])
+    except Exception:
+        return None
+
+
+def latest_signal_decision(signal_id: int) -> dict[str, Any] | None:
+    init_v3_db()
+    with connect() as conn:
+        row = conn.execute("SELECT raw_json FROM signal_decisions WHERE signal_id = ?", (signal_id,)).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row["raw_json"])
+    except Exception:
+        return None
+
+
+def truth_coverage_summary() -> dict[str, Any]:
+    init_v3_db()
+    with connect() as conn:
+        rows = [dict(r) for r in conn.execute("SELECT * FROM truth_observations ORDER BY target_date DESC").fetchall()]
+    by_city: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        city = row.get("city") or ""
+        item = by_city.setdefault(
+            city,
+            {
+                "city": city,
+                "city_name": row.get("city_name") or city,
+                "station_id": row.get("station_id") or "",
+                "total_observations": 0,
+                "eligible_observations": 0,
+                "open_meteo_fallbacks": 0,
+                "latest_provider": "",
+                "latest_date": "",
+                "latest_confidence": 0.0,
+            },
+        )
+        item["total_observations"] += 1
+        if row.get("calibration_eligible"):
+            item["eligible_observations"] += 1
+        if row.get("provider") == "open_meteo_archive":
+            item["open_meteo_fallbacks"] += 1
+        if not item["latest_date"] or str(row.get("target_date") or "") > item["latest_date"]:
+            item["latest_date"] = row.get("target_date") or ""
+            item["latest_provider"] = row.get("provider") or ""
+            item["latest_confidence"] = _num(row.get("source_confidence"), 0.0)
+    cities = sorted(by_city.values(), key=lambda row: (row["eligible_observations"], row["total_observations"]), reverse=True)
+    total = sum(row["total_observations"] for row in cities)
+    eligible = sum(row["eligible_observations"] for row in cities)
+    fallbacks = sum(row["open_meteo_fallbacks"] for row in cities)
+    return {
+        "total_observations": total,
+        "eligible_observations": eligible,
+        "coverage_rate": round((eligible / total) if total else 0.0, 4),
+        "open_meteo_fallbacks": fallbacks,
+        "open_meteo_fallback_rate": round((fallbacks / total) if total else 0.0, 4),
+        "cities": cities,
+    }
 
 
 def insert_order(table: str, order: dict[str, Any]) -> int:

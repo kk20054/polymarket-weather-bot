@@ -43,6 +43,12 @@ def _int(value: Any, default: int) -> int:
 
 @dataclass(frozen=True)
 class V3Config:
+    truth_provider_mode: str
+    visual_crossing_key: str
+    open_meteo_actual_allowed_for_paper: bool
+    open_meteo_actual_allowed_for_live: bool
+    min_independent_settlement_days: int
+    canary_max_order_usd: float
     live_trading: bool
     live_dry_run: bool
     ai_review_enabled: bool
@@ -75,6 +81,12 @@ def load_config() -> V3Config:
 
     max_bet = _float(get("MAX_BET", file_cfg.get("max_bet", 2.0)), 2.0)
     return V3Config(
+        truth_provider_mode=str(get("TRUTH_PROVIDER_MODE", "official_paid") or "official_paid"),
+        visual_crossing_key=str(get("VISUAL_CROSSING_KEY", file_cfg.get("vc_key", "")) or ""),
+        open_meteo_actual_allowed_for_paper=_bool(get("OPEN_METEO_ACTUAL_ALLOWED_FOR_PAPER", True), True),
+        open_meteo_actual_allowed_for_live=_bool(get("OPEN_METEO_ACTUAL_ALLOWED_FOR_LIVE", False), False),
+        min_independent_settlement_days=_int(get("MIN_INDEPENDENT_SETTLEMENT_DAYS", 20), 20),
+        canary_max_order_usd=_float(get("CANARY_MAX_ORDER_USD", 2.0), 2.0),
         live_trading=_bool(get("LIVE_TRADING", False), False),
         live_dry_run=_bool(get("LIVE_DRY_RUN", True), True),
         ai_review_enabled=_bool(get("AI_REVIEW_ENABLED", False), False),

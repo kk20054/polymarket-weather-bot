@@ -27,6 +27,15 @@ try:
 except Exception:
     log_signal = None
 
+try:
+    from weatherbot_v3.db import upsert_truth_observation
+    from weatherbot_v3.truth import get_actual_observation as get_v4_actual_observation
+    from weatherbot_v3.truth import infer_settlement_rule
+except Exception:
+    upsert_truth_observation = None
+    get_v4_actual_observation = None
+    infer_settlement_rule = None
+
 # =============================================================================
 # CONFIG
 # =============================================================================
@@ -50,7 +59,7 @@ USE_GFS_ENSEMBLE = _cfg.get("use_gfs_ensemble", True)
 ENSEMBLE_MIN_MEMBERS = _cfg.get("ensemble_min_members", 10)
 SCAN_INTERVAL    = _cfg.get("scan_interval", 3600)   # every hour
 CALIBRATION_MIN  = _cfg.get("calibration_min", 30)
-VC_KEY           = _cfg.get("vc_key", "")
+VC_KEY           = _cfg.get("vc_key", _cfg.get("VISUAL_CROSSING_KEY", ""))
 MANUAL_ORDER_INSTRUCTIONS = _cfg.get("manual_order_instructions", True)
 
 SIGMA_F = 2.0
@@ -437,8 +446,35 @@ def get_metar(city_slug):
         print(f"  [METAR] {city_slug}: {e}")
     return None
 
+def get_actual_observation(city_slug, date_str):
+    """Actual high temperature plus provider metadata for calibration."""
+    if get_v4_actual_observation:
+        obs = get_v4_actual_observation(city_slug, date_str, LOCATIONS, TIMEZONES)
+        if upsert_truth_observation:
+            try:
+                upsert_truth_observation(obs.to_dict())
+            except Exception:
+                pass
+        return obs.market_fields()
+
+    actual = _legacy_actual_temp(city_slug, date_str)
+    return {
+        "actual_temp": actual,
+        "actual_provider": "legacy_open_meteo_or_visual_crossing",
+        "actual_station": LOCATIONS[city_slug]["station"],
+        "actual_observation_count": 1 if actual is not None else 0,
+        "actual_confidence": 0.35 if actual is not None else 0.0,
+        "actual_calibration_eligible": False,
+        "actual_reason_if_ineligible": "v4_truth_module_unavailable",
+        "actual_source_url": "",
+    }
+
 def get_actual_temp(city_slug, date_str):
-    """Actual high temperature for closed-market calibration."""
+    """Backward-compatible actual high temperature accessor."""
+    return get_actual_observation(city_slug, date_str).get("actual_temp")
+
+def _legacy_actual_temp(city_slug, date_str):
+    """Legacy Open-Meteo/Visual Crossing fallback for closed-market calibration."""
     loc = LOCATIONS[city_slug]
     station = loc["station"]
     unit = loc["unit"]
@@ -644,17 +680,46 @@ def load_all_markets():
 
 def new_market(city_slug, date_str, event, hours):
     loc = LOCATIONS[city_slug]
+    settlement_rule = None
+    if infer_settlement_rule:
+        try:
+            settlement_rule = infer_settlement_rule(
+                {
+                    "city": city_slug,
+                    "city_name": loc["name"],
+                    "date": date_str,
+                    "unit": loc["unit"],
+                    "station": loc["station"],
+                    "event_url": get_event_url(event),
+                    "question": event.get("title") or event.get("slug") or "",
+                    "description": event.get("description") or "",
+                    "resolutionSource": event.get("resolutionSource") or "",
+                },
+                LOCATIONS,
+                TIMEZONES,
+            ).to_dict()
+        except Exception:
+            settlement_rule = None
     return {
         "city":               city_slug,
         "city_name":          loc["name"],
         "date":               date_str,
         "unit":               loc["unit"],
         "station":            loc["station"],
+        "timezone":           TIMEZONES.get(city_slug, "UTC"),
+        "settlement_rule":    settlement_rule,
         "event_end_date":     event.get("endDate", ""),
         "hours_at_discovery": round(hours, 1),
         "status":             "open",           # open | closed | resolved
         "position":           None,             # filled when position opens
         "actual_temp":        None,             # filled after resolution
+        "actual_provider":    None,
+        "actual_station":     None,
+        "actual_observation_count": 0,
+        "actual_confidence":  0.0,
+        "actual_calibration_eligible": False,
+        "actual_reason_if_ineligible": "not_resolved",
+        "actual_source_url":  "",
         "resolved_outcome":   None,             # win / loss / no_position
         "pnl":                None,
         "forecast_snapshots": [],               # list of forecast snapshots
@@ -1123,7 +1188,8 @@ def scan_and_update():
         mkt["status"]       = "resolved"
         mkt["resolved_outcome"] = "win" if won else "loss"
         if mkt.get("actual_temp") is None:
-            mkt["actual_temp"] = get_actual_temp(mkt["city"], mkt["date"])
+            actual_payload = get_actual_observation(mkt["city"], mkt["date"])
+            mkt.update(actual_payload)
 
         if won:
             state["wins"] += 1

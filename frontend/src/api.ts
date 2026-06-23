@@ -98,6 +98,18 @@ export async function fetchTemperatureFit(): Promise<TemperatureFitData> {
   return data
 }
 
+export async function backfillWeatherHistory(days = 30): Promise<{
+  ok: boolean
+  days: number
+  cities: number
+  fetched: number
+  cached_cities: number
+  errors: Array<{ city: string; error: string }>
+}> {
+  const { data } = await api.post('/weather/backfill-history', { days })
+  return data
+}
+
 export async function resetBot(): Promise<{ status: string; trades_deleted: number; new_bankroll: number }> {
   const { data } = await api.post('/bot/reset')
   return data

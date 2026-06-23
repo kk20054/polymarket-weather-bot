@@ -34,9 +34,14 @@ from dashboard_db import (
 from weatherbot_v3.config import load_config as load_v3_config
 from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
 from weatherbot_v3.db import init_v3_db
+from weatherbot_v3.db import insert_event_distribution, latest_event_distribution, latest_signal_decision
+from weatherbot_v3.db import truth_coverage_summary, upsert_market_rules, upsert_signal_decision, upsert_truth_observation
+from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
+from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
 from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.notifier import FeishuNotifier
+from weatherbot_v3.truth import infer_settlement_rule
 
 
 ROOT = Path(__file__).resolve().parent
@@ -46,6 +51,7 @@ DASHBOARD_DIR = ROOT / "dashboard"
 BOT_LOG_PATH = DATA_DIR / "weatherbet-dashboard.log"
 BOT_PID_PATH = DATA_DIR / "weatherbet-dashboard.pid"
 bot_process: subprocess.Popen | None = None
+_market_rule_sync_signature: tuple[tuple[str, float], ...] | None = None
 
 app = FastAPI(title="WeatherBot Dashboard", version="1.0")
 app.add_middleware(
@@ -64,12 +70,22 @@ class StatusUpdate(BaseModel):
     amount: float | None = None
 
 
+class WeatherHistoryBackfillRequest(BaseModel):
+    days: int = 30
+    cities: list[str] | None = None
+
+
 class SimulationReset(BaseModel):
     balance: float
     clear_marks: bool = False
 
 
 class LiveOrderUpdate(BaseModel):
+    signal_id: int
+    amount: float | None = None
+
+
+class CanaryDryRunUpdate(BaseModel):
     signal_id: int
     amount: float | None = None
 
@@ -208,14 +224,173 @@ def _bulk_simulation_skip_reason(signal, dashboard_signal, today):
         display_edge = 0.0
     if display_edge <= 0:
         return "calibrated_ev_nonpositive"
+    decision = dashboard_signal.get("decision") or {}
+    if decision and decision.get("paper_allowed") is False:
+        reasons = decision.get("reasons") or []
+        return f"paper_gate:{reasons[0]}" if reasons else "paper_gate_blocked"
     pre_strategy_allowed = dashboard_signal.get("live_pre_strategy_allowed")
     if pre_strategy_allowed is False:
         reasons = dashboard_signal.get("live_block_reasons") or []
-        hard_reasons = [r for r in reasons if r != "strategy_not_ready"]
+        paper_hard_reasons = {
+            "price_below_min",
+            "price_above_max",
+            "spread_above_limit",
+            "spread_cost_too_high",
+            "low_price_tail_unverified",
+            "near_lock_missing_metar",
+            "distribution_missing",
+            "distribution_edge_negative",
+        }
+        hard_reasons = [r for r in reasons if r in paper_hard_reasons]
         if hard_reasons:
             return f"risk_gate:{hard_reasons[0]}"
-        return "risk_gate_blocked"
     return None
+
+
+def _market_truth_observation(market):
+    actual = market.get("actual_temp")
+    if actual is None:
+        return None
+    provider = market.get("actual_provider") or "legacy_unknown"
+    confidence = float(market.get("actual_confidence") or 0.0)
+    eligible = bool(market.get("actual_calibration_eligible"))
+    if provider == "legacy_unknown":
+        eligible = False
+        confidence = min(confidence, 0.2)
+    return {
+        "city": market.get("city") or "",
+        "city_name": market.get("city_name") or market.get("city") or "",
+        "target_date": market.get("date") or "",
+        "station_id": market.get("actual_station") or market.get("station") or "",
+        "station_name": market.get("city_name") or market.get("city") or "",
+        "unit": market.get("unit") or "F",
+        "actual_temp": actual,
+        "provider": provider,
+        "source_url": market.get("actual_source_url") or "",
+        "observation_count": int(market.get("actual_observation_count") or 0),
+        "source_confidence": confidence,
+        "calibration_eligible": eligible,
+        "reason_if_ineligible": market.get("actual_reason_if_ineligible") or ("" if eligible else "legacy_or_low_confidence_truth"),
+        "raw": {
+            "market_file": market.get("_file"),
+            "resolved_outcome": market.get("resolved_outcome"),
+        },
+    }
+
+
+def _market_calibration_eligible(market):
+    obs = _market_truth_observation(market)
+    if not obs:
+        return False
+    return bool(obs.get("calibration_eligible"))
+
+
+def _build_truth_health(markets):
+    by_city = {}
+    total = 0
+    eligible = 0
+    open_meteo = 0
+    legacy = 0
+    for market in markets:
+        obs = _market_truth_observation(market)
+        if not obs:
+            continue
+        try:
+            upsert_truth_observation(obs)
+        except Exception:
+            pass
+        total += 1
+        if obs["calibration_eligible"]:
+            eligible += 1
+        if obs["provider"] == "open_meteo_archive":
+            open_meteo += 1
+        if obs["provider"] == "legacy_unknown":
+            legacy += 1
+        city = obs["city"]
+        item = by_city.setdefault(
+            city,
+            {
+                "city": city,
+                "city_name": obs["city_name"],
+                "station_id": obs["station_id"],
+                "total_observations": 0,
+                "eligible_observations": 0,
+                "open_meteo_fallbacks": 0,
+                "legacy_unknown": 0,
+                "latest_provider": "",
+                "latest_date": "",
+                "latest_confidence": 0.0,
+                "status": "blocked",
+                "reasons": [],
+            },
+        )
+        item["total_observations"] += 1
+        if obs["calibration_eligible"]:
+            item["eligible_observations"] += 1
+        if obs["provider"] == "open_meteo_archive":
+            item["open_meteo_fallbacks"] += 1
+        if obs["provider"] == "legacy_unknown":
+            item["legacy_unknown"] += 1
+        if not item["latest_date"] or obs["target_date"] > item["latest_date"]:
+            item["latest_date"] = obs["target_date"]
+            item["latest_provider"] = obs["provider"]
+            item["latest_confidence"] = obs["source_confidence"]
+
+    cfg = load_v3_config()
+    for item in by_city.values():
+        reasons = []
+        if item["eligible_observations"] < cfg.min_independent_settlement_days:
+            reasons.append("truth_independent_days_low")
+        if item["open_meteo_fallbacks"]:
+            reasons.append("open_meteo_truth_fallback_present")
+        if item["legacy_unknown"]:
+            reasons.append("legacy_truth_unknown")
+        item["status"] = "eligible" if not reasons else "blocked"
+        item["reasons"] = reasons
+
+    cities = sorted(by_city.values(), key=lambda row: (row["eligible_observations"], row["total_observations"]), reverse=True)
+    return {
+        "total_observations": total,
+        "eligible_observations": eligible,
+        "coverage_rate": round((eligible / total) if total else 0.0, 4),
+        "open_meteo_fallbacks": open_meteo,
+        "open_meteo_fallback_rate": round((open_meteo / total) if total else 0.0, 4),
+        "legacy_unknown": legacy,
+        "cities": cities,
+    }
+
+
+def _truth_city_lookup(truth_health):
+    return {row.get("city"): row for row in truth_health.get("cities", [])}
+
+
+def _sync_v4_market_rules(markets):
+    global _market_rule_sync_signature
+    signature = tuple(
+        sorted(
+            (str(market.get("_file") or f"{market.get('city')}:{market.get('date')}"), float(Path(MARKETS_DIR / str(market.get("_file"))).stat().st_mtime if market.get("_file") and (MARKETS_DIR / str(market.get("_file"))).exists() else 0.0))
+            for market in markets
+        )
+    )
+    if signature == _market_rule_sync_signature:
+        return
+    rules = []
+    for market in markets:
+        outcomes = market.get("all_outcomes") or []
+        for outcome in outcomes:
+            payload = {
+                **market,
+                "market_id": outcome.get("market_id"),
+                "question": outcome.get("question") or market.get("question") or "",
+                "event_url": outcome.get("event_url") or market.get("event_url") or "",
+            }
+            try:
+                rule = infer_settlement_rule(payload).to_dict()
+                rules.append(rule)
+            except Exception:
+                continue
+    upsert_market_rules(rules)
+    _market_rule_sync_signature = signature
 
 
 def _latest_market_update():
@@ -1429,10 +1604,36 @@ def _fit_trade_readiness(summary, market_count=0):
 def _build_temperature_fit(markets):
     records = []
     market_keys = set()
+    eligible_market_keys = set()
+    history_cache = merge_history_points(market_history_points(markets))
     for market in markets:
-        actual = market.get("actual_temp")
         snapshots = market.get("forecast_snapshots") or []
-        if actual is None or not snapshots:
+        if not snapshots:
+            continue
+        city = market.get("city") or ""
+        date = market.get("date") or ""
+        cached_history = next(
+            (
+                row for row in history_cache.get(city, [])
+                if str(row.get("target_date") or "") == str(date)
+                and row.get("actual_high") is not None
+            ),
+            None,
+        )
+        actual = market.get("actual_temp")
+        actual_provider = market.get("actual_provider") or "unknown"
+        actual_station = market.get("actual_station") or market.get("station") or ""
+        truth_confidence = float(market.get("actual_confidence") or 0.0)
+        calibration_tier = "live_truth" if bool(market.get("actual_calibration_eligible")) else "research_truth"
+        reason_if_ineligible = market.get("actual_reason_if_ineligible") or "truth_not_high_confidence"
+        if actual is None and cached_history:
+            actual = cached_history.get("actual_high")
+            actual_provider = cached_history.get("provider") or "history_cache"
+            actual_station = cached_history.get("station_id") or actual_station
+            truth_confidence = float(cached_history.get("source_confidence") or 0.0)
+            calibration_tier = str(cached_history.get("calibration_tier") or "research_truth")
+            reason_if_ineligible = "research_history_not_live_settlement_truth"
+        if actual is None:
             continue
         try:
             actual_native = float(actual)
@@ -1440,9 +1641,10 @@ def _build_temperature_fit(markets):
             continue
         unit = market.get("unit") or "F"
         actual_f = _native_to_f(actual_native, unit) or actual_native
-        city = market.get("city") or ""
-        date = market.get("date") or ""
         market_keys.add(f"{city}:{date}")
+        calibration_eligible = bool(_market_calibration_eligible(market)) or calibration_tier == "live_truth"
+        if calibration_eligible:
+            eligible_market_keys.add(f"{city}:{date}")
         for snap in snapshots:
             for source in ("best", "ecmwf", "hrrr", "metar"):
                 forecast = snap.get(source)
@@ -1462,6 +1664,14 @@ def _build_temperature_fit(markets):
                     "city_name": market.get("city_name") or city,
                     "target_date": date,
                     "unit": unit,
+                    "actual_provider": actual_provider,
+                    "actual_station": actual_station,
+                    "truth_confidence": truth_confidence,
+                    "calibration_eligible": calibration_eligible,
+                    "calibration_tier": "live_truth" if calibration_eligible else calibration_tier,
+                    "reason_if_ineligible": "" if calibration_eligible else (
+                        reason_if_ineligible
+                    ),
                     "source": "model_best" if source == "best" else source.upper(),
                     "best_source": (snap.get("best_source") or "").upper(),
                     "timestamp": snap.get("ts"),
@@ -1479,6 +1689,7 @@ def _build_temperature_fit(markets):
                 })
 
     best_records = [r for r in records if r["source"] == "model_best"]
+    eligible_best_records = [r for r in best_records if r.get("calibration_eligible")]
     by_city = {}
     for record in best_records:
         key = record["city_key"] or record["city_name"]
@@ -1529,9 +1740,18 @@ def _build_temperature_fit(markets):
     ]
 
     readiness_counts = dict(Counter(row["fit_status"] for row in city_rows))
+    provider_counts = dict(Counter((r.get("actual_provider") or "unknown") for r in best_records))
+    tier_counts = dict(Counter((r.get("calibration_tier") or "unknown") for r in best_records))
+    ineligible_counts = dict(Counter((r.get("reason_if_ineligible") or "eligible") for r in best_records if not r.get("calibration_eligible")))
     return {
         "summary": {
             "markets": len(market_keys),
+            "eligible_markets": len(eligible_market_keys),
+            "eligible_samples": len(eligible_best_records),
+            "observed_samples": len(best_records),
+            "provider_counts": provider_counts,
+            "tier_counts": tier_counts,
+            "ineligible_counts": ineligible_counts,
             **_metric_summary(best_records),
         },
         "readiness_counts": {
@@ -1556,10 +1776,75 @@ def _build_temperature_fit(markets):
         },
         "notes": [
             "拟合页基于本地 forecast_snapshots 与 actual_temp，适合发现模型偏差，不等同于完整盘口回放。",
+            "页面会展示所有本地观察样本；只有 calibration_eligible=true 的样本才应进入自动实盘校准。",
             "MAE/RMSE 统一折算为华氏度，便于跨 °C/°F 城市比较；表格仍展示原市场单位。",
             "下一步交易过滤应要求：样本数足够、城市 MAE 可控、数据源分歧低、盘口 spread/orderMinSize/tick size 合格。",
         ],
     }
+
+
+def _build_weather_city_series(markets):
+    """Compact chart-friendly forecast history by city for the dashboard."""
+    by_city = {}
+    history_cache = merge_history_points(market_history_points(markets))
+    for market in markets:
+        city_key = market.get("city") or ""
+        if not city_key:
+            continue
+        unit = market.get("unit") or "F"
+        city = by_city.setdefault(city_key, {
+            "city_key": city_key,
+            "city_name": market.get("city_name") or city_key,
+            "station_id": market.get("station") or market.get("actual_station") or "",
+            "unit": unit,
+            "forecast_points": [],
+            "history_points": list(history_cache.get(city_key) or []),
+            "humidity_status": "not_collected",
+        })
+        for snap in market.get("forecast_snapshots") or []:
+            ts = snap.get("ts")
+            if not ts:
+                continue
+            point = {
+                "timestamp": ts,
+                "target_date": market.get("date") or "",
+                "horizon": snap.get("horizon") or "",
+                "best": snap.get("best"),
+                "ecmwf": snap.get("ecmwf"),
+                "hrrr": snap.get("hrrr"),
+                "metar": snap.get("metar"),
+                "ensemble_mean": snap.get("ensemble_mean"),
+                "ensemble_std": snap.get("ensemble_std"),
+                "humidity": snap.get("humidity") or snap.get("relative_humidity"),
+                "source": snap.get("best_source") or "",
+            }
+            city["forecast_points"].append(point)
+
+    rows = []
+    for city in by_city.values():
+        points = sorted(city["forecast_points"], key=lambda p: p.get("timestamp") or "")
+        deduped = {}
+        for point in points:
+            deduped[f"{point.get('timestamp')}:{point.get('target_date')}"] = point
+        points = list(deduped.values())[-80:]
+        history_points = sorted(city.get("history_points") or [], key=lambda p: p.get("target_date") or "")[-120:]
+        if not points and not history_points:
+            continue
+        latest = points[-1] if points else {}
+        humidity_values = [p.get("humidity") for p in points if p.get("humidity") is not None]
+        humidity_values += [p.get("humidity_mean") for p in history_points if p.get("humidity_mean") is not None]
+        city["forecast_points"] = points
+        city["history_points"] = history_points
+        city["points"] = points
+        city["latest_best"] = latest.get("best")
+        city["latest_metar"] = latest.get("metar")
+        city["latest_source"] = latest.get("source")
+        city["latest_timestamp"] = latest.get("timestamp")
+        city["humidity_status"] = "available" if humidity_values else "not_collected"
+        city["history_count"] = len(history_points)
+        city["forecast_count"] = len(points)
+        rows.append(city)
+    return sorted(rows, key=lambda row: row.get("city_name") or "")
 
 
 def _strategy_diagnostics(signal, raw_signal, market, fit):
@@ -1662,7 +1947,7 @@ def _strategy_diagnostics(signal, raw_signal, market, fit):
     }
 
 
-def _fit_quality_flags(fit):
+def _fit_quality_flags(fit, truth=None):
     flags = []
     if fit:
         markets = int(fit.get("markets") or 0)
@@ -1678,6 +1963,15 @@ def _fit_quality_flags(fit):
             flags.append("city_bias_high")
     else:
         flags.append("fit_missing")
+    if truth:
+        if int(truth.get("eligible_observations") or 0) < load_v3_config().min_independent_settlement_days:
+            flags.append("truth_independent_days_low")
+        if truth.get("open_meteo_fallbacks"):
+            flags.append("open_meteo_truth_fallback_present")
+        if truth.get("legacy_unknown"):
+            flags.append("legacy_truth_unknown")
+    else:
+        flags.append("truth_missing")
     return flags
 
 
@@ -1698,6 +1992,14 @@ def _live_gate(signal, quality_flags, strategy):
         reasons.append("city_bias_high")
     if "fit_sample_low" in quality_flags:
         cautions.append("fit_sample_low")
+    if "truth_missing" in quality_flags:
+        reasons.append("truth_missing")
+    if "truth_independent_days_low" in quality_flags:
+        reasons.append("truth_independent_days_low")
+    if "open_meteo_truth_fallback_present" in quality_flags:
+        reasons.append("open_meteo_truth_fallback_present")
+    if "legacy_truth_unknown" in quality_flags:
+        reasons.append("legacy_truth_unknown")
     if "near_lock_missing_metar" in tags:
         reasons.append("near_lock_missing_metar")
 
@@ -1744,9 +2046,10 @@ def _live_gate(signal, quality_flags, strategy):
     }
 
 
-def _signal_diagnostics_payload(signal, raw_signal, fit_by_city, market_by_city_date):
+def _signal_diagnostics_payload(signal, raw_signal, fit_by_city, market_by_city_date, truth_by_city=None):
     fit = fit_by_city.get(signal.get("city")) or {}
-    quality_flags = _fit_quality_flags(fit)
+    truth = (truth_by_city or {}).get(signal.get("city"))
+    quality_flags = _fit_quality_flags(fit, truth)
     market_for_signal = market_by_city_date.get((signal.get("city"), signal.get("date")), {})
     strategy = _strategy_diagnostics(signal, raw_signal, market_for_signal, fit)
     gate = _live_gate(signal, quality_flags, strategy)
@@ -1810,9 +2113,73 @@ def _signal_calibration_payload(signal, raw_signal, fit, source_fit, market):
     }
 
 
+def _distribution_for_signal(signal, raw_signal, market, calibration_payload):
+    outcomes = (market or {}).get("all_outcomes") or []
+    latest = _latest_snapshot(market or {}, "forecast_snapshots")
+    unit = (market or {}).get("unit") or ("F" if str(signal.get("bucket_label") or "").endswith("F") else "C")
+    forecast = signal.get("forecast_temp")
+    if forecast is None:
+        forecast = raw_signal.get("forecast_temp")
+    if forecast is None:
+        forecast = latest.get("best")
+    sigma = calibration_payload.get("calibrated_sigma_f")
+    if sigma is None:
+        sigma = raw_signal.get("calibrated_sigma_f") or raw_signal.get("sigma") or (2.16 if unit == "C" else 2.0)
+    bias = calibration_payload.get("calibration_bias_f") or raw_signal.get("calibration_bias_f") or 0.0
+    distribution = build_event_distribution(
+        outcomes,
+        forecast,
+        unit=unit,
+        sigma_f=float(sigma or 0),
+        bias_f=float(bias or 0),
+        signal_market_id=str(signal.get("market_id") or ""),
+    )
+    signal_row = next((item for item in distribution.get("items", []) if item.get("is_signal")), None)
+    if signal_row:
+        distribution["signal_probability"] = signal_row.get("probability")
+        distribution["signal_probability_edge"] = signal_row.get("probability_edge")
+        distribution["signal_ev"] = signal_row.get("ev")
+        distribution["signal_spread_cost_ratio"] = signal_row.get("spread_cost_ratio")
+    return distribution
+
+
+def _decision_for_signal(signal, display_edge, quality_flags, strategy, live_gate, distribution, truth):
+    reasons = list(live_gate.get("live_block_reasons") or [])
+    cautions = list(live_gate.get("live_cautions") or [])
+    if not distribution.get("normalized"):
+        reasons.append("distribution_missing")
+    signal_prob = distribution.get("signal_probability")
+    if signal_prob is not None and float(signal_prob) < float(signal.get("limit_price") or 0):
+        reasons.append("distribution_edge_negative")
+    if truth and truth.get("status") != "eligible":
+        for reason in truth.get("reasons") or []:
+            if reason not in reasons:
+                reasons.append(reason)
+    try:
+        display_edge = float(display_edge or 0.0)
+    except Exception:
+        display_edge = 0.0
+    action = "buy_paper_candidate" if display_edge > 0 and not reasons else "skip_or_watch"
+    return {
+        "signal_id": signal.get("id"),
+        "market_id": signal.get("market_id"),
+        "action": action,
+        "paper_allowed": display_edge > 0 and not any(reason in reasons for reason in ("distribution_missing", "distribution_edge_negative")),
+        "live_allowed": bool(live_gate.get("live_allowed")) and not reasons,
+        "reasons": reasons,
+        "cautions": cautions,
+        "quality_flags": quality_flags,
+        "strategy_tags": strategy.get("strategy_tags") or [],
+        "strategy_score": strategy.get("strategy_score"),
+        "distribution_signal_probability": signal_prob,
+        "truth_status": truth.get("status") if truth else "missing",
+    }
+
+
 def build_dashboard_payload():
     init_db()
     markets = load_markets()
+    _sync_v4_market_rules(markets)
     for market in markets:
         upsert_signal_from_market(market)
 
@@ -1823,6 +2190,9 @@ def build_dashboard_payload():
     recent_trades = []
     position_market_ids = set()
     weather_forecasts_by_city = {}
+    weather_city_series = _build_weather_city_series(markets)
+    truth_health = _build_truth_health(markets)
+    truth_by_city = _truth_city_lookup(truth_health)
     temperature_fit = _build_temperature_fit(markets)
     fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
     fit_by_source = {str(row.get("source") or "").upper(): row for row in temperature_fit.get("sources", [])}
@@ -1955,6 +2325,7 @@ def build_dashboard_payload():
             raw_signal,
             fit_by_city,
             market_by_city_date,
+            truth_by_city,
         )
         market_for_signal = market_by_city_date.get((signal.get("city"), signal.get("date")), {})
         source_key = str(signal.get("forecast_src") or raw_signal.get("forecast_src") or "").upper()
@@ -1972,6 +2343,32 @@ def build_dashboard_payload():
         if display_edge is None:
             display_edge = signal.get("ev") or 0
         display_probability_edge = (display_probability - limit_price) if display_probability is not None else probability_edge
+        signal_distribution = _distribution_for_signal(
+            signal,
+            raw_signal,
+            market_for_signal,
+            calibration_payload,
+        )
+        decision_payload = _decision_for_signal(
+            signal,
+            display_edge,
+            quality_flags,
+            strategy,
+            live_gate,
+            signal_distribution,
+            truth_by_city.get(signal.get("city")),
+        )
+        try:
+            if signal_distribution.get("items"):
+                insert_event_distribution(
+                    str(signal.get("market_id") or ""),
+                    _event_slug_from_url(signal.get("event_url")) or "",
+                    signal_distribution,
+                    int(signal.get("id") or 0) or None,
+                )
+            upsert_signal_decision(int(signal.get("id") or 0), decision_payload)
+        except Exception:
+            pass
         weather_signals.append({
             "id": signal.get("id"),
             "market_id": signal.get("market_id"),
@@ -2018,6 +2415,9 @@ def build_dashboard_payload():
             "fit_bias_f": fit.get("bias_f"),
             "fit_decayed_bias_f": fit.get("decayed_bias_f"),
             "quality_flags": quality_flags,
+            "truth": truth_by_city.get(signal.get("city")),
+            "distribution": signal_distribution,
+            "decision": decision_payload,
             **strategy,
             **live_gate,
         })
@@ -2125,6 +2525,22 @@ def build_dashboard_payload():
     }
     backtest_summary = _build_backtest_summary(markets)
     strategy_readiness = backtest_summary.get("strategy_readiness") or {}
+    cfg = load_v3_config()
+    readiness_reasons = list(strategy_readiness.get("reasons") or [])
+    if truth_health.get("eligible_observations", 0) < cfg.min_independent_settlement_days:
+        readiness_reasons.append("truth_observations_below_min")
+    if truth_health.get("open_meteo_fallback_rate", 0) > 0:
+        readiness_reasons.append("open_meteo_truth_fallback_present")
+    if truth_health.get("legacy_unknown", 0) > 0:
+        readiness_reasons.append("legacy_truth_unknown")
+    if readiness_reasons:
+        strategy_readiness = {
+            **strategy_readiness,
+            "live_ready": False,
+            "status": "blocked",
+            "reasons": list(dict.fromkeys(readiness_reasons)),
+        }
+        backtest_summary["strategy_readiness"] = strategy_readiness
     if not strategy_readiness.get("live_ready"):
         for signal in weather_signals:
             reasons = list(signal.get("live_block_reasons") or [])
@@ -2169,6 +2585,7 @@ def build_dashboard_payload():
     return {
         "stats": stats,
         "v3": v3_dashboard_summary(),
+        "truth_health": truth_health,
         "btc_price": None,
         "microstructure": None,
         "windows": [],
@@ -2179,6 +2596,7 @@ def build_dashboard_payload():
         "backtest": backtest_summary,
         "weather_signals": weather_signals,
         "weather_forecasts": list(weather_forecasts_by_city.values()),
+        "weather_city_series": weather_city_series,
         "events": list_events(100),
     }
 
@@ -2217,9 +2635,99 @@ async def backtest():
     return _build_backtest_summary(load_markets())
 
 
+@app.get("/api/backtest/policies")
+async def backtest_policies():
+    summary = _build_backtest_summary(load_markets())
+    return {
+        "policy_candidates": summary.get("policy_candidates", []),
+        "strategy_readiness": summary.get("strategy_readiness", {}),
+        "notes": summary.get("notes", []),
+    }
+
+
 @app.get("/api/temperature-fit")
 async def temperature_fit():
     return _build_temperature_fit(load_markets())
+
+
+@app.get("/api/truth/coverage")
+async def truth_coverage():
+    markets = load_markets()
+    return {
+        "local": _build_truth_health(markets),
+        "db": truth_coverage_summary(),
+    }
+
+
+@app.post("/api/weather/backfill-history")
+async def weather_backfill_history(request: WeatherHistoryBackfillRequest):
+    # Import lazily so dashboard startup stays light and does not couple to the
+    # scanner unless the user explicitly requests historical backfill.
+    from bot_v2 import LOCATIONS, TIMEZONES
+
+    days = max(1, min(int(request.days or 30), 365))
+    requested = set(request.cities or [])
+    city_keys = [city for city in LOCATIONS.keys() if not requested or city in requested]
+    fetched: list[dict] = []
+    errors: list[dict] = []
+    for city in city_keys:
+        try:
+            fetched.extend(fetch_open_meteo_history(
+                city,
+                LOCATIONS[city],
+                TIMEZONES.get(city, "UTC"),
+                days=days,
+            ))
+        except Exception as exc:
+            errors.append({"city": city, "error": str(exc)})
+    cache = merge_history_points(fetched)
+    log_event(
+        "info" if not errors else "warning",
+        f"历史天气补全：城市 {len(city_keys)}，写入 {len(fetched)} 条，错误 {len(errors)} 个",
+        {"errors": errors[:10]},
+    )
+    return {
+        "ok": len(errors) == 0,
+        "days": days,
+        "cities": len(city_keys),
+        "fetched": len(fetched),
+        "cached_cities": len(cache),
+        "errors": errors,
+    }
+
+
+@app.get("/api/weather/history-cache")
+async def weather_history_cache():
+    cache = load_history_cache()
+    return {
+        "cities": len(cache),
+        "points": sum(len(points) for points in cache.values()),
+        "cache": cache,
+    }
+
+
+@app.get("/api/markets/{market_id}/distribution")
+async def market_distribution(market_id: str):
+    cached = latest_event_distribution(market_id)
+    if cached:
+        return cached
+    dashboard_payload = build_dashboard_payload()
+    for signal in dashboard_payload.get("weather_signals", []):
+        if str(signal.get("market_id") or "") == str(market_id):
+            return signal.get("distribution") or {"items": []}
+    return {"items": [], "normalized": False, "notes": ["distribution_not_found"]}
+
+
+@app.get("/api/signals/{signal_id}/decision")
+async def signal_decision(signal_id: int):
+    cached = latest_signal_decision(signal_id)
+    if cached:
+        return cached
+    dashboard_payload = build_dashboard_payload()
+    for signal in dashboard_payload.get("weather_signals", []):
+        if int(signal.get("id") or 0) == signal_id:
+            return signal.get("decision") or {}
+    return {"signal_id": signal_id, "action": "unknown", "reasons": ["signal_not_found"]}
 
 
 @app.websocket("/ws/events")
@@ -2495,12 +3003,47 @@ async def v3_status():
         "ai_review_enabled": cfg.ai_review_enabled,
         "ai_required_for_live": cfg.ai_required_for_live,
         "max_order_usd": cfg.live_max_order_usd,
+        "canary_max_order_usd": cfg.canary_max_order_usd,
         "daily_max_usd": cfg.live_daily_max_usd,
         "max_open_positions": cfg.live_max_open_positions,
+        "truth_provider_mode": cfg.truth_provider_mode,
+        "min_independent_settlement_days": cfg.min_independent_settlement_days,
+        "visual_crossing_configured": bool(cfg.visual_crossing_key),
         "feishu_configured": bool(cfg.feishu_webhook_url),
         "minimax_configured": bool(cfg.minimax_api_key),
     }
     return summary
+
+
+@app.post("/api/executor/canary-dry-run")
+async def canary_dry_run(update: CanaryDryRunUpdate):
+    signal = next(
+        (
+            s for s in list_signals(500)
+            if int(s.get("id") or 0) == update.signal_id and not _is_dashboard_position_import(s)
+        ),
+        None,
+    )
+    if not signal:
+        return {"ok": False, "status": "blocked", "reason": "signal_not_found"}
+    cfg = load_v3_config()
+    amount = update.amount
+    if amount is not None:
+        amount = min(float(amount), cfg.canary_max_order_usd)
+    result = LiveExecutor().place_order(signal, amount)
+    log_event(
+        "info" if result.status == "dry_run" else "warning",
+        f"canary dry-run {result.status}: {result.reason or 'ok'}",
+        result.payload,
+    )
+    return {
+        "ok": result.status == "dry_run",
+        "mode": result.mode,
+        "status": result.status,
+        "order_id": result.order_id,
+        "reason": result.reason,
+        "payload": result.payload,
+    }
 
 
 @app.post("/api/v3/live-order")
@@ -2534,6 +3077,7 @@ async def v3_live_order(update: LiveOrderUpdate):
         }
     temperature_fit = _build_temperature_fit(markets)
     fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
+    truth_by_city = _truth_city_lookup(_build_truth_health(markets))
     market_by_city_date = {
         (market.get("city"), market.get("date")): market
         for market in markets
@@ -2545,6 +3089,7 @@ async def v3_live_order(update: LiveOrderUpdate):
         raw_signal,
         fit_by_city,
         market_by_city_date,
+        truth_by_city,
     )
     if not gate.get("live_allowed"):
         payload = {

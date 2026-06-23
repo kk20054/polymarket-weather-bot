@@ -1,8 +1,6 @@
-import { AnimatePresence, motion } from 'framer-motion'
-import { ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ExternalLink, X } from 'lucide-react'
+import { ChevronDown, Check, ExternalLink, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type { Signal, WeatherSignal } from '../types'
-import { platformStyles } from '../utils'
 
 interface Props {
   signals: Signal[]
@@ -11,466 +9,255 @@ interface Props {
   isSimulating: boolean
   onSignalStatus?: (signalId: number, status: string, amount?: number) => void
   onLiveOrder?: (signalId: number, amount?: number) => void
+  liveModeAvailable?: boolean
 }
 
-type SortKey = 'edge' | 'model_probability' | 'suggested_size' | 'strategy_score'
-type SortDir = 'asc' | 'desc'
-
-interface UnifiedSignal {
-  key: string
-  id?: number
-  ticker: string
-  title: string
-  platform: string
-  direction: string
-  edge: number
-  rawEdge?: number | null
-  calibratedEdge?: number | null
-  probabilityEdge?: number
-  modelProb: number
-  rawModelProb?: number | null
-  calibratedProb?: number | null
-  marketProb: number
-  calibratedSigmaF?: number | null
-  calibrationBiasF?: number | null
-  confidence: number
-  suggestedSize: number
-  reasoning: string
-  actionable: boolean
-  eventUrl?: string
-  status?: string
-  limitPrice?: number
-  bidPrice?: number
-  spread?: number
-  shares?: number
-  token?: string
-  simAmount?: number | null
-  paperPosition?: boolean
-  fitMarkets?: number
-  fitSamples?: number
-  fitMaeF?: number
-  fitBiasF?: number
-  fitDecayedBiasF?: number
-  qualityFlags?: string[]
-  strategyTags?: string[]
-  strategyScore?: number
-  strategyNotes?: string[]
-  dispersionRatio?: number | null
-  liveAllowed?: boolean
-  liveRiskLevel?: 'eligible' | 'caution' | 'blocked'
-  liveBlockReasons?: string[]
-  liveCautions?: string[]
-  nearLock?: {
-    hours_left: number
-    observed_temp: number
-    model_best: number
-    remaining_potential: number
-  } | null
+function pct(value?: number | null, signed = false) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  const n = Number(value) * 100
+  return `${signed && n > 0 ? '+' : ''}${n.toFixed(1)}%`
 }
 
-function PlatformBadge({ platform }: { platform: string }) {
-  const style = platformStyles[platform.toLowerCase()]
-  if (!style) return null
-  return <span className={`platform-badge ${style.badge}`}>{style.icon}</span>
+function cents(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${(Number(value) * 100).toFixed(1)}c`
 }
 
-function WeatherBadge() {
-  return <span className="border border-cyan-500/20 bg-cyan-500/10 px-1 py-0.5 text-[8px] font-bold text-cyan-400">天气</span>
+function money(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `$${Number(value).toFixed(2)}`
 }
 
-function EdgeBar({ edge }: { edge: number }) {
-  const absEdge = Math.abs(edge) * 100
-  const width = Math.min(100, absEdge * 2)
-  const color = edge > 0.08 ? '#22c55e' : edge > 0 ? '#22c55e80' : '#dc2626'
-  return (
-    <div className="edge-bar">
-      <div className="edge-fill" style={{ width: `${width}%`, backgroundColor: color }} />
-    </div>
-  )
+function statusText(signal: WeatherSignal) {
+  if (signal.paper_position || signal.status === 'simulated') return '已模拟'
+  if (signal.status === 'bought') return '已标记实盘'
+  if (signal.status === 'skipped') return '已跳过'
+  if (signal.actionable && signal.live_allowed) return '可模拟，实盘待确认'
+  if (signal.actionable) return '建议先模拟'
+  return '观察'
+}
+
+function statusClass(signal: WeatherSignal) {
+  const label = statusText(signal)
+  if (label.includes('已模拟')) return 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
+  if (label.includes('建议')) return 'border-green-500/30 bg-green-500/10 text-green-300'
+  if (label.includes('实盘')) return 'border-blue-500/30 bg-blue-500/10 text-blue-300'
+  if (label.includes('跳过')) return 'border-neutral-700 bg-neutral-900 text-neutral-500'
+  return 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+}
+
+function reasonLabel(reason: string) {
+  const map: Record<string, string> = {
+    strategy_not_ready: '策略尚未达到实盘标准',
+    fit_missing: '缺少城市拟合样本',
+    fit_independent_days_too_low: '独立结算日太少',
+    fit_independent_days_low: '独立结算日不足',
+    truth_missing: '缺少结算 truth',
+    truth_observations_below_min: 'truth 样本不足',
+    open_meteo_truth_fallback_present: '仍含 Open-Meteo fallback',
+    legacy_truth_unknown: '存在旧版未知 truth',
+    distribution_missing: '缺少整场分布',
+    distribution_edge_negative: '归一化后无优势',
+    spread_cost_too_high: 'spread 成本太高',
+    spread_above_limit: 'spread 过宽',
+    low_price_tail_unverified: '低价尾部未验证',
+    price_below_min: '价格低于策略下限',
+    price_above_max: '价格高于上限',
+    expired_signal: '信号已过期',
+    already_simulated: '已模拟',
+    already_bought: '已买入/标记',
+    already_skipped: '已跳过',
+  }
+  return map[reason] ?? reason
 }
 
 function shortToken(token?: string) {
   if (!token) return ''
-  return `${token.slice(0, 6)}...${token.slice(-4)}`
-}
-
-function isNum(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value)
-}
-
-function pct(value?: number | null, signed = false) {
-  if (!isNum(value)) return '--'
-  return `${signed && value > 0 ? '+' : ''}${(value * 100).toFixed(1)}%`
-}
-
-function cents(value?: number | null) {
-  if (!isNum(value)) return '--'
-  return `${(value * 100).toFixed(1)}c`
-}
-
-function statusLabel(status?: string) {
-  switch (status) {
-    case 'simulated': return '已模拟'
-    case 'bought': return '已标记实盘'
-    case 'paper_open': return '纸面持仓'
-    case 'skipped': return '已跳过'
-    case 'signal': return '新信号'
-    default: return status || '观察'
-  }
-}
-
-function flagLabel(flag: string) {
-  switch (flag) {
-    case 'fit_independent_days_too_low': return '独立日过少'
-    case 'fit_independent_days_low': return '独立日不足'
-    case 'fit_sample_low': return '拟合样本少'
-    case 'city_mae_high': return '城市误差高'
-    case 'city_bias_high': return '城市偏差高'
-    case 'fit_missing': return '缺少拟合样本'
-    default: return flag
-  }
-}
-
-function strategyLabel(tag: string) {
-  switch (tag) {
-    case 'near_lock_watch': return '临近结算观察'
-    case 'near_lock_strong': return '临近结算强信号'
-    case 'near_lock_missing_metar': return '缺少 METAR'
-    case 'dispersion_underpricing_watch': return '离散度不足'
-    case 'cheap_tail_candidate': return '低价尾部'
-    case 'low_price_tail_watch': return '低价尾部审查'
-    case 'independent_history_thin': return '独立日不足'
-    case 'fit_risk': return '拟合风险'
-    case 'bias_risk': return '偏差风险'
-    case 'standard_ev': return '普通 EV'
-    default: return tag
-  }
-}
-
-function gateLabel(reason: string) {
-  switch (reason) {
-    case 'fit_missing': return '缺少城市拟合'
-    case 'fit_independent_days_too_low': return '独立结算日过少'
-    case 'fit_independent_days_low': return '独立结算日不足'
-    case 'city_mae_high': return '城市 MAE 过高'
-    case 'city_bias_high': return '城市 Bias 过高'
-    case 'fit_sample_low': return '拟合样本偏少'
-    case 'near_lock_missing_metar': return 'D+0 缺少 METAR'
-    case 'strategy_score_low': return '策略分过低'
-    case 'price_below_min': return '价格低于最小阈值'
-    case 'price_above_max': return '价格高于上限'
-    case 'low_price_tail_unverified': return '低价尾部未验证'
-    case 'spread_cost_too_high': return 'spread 成本过高'
-    case 'spread_missing': return '缺少 spread'
-    case 'spread_above_limit': return 'spread 过宽'
-    case 'expired_signal': return '信号已过期'
-    case 'strategy_not_ready': return '策略回放未达实盘标准'
-    case 'already_simulated': return '已模拟'
-    case 'already_bought': return '已买入'
-    case 'already_skipped': return '已跳过'
-    default: return reason
-  }
-}
-
-function liveGateText(sig: UnifiedSignal) {
-  if (sig.liveAllowed) {
-    return sig.liveRiskLevel === 'caution' ? '可实盘，需谨慎' : '可实盘'
-  }
-  return '禁止实盘'
+  return `${token.slice(0, 8)}...${token.slice(-6)}`
 }
 
 export function SignalsTable({
-  signals: _signals,
   weatherSignals,
-  onSimulateTrade: _onSimulateTrade,
-  isSimulating: _isSimulating,
   onSignalStatus,
   onLiveOrder,
+  liveModeAvailable = false,
 }: Props) {
-  const [sortKey, setSortKey] = useState<SortKey>('edge')
-  const [sortDir, setSortDir] = useState<SortDir>('desc')
-  const [expandedKey, setExpandedKey] = useState<string | null>(null)
-  const [simAmounts, setSimAmounts] = useState<Record<string, string>>({})
-
-  const unified: UnifiedSignal[] = useMemo(() => {
-    return weatherSignals.map(signal => ({
-      key: `wx-${signal.id || signal.market_id}`,
-      id: signal.id,
-      ticker: signal.market_id,
-      title: signal.question || `${signal.city_name} ${signal.bucket_label || `${signal.threshold_f}F`}`,
-      platform: signal.platform || 'polymarket',
-      direction: signal.direction,
-      edge: signal.edge ?? 0,
-      rawEdge: signal.raw_edge,
-      calibratedEdge: signal.calibrated_edge,
-      probabilityEdge: signal.probability_edge,
-      modelProb: signal.model_probability ?? 0,
-      rawModelProb: signal.raw_model_probability,
-      calibratedProb: signal.calibrated_probability,
-      marketProb: signal.market_probability ?? 0,
-      calibratedSigmaF: signal.calibrated_sigma_f,
-      calibrationBiasF: signal.calibration_bias_f,
-      confidence: signal.confidence,
-      suggestedSize: signal.suggested_size,
-      reasoning: signal.reasoning,
-      actionable: signal.actionable,
-      eventUrl: signal.event_url,
-      status: signal.status,
-      limitPrice: signal.limit_price,
-      bidPrice: signal.bid_price,
-      spread: signal.spread,
-      shares: signal.shares,
-      token: signal.yes_token_id,
-      simAmount: signal.sim_amount,
-      paperPosition: signal.paper_position,
-      fitMarkets: signal.fit_markets,
-      fitSamples: signal.fit_samples,
-      fitMaeF: signal.fit_mae_f,
-      fitBiasF: signal.fit_bias_f,
-      fitDecayedBiasF: signal.fit_decayed_bias_f,
-      qualityFlags: signal.quality_flags,
-      strategyTags: signal.strategy_tags,
-      strategyScore: signal.strategy_score,
-      strategyNotes: signal.strategy_notes,
-      dispersionRatio: signal.dispersion_ratio,
-      liveAllowed: signal.live_allowed,
-      liveRiskLevel: signal.live_risk_level,
-      liveBlockReasons: signal.live_block_reasons,
-      liveCautions: signal.live_cautions,
-      nearLock: signal.near_lock,
-    }))
-  }, [weatherSignals])
-
-  const handleSort = (key: SortKey) => {
-    if (sortKey === key) {
-      setSortDir(sortDir === 'asc' ? 'desc' : 'asc')
-    } else {
-      setSortKey(key)
-      setSortDir('desc')
-    }
-  }
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [amounts, setAmounts] = useState<Record<string, string>>({})
 
   const sorted = useMemo(() => {
-    return [...unified].sort((a, b) => {
+    return [...weatherSignals].sort((a, b) => {
+      const aDone = a.paper_position || ['simulated', 'bought', 'skipped'].includes(a.status || '')
+      const bDone = b.paper_position || ['simulated', 'bought', 'skipped'].includes(b.status || '')
+      if (aDone !== bDone) return aDone ? 1 : -1
       if (a.actionable !== b.actionable) return a.actionable ? -1 : 1
-      let aVal: number
-      let bVal: number
-      switch (sortKey) {
-        case 'edge':
-          aVal = Math.abs(a.edge); bVal = Math.abs(b.edge); break
-        case 'model_probability':
-          aVal = a.modelProb; bVal = b.modelProb; break
-        case 'strategy_score':
-          aVal = a.strategyScore ?? 0; bVal = b.strategyScore ?? 0; break
-        case 'suggested_size':
-          aVal = a.suggestedSize; bVal = b.suggestedSize; break
-        default:
-          return 0
-      }
-      return sortDir === 'asc' ? aVal - bVal : bVal - aVal
+      return Math.abs((b.edge ?? 0)) - Math.abs((a.edge ?? 0))
     })
-  }, [unified, sortKey, sortDir])
+  }, [weatherSignals])
 
-  const SortIcon = ({ column }: { column: SortKey }) => {
-    if (sortKey !== column) return <ArrowUpDown className="h-2.5 w-2.5 text-neutral-600" />
-    return sortDir === 'asc'
-      ? <ArrowUp className="h-2.5 w-2.5 text-amber-500" />
-      : <ArrowDown className="h-2.5 w-2.5 text-amber-500" />
-  }
-
-  if (unified.length === 0) {
+  if (sorted.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-8 text-neutral-600">
-        <p className="text-xs">暂无信号</p>
-        <p className="mt-0.5 text-[10px] text-neutral-700">运行 WeatherBot 后等待下一轮扫描</p>
+      <div className="flex h-full flex-col items-center justify-center gap-1 p-6 text-center text-neutral-600">
+        <div className="text-sm text-neutral-400">暂无天气信号</div>
+        <div className="text-[11px]">启动扫描器后，符合日期和盘口条件的信号会出现在这里。</div>
       </div>
     )
   }
 
   return (
-    <table className="w-full table-fixed">
-      <thead className="sticky top-0 z-10 bg-[#0a0a0a]">
-        <tr className="border-b border-neutral-800 text-left text-[10px] text-neutral-600">
-          <th className="w-12 px-1.5 py-1.5 font-medium"></th>
-          <th className="px-1.5 py-1.5 font-medium">信号</th>
-          <th className="w-16 cursor-pointer px-1.5 py-1.5 text-right font-medium hover:text-neutral-400" onClick={() => handleSort('edge')}>
-            <div className="flex items-center justify-end gap-0.5">
-              校准EV <SortIcon column="edge" />
-            </div>
-          </th>
-          <th className="w-16 cursor-pointer px-1.5 py-1.5 text-right font-medium hover:text-neutral-400" onClick={() => handleSort('strategy_score')}>
-            <div className="flex items-center justify-end gap-0.5">
-              风控 <SortIcon column="strategy_score" />
-            </div>
-          </th>
-          <th className="w-20 cursor-pointer px-1.5 py-1.5 text-right font-medium hover:text-neutral-400" onClick={() => handleSort('suggested_size')}>
-            <div className="flex items-center justify-end gap-0.5">
-              模拟 <SortIcon column="suggested_size" />
-            </div>
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        <AnimatePresence>
-          {sorted.map((sig, index) => {
-            const isExpanded = expandedKey === sig.key
-            const status = sig.status || (sig.actionable ? 'signal' : 'watch')
-            const locked = ['simulated', 'bought', 'skipped'].includes(status)
-            const liveBlocked = sig.liveAllowed === false
-            const amountValue = simAmounts[sig.key] ?? String(sig.simAmount ?? sig.suggestedSize ?? '')
-            const parsedAmount = Number(amountValue)
-            const amountForSave = Number.isFinite(parsedAmount) ? parsedAmount : sig.suggestedSize
-            const flags = sig.qualityFlags ?? []
-            const liveReasons = sig.liveBlockReasons ?? []
-            const liveCautions = sig.liveCautions ?? []
+    <div className="divide-y divide-neutral-900">
+      {sorted.map(signal => {
+        const key = `${signal.id ?? signal.market_id}`
+        const isExpanded = expanded === key
+        const locked = signal.paper_position || ['simulated', 'bought', 'skipped'].includes(signal.status || '')
+        const liveAllowed = Boolean(liveModeAvailable && signal.live_allowed)
+        const amount = amounts[key] ?? String(signal.sim_amount ?? signal.suggested_size ?? '')
+        const parsedAmount = Number(amount)
+        const amountForSave = Number.isFinite(parsedAmount) ? parsedAmount : signal.suggested_size
+        const liveReasons = signal.live_block_reasons ?? []
+        const qualityFlags = signal.quality_flags ?? []
+        const decisionReasons = signal.decision?.reasons ?? []
 
-            return (
-              <motion.tr
-                key={sig.key}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: index * 0.02 }}
-                className={`cursor-pointer border-b border-neutral-800/50 text-[11px] hover:bg-neutral-800/30 ${sig.actionable ? '' : 'opacity-55'}`}
-                onClick={() => setExpandedKey(isExpanded ? null : sig.key)}
-              >
-                <td className="px-1.5 py-1 align-top">
-                  <div className="flex items-center gap-1">
-                    <ChevronDown className={`h-3 w-3 text-neutral-600 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
-                    <PlatformBadge platform={sig.platform} />
-                    <WeatherBadge />
-                  </div>
-                </td>
-                <td className="px-1.5 py-1 align-top">
-                  <span className="block break-words leading-snug text-neutral-300" title={sig.title}>
-                    {sig.title}
-                  </span>
-                  <span className="mt-0.5 block text-[9px] text-neutral-600">
-                    {statusLabel(status)} · {sig.direction.toUpperCase()} · 限价 {sig.limitPrice ? cents(sig.limitPrice) : cents(sig.marketProb)}
-                    {sig.paperPosition ? ' · 已有纸面仓位' : ''}
-                  </span>
-                  {sig.token && <span className="block text-[9px] text-neutral-700">{shortToken(sig.token)}</span>}
-                  {isExpanded && (
-                    <div className="mt-1 space-y-1 text-[10px] leading-relaxed text-neutral-500">
-                      <div>{sig.reasoning}</div>
-                      <div>
-                        模型P {pct(sig.modelProb)} / 市场P {pct(sig.marketProb)} / 概率差 {pct(sig.probabilityEdge, true)} / EV {pct(sig.edge, true)}
-                      </div>
-                      {(sig.calibratedSigmaF !== undefined || sig.rawEdge !== undefined) && (
-                        <div className="border-l border-amber-500/30 pl-2 text-amber-200/80">
-                          校准：P {pct(sig.calibratedProb ?? sig.modelProb)}
-                          {' / '}EV {pct(sig.calibratedEdge ?? sig.edge, true)}
-                          {isNum(sig.rawModelProb) ? ` / 原始P ${pct(sig.rawModelProb)}` : ''}
-                          {isNum(sig.rawEdge) ? ` / 原始EV ${pct(sig.rawEdge, true)}` : ''}
-                          {isNum(sig.calibratedSigmaF) ? ` / sigma ${sig.calibratedSigmaF.toFixed(2)}F` : ''}
-                          {isNum(sig.calibrationBiasF) ? ` / bias ${sig.calibrationBiasF >= 0 ? '+' : ''}${sig.calibrationBiasF.toFixed(2)}F` : ''}
-                        </div>
-                      )}
-                      {sig.bidPrice !== undefined && sig.spread !== undefined && (
-                        <div>Bid/Ask {cents(sig.bidPrice)} / {cents(sig.limitPrice)} · spread {cents(sig.spread)}</div>
-                      )}
-                      <div className="border-l border-neutral-800 pl-2">
-                        拟合质量：独立日 {sig.fitMarkets ?? 0} / 快照 {sig.fitSamples ?? 0} / MAE {isNum(sig.fitMaeF) ? `${sig.fitMaeF.toFixed(1)}F` : '--'} / Bias {isNum(sig.fitBiasF) ? `${sig.fitBiasF.toFixed(1)}F` : '--'}
-                        {isNum(sig.fitDecayedBiasF) ? ` / 衰减Bias ${sig.fitDecayedBiasF >= 0 ? '+' : ''}${sig.fitDecayedBiasF.toFixed(1)}F` : ''}
-                        {flags.length ? ` / 提示 ${flags.map(flagLabel).join('、')}` : ' / 暂无硬风险提示'}
-                      </div>
-                      <div className="border-l border-cyan-500/30 pl-2">
-                        <div>
-                          策略诊断：分数 {isNum(sig.strategyScore) ? sig.strategyScore.toFixed(2) : '--'} / {(sig.strategyTags ?? []).map(strategyLabel).join('、') || '普通 EV'}
-                          {isNum(sig.dispersionRatio) ? ` / 离散度比 ${sig.dispersionRatio.toFixed(2)}` : ''}
-                        </div>
-                        {sig.nearLock && (
-                          <div>
-                            NEAR-LOCK：剩余 {sig.nearLock.hours_left.toFixed(1)}h / METAR {sig.nearLock.observed_temp.toFixed(1)} / 模型 {sig.nearLock.model_best.toFixed(1)} / 剩余潜力 {sig.nearLock.remaining_potential.toFixed(1)}
-                          </div>
-                        )}
-                        {(sig.strategyNotes ?? []).map(note => (
-                          <div key={note} className="text-neutral-600">{note}</div>
-                        ))}
-                      </div>
-                      <div className={`border-l pl-2 ${liveBlocked ? 'border-red-500/40 text-red-300' : 'border-green-500/30 text-green-300'}`}>
-                        实盘门槛：{liveGateText(sig)}
-                        {liveReasons.length ? ` / 拦截：${liveReasons.map(gateLabel).join('、')}` : ''}
-                        {liveCautions.length ? ` / 提醒：${liveCautions.map(gateLabel).join('、')}` : ''}
-                      </div>
-                      <div>模拟买入只写入本地记录，不会向 Polymarket 下单；实盘按钮会再次经过后端风控。</div>
+        return (
+          <div key={key} className="bg-black text-[11px] hover:bg-neutral-950">
+            <button
+              type="button"
+              onClick={() => setExpanded(isExpanded ? null : key)}
+              className="grid w-full grid-cols-[18px_1fr_72px_84px] items-start gap-2 px-2 py-2 text-left"
+            >
+              <ChevronDown className={`mt-0.5 h-3.5 w-3.5 text-neutral-600 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+              <div className="min-w-0">
+                <div className="break-words leading-snug text-neutral-200">{signal.question || signal.market_id}</div>
+                <div className="mt-1 flex flex-wrap items-center gap-1">
+                  <span className={`border px-1.5 py-0.5 text-[9px] ${statusClass(signal)}`}>{statusText(signal)}</span>
+                  <span className="text-[9px] text-neutral-600">{signal.city_name} / {signal.target_date}</span>
+                  <span className="text-[9px] text-neutral-600">YES {cents(signal.limit_price ?? signal.market_probability)}</span>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className={signal.edge >= 0 ? 'tabular-nums text-green-400' : 'tabular-nums text-red-400'}>
+                  {pct(signal.edge, true)}
+                </div>
+                <div className="text-[9px] text-neutral-600">EV</div>
+              </div>
+              <div className="text-right">
+                <div className="tabular-nums text-blue-300">{money(signal.suggested_size)}</div>
+                <div className="text-[9px] text-neutral-600">建议模拟</div>
+              </div>
+            </button>
+
+            {isExpanded && (
+              <div className="space-y-3 border-t border-neutral-900 px-3 py-3 text-neutral-400">
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="border border-neutral-800 p-2">
+                    <div className="text-[9px] text-neutral-600">模型概率 / 市场价格</div>
+                    <div className="tabular-nums text-neutral-100">{pct(signal.model_probability)} / {cents(signal.limit_price ?? signal.market_probability)}</div>
+                    <div className="mt-1 text-[10px] text-neutral-600">
+                      归一化概率 {pct(signal.distribution?.signal_probability)}，概率差 {pct(signal.probability_edge, true)}
                     </div>
-                  )}
-                </td>
-                <td className="px-1.5 py-1 text-right align-top">
-                  <span className={`font-semibold tabular-nums ${sig.edge > 0 ? 'text-green-500' : sig.edge < 0 ? 'text-red-500' : 'text-neutral-600'}`}>
-                    {isNum(sig.edge) && sig.edge !== 0 ? pct(sig.edge, true) : '-'}
-                  </span>
-                  <EdgeBar edge={sig.edge} />
-                </td>
-                <td className="px-1.5 py-1 text-right align-top">
-                  <span className={`text-[10px] font-semibold ${
-                    liveBlocked ? 'text-red-400' : sig.liveRiskLevel === 'caution' ? 'text-amber-400' : 'text-green-400'
-                  }`}>
-                    {liveGateText(sig)}
-                  </span>
-                  <div className="text-[9px] text-neutral-600">
-                    {isNum(sig.strategyScore) ? sig.strategyScore.toFixed(2) : '--'}
                   </div>
-                </td>
-                <td className="px-1.5 py-1 text-right align-top tabular-nums text-blue-400">
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={amountValue}
-                    onClick={event => event.stopPropagation()}
-                    onChange={event => setSimAmounts(prev => ({ ...prev, [sig.key]: event.target.value }))}
-                    className="w-14 border border-neutral-800 bg-black px-1 py-0.5 text-right text-[10px] text-blue-300"
-                  />
-                  {isNum(sig.shares) && sig.shares > 0 ? <div className="text-[9px] text-neutral-600">{sig.shares.toFixed(2)} sh</div> : null}
-                  <div className="mt-1 flex items-center justify-end gap-1">
-                    {sig.eventUrl && (
+                  <div className="border border-neutral-800 p-2">
+                    <div className="text-[9px] text-neutral-600">盘口成本</div>
+                    <div className="tabular-nums text-neutral-100">Bid {cents(signal.bid_price)} / Ask {cents(signal.limit_price)}</div>
+                    <div className="mt-1 text-[10px] text-neutral-600">Spread {cents(signal.spread)}，买入后立即按 bid 估值会先显示浮亏。</div>
+                  </div>
+                </div>
+
+                <div className="border border-neutral-800 p-2">
+                  <div className="mb-1 text-[10px] text-neutral-500">操作</div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={amount}
+                      onChange={event => setAmounts(prev => ({ ...prev, [key]: event.target.value }))}
+                      className="w-24 px-2 py-1 text-right tabular-nums"
+                      aria-label="模拟买入金额"
+                    />
+                    <button
+                      onClick={() => signal.id && onSignalStatus?.(signal.id, 'simulated', amountForSave)}
+                      disabled={locked || !signal.id}
+                      className="inline-flex items-center gap-1 border border-green-500/30 px-2 py-1 text-green-300 hover:bg-green-500/10 disabled:opacity-30"
+                    >
+                      <Check className="h-3.5 w-3.5" />
+                      模拟买入
+                    </button>
+                    <button
+                      onClick={() => signal.id && onLiveOrder?.(signal.id, amountForSave)}
+                      disabled={locked || !signal.id || !liveAllowed}
+                      className="border border-blue-500/30 px-2 py-1 text-blue-300 hover:bg-blue-500/10 disabled:opacity-30"
+                      title={liveAllowed ? '执行后端实盘/dry-run 检查' : '当前实盘未开放或该信号未通过实盘门槛'}
+                    >
+                      实盘买入
+                    </button>
+                    <button
+                      onClick={() => signal.id && onSignalStatus?.(signal.id, 'skipped')}
+                      disabled={locked || !signal.id}
+                      className="inline-flex items-center gap-1 border border-red-500/30 px-2 py-1 text-red-300 hover:bg-red-500/10 disabled:opacity-30"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      跳过
+                    </button>
+                    {signal.event_url && (
                       <a
-                        href={sig.eventUrl}
+                        href={signal.event_url}
                         target="_blank"
                         rel="noreferrer"
-                        onClick={event => event.stopPropagation()}
-                        className="border border-neutral-700 p-0.5 text-neutral-400 hover:text-cyan-400"
-                        title="打开 Polymarket"
+                        className="inline-flex items-center gap-1 border border-neutral-700 px-2 py-1 text-neutral-300 hover:text-cyan-300"
                       >
-                        <ExternalLink className="h-3 w-3" />
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        Polymarket
                       </a>
                     )}
-                    {sig.id && onSignalStatus && (
-                      <>
-                        <button
-                          onClick={event => { event.stopPropagation(); onSignalStatus(sig.id!, 'simulated', amountForSave) }}
-                          disabled={locked}
-                          className="border border-green-500/30 p-0.5 text-green-400 hover:bg-green-500/10 disabled:opacity-30"
-                          title="模拟买入"
-                        >
-                          <Check className="h-3 w-3" />
-                        </button>
-                        <button
-                          onClick={event => { event.stopPropagation(); onLiveOrder ? onLiveOrder(sig.id!, amountForSave) : onSignalStatus(sig.id!, 'bought', amountForSave) }}
-                          disabled={locked || liveBlocked}
-                          className="border border-blue-500/30 px-1 py-0.5 text-[9px] text-blue-400 hover:bg-blue-500/10 disabled:opacity-30"
-                          title={liveBlocked ? `实盘被拦截：${liveReasons.map(gateLabel).join('、')}` : '执行实盘下单或 dry-run'}
-                        >
-                          $
-                        </button>
-                        <button
-                          onClick={event => { event.stopPropagation(); onSignalStatus(sig.id!, 'skipped') }}
-                          disabled={locked}
-                          className="border border-red-500/30 p-0.5 text-red-400 hover:bg-red-500/10 disabled:opacity-30"
-                          title="跳过"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </>
+                  </div>
+                </div>
+
+                <div className="grid gap-2 md:grid-cols-2">
+                  <div className="border border-neutral-800 p-2 leading-relaxed">
+                    <div className="mb-1 text-[10px] text-neutral-500">为什么买/不买</div>
+                    <p>{signal.reasoning}</p>
+                    {[...decisionReasons, ...liveReasons, ...qualityFlags].length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {[...decisionReasons, ...liveReasons, ...qualityFlags].slice(0, 12).map(reason => (
+                          <span key={reason} className="border border-amber-500/20 bg-amber-500/5 px-1.5 py-0.5 text-[9px] text-amber-200">
+                            {reasonLabel(reason)}
+                          </span>
+                        ))}
+                      </div>
                     )}
                   </div>
-                </td>
-              </motion.tr>
-            )
-          })}
-        </AnimatePresence>
-      </tbody>
-    </table>
+
+                  <div className="border border-neutral-800 p-2 leading-relaxed">
+                    <div className="mb-1 text-[10px] text-neutral-500">校准与 truth</div>
+                    <div>独立样本 {signal.fit_markets ?? 0} 天 / 快照 {signal.fit_samples ?? 0}</div>
+                    <div>MAE {signal.fit_mae_f?.toFixed?.(1) ?? '--'}F / Bias {signal.fit_bias_f?.toFixed?.(1) ?? '--'}F</div>
+                    <div>truth {signal.truth?.latest_provider || '缺失'} / 站点 {signal.truth?.station_id || '未映射'}</div>
+                    {signal.yes_token_id && <div className="mt-1 text-neutral-600">YES token {shortToken(signal.yes_token_id)}</div>}
+                  </div>
+                </div>
+
+                {signal.distribution?.top_model?.length ? (
+                  <div className="border border-neutral-800 p-2">
+                    <div className="mb-2 text-[10px] text-neutral-500">整场 bucket 分布 Top</div>
+                    <div className="grid gap-1 sm:grid-cols-3">
+                      {signal.distribution.top_model.slice(0, 6).map(item => (
+                        <div
+                          key={item.market_id}
+                          className={`border px-2 py-1 ${item.is_signal ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200' : 'border-neutral-800 text-neutral-400'}`}
+                        >
+                          <div className="truncate">{item.bucket_low}-{item.bucket_high}</div>
+                          <div className="tabular-nums text-[10px]">P {pct(item.probability)} / Ask {cents(item.ask)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
   )
 }

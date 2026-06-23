@@ -1,29 +1,33 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { motion } from 'framer-motion'
 import {
+  Activity,
+  BarChart3,
+  CheckCircle2,
+  PauseCircle,
+  PlayCircle,
+  RefreshCw,
+  ShieldAlert,
+  Wallet,
+} from 'lucide-react'
+import {
+  backfillWeatherHistory,
   bulkSimulateSignals,
   fetchDashboard,
   fetchTemperatureFit,
-  notifyDailySummary,
   placeLiveOrder,
   resetSimulation,
   settleTradesApi,
-  simulateTrade,
   startBot,
   stopBot,
   updateSignalStatus,
 } from './api'
-import { BacktestPanel } from './components/BacktestPanel'
-import { CalibrationPanel } from './components/CalibrationPanel'
-import { EdgeDistribution } from './components/EdgeDistribution'
 import { EquityChart } from './components/EquityChart'
-import { MicrostructurePanel } from './components/MicrostructurePanel'
 import { SignalsTable } from './components/SignalsTable'
 import { StatsCards } from './components/StatsCards'
-import { Terminal } from './components/Terminal'
-import { TradesTable } from './components/TradesTable'
 import { TemperatureFitPage } from './components/TemperatureFitPage'
+import { TradesTable } from './components/TradesTable'
+import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
 import type { BotStats, BulkSimulateResult } from './types'
 
@@ -42,78 +46,13 @@ const EMPTY_STATS: BotStats = {
   simulation_started_at: null,
 }
 
-function LiveClock() {
-  const [time, setTime] = useState(new Date())
-
-  useEffect(() => {
-    const interval = window.setInterval(() => setTime(new Date()), 1000)
-    return () => window.clearInterval(interval)
-  }, [])
-
-  return (
-    <span className="text-xs tabular-nums text-neutral-400">
-      {time.toLocaleTimeString('zh-CN', { hour12: false })}
-    </span>
-  )
+function money(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${Number(value) >= 0 ? '' : '-'}$${Math.abs(Number(value)).toFixed(2)}`
 }
 
-function RefreshBar({ interval }: { interval: number }) {
-  const [progress, setProgress] = useState(100)
-
-  useEffect(() => {
-    setProgress(100)
-    const step = 100 / (interval / 1000)
-    const timer = window.setInterval(() => {
-      setProgress(value => Math.max(0, value - step))
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [interval])
-
-  return (
-    <div className="refresh-bar w-16">
-      <div className="refresh-fill" style={{ width: `${progress}%` }} />
-    </div>
-  )
-}
-
-function formatDataAge(minutes?: number | null) {
-  if (minutes === null || minutes === undefined) return '暂无数据'
-  if (minutes < 60) return `${minutes.toFixed(0)} 分钟前`
-  if (minutes < 1440) return `${(minutes / 60).toFixed(1)} 小时前`
-  return `${(minutes / 1440).toFixed(1)} 天前`
-}
-
-function bulkReasonLabel(reason: string): string {
-  if (reason.startsWith('risk_gate:')) return `风控拦截：${reason.slice('risk_gate:'.length)}`
-  if (reason.startsWith('paper_rejected:')) return `盘口拒单：${bulkReasonLabel(reason.slice('paper_rejected:'.length))}`
-  switch (reason) {
-    case 'already_paper_position': return '已有纸面仓位'
-    case 'already_simulated': return '已模拟'
-    case 'already_bought': return '已实盘标记'
-    case 'already_skipped': return '已跳过'
-    case 'expired_signal': return '已过期'
-    case 'not_actionable': return '不可行动'
-    case 'calibrated_ev_nonpositive': return '校准EV非正'
-    case 'risk_gate_blocked': return '风控拦截'
-    case 'fit_independent_days_too_low': return '独立结算日过少'
-    case 'fit_independent_days_low': return '独立结算日不足'
-    case 'low_price_tail_unverified': return '低价尾部未验证'
-    case 'spread_cost_too_high': return 'spread 成本过高'
-    case 'no_requested_amount': return '无模拟金额'
-    case 'no_simulation_cash': return '余额不足'
-    case 'position_write_failed': return '持仓写入失败'
-    case 'below_order_min_size': return '低于最小订单'
-    case 'spread_above_max_slippage': return 'spread 太宽'
-    case 'best_ask_above_limit': return '卖一高于限价'
-    case 'orderbook_disabled': return '盘口未开启'
-    case 'invalid_tick_size': return '价格不符合 tick'
-    case 'quote_stale': return '盘口过期'
-    default: return reason
-  }
-}
-
-function formatDateTime(value?: string | null) {
-  if (!value) return '尚未重置'
+function timeText(value?: string | null) {
+  if (!value) return '暂无'
   try {
     return new Date(value).toLocaleString('zh-CN', {
       month: '2-digit',
@@ -123,118 +62,219 @@ function formatDateTime(value?: string | null) {
       hour12: false,
     })
   } catch {
-    return '时间未知'
+    return value
   }
 }
 
-function SimulationPanel({
-  bankroll,
-  cashBalance,
-  reservedCapital,
-  startedAt,
-  openTrades,
-  settledTrades,
+function dataAge(minutes?: number | null) {
+  if (minutes === null || minutes === undefined) return '暂无'
+  if (minutes < 60) return `${minutes.toFixed(0)} 分钟前`
+  if (minutes < 1440) return `${(minutes / 60).toFixed(1)} 小时前`
+  return `${(minutes / 1440).toFixed(1)} 天前`
+}
+
+function reasonLabel(reason: string) {
+  const map: Record<string, string> = {
+    truth_observations_below_min: '高置信 truth 样本不足',
+    open_meteo_truth_fallback_present: '仍有 Open-Meteo fallback',
+    legacy_truth_unknown: '存在旧版未知 truth',
+    settled_sample_missing: '已结算样本不足',
+    sample_low: '回放样本不足',
+    pnl_negative: '允许组仍亏损',
+    roi_negative: 'ROI 为负',
+    win_rate_low: '胜率偏低',
+    strategy_not_ready: '策略尚未达标',
+  }
+  return map[reason] ?? reason
+}
+
+function bulkReasonLabel(reason: string): string {
+  if (reason.startsWith('risk_gate:')) return `风控拦截：${reasonLabel(reason.slice('risk_gate:'.length))}`
+  if (reason.startsWith('paper_rejected:')) return `模拟拒单：${bulkReasonLabel(reason.slice('paper_rejected:'.length))}`
+  const map: Record<string, string> = {
+    already_paper_position: '已有模拟持仓',
+    already_simulated: '已经模拟',
+    already_bought: '已经标记实盘',
+    already_skipped: '已经跳过',
+    expired_signal: '信号过期',
+    not_actionable: '不可操作',
+    no_simulation_cash: '模拟现金不足',
+    below_order_min_size: '低于最小订单',
+    spread_above_max_slippage: 'spread 过宽',
+    best_ask_above_limit: '卖一高于限价',
+    quote_stale: '盘口过期',
+    spread_cost_too_high: 'spread 成本过高',
+    low_price_tail_unverified: '低价尾部未验证',
+  }
+  return map[reason] ?? reasonLabel(reason)
+}
+
+function ReadinessBanner({ stats }: { stats: BotStats }) {
+  const ready = Boolean(stats.strategy_live_ready)
+  const reasons = stats.strategy_readiness_reasons ?? []
+  return (
+    <div className={`border px-3 py-2 ${ready ? 'border-green-500/30 bg-green-500/10' : 'border-amber-500/30 bg-amber-500/10'}`}>
+      <div className="flex items-center gap-2">
+        {ready ? <CheckCircle2 className="h-4 w-4 text-green-300" /> : <ShieldAlert className="h-4 w-4 text-amber-300" />}
+        <div className="text-sm font-medium text-neutral-100">
+          {ready ? '实盘门槛已通过，但仍建议从 $1-$2 canary 开始' : '当前只允许模拟观察，实盘按钮已锁定'}
+        </div>
+      </div>
+      {!ready && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {reasons.length ? reasons.slice(0, 8).map(reason => (
+            <span key={reason} className="border border-amber-500/20 bg-black/30 px-1.5 py-0.5 text-[10px] text-amber-100">
+              {reasonLabel(reason)}
+            </span>
+          )) : (
+            <span className="text-[11px] text-neutral-500">等待更多模拟和结算样本。</span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SimulationCard({
+  stats,
   value,
   clearMarks,
+  lastBulk,
   onValue,
   onClearMarks,
   onReset,
   onSettle,
-  disabled,
+  onBulk,
+  resetting,
   settling,
+  bulkPending,
 }: {
-  bankroll: number
-  cashBalance: number
-  reservedCapital: number
-  startedAt?: string | null
-  openTrades: number
-  settledTrades: number
+  stats: BotStats
   value: string
   clearMarks: boolean
+  lastBulk: BulkSimulateResult | null
   onValue: (value: string) => void
   onClearMarks: (value: boolean) => void
   onReset: () => void
   onSettle: () => void
-  disabled: boolean
+  onBulk: () => void
+  resetting: boolean
   settling: boolean
+  bulkPending: boolean
 }) {
   return (
-    <div className="h-full space-y-2 overflow-y-auto p-2 text-[10px] text-neutral-500">
-      <div className="flex items-center justify-between">
-        <span className="uppercase tracking-wider">当前权益</span>
-        <span className="tabular-nums text-neutral-200">${bankroll.toFixed(2)}</span>
+    <div className="border border-neutral-800 bg-black p-3">
+      <div className="mb-3 flex items-center gap-2">
+        <Wallet className="h-4 w-4 text-cyan-300" />
+        <div>
+          <div className="text-sm font-medium text-neutral-100">模拟账户</div>
+          <div className="text-[11px] text-neutral-600">手动模式：点击“一键模拟当前信号”才会写入模拟持仓。</div>
+        </div>
       </div>
-      <div className="flex items-center justify-between">
-        <span className="uppercase tracking-wider">现金 / 持仓成本</span>
-        <span className="tabular-nums text-neutral-300">${cashBalance.toFixed(2)} / ${reservedCapital.toFixed(2)}</span>
+
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <div className="border border-neutral-800 p-2">
+          <div className="text-neutral-600">当前权益</div>
+          <div className="tabular-nums text-lg text-neutral-100">{money(stats.bankroll)}</div>
+        </div>
+        <div className="border border-neutral-800 p-2">
+          <div className="text-neutral-600">未实现盈亏</div>
+          <div className={`tabular-nums text-lg ${(stats.unrealized_pnl ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
+            {money(stats.unrealized_pnl ?? 0)}
+          </div>
+        </div>
+        <div className="border border-neutral-800 p-2">
+          <div className="text-neutral-600">现金 / 占用</div>
+          <div className="tabular-nums text-neutral-200">{money(stats.cash_balance ?? stats.bankroll)} / {money(stats.reserved_capital ?? 0)}</div>
+        </div>
+        <div className="border border-neutral-800 p-2">
+          <div className="text-neutral-600">持仓 / 已结算</div>
+          <div className="tabular-nums text-neutral-200">{stats.open_trades ?? 0} / {stats.settled_trades ?? 0}</div>
+        </div>
       </div>
-      <div className="flex items-center justify-between">
-        <span className="uppercase tracking-wider">本轮开始</span>
-        <span className="tabular-nums text-neutral-300">{formatDateTime(startedAt)}</span>
-      </div>
-      <div className="flex items-center justify-between">
-        <span className="uppercase tracking-wider">持仓 / 已结算</span>
-        <span className="tabular-nums text-neutral-300">{openTrades}/{settledTrades}</span>
-      </div>
-      <div className="flex items-center gap-1.5">
+
+      <div className="mt-3 flex gap-2">
         <input
           type="number"
           min="0"
           step="1"
           value={value}
           onChange={event => onValue(event.target.value)}
-          className="w-full px-2 py-1 text-[11px] tabular-nums"
-          placeholder="输入模拟本金"
+          className="min-w-0 flex-1 px-2 py-1 text-right tabular-nums"
+          aria-label="设置模拟本金"
         />
         <button
           onClick={onReset}
-          disabled={disabled}
-          className="whitespace-nowrap border border-green-500/30 px-2 py-1 text-green-400 hover:bg-green-500/10 disabled:opacity-40"
+          disabled={resetting}
+          className="border border-cyan-500/30 px-2 py-1 text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-40"
         >
-          应用
-        </button>
-        <button
-          onClick={onSettle}
-          disabled={settling || openTrades === 0}
-          className="whitespace-nowrap border border-amber-500/30 px-2 py-1 text-amber-400 hover:bg-amber-500/10 disabled:opacity-40"
-        >
-          检查结算
+          应用本金
         </button>
       </div>
-      <label className="flex cursor-pointer items-center gap-2">
+
+      <label className="mt-2 flex items-center gap-2 text-[11px] text-neutral-500">
         <input
           type="checkbox"
           checked={clearMarks}
           onChange={event => onClearMarks(event.target.checked)}
           className="h-3 w-3 p-0"
         />
-        <span>同时清除模拟、跳过、实盘等标记</span>
+        重置时清除模拟/跳过/实盘标记
       </label>
-      <div className="space-y-1 border-t border-neutral-800 pt-2 leading-relaxed">
-        <p>当前权益现在只按已结算盈亏计算；未结算持仓显示为占用成本，不再当成利润。</p>
-        <p>一键模拟会按当前可操作天气信号批量写入本地模拟仓位，不会真实下单。</p>
-        <p>单条信号仍支持模拟、标记实盘、跳过和打开 Polymarket 链接。</p>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button
+          onClick={onBulk}
+          disabled={bulkPending}
+          className="border border-green-500/30 bg-green-500/10 px-2 py-1.5 text-green-300 hover:border-green-500/60 disabled:opacity-40"
+        >
+          {bulkPending ? '模拟中...' : '一键模拟当前信号'}
+        </button>
+        <button
+          onClick={onSettle}
+          disabled={settling || (stats.open_trades ?? 0) === 0}
+          className="border border-amber-500/30 px-2 py-1.5 text-amber-300 hover:bg-amber-500/10 disabled:opacity-40"
+        >
+          检查结算
+        </button>
       </div>
+
+      {lastBulk && (
+        <div className="mt-3 border border-neutral-800 p-2 text-[11px] leading-relaxed text-neutral-400">
+          <div className="mb-1 text-neutral-200">最近一次一键模拟</div>
+          <div>买入 {lastBulk.count} 笔，跳过 {lastBulk.skipped}/{lastBulk.total_current}，花费 {money(lastBulk.spent)}，剩余 {money(lastBulk.remaining)}</div>
+          {Object.entries(lastBulk.reason_counts).length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {Object.entries(lastBulk.reason_counts).slice(0, 6).map(([reason, count]) => (
+                <span key={reason} className="border border-neutral-800 bg-neutral-950 px-1.5 py-0.5 text-[10px] text-neutral-500">
+                  {bulkReasonLabel(reason)} × {count}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <p className="mt-3 text-[11px] leading-relaxed text-neutral-600">
+        新买入立刻显示浮亏，多数是因为按卖一成交、按买一估值，spread 会先被计入未实现亏损；这不等于最终判断已经错。
+      </p>
     </div>
   )
 }
 
 function App() {
   const queryClient = useQueryClient()
-  const [leftWidth, setLeftWidth] = useState(300)
-  const [rightWidth, setRightWidth] = useState(420)
+  const [view, setView] = useState<'dashboard' | 'temperature-fit'>('dashboard')
   const [simBalance, setSimBalance] = useState('40')
   const [clearMarks, setClearMarks] = useState(false)
-  const [view, setView] = useState<'dashboard' | 'temperature-fit'>('dashboard')
   const [lastBulkResult, setLastBulkResult] = useState<BulkSimulateResult | null>(null)
-  const leftDragRef = useRef(false)
-  const rightDragRef = useRef(false)
   const balanceInitRef = useRef(false)
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['dashboard'],
     queryFn: fetchDashboard,
     refetchInterval: 10000,
+    retry: 1,
   })
 
   const temperatureFitQuery = useQuery({
@@ -244,37 +284,23 @@ function App() {
     refetchInterval: view === 'temperature-fit' ? 30000 : false,
   })
 
-  const tradeMutation = useMutation({
-    mutationFn: simulateTrade,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
-  })
-
   const startMutation = useMutation({
     mutationFn: startBot,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
-
   const stopMutation = useMutation({
     mutationFn: stopBot,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
-
   const signalStatusMutation = useMutation({
     mutationFn: ({ signalId, status, amount }: { signalId: number; status: string; amount?: number }) =>
       updateSignalStatus(signalId, status, amount),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
-
   const liveOrderMutation = useMutation({
     mutationFn: ({ signalId, amount }: { signalId: number; amount?: number }) => placeLiveOrder(signalId, amount),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
-
-  const notifyDailyMutation = useMutation({
-    mutationFn: notifyDailySummary,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
-  })
-
   const bulkSimulateMutation = useMutation({
     mutationFn: bulkSimulateSignals,
     onSuccess: result => {
@@ -282,7 +308,6 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     },
   })
-
   const resetSimulationMutation = useMutation({
     mutationFn: ({ balance, clear }: { balance: number; clear: boolean }) => resetSimulation(balance, clear),
     onSuccess: result => {
@@ -290,81 +315,31 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     },
   })
-
   const settleMutation = useMutation({
     mutationFn: settleTradesApi,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
-
-  useEffect(() => {
-    const onMove = (event: MouseEvent) => {
-      if (leftDragRef.current) {
-        setLeftWidth(Math.max(240, Math.min(520, event.clientX)))
-      }
-      if (rightDragRef.current) {
-        setRightWidth(Math.max(320, Math.min(640, window.innerWidth - event.clientX)))
-      }
-    }
-    const onUp = () => {
-      leftDragRef.current = false
-      rightDragRef.current = false
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    return () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-    }
-  }, [])
+  const historyBackfillMutation = useMutation({
+    mutationFn: () => backfillWeatherHistory(30),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+  })
 
   const stats = data?.stats ?? EMPTY_STATS
-  const recentTrades = data?.recent_trades ?? []
-  const micro = data?.microstructure
-  const weatherSignals = data?.weather_signals ?? []
-  const weatherForecasts = data?.weather_forecasts ?? []
+  const signals = data?.weather_signals ?? []
+  const forecasts = data?.weather_forecasts ?? []
+  const citySeries = data?.weather_city_series ?? []
+  const trades = data?.recent_trades ?? []
   const equityCurve = data?.equity_curve ?? []
-  const calibration = data?.calibration ?? null
-  const backtest = data?.backtest ?? null
-  const actionableCount = weatherSignals.filter(signal => signal.actionable).length
+  const truthHealth = data?.truth_health ?? null
+  const actionable = signals.filter(signal => signal.actionable).length
+  const liveAvailable = Boolean(stats.strategy_live_ready && data?.v3?.config?.live_trading)
 
   useEffect(() => {
     if (!balanceInitRef.current && data?.stats?.bankroll !== undefined) {
-      setSimBalance(String(data.stats.bankroll.toFixed(0)))
+      setSimBalance(String(Math.round(data.stats.bankroll)))
       balanceInitRef.current = true
     }
   }, [data?.stats?.bankroll])
-
-  if (isLoading) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-black">
-        <div className="text-center">
-          <div className="relative mx-auto mb-4 h-10 w-10">
-            <div className="absolute inset-0 rounded-full border-2 border-neutral-800" />
-            <div className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-green-500" />
-          </div>
-          <div className="font-mono text-[10px] uppercase tracking-widest text-neutral-500">正在连接看板</div>
-        </div>
-      </div>
-    )
-  }
-
-  if (error || !data) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-black">
-        <div className="text-center">
-          <div className="mb-2 text-xs uppercase tracking-wider text-red-500">后端连接失败</div>
-          <button
-            onClick={() => refetch()}
-            className="border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs uppercase tracking-wider text-neutral-300"
-          >
-            重试
-          </button>
-        </div>
-      </div>
-    )
-  }
 
   if (view === 'temperature-fit') {
     return (
@@ -376,300 +351,217 @@ function App() {
     )
   }
 
+  if (isLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-black text-neutral-300">
+        <div className="text-center">
+          <div className="mx-auto mb-4 h-9 w-9 animate-spin rounded-full border-2 border-neutral-800 border-t-green-400" />
+          <div className="text-xs text-neutral-500">正在连接本地看板 API...</div>
+        </div>
+      </div>
+    )
+  }
+
+  if (error || !data) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-black text-neutral-300">
+        <div className="max-w-md border border-red-500/30 bg-red-500/5 p-5 text-center">
+          <div className="mb-2 text-sm text-red-300">后端未连接</div>
+          <p className="mb-4 text-[12px] leading-relaxed text-neutral-500">
+            请确认 dashboard_server 正在运行在 http://127.0.0.1:8765，然后刷新页面。
+          </p>
+          <button onClick={() => refetch()} className="border border-neutral-700 px-3 py-1.5 text-xs text-neutral-200">
+            重试
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-black text-neutral-200">
-      <motion.header
-        initial={{ opacity: 0, y: -10 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="relative flex shrink-0 items-center gap-4 border-b border-neutral-800 px-3 py-1.5"
-      >
-        <div className="scan-line" />
-        <div className="flex shrink-0 items-center gap-2">
-          <h1 className="whitespace-nowrap font-mono text-xs font-bold uppercase tracking-widest text-neutral-100">
-            天气交易终端
-          </h1>
-          <span className={`px-1.5 py-0.5 text-[9px] font-bold uppercase ${
-            stats.is_running
-              ? 'border border-green-500/20 bg-green-500/10 text-green-500'
-              : 'border border-neutral-700 bg-neutral-800 text-neutral-500'
-          }`}>
-            {stats.is_running ? '扫描中' : '扫描停止'}
-          </span>
-          <span className="border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-amber-400">
-            模拟模式
-          </span>
-          <span className={`px-1.5 py-0.5 text-[9px] font-bold uppercase ${
-            (stats.data_age_minutes ?? 99999) <= 90
-              ? 'border border-green-500/20 bg-green-500/10 text-green-500'
-              : 'border border-red-500/20 bg-red-500/10 text-red-400'
-          }`}>
-            数据 {formatDataAge(stats.data_age_minutes)}
-          </span>
+      <header className="flex shrink-0 items-center gap-3 border-b border-neutral-800 px-3 py-2">
+        <div>
+          <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot 生产化看板</h1>
+          <div className="text-[11px] text-neutral-600">当前是模拟优先模式；实盘未达标前不会自动下单。</div>
         </div>
-
         <div className="flex-1" />
         <StatsCards stats={stats} />
+        <button
+          onClick={() => refetch()}
+          className="inline-flex items-center gap-1 border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-900"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          刷新
+        </button>
+      </header>
 
-        <div className="flex shrink-0 items-center gap-2">
-          <button
-            onClick={() => refetch()}
-            className="whitespace-nowrap border border-neutral-700 bg-neutral-900 px-2.5 py-1 text-[10px] uppercase tracking-wider text-neutral-300 transition-colors hover:border-neutral-600 disabled:opacity-50"
-          >
-            刷新
-          </button>
-          <button
-            onClick={() => bulkSimulateMutation.mutate()}
-            disabled={bulkSimulateMutation.isPending}
-            className="whitespace-nowrap border border-green-500/30 bg-green-500/10 px-2.5 py-1 text-[10px] uppercase tracking-wider text-green-400 transition-colors hover:border-green-500/60 disabled:opacity-40"
-            title="只写入本地模拟记录，不会真实下单"
-          >
-            {bulkSimulateMutation.isPending ? '模拟中...' : '一键模拟'}
-          </button>
-          <button
-            onClick={() => notifyDailyMutation.mutate()}
-            disabled={notifyDailyMutation.isPending}
-            className="whitespace-nowrap border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-[10px] uppercase tracking-wider text-blue-400 transition-colors hover:border-blue-500/60 disabled:opacity-40"
-            title="发送或记录日度摘要"
-          >
-            日报
-          </button>
-          <LiveClock />
-        </div>
-      </motion.header>
-
-      {lastBulkResult && (
-        <div className="shrink-0 border-b border-neutral-800 bg-neutral-950 px-3 py-1 text-[10px] text-neutral-400">
-          <div className="flex items-center gap-3 overflow-x-auto">
-            <span className="whitespace-nowrap text-neutral-300">一键模拟结果</span>
-            <span className="whitespace-nowrap tabular-nums text-green-400">买入 {lastBulkResult.count}</span>
-            <span className="whitespace-nowrap tabular-nums text-amber-400">跳过 {lastBulkResult.skipped}/{lastBulkResult.total_current}</span>
-            <span className="whitespace-nowrap tabular-nums text-blue-300">
-              用额 ${lastBulkResult.spent.toFixed(2)} / 剩余 ${lastBulkResult.remaining.toFixed(2)}
-            </span>
-            {Object.entries(lastBulkResult.reason_counts).slice(0, 5).map(([reason, value]) => (
-              <span key={reason} className="whitespace-nowrap border border-neutral-800 bg-black px-1.5 py-0.5 text-neutral-500">
-                {bulkReasonLabel(reason)} × {value}
-              </span>
-            ))}
-          </div>
-          {lastBulkResult.examples.length > 0 && (
-            <div className="mt-1 flex gap-2 overflow-x-auto text-[9px] text-neutral-600">
-              {lastBulkResult.examples.slice(0, 4).map(example => (
-                <a
-                  key={`${example.id}-${example.reason}`}
-                  href={example.event_url || undefined}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="max-w-[260px] shrink-0 truncate border border-neutral-900 bg-black px-1.5 py-0.5 hover:text-cyan-400"
-                  title={`${example.title || example.city || '信号'}：${bulkReasonLabel(example.reason)}`}
-                >
-                  {bulkReasonLabel(example.reason)} · {example.city || example.title || `#${example.id}`}
-                </a>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      <div
-        className="grid min-h-0 flex-1 grid-rows-[1fr] gap-0"
-        style={{ gridTemplateColumns: `${leftWidth}px 6px minmax(420px, 1fr) 6px ${rightWidth}px` }}
-      >
-        <div className="flex min-h-0 flex-col overflow-hidden border-r border-neutral-800">
-          {micro && (
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="shrink-0 border-b border-neutral-800 px-2 py-2">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-[10px] uppercase tracking-wider text-neutral-500">盘口结构</span>
-                <span className="tabular-nums text-[9px] text-neutral-600">{micro.source}</span>
+      <main className="grid min-h-0 flex-1 grid-cols-[340px_minmax(560px,1fr)_420px] overflow-hidden">
+        <aside className="min-h-0 space-y-3 overflow-y-auto border-r border-neutral-800 bg-neutral-950/40 p-3">
+          <div className="grid grid-cols-2 gap-2 text-[11px]">
+            <div className={`border p-2 ${stats.is_running ? 'border-green-500/30 bg-green-500/10' : 'border-neutral-800'}`}>
+              <div className="mb-1 flex items-center gap-1 text-neutral-500">
+                <Activity className="h-3.5 w-3.5" />
+                扫描器
               </div>
-              <MicrostructurePanel micro={micro} />
-            </motion.div>
-          )}
-
-          <div className="border-b border-neutral-800" style={{ height: '28%', minHeight: '120px' }}>
-            <div className="flex shrink-0 items-center justify-between border-b border-neutral-800 px-2 py-1">
-              <span className="text-[10px] uppercase tracking-wider text-neutral-500">资金曲线</span>
-              <span className={`tabular-nums text-[10px] ${stats.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(2)}
-              </span>
+              <div className={stats.is_running ? 'text-green-300' : 'text-neutral-300'}>{stats.is_running ? '运行中' : '已停止'}</div>
             </div>
-            <div className="h-[calc(100%-24px)] p-1">
+            <div className="border border-neutral-800 p-2">
+              <div className="text-neutral-500">数据年龄</div>
+              <div className="text-neutral-200">{dataAge(stats.data_age_minutes)}</div>
+            </div>
+            <div className="border border-neutral-800 p-2">
+              <div className="text-neutral-500">当前信号</div>
+              <div className="tabular-nums text-green-300">{actionable} / {signals.length}</div>
+            </div>
+            <div className="border border-neutral-800 p-2">
+              <div className="text-neutral-500">实盘状态</div>
+              <div className={liveAvailable ? 'text-green-300' : 'text-amber-300'}>{liveAvailable ? '可用' : '锁定'}</div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => startMutation.mutate()}
+              disabled={stats.is_running || startMutation.isPending}
+              className="inline-flex items-center justify-center gap-1 border border-green-500/30 px-2 py-1.5 text-green-300 hover:bg-green-500/10 disabled:opacity-40"
+            >
+              <PlayCircle className="h-4 w-4" />
+              启动扫描
+            </button>
+            <button
+              onClick={() => stopMutation.mutate()}
+              disabled={!stats.is_running || stopMutation.isPending}
+              className="inline-flex items-center justify-center gap-1 border border-red-500/30 px-2 py-1.5 text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+            >
+              <PauseCircle className="h-4 w-4" />
+              停止扫描
+            </button>
+          </div>
+
+          <ReadinessBanner stats={stats} />
+
+          <div>
+            <SimulationCard
+              stats={stats}
+              value={simBalance}
+              clearMarks={clearMarks}
+              lastBulk={lastBulkResult}
+              onValue={setSimBalance}
+              onClearMarks={setClearMarks}
+              onReset={() => {
+                const parsed = Number(simBalance)
+                if (Number.isFinite(parsed) && parsed >= 0) {
+                  resetSimulationMutation.mutate({ balance: parsed, clear: clearMarks })
+                }
+              }}
+              onSettle={() => settleMutation.mutate()}
+              onBulk={() => bulkSimulateMutation.mutate()}
+              resetting={resetSimulationMutation.isPending}
+              settling={settleMutation.isPending}
+              bulkPending={bulkSimulateMutation.isPending}
+            />
+          </div>
+
+          <div className="border border-neutral-800 bg-black p-3">
+            <div className="mb-2 flex items-center gap-2">
+              <BarChart3 className="h-4 w-4 text-cyan-300" />
+              <div>
+                <div className="text-sm text-neutral-100">分析中心</div>
+                <div className="text-[11px] text-neutral-600">查看温度拟合、truth 覆盖、城市偏差。</div>
+              </div>
+            </div>
+            <button
+              onClick={() => setView('temperature-fit')}
+              className="w-full border border-cyan-500/30 px-2 py-1.5 text-cyan-300 hover:bg-cyan-500/10"
+            >
+              打开温度拟合
+            </button>
+          </div>
+
+          <div className="border border-neutral-800 bg-black p-3">
+            <div className="mb-2 text-sm text-neutral-100">结算源健康</div>
+            <TruthHealthPanel truth={truthHealth} />
+          </div>
+        </aside>
+
+        <section className="flex min-h-0 flex-col overflow-hidden">
+          <div className="relative min-h-[300px] flex-[0.95] border-b border-neutral-800">
+            <Suspense fallback={<div className="flex h-full items-center justify-center text-neutral-600">加载地球视图...</div>}>
+              <GlobeView forecasts={forecasts} signals={signals} />
+            </Suspense>
+            <div className="absolute left-3 top-3 border border-neutral-800 bg-black/80 px-2 py-1 text-[11px]">
+              <span className="text-neutral-500">可操作信号 </span>
+              <span className="tabular-nums text-green-300">{actionable}</span>
+              <span className="ml-2 text-neutral-500">最新扫描 </span>
+              <span className="tabular-nums text-neutral-300">{timeText(stats.last_run)}</span>
+            </div>
+          </div>
+
+          <div className="min-h-0 flex-1 border-b border-neutral-800">
+            <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-1.5">
+              <div className="text-sm text-neutral-100">机场天气趋势</div>
+              <div className="text-[11px] text-neutral-600">温度来自 forecast 快照；湿度当前仅在数据源提供时显示。</div>
+            </div>
+            <WeatherPanel
+              forecasts={forecasts}
+              signals={signals}
+              citySeries={citySeries}
+              onBackfillHistory={() => historyBackfillMutation.mutate()}
+              backfilling={historyBackfillMutation.isPending}
+              backfillResult={historyBackfillMutation.data}
+            />
+          </div>
+
+          <div className="h-[150px] shrink-0">
+            <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-1.5">
+              <div className="text-sm text-neutral-100">资金曲线</div>
+              <div className={`tabular-nums text-[11px] ${(stats.total_pnl ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
+                {money(stats.total_pnl)}
+              </div>
+            </div>
+            <div className="h-[118px] p-2">
               <EquityChart data={equityCurve} initialBankroll={stats.bankroll - stats.total_pnl} />
             </div>
           </div>
+        </section>
 
-          {calibration && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="overflow-hidden border-b border-neutral-800 px-2 py-2"
-              style={{ height: '22%', minHeight: '120px' }}
-            >
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="text-[10px] uppercase tracking-wider text-neutral-500">校准</span>
-                <span className="tabular-nums text-[9px] text-neutral-600">{calibration.total_with_outcome} 已结算</span>
+        <aside className="flex min-h-0 flex-col border-l border-neutral-800">
+          <div className="flex min-h-0 flex-[1.15] flex-col">
+            <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-1.5">
+              <div>
+                <div className="text-sm text-neutral-100">信号行动队列</div>
+                <div className="text-[11px] text-neutral-600">点击一行展开，查看下单链接、盘口和拦截原因。</div>
               </div>
-              <CalibrationPanel calibration={calibration} backtest={backtest} />
-            </motion.div>
-          )}
-
-          <div className="min-h-0 flex-1">
-            <Terminal
-              isRunning={stats.is_running}
-              lastRun={stats.last_run}
-              stats={{ total_trades: stats.total_trades, total_pnl: stats.total_pnl }}
-              onStart={() => startMutation.mutate()}
-              onStop={() => stopMutation.mutate()}
-              onScan={() => refetch()}
-            />
-          </div>
-        </div>
-
-        <div
-          className="cursor-col-resize border-l border-r border-neutral-800 bg-neutral-900/60 hover:bg-green-500/30"
-          onMouseDown={() => {
-            leftDragRef.current = true
-            document.body.style.cursor = 'col-resize'
-            document.body.style.userSelect = 'none'
-          }}
-          title="拖拽调整左侧栏宽度"
-        />
-
-        <div className="flex min-h-0 flex-col">
-          <div className="relative" style={{ height: '58%' }}>
-            <div className="absolute inset-0">
-              <Suspense fallback={
-                <div className="flex h-full w-full items-center justify-center bg-black">
-                  <span className="text-[10px] uppercase tracking-wider text-neutral-600">加载地球视图...</span>
-                </div>
-              }>
-                <GlobeView forecasts={weatherForecasts} signals={weatherSignals} />
-              </Suspense>
-            </div>
-            <div className="absolute left-2 top-2 z-10">
-              <div className="border border-neutral-800 bg-black/80 px-2 py-1 text-[10px]">
-                <span className="mr-2 uppercase tracking-wider text-neutral-500">市场</span>
-                <span className="tabular-nums text-amber-500">{actionableCount} 个当前信号</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="grid min-h-0 flex-1 grid-cols-4 border-t border-neutral-800">
-            <div className="flex min-h-0 flex-col border-r border-neutral-800">
-              <div className="shrink-0 border-b border-neutral-800 px-2 py-1">
-                <span className="text-[10px] uppercase tracking-wider text-neutral-500">EV 分布</span>
-              </div>
-              <div className="min-h-0 flex-1 p-1">
-                <EdgeDistribution weatherSignals={weatherSignals} />
-              </div>
-            </div>
-
-            <div className="flex min-h-0 flex-col border-r border-neutral-800">
-              <div className="shrink-0 border-b border-neutral-800 px-2 py-1">
-                <span className="text-[10px] uppercase tracking-wider text-neutral-500">模拟账户</span>
-              </div>
-              <SimulationPanel
-                bankroll={stats.bankroll}
-                cashBalance={stats.cash_balance ?? stats.bankroll}
-                reservedCapital={stats.reserved_capital ?? 0}
-                startedAt={stats.simulation_started_at}
-                openTrades={stats.open_trades ?? 0}
-                settledTrades={stats.settled_trades ?? 0}
-                value={simBalance}
-                clearMarks={clearMarks}
-                onValue={setSimBalance}
-                onClearMarks={setClearMarks}
-                onReset={() => {
-                  const parsed = Number(simBalance)
-                  if (Number.isFinite(parsed) && parsed >= 0) {
-                    resetSimulationMutation.mutate({ balance: parsed, clear: clearMarks })
-                  }
-                }}
-                onSettle={() => settleMutation.mutate()}
-                disabled={resetSimulationMutation.isPending}
-                settling={settleMutation.isPending}
-              />
-            </div>
-
-            <div className="flex min-h-0 flex-col border-r border-neutral-800">
-              <div className="shrink-0 border-b border-neutral-800 px-2 py-1">
-                <span className="text-[10px] uppercase tracking-wider text-neutral-500">历史复盘</span>
-              </div>
-              <div className="min-h-0 flex-1">
-                <BacktestPanel backtest={backtest} onOpenFit={() => setView('temperature-fit')} />
-              </div>
-            </div>
-
-            <div className="flex min-h-0 flex-col">
-              <div className="flex shrink-0 items-center justify-between border-b border-neutral-800 px-2 py-1">
-                <span className="text-[10px] uppercase tracking-wider text-neutral-500">天气</span>
-                <span className="border border-cyan-500/20 bg-cyan-500/10 px-1 py-0.5 text-[8px] font-bold uppercase text-cyan-400">WX</span>
-              </div>
-              <div className="min-h-0 flex-1 overflow-y-auto">
-                <WeatherPanel forecasts={weatherForecasts} signals={weatherSignals} />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div
-          className="cursor-col-resize border-l border-r border-neutral-800 bg-neutral-900/60 hover:bg-green-500/30"
-          onMouseDown={() => {
-            rightDragRef.current = true
-            document.body.style.cursor = 'col-resize'
-            document.body.style.userSelect = 'none'
-          }}
-          title="拖拽调整右侧栏宽度"
-        />
-
-        <div className="flex min-h-0 flex-col overflow-hidden">
-          <div className="flex min-h-0 flex-col" style={{ height: '50%' }}>
-            <div className="flex shrink-0 items-center justify-between border-b border-neutral-800 px-2 py-1">
-              <span className="text-[10px] uppercase tracking-wider text-neutral-500">信号</span>
-              <div className="flex items-center gap-2">
-                {(stats.expired_signal_count ?? 0) > 0 && (
-                  <span className="tabular-nums text-[10px] text-neutral-600">{stats.expired_signal_count} 过期隐藏</span>
-                )}
-                {weatherSignals.length > 0 && (
-                  <span className="tabular-nums text-[10px] text-cyan-400">{weatherSignals.length} 天气</span>
-                )}
-              </div>
+              <div className="text-[11px] text-neutral-500">{signals.length} 条</div>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
               <SignalsTable
                 signals={[]}
-                weatherSignals={weatherSignals}
-                onSimulateTrade={ticker => tradeMutation.mutate(ticker)}
-                isSimulating={tradeMutation.isPending}
+                weatherSignals={signals}
+                onSimulateTrade={() => undefined}
+                isSimulating={signalStatusMutation.isPending}
                 onSignalStatus={(signalId, status, amount) => signalStatusMutation.mutate({ signalId, status, amount })}
                 onLiveOrder={(signalId, amount) => liveOrderMutation.mutate({ signalId, amount })}
+                liveModeAvailable={liveAvailable}
               />
             </div>
           </div>
 
-          <div className="flex min-h-0 flex-col border-t border-neutral-800" style={{ height: '50%' }}>
-            <div className="flex shrink-0 items-center justify-between border-b border-neutral-800 px-2 py-1">
-              <span className="text-[10px] uppercase tracking-wider text-neutral-500">模拟 / 交易记录</span>
-              <span className="tabular-nums text-[10px] text-neutral-600">{recentTrades.length}</span>
+          <div className="flex min-h-0 flex-1 flex-col border-t border-neutral-800">
+            <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-1.5">
+              <div>
+                <div className="text-sm text-neutral-100">模拟 / 交易记录</div>
+                <div className="text-[11px] text-neutral-600">未结算持仓按当前 bid 估值，因此会体现 spread 浮亏。</div>
+              </div>
+              <div className="text-[11px] text-neutral-500">{trades.length} 条</div>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <TradesTable trades={recentTrades} />
+              <TradesTable trades={trades} />
             </div>
           </div>
-        </div>
-      </div>
-
-      <footer className="flex shrink-0 items-center justify-between border-t border-neutral-800 px-3 py-0.5">
-        <span className="font-mono text-[10px] text-neutral-700">Open-Meteo | METAR | Polymarket 天气区间</span>
-        <div className="flex items-center gap-3">
-          <RefreshBar interval={10000} />
-          <span className="font-mono text-[10px] text-neutral-700">WeatherBot 信号引擎 + Kalshi 看板框架</span>
-          <div className="flex items-center gap-1">
-            <div className="h-1.5 w-1.5 rounded-full bg-green-500" />
-            <span className="font-mono text-[10px] text-neutral-600">已连接</span>
-          </div>
-        </div>
-      </footer>
+        </aside>
+      </main>
     </div>
   )
 }

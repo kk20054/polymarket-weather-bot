@@ -115,6 +115,78 @@ export interface BotStats {
   scanner_status?: string
 }
 
+export interface TruthCityHealth {
+  city: string
+  city_name: string
+  station_id: string
+  total_observations: number
+  eligible_observations: number
+  open_meteo_fallbacks: number
+  legacy_unknown?: number
+  latest_provider: string
+  latest_date: string
+  latest_confidence: number
+  status?: 'eligible' | 'blocked'
+  reasons?: string[]
+}
+
+export interface TruthHealth {
+  total_observations: number
+  eligible_observations: number
+  coverage_rate: number
+  open_meteo_fallbacks: number
+  open_meteo_fallback_rate: number
+  legacy_unknown?: number
+  cities: TruthCityHealth[]
+}
+
+export interface DistributionItem {
+  market_id: string
+  question: string
+  bucket_low: number
+  bucket_high: number
+  probability_raw: number
+  probability: number
+  ask: number
+  bid: number
+  spread: number
+  probability_edge: number
+  ev: number
+  spread_cost_ratio?: number | null
+  is_signal?: boolean
+}
+
+export interface EventDistribution {
+  items: DistributionItem[]
+  sum_probability: number
+  normalized: boolean
+  forecast_f?: number
+  sigma_f?: number
+  bias_f?: number
+  top_model?: DistributionItem[]
+  top_market?: DistributionItem[]
+  signal_probability?: number
+  signal_probability_edge?: number
+  signal_ev?: number
+  signal_spread_cost_ratio?: number | null
+  notes?: string[]
+}
+
+export interface SignalDecision {
+  signal_id?: number
+  market_id?: string
+  action: string
+  paper_allowed: boolean
+  live_allowed: boolean
+  reasons: string[]
+  cautions: string[]
+  quality_flags?: string[]
+  strategy_tags?: string[]
+  strategy_score?: number
+  distribution_signal_probability?: number | null
+  truth_status?: string
+}
+
 export interface EquityPoint {
   timestamp: string
   pnl: number
@@ -205,6 +277,12 @@ export interface TemperatureFitRecord {
   city_name: string
   target_date: string
   unit: string
+  actual_provider?: string
+  actual_station?: string
+  truth_confidence?: number
+  calibration_eligible?: boolean
+  calibration_tier?: string
+  reason_if_ineligible?: string
   source: string
   best_source: string
   timestamp?: string | null
@@ -247,6 +325,12 @@ export interface TemperatureFitGroup {
 
 export interface TemperatureFitSummary {
   markets: number
+  eligible_markets?: number
+  eligible_samples?: number
+  observed_samples?: number
+  provider_counts?: Record<string, number>
+  tier_counts?: Record<string, number>
+  ineligible_counts?: Record<string, number>
   samples: number
   mae_f: number
   bias_f: number
@@ -299,6 +383,51 @@ export interface WeatherForecast {
   ensemble_agreement: number | null
 }
 
+export interface WeatherCityPoint {
+  timestamp: string
+  target_date: string
+  horizon?: string
+  best?: number | null
+  ecmwf?: number | null
+  hrrr?: number | null
+  metar?: number | null
+  ensemble_mean?: number | null
+  ensemble_std?: number | null
+  humidity?: number | null
+  source?: string
+}
+
+export interface HistoricalWeatherPoint {
+  city: string
+  city_name: string
+  station_id?: string
+  target_date: string
+  unit: string
+  actual_high?: number | null
+  humidity_mean?: number | null
+  provider?: string
+  source_confidence?: number
+  calibration_tier?: 'live_truth' | 'research_truth' | string
+  source_url?: string
+}
+
+export interface WeatherCitySeries {
+  city_key: string
+  city_name: string
+  station_id?: string
+  unit: string
+  latest_best?: number | null
+  latest_metar?: number | null
+  latest_source?: string | null
+  latest_timestamp?: string | null
+  humidity_status?: 'available' | 'not_collected' | string
+  history_count?: number
+  forecast_count?: number
+  history_points?: HistoricalWeatherPoint[]
+  forecast_points?: WeatherCityPoint[]
+  points: WeatherCityPoint[]
+}
+
 export interface WeatherSignal {
   id?: number
   market_id: string
@@ -344,6 +473,9 @@ export interface WeatherSignal {
   fit_bias_f?: number
   fit_decayed_bias_f?: number
   quality_flags?: string[]
+  truth?: TruthCityHealth | null
+  distribution?: EventDistribution | null
+  decision?: SignalDecision | null
   strategy_tags?: string[]
   strategy_score?: number
   strategy_notes?: string[]
@@ -384,6 +516,7 @@ export interface BulkSimulateResult {
 export interface DashboardData {
   stats: BotStats
   v3?: V3Summary
+  truth_health?: TruthHealth
   btc_price: BtcPrice | null
   microstructure: Microstructure | null
   windows: BtcWindow[]
@@ -394,6 +527,7 @@ export interface DashboardData {
   backtest?: BacktestSummary | null
   weather_signals: WeatherSignal[]
   weather_forecasts: WeatherForecast[]
+  weather_city_series?: WeatherCitySeries[]
 }
 
 export interface V3Summary {

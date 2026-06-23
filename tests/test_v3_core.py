@@ -7,6 +7,9 @@ from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.db import connect, init_v3_db
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import quote_from_market_payload, validate_order_constraints
+from weatherbot_v3.distribution import build_event_distribution
+from weatherbot_v3.truth import infer_settlement_rule
+from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from dashboard_server import _augment_strategy_replay_record, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _entry_snapshot_features, _fit_trade_readiness, _live_gate, _metric_summary
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric
 
@@ -57,6 +60,70 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("signals", tables)
         self.assertIn("paper_orders", tables)
         self.assertIn("live_orders", tables)
+        self.assertIn("market_rules", tables)
+        self.assertIn("truth_observations", tables)
+        self.assertIn("event_distributions", tables)
+        self.assertIn("signal_decisions", tables)
+
+    def test_settlement_rule_infers_station_and_wunderground_confidence(self):
+        rule = infer_settlement_rule(
+            {
+                "city": "nyc",
+                "city_name": "New York City",
+                "unit": "F",
+                "station": "KLGA",
+                "event_url": "https://polymarket.com/event/highest-temperature-in-nyc-on-june-23-2026",
+                "question": "Will the highest temperature in NYC be between 80-81°F on June 23?",
+                "description": "This market resolves according to Wunderground station history.",
+            }
+        )
+        self.assertEqual(rule.station_id, "KLGA")
+        self.assertEqual(rule.event_slug, "highest-temperature-in-nyc-on-june-23-2026")
+        self.assertEqual(rule.bucket_low, 80)
+        self.assertEqual(rule.bucket_high, 81)
+        self.assertGreaterEqual(rule.truth_confidence, 0.8)
+
+    def test_event_distribution_normalizes_all_buckets(self):
+        dist = build_event_distribution(
+            [
+                {"market_id": "low", "range": (76, 77), "ask": 0.35, "bid": 0.33, "spread": 0.02},
+                {"market_id": "mid", "range": (78, 79), "ask": 0.27, "bid": 0.25, "spread": 0.02},
+                {"market_id": "tail", "range": (80, 81), "ask": 0.07, "bid": 0.04, "spread": 0.03},
+            ],
+            76.6,
+            unit="F",
+            sigma_f=3.2,
+            signal_market_id="tail",
+        )
+        self.assertTrue(dist["normalized"])
+        self.assertAlmostEqual(sum(item["probability"] for item in dist["items"]), 1.0, places=3)
+        tail = next(item for item in dist["items"] if item["market_id"] == "tail")
+        self.assertTrue(tail["is_signal"])
+        self.assertLess(tail["probability"], 0.5)
+
+    def test_truth_coverage_summary_marks_open_meteo_fallback(self):
+        db_path = test_db_path("truth_coverage")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            upsert_truth_observation({
+                "city": "nyc",
+                "city_name": "New York City",
+                "target_date": "2026-06-23",
+                "station_id": "KLGA",
+                "station_name": "New York City",
+                "unit": "F",
+                "actual_temp": 77.0,
+                "provider": "open_meteo_archive",
+                "source_url": "https://archive-api.open-meteo.com/v1/archive",
+                "observation_count": 1,
+                "source_confidence": 0.45,
+                "calibration_eligible": False,
+                "reason_if_ineligible": "fallback",
+            })
+            summary = truth_coverage_summary()
+        self.assertEqual(summary["total_observations"], 1)
+        self.assertEqual(summary["eligible_observations"], 0)
+        self.assertEqual(summary["open_meteo_fallbacks"], 1)
 
     def test_paper_executor_rejects_bad_orderbook(self):
         db_path = test_db_path("paper_reject")
@@ -251,7 +318,15 @@ class V3CoreTests(unittest.TestCase):
                 {"paper_position": False, "actionable": True, "edge": 0.2, "live_pre_strategy_allowed": False, "live_block_reasons": ["fit_missing", "strategy_not_ready"]},
                 "2026-06-22",
             ),
-            "risk_gate:fit_missing",
+            None,
+        )
+        self.assertEqual(
+            _bulk_simulation_skip_reason(
+                {"status": "signal", "date": "2026-06-22"},
+                {"paper_position": False, "actionable": True, "edge": 0.2, "live_pre_strategy_allowed": False, "live_block_reasons": ["spread_cost_too_high", "strategy_not_ready"]},
+                "2026-06-22",
+            ),
+            "risk_gate:spread_cost_too_high",
         )
 
     def test_temperature_fit_readiness_gates_live_candidates(self):
