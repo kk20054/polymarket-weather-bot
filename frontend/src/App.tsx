@@ -381,12 +381,13 @@ function App() {
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-black text-neutral-200">
       <header className="flex shrink-0 items-center gap-3 border-b border-neutral-800 px-3 py-2">
-        <div>
+        <div className="min-w-[190px] shrink-0">
           <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot 生产化看板</h1>
           <div className="text-[11px] text-neutral-600">当前是模拟优先模式；实盘未达标前不会自动下单。</div>
         </div>
-        <div className="flex-1" />
-        <StatsCards stats={stats} />
+        <div className="min-w-0 flex-1 overflow-x-auto">
+          <StatsCards stats={stats} />
+        </div>
         <button
           onClick={() => refetch()}
           className="inline-flex items-center gap-1 border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-900"
@@ -396,7 +397,7 @@ function App() {
         </button>
       </header>
 
-      <main className="grid min-h-0 flex-1 grid-cols-[340px_minmax(560px,1fr)_420px] overflow-hidden">
+      <main className="grid min-h-0 flex-1 grid-cols-[320px_minmax(500px,1fr)_390px] overflow-hidden">
         <aside className="min-h-0 space-y-3 overflow-y-auto border-r border-neutral-800 bg-neutral-950/40 p-3">
           <div className="grid grid-cols-2 gap-2 text-[11px]">
             <div className={`border p-2 ${stats.is_running ? 'border-green-500/30 bg-green-500/10' : 'border-neutral-800'}`}>

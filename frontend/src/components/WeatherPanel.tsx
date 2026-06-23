@@ -132,11 +132,11 @@ export function WeatherPanel({
 
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(190px,1fr)_auto] gap-2 p-3 text-[11px] text-neutral-400">
-      <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <select
           value={series?.city_key ?? forecastFallback?.city_key ?? ''}
           onChange={event => setSelected(event.target.value)}
-          className="min-w-0 border border-neutral-800 bg-black px-2 py-1 text-neutral-200"
+          className="min-w-[180px] flex-1 border border-neutral-800 bg-black px-2 py-1 text-neutral-200"
           aria-label="选择城市"
         >
           {citySeries.map(row => (
@@ -146,20 +146,20 @@ export function WeatherPanel({
             <option key={row.city_key} value={row.city_key}>{row.city_name}</option>
           ))}
         </select>
-        <div className="border border-neutral-800 px-2 py-1 text-[10px] text-neutral-500">
+        <div className="shrink-0 border border-neutral-800 px-2 py-1 text-[10px] text-neutral-500">
           站点 {series?.station_id || '未映射'}
         </div>
         <button
           onClick={onBackfillHistory}
           disabled={backfilling || !onBackfillHistory}
-          className="border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-40"
+          className="shrink-0 border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-40"
           title="补最近 30 天研究级历史天气。不会开启实盘，也不会解锁实盘门槛。"
         >
           {backfilling ? '补历史中...' : '补历史数据'}
         </button>
       </div>
 
-      <div className="grid grid-cols-5 gap-2">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(88px,1fr))] gap-2">
         <Metric label="历史点" value={`${series?.history_count ?? series?.history_points?.length ?? 0}`} tone="neutral" />
         <Metric label="预测点" value={`${series?.forecast_count ?? series?.forecast_points?.length ?? series?.points?.length ?? 0}`} tone="neutral" />
         <Metric label="最新实际" value={fmt(latestHistory?.actual_high, unit)} tone="cyan" />
@@ -196,7 +196,7 @@ export function WeatherPanel({
         )}
       </div>
 
-      <div className="grid grid-cols-[1fr_1fr] gap-2">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-2">
         <div className="border border-neutral-800 p-2 leading-relaxed">
           <div className="mb-1 text-neutral-500">读图方式</div>
           <p className="text-[10px] text-neutral-600">

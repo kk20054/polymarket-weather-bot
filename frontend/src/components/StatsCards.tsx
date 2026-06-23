@@ -45,7 +45,7 @@ export function StatsCards({ stats }: Props) {
       : 'border-amber-500/30 bg-amber-500/10 text-amber-400'
 
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex min-w-max items-center gap-3">
       <motion.div className="flex items-center gap-1.5" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
         <span className="text-[10px] text-neutral-600 uppercase">权益</span>
         <span className="text-sm font-semibold tabular-nums text-neutral-100">
