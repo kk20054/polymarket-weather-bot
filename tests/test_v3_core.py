@@ -1,3 +1,4 @@
+import asyncio
 import os
 import unittest
 from pathlib import Path
@@ -10,7 +11,7 @@ from weatherbot_v3.polymarket import quote_from_market_payload, validate_order_c
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.truth import infer_settlement_rule
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from dashboard_server import _augment_strategy_replay_record, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _live_gate, _metric_summary
+from dashboard_server import AutoSimulationUpdate, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _live_gate, _metric_summary, _save_auto_simulation_state, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric
 
 
@@ -25,6 +26,36 @@ def test_db_path(name: str) -> Path:
 
 
 class V3CoreTests(unittest.TestCase):
+    def test_auto_simulation_state_persists_and_clamps_interval(self):
+        TEST_DB_DIR.mkdir(exist_ok=True)
+        state_path = TEST_DB_DIR / "auto-simulation.json"
+        state_path.unlink(missing_ok=True)
+        self.addCleanup(lambda: state_path.unlink(missing_ok=True))
+        with patch("dashboard_server.AUTO_SIMULATION_PATH", state_path):
+            initial = _auto_simulation_state()
+            self.assertFalse(initial["enabled"])
+            saved = _save_auto_simulation_state(enabled=True, interval_seconds=10)
+            self.assertTrue(saved["enabled"])
+            self.assertEqual(_auto_simulation_state()["interval_seconds"], 60)
+
+    def test_auto_simulation_api_enables_without_running_real_orders(self):
+        TEST_DB_DIR.mkdir(exist_ok=True)
+        state_path = TEST_DB_DIR / "auto-simulation-api.json"
+        state_path.unlink(missing_ok=True)
+        self.addCleanup(lambda: state_path.unlink(missing_ok=True))
+        with (
+            patch("dashboard_server.AUTO_SIMULATION_PATH", state_path),
+            patch("dashboard_server._ensure_auto_simulation_task") as ensure_task,
+            patch("dashboard_server.log_event"),
+        ):
+            result = asyncio.run(update_auto_simulation(
+                AutoSimulationUpdate(enabled=True, interval_seconds=300)
+            ))
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["enabled"])
+        self.assertEqual(result["interval_seconds"], 300)
+        ensure_task.assert_called_once()
+
     def test_quote_uses_best_bid_ask_and_constraints(self):
         quote = quote_from_market_payload({
             "id": "1",

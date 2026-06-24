@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react'
 import {
+  Bar,
   CartesianGrid,
-  Legend,
+  ComposedChart,
   Line,
-  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -167,32 +167,53 @@ export function WeatherPanel({
         <Metric label="湿度" value={humidityText} tone={humidityText === '已采集' ? 'green' : 'amber'} />
       </div>
 
-      <div className="min-h-0 border border-neutral-800 bg-black p-2">
+      <div className="flex min-h-0 flex-col border border-neutral-800 bg-black p-2">
+        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-neutral-400" aria-hidden="true">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-0.5 w-5 bg-sky-400" />
+            历史实际最高温
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="w-5 border-t-2 border-dashed border-green-400" />
+            预测最高温
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2.5 w-3 bg-amber-400/45" />
+            日均湿度
+          </span>
+        </div>
         {chartData.length > 0 ? (
           <div
-            className="h-full"
+            className="min-h-0 flex-1"
             role="img"
-            aria-label={`${series?.city_name ?? '当前城市'}最近 ${series?.history_count ?? 0} 个历史天气点与未来预测趋势。蓝色实线表示历史实际最高温，绿色虚线表示预测最高温，琥珀色点线表示平均湿度。`}
+            aria-label={`${series?.city_name ?? '当前城市'}最近 ${series?.history_count ?? 0} 个历史天气点与未来预测趋势。蓝色实线表示历史实际最高温，绿色虚线表示预测最高温，琥珀色柱表示日均湿度。`}
           >
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: -8 }}>
-              <CartesianGrid stroke="#1f1f1f" strokeDasharray="3 3" />
-              <XAxis dataKey="label" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} minTickGap={14} />
-              <YAxis yAxisId="temp" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} />
-              <YAxis yAxisId="humidity" orientation="right" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
-              <Tooltip
-                contentStyle={{ background: '#050505', border: '1px solid #262626', color: '#e5e5e5', fontSize: 11 }}
-                formatter={(value: any, name: any) => {
-                  if (name === '湿度') return [pct(Number(value)), name]
-                  return [fmt(Number(value), unit), name]
-                }}
-                labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ''}
-              />
-              <Legend wrapperStyle={{ fontSize: 10 }} />
-              <Line yAxisId="temp" type="monotone" dataKey="actual_high" name="历史实际高温" stroke="#38bdf8" dot={false} strokeWidth={2.4} connectNulls={false} />
-              <Line yAxisId="temp" type="monotone" dataKey="forecast_high" name="预测高温" stroke="#22c55e" strokeDasharray="7 4" dot={false} strokeWidth={2.4} connectNulls={false} />
-              <Line yAxisId="humidity" type="monotone" dataKey="humidity_mean" name="湿度" stroke="#f59e0b" strokeDasharray="2 4" dot={false} strokeWidth={1.7} connectNulls={false} />
-              </LineChart>
+              <ComposedChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: -8 }}>
+                <CartesianGrid stroke="#1f1f1f" strokeDasharray="3 3" />
+                <XAxis dataKey="label" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} minTickGap={14} />
+                <YAxis yAxisId="temp" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} />
+                <YAxis yAxisId="humidity" orientation="right" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
+                <Tooltip
+                  contentStyle={{ background: '#050505', border: '1px solid #262626', color: '#e5e5e5', fontSize: 11 }}
+                  formatter={(value: any, name: any) => {
+                    if (name === '日均湿度') return [pct(Number(value)), name]
+                    return [fmt(Number(value), unit), name]
+                  }}
+                  labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ''}
+                />
+                <Bar
+                  yAxisId="humidity"
+                  dataKey="humidity_mean"
+                  name="日均湿度"
+                  fill="#f59e0b"
+                  fillOpacity={0.28}
+                  maxBarSize={10}
+                  radius={[1, 1, 0, 0]}
+                />
+                <Line yAxisId="temp" type="monotone" dataKey="actual_high" name="历史实际最高温" stroke="#38bdf8" dot={false} strokeWidth={2.4} connectNulls={false} />
+                <Line yAxisId="temp" type="monotone" dataKey="forecast_high" name="预测最高温" stroke="#22c55e" strokeDasharray="7 4" dot={false} strokeWidth={2.4} connectNulls={false} />
+              </ComposedChart>
             </ResponsiveContainer>
           </div>
         ) : (
@@ -204,20 +225,14 @@ export function WeatherPanel({
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-2">
         <div className="border border-neutral-800 p-2 leading-relaxed">
-          <div className="mb-1 text-neutral-500">读图方式</div>
-          <p className="text-[10px] text-neutral-600">
-            蓝线是历史实际最高温，绿线是当前预测最高温。两条线用于判断模型是否长期偏热/偏冷；下单仍要看盘口和风控。
-          </p>
-          {backfillResult && (
-            <p className="mt-1 text-[10px] text-cyan-300">
-              最近补历史：写入 {backfillResult.fetched} 条，错误 {backfillResult.errors.length} 个。
-            </p>
-          )}
-        </div>
-        <div className="border border-neutral-800 p-2 leading-relaxed">
           <div className="mb-1 text-neutral-500">当前城市信号</div>
-          <div>可操作 {actionable.length} 条；最强信号 {bestSignal ? `${bestSignal.bucket_label || bestSignal.threshold_f} / EV ${(bestSignal.edge * 100).toFixed(1)}%` : '暂无'}</div>
+          <div>可操作 {actionable.length} 条；最强信号 {bestSignal ? `${bestSignal.bucket_label || bestSignal.threshold_f} / 概率差 ${((bestSignal.probability_edge ?? bestSignal.edge) * 100).toFixed(1)}%` : '暂无'}</div>
           <div className="text-[10px] text-neutral-600">最新预测更新时间 {shortTime(latestForecast?.timestamp)}</div>
+          {backfillResult && (
+            <div className="mt-1 text-[10px] text-cyan-300">
+              最近补历史：写入 {backfillResult.fetched} 条，错误 {backfillResult.errors.length} 个。
+            </div>
+          )}
         </div>
       </div>
     </div>

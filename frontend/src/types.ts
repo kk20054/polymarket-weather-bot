@@ -113,6 +113,20 @@ export interface BotStats {
   strategy_allowed_resolved?: number
   simulation_started_at?: string | null
   scanner_status?: string
+  auto_simulation?: AutoSimulationStatus
+}
+
+export interface AutoSimulationStatus {
+  enabled: boolean
+  interval_seconds: number
+  last_run?: string | null
+  last_result?: {
+    count: number
+    spent: number
+    skipped: number
+    remaining: number
+  } | null
+  last_error?: string | null
 }
 
 export interface TruthCityHealth {

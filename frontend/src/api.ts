@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData } from './types'
+import type { AutoSimulationStatus, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -51,6 +51,14 @@ export async function simulateTrade(ticker: string): Promise<{ trade_id: number;
 
 export async function bulkSimulateSignals(): Promise<BulkSimulateResult> {
   const { data } = await api.post('/signals/bulk-simulate')
+  return data
+}
+
+export async function setAutoSimulation(enabled: boolean, intervalSeconds = 300): Promise<AutoSimulationStatus & { ok: boolean }> {
+  const { data } = await api.post('/simulation/auto', {
+    enabled,
+    interval_seconds: intervalSeconds,
+  })
   return data
 }
 

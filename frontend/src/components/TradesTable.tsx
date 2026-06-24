@@ -1,7 +1,7 @@
 import { formatDistanceToNow } from 'date-fns'
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ExternalLink } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { useMemo, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import type { Trade } from '../types'
 import { platformStyles } from '../utils'
 
@@ -149,90 +149,126 @@ export function TradesTable({ trades }: Props) {
             const displayPnl = trade.pnl ?? trade.unrealized_pnl ?? null
 
             return (
-              <motion.tr
-                key={tradeKey}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.02 }}
-                className="cursor-pointer border-b border-neutral-800/50 align-top text-[11px] hover:bg-neutral-800/30"
-                onClick={() => setExpandedId(expanded ? null : tradeKey)}
-              >
-                <td className="px-1.5 py-1">
-                  <div className="flex items-center gap-1">
-                    <ChevronDown className={`h-3 w-3 text-neutral-600 transition-transform ${expanded ? 'rotate-180' : ''}`} />
-                    {style && <span className={`platform-badge ${style.badge}`}>{style.icon}</span>}
-                  </div>
-                </td>
-                <td className="px-1.5 py-1">
-                  <span className={`text-[9px] font-medium uppercase ${
-                    isPending ? 'text-amber-500' : isWin ? 'text-green-500' : 'text-red-500'
-                  }`}>
-                    {resultText(trade.result)}
-                  </span>
-                </td>
-                <td className="px-1.5 py-1">
-                  <div className="flex items-center gap-1">
-                    <span className="block truncate text-neutral-400" title={tradeTitle}>
-                      {tradeTitle}
-                    </span>
-                    {trade.event_url && (
-                      <a
-                        href={trade.event_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="shrink-0 text-cyan-400 hover:text-cyan-300"
-                        onClick={(event) => event.stopPropagation()}
-                        title="打开 Polymarket"
-                      >
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
-                    )}
-                  </div>
-                  {expanded && (
-                    <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 border-l border-neutral-800 pl-2 text-[10px] text-neutral-500">
-                      <span>ID</span><span className="truncate text-neutral-400" title={tradeKey}>{tradeKey}</span>
-                      <span>Polymarket</span>
-                      <span className="truncate text-cyan-400">
-                        {trade.event_url ? <a href={trade.event_url} target="_blank" rel="noreferrer" onClick={event => event.stopPropagation()}>打开市场</a> : '-'}
-                      </span>
-                      <span>买入价 ask</span><span className="tabular-nums text-neutral-300">{price(trade.entry_price)}</span>
-                      <span>入场 bid</span><span className="tabular-nums text-neutral-300">{price(trade.bid_at_entry)}</span>
-                      <span>当前估值 bid</span><span className="tabular-nums text-neutral-300">{price(trade.mark_price)}</span>
-                      <span>spread</span><span className="tabular-nums text-neutral-300">{price(trade.spread)}</span>
-                      <span>份额</span><span className="tabular-nums text-neutral-300">{trade.shares?.toFixed(2) ?? '-'}</span>
-                      <span>数据源</span><span className="text-neutral-300">{trade.source || '-'}</span>
-                      <span>未实现盈亏</span><span className={`tabular-nums ${Number(trade.unrealized_pnl ?? 0) >= 0 ? 'text-green-500' : 'text-red-500'}`}>{money(trade.unrealized_pnl)}</span>
-                      <span>结算原因</span><span className="text-neutral-300">{trade.close_reason || (isPending ? '等待结算' : '-')}</span>
+              <Fragment key={tradeKey}>
+                <motion.tr
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: i * 0.02 }}
+                  className="cursor-pointer border-b border-neutral-800/50 align-top text-[11px] hover:bg-neutral-800/30"
+                  onClick={() => setExpandedId(expanded ? null : tradeKey)}
+                >
+                  <td className="px-1.5 py-1">
+                    <div className="flex items-center gap-1">
+                      <ChevronDown className={`h-3 w-3 text-neutral-600 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                      {style && <span className={`platform-badge ${style.badge}`}>{style.icon}</span>}
                     </div>
-                  )}
-                </td>
-                <td className="px-1.5 py-1 text-center">
-                  <span className="text-[10px] font-semibold uppercase text-cyan-400">
-                    {trade.direction}
-                  </span>
-                </td>
-                <td className="px-1.5 py-1 text-right tabular-nums text-neutral-300">
-                  ${trade.size.toFixed(2)}
-                </td>
-                <td className="px-1.5 py-1 text-right">
-                  {displayPnl !== null ? (
-                    <span className={`font-semibold tabular-nums ${
-                      displayPnl >= 0 ? 'text-green-500' : 'text-red-500'
+                  </td>
+                  <td className="px-1.5 py-1">
+                    <span className={`text-[9px] font-medium uppercase ${
+                      isPending ? 'text-amber-500' : isWin ? 'text-green-500' : 'text-red-500'
                     }`}>
-                      {money(displayPnl)}
+                      {resultText(trade.result)}
                     </span>
-                  ) : (
-                    <span className="text-neutral-600">-</span>
-                  )}
-                </td>
-                <td className="px-1.5 py-1 text-right text-[10px] tabular-nums text-neutral-600">
-                  {formatDistanceToNow(new Date(trade.timestamp), { addSuffix: false })}
-                </td>
-              </motion.tr>
+                  </td>
+                  <td className="px-1.5 py-1">
+                    <div className="flex items-center gap-1">
+                      <span className="block truncate text-neutral-400" title={tradeTitle}>
+                        {tradeTitle}
+                      </span>
+                      {trade.event_url && (
+                        <a
+                          href={trade.event_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="shrink-0 text-cyan-400 hover:text-cyan-300"
+                          onClick={(event) => event.stopPropagation()}
+                          title="打开 Polymarket"
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-1.5 py-1 text-center">
+                    <span className="text-[10px] font-semibold uppercase text-cyan-400">
+                      {trade.direction}
+                    </span>
+                  </td>
+                  <td className="px-1.5 py-1 text-right tabular-nums text-neutral-300">
+                    ${trade.size.toFixed(2)}
+                  </td>
+                  <td className="px-1.5 py-1 text-right">
+                    {displayPnl !== null ? (
+                      <span className={`font-semibold tabular-nums ${
+                        displayPnl >= 0 ? 'text-green-500' : 'text-red-500'
+                      }`}>
+                        {money(displayPnl)}
+                      </span>
+                    ) : (
+                      <span className="text-neutral-600">-</span>
+                    )}
+                  </td>
+                  <td className="px-1.5 py-1 text-right text-[10px] tabular-nums text-neutral-600">
+                    {formatDistanceToNow(new Date(trade.timestamp), { addSuffix: false })}
+                  </td>
+                </motion.tr>
+                {expanded && (
+                  <motion.tr
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="border-b border-cyan-500/20 bg-cyan-500/[0.03]"
+                  >
+                    <td colSpan={7} className="px-3 py-2">
+                      <div className="mb-2 break-words text-[11px] leading-relaxed text-neutral-300">{tradeTitle}</div>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] sm:grid-cols-4">
+                        <Detail label="买入价 ask" value={price(trade.entry_price)} />
+                        <Detail label="入场 bid" value={price(trade.bid_at_entry)} />
+                        <Detail label="当前估值 bid" value={price(trade.mark_price)} />
+                        <Detail label="Spread" value={price(trade.spread)} />
+                        <Detail label="份额" value={trade.shares?.toFixed(2) ?? '-'} />
+                        <Detail label="数据源" value={trade.source || '-'} />
+                        <Detail label="未实现盈亏" value={money(trade.unrealized_pnl)} tone={Number(trade.unrealized_pnl ?? 0) >= 0 ? 'positive' : 'negative'} />
+                        <Detail label="结算状态" value={trade.close_reason || (isPending ? '等待结算' : resultText(trade.result))} />
+                      </div>
+                      {trade.event_url && (
+                        <a
+                          href={trade.event_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-2 inline-flex min-h-8 items-center gap-1 border border-neutral-700 px-2 text-[10px] text-cyan-300"
+                          onClick={event => event.stopPropagation()}
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                          打开 Polymarket
+                        </a>
+                      )}
+                    </td>
+                  </motion.tr>
+                )}
+              </Fragment>
             )
           })}
         </AnimatePresence>
       </tbody>
     </table>
+  )
+}
+
+function Detail({
+  label,
+  value,
+  tone = 'neutral',
+}: {
+  label: string
+  value: string
+  tone?: 'neutral' | 'positive' | 'negative'
+}) {
+  const color = tone === 'positive' ? 'text-green-400' : tone === 'negative' ? 'text-red-400' : 'text-neutral-300'
+  return (
+    <div className="min-w-0">
+      <div className="text-neutral-600">{label}</div>
+      <div className={`break-words tabular-nums ${color}`}>{value}</div>
+    </div>
   )
 }

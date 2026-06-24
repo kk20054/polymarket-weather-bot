@@ -13,11 +13,11 @@ import {
 } from 'lucide-react'
 import {
   backfillWeatherHistory,
-  bulkSimulateSignals,
   fetchDashboard,
   fetchTemperatureFit,
   placeLiveOrder,
   resetSimulation,
+  setAutoSimulation,
   settleTradesApi,
   startBot,
   stopBot,
@@ -30,7 +30,7 @@ import { TemperatureFitPage } from './components/TemperatureFitPage'
 import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
-import type { BotStats, BulkSimulateResult } from './types'
+import type { AutoSimulationStatus, BotStats } from './types'
 
 const GlobeView = lazy(() => import('./components/GlobeView').then(module => ({ default: module.GlobeView })))
 type TradeMode = 'paper' | 'live'
@@ -88,27 +88,6 @@ function reasonLabel(reason: string) {
     strategy_not_ready: '策略尚未达标',
   }
   return map[reason] ?? reason
-}
-
-function bulkReasonLabel(reason: string): string {
-  if (reason.startsWith('risk_gate:')) return `风控拦截：${reasonLabel(reason.slice('risk_gate:'.length))}`
-  if (reason.startsWith('paper_rejected:')) return `模拟拒单：${bulkReasonLabel(reason.slice('paper_rejected:'.length))}`
-  const map: Record<string, string> = {
-    already_paper_position: '已有模拟持仓',
-    already_simulated: '已经模拟',
-    already_bought: '已经标记实盘',
-    already_skipped: '已经跳过',
-    expired_signal: '信号过期',
-    not_actionable: '不可操作',
-    no_simulation_cash: '模拟现金不足',
-    below_order_min_size: '低于最小订单',
-    spread_above_max_slippage: 'spread 过宽',
-    best_ask_above_limit: '卖一高于限价',
-    quote_stale: '盘口过期',
-    spread_cost_too_high: 'spread 成本过高',
-    low_price_tail_unverified: '低价尾部未验证',
-  }
-  return map[reason] ?? reasonLabel(reason)
 }
 
 function ReadinessBanner({ stats }: { stats: BotStats }) {
@@ -210,29 +189,31 @@ function SimulationCard({
   stats,
   value,
   clearMarks,
-  lastBulk,
+  autoSimulation,
   onValue,
   onClearMarks,
   onReset,
   onSettle,
-  onBulk,
+  onToggleAuto,
   resetting,
   settling,
-  bulkPending,
+  autoPending,
 }: {
   stats: BotStats
   value: string
   clearMarks: boolean
-  lastBulk: BulkSimulateResult | null
+  autoSimulation: AutoSimulationStatus
   onValue: (value: string) => void
   onClearMarks: (value: boolean) => void
   onReset: () => void
   onSettle: () => void
-  onBulk: () => void
+  onToggleAuto: () => void
   resetting: boolean
   settling: boolean
-  bulkPending: boolean
+  autoPending: boolean
 }) {
+  const autoRunning = autoSimulation.enabled
+  const lastResult = autoSimulation.last_result
   return (
     <div className="border border-neutral-800 bg-black p-3">
       <div className="mb-3 flex items-center gap-2">
@@ -243,15 +224,27 @@ function SimulationCard({
         </div>
       </div>
 
-      <div className="mb-3 flex items-center justify-between gap-3 border border-amber-500/20 bg-amber-500/5 px-2 py-2">
+      <div className={`mb-3 flex items-center justify-between gap-3 border px-2 py-2 ${
+        autoRunning ? 'border-green-500/25 bg-green-500/5' : 'border-neutral-800 bg-neutral-950'
+      }`}>
         <div className="flex items-center gap-2">
-          <span className="h-2 w-2 shrink-0 rounded-full bg-amber-300" aria-hidden="true" />
+          <span className={`h-2 w-2 shrink-0 rounded-full ${autoRunning ? 'live-dot' : 'bg-neutral-600'}`} aria-hidden="true" />
           <div>
-            <div className="text-[11px] font-medium text-amber-200">自动模拟未开启</div>
-            <div className="text-[10px] text-neutral-500">新信号不会自动买入，需要点击下方按钮。</div>
+            <div className={`text-[11px] font-medium ${autoRunning ? 'text-green-200' : 'text-neutral-300'}`}>
+              {autoRunning ? '自动模拟运行中' : '自动模拟已停止'}
+            </div>
+            <div className="text-[10px] text-neutral-500">
+              {autoRunning
+                ? `每 ${Math.round(autoSimulation.interval_seconds / 60)} 分钟检查新信号；关闭前会持续运行。`
+                : '启动后由后端持续检查新信号，无需保持页面打开。'}
+            </div>
           </div>
         </div>
-        <span className="shrink-0 border border-neutral-700 px-1.5 py-0.5 text-[9px] text-neutral-400">手动触发</span>
+        <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${
+          autoRunning ? 'border-green-500/30 text-green-300' : 'border-neutral-700 text-neutral-500'
+        }`}>
+          {autoRunning ? '持续运行' : '未运行'}
+        </span>
       </div>
 
       <div className="grid grid-cols-2 gap-2 text-[11px]">
@@ -306,11 +299,15 @@ function SimulationCard({
 
       <div className="mt-3 grid grid-cols-2 gap-2">
         <button
-          onClick={onBulk}
-          disabled={bulkPending}
-          className="border border-green-500/30 bg-green-500/10 px-2 py-1.5 text-green-300 hover:border-green-500/60 disabled:opacity-40"
+          onClick={onToggleAuto}
+          disabled={autoPending}
+          className={`border px-2 py-1.5 disabled:opacity-40 ${
+            autoRunning
+              ? 'border-red-500/30 bg-red-500/5 text-red-300 hover:bg-red-500/10'
+              : 'border-green-500/30 bg-green-500/10 text-green-300 hover:border-green-500/60'
+          }`}
         >
-          {bulkPending ? '模拟中...' : '一键模拟当前信号'}
+          {autoPending ? '更新中...' : autoRunning ? '停止自动模拟' : '一键模拟'}
         </button>
         <button
           onClick={onSettle}
@@ -321,19 +318,13 @@ function SimulationCard({
         </button>
       </div>
 
-      {lastBulk && (
+      {(lastResult || autoSimulation.last_error) && (
         <div className="mt-3 border border-neutral-800 p-2 text-[11px] leading-relaxed text-neutral-400">
-          <div className="mb-1 text-neutral-200">最近一次一键模拟</div>
-          <div>买入 {lastBulk.count} 笔，跳过 {lastBulk.skipped}/{lastBulk.total_current}，花费 {money(lastBulk.spent)}，剩余 {money(lastBulk.remaining)}</div>
-          {Object.entries(lastBulk.reason_counts).length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-1">
-              {Object.entries(lastBulk.reason_counts).slice(0, 6).map(([reason, count]) => (
-                <span key={reason} className="border border-neutral-800 bg-neutral-950 px-1.5 py-0.5 text-[10px] text-neutral-500">
-                  {bulkReasonLabel(reason)} × {count}
-                </span>
-              ))}
-            </div>
+          <div className="mb-1 text-neutral-200">最近一次自动检查 · {timeText(autoSimulation.last_run)}</div>
+          {lastResult && (
+            <div>买入 {lastResult.count} 笔，跳过 {lastResult.skipped} 笔，花费 {money(lastResult.spent)}，剩余 {money(lastResult.remaining)}</div>
           )}
+          {autoSimulation.last_error && <div className="text-red-300">{autoSimulation.last_error}</div>}
         </div>
       )}
 
@@ -348,9 +339,9 @@ function App() {
   const queryClient = useQueryClient()
   const [view, setView] = useState<'dashboard' | 'temperature-fit'>('dashboard')
   const [tradeMode, setTradeMode] = useState<TradeMode>('paper')
+  const [activityView, setActivityView] = useState<'signals' | 'trades'>('signals')
   const [simBalance, setSimBalance] = useState('40')
   const [clearMarks, setClearMarks] = useState(false)
-  const [lastBulkResult, setLastBulkResult] = useState<BulkSimulateResult | null>(null)
   const balanceInitRef = useRef(false)
 
   const { data, isLoading, error, refetch } = useQuery({
@@ -384,10 +375,9 @@ function App() {
     mutationFn: ({ signalId, amount }: { signalId: number; amount?: number }) => placeLiveOrder(signalId, amount),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
-  const bulkSimulateMutation = useMutation({
-    mutationFn: bulkSimulateSignals,
-    onSuccess: result => {
-      setLastBulkResult(result)
+  const autoSimulationMutation = useMutation({
+    mutationFn: (enabled: boolean) => setAutoSimulation(enabled, 300),
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     },
   })
@@ -416,6 +406,13 @@ function App() {
   const truthHealth = data?.truth_health ?? null
   const actionable = signals.filter(signal => signal.actionable).length
   const liveAvailable = Boolean(stats.strategy_live_ready && data?.v3?.config?.live_trading)
+  const autoSimulation = stats.auto_simulation ?? {
+    enabled: false,
+    interval_seconds: 300,
+    last_run: null,
+    last_result: null,
+    last_error: null,
+  }
 
   useEffect(() => {
     if (!balanceInitRef.current && data?.stats?.bankroll !== undefined) {
@@ -538,7 +535,7 @@ function App() {
               stats={stats}
               value={simBalance}
               clearMarks={clearMarks}
-              lastBulk={lastBulkResult}
+              autoSimulation={autoSimulation}
               onValue={setSimBalance}
               onClearMarks={setClearMarks}
               onReset={() => {
@@ -548,11 +545,26 @@ function App() {
                 }
               }}
               onSettle={() => settleMutation.mutate()}
-              onBulk={() => bulkSimulateMutation.mutate()}
+              onToggleAuto={() => autoSimulationMutation.mutate(!autoSimulation.enabled)}
               resetting={resetSimulationMutation.isPending}
               settling={settleMutation.isPending}
-              bulkPending={bulkSimulateMutation.isPending}
+              autoPending={autoSimulationMutation.isPending}
             />
+          </div>
+
+          <div className="border border-neutral-800 bg-black">
+            <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-2">
+              <div>
+                <div className="text-sm text-neutral-100">资金曲线</div>
+                <div className="text-[10px] text-neutral-600">仅统计已结算盈亏，未结算浮动显示在账户指标中。</div>
+              </div>
+              <div className={`tabular-nums text-[11px] ${(stats.total_pnl ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
+                {money(stats.total_pnl)}
+              </div>
+            </div>
+            <div className="h-[160px] p-2">
+              <EquityChart data={equityCurve} initialBankroll={stats.bankroll - stats.total_pnl} />
+            </div>
           </div>
 
           <div className="border border-neutral-800 bg-black p-3">
@@ -605,29 +617,42 @@ function App() {
             />
           </div>
 
-          <div className="h-[160px] min-h-[160px]">
-            <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-1.5">
-              <div className="text-sm text-neutral-100">资金曲线</div>
-              <div className={`tabular-nums text-[11px] ${(stats.total_pnl ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
-                {money(stats.total_pnl)}
-              </div>
-            </div>
-            <div className="h-[118px] p-2">
-              <EquityChart data={equityCurve} initialBankroll={stats.bankroll - stats.total_pnl} />
-            </div>
-          </div>
         </section>
 
         <aside className="order-2 flex h-[760px] min-h-0 flex-col border-t border-neutral-800 xl:order-3 xl:h-auto xl:border-l xl:border-t-0">
-          <div className="flex min-h-0 flex-[1.15] flex-col">
-            <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-1.5">
-              <div>
-                <div className="text-sm text-neutral-100">信号行动队列</div>
-                <div className="text-[11px] text-neutral-600">点击一行展开，查看下单链接、盘口和拦截原因。</div>
+          <div className="grid grid-cols-2 border-b border-neutral-800" role="tablist" aria-label="行动与交易记录">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activityView === 'signals'}
+              onClick={() => setActivityView('signals')}
+              className={`min-h-11 border-r border-neutral-800 px-3 text-left ${
+                activityView === 'signals' ? 'bg-cyan-500/10 text-cyan-200' : 'text-neutral-500 hover:bg-neutral-950'
+              }`}
+            >
+              <div className="text-xs">信号队列</div>
+              <div className="text-[9px]">{signals.length} 条</div>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activityView === 'trades'}
+              onClick={() => setActivityView('trades')}
+              className={`min-h-11 px-3 text-left ${
+                activityView === 'trades' ? 'bg-amber-500/10 text-amber-200' : 'text-neutral-500 hover:bg-neutral-950'
+              }`}
+            >
+              <div className="text-xs">模拟 / 交易记录</div>
+              <div className="text-[9px]">{trades.length} 条</div>
+            </button>
+          </div>
+
+          {activityView === 'signals' ? (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="border-b border-neutral-800 px-3 py-2 text-[10px] text-neutral-600">
+                点击信号查看盘口、风控原因与 Polymarket 链接。
               </div>
-              <div className="text-[11px] text-neutral-500">{signals.length} 条</div>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="min-h-0 flex-1 overflow-y-auto">
               <SignalsTable
                 signals={[]}
                 weatherSignals={signals}
@@ -640,19 +665,16 @@ function App() {
               />
             </div>
           </div>
-
-          <div className="flex min-h-0 flex-1 flex-col border-t border-neutral-800">
-            <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-1.5">
-              <div>
-                <div className="text-sm text-neutral-100">模拟 / 交易记录</div>
-                <div className="text-[11px] text-neutral-600">未结算持仓按当前 bid 估值，因此会体现 spread 浮亏。</div>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="border-b border-neutral-800 px-3 py-2 text-[10px] text-neutral-600">
+                未结算持仓按当前 bid 估值，会包含买卖价差造成的即时浮亏。
               </div>
-              <div className="text-[11px] text-neutral-500">{trades.length} 条</div>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="min-h-0 flex-1 overflow-y-auto">
               <TradesTable trades={trades} />
             </div>
-          </div>
+            </div>
+          )}
         </aside>
       </main>
     </div>

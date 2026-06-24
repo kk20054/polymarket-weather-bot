@@ -172,16 +172,19 @@ export function SignalsTable({
 
                 <div className="border border-neutral-800 p-2">
                   <div className="mb-1 text-[10px] text-neutral-500">操作</div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={amount}
-                      onChange={event => setAmounts(prev => ({ ...prev, [key]: event.target.value }))}
-                      className="w-24 px-2 py-1 text-right tabular-nums"
-                      aria-label="模拟买入金额"
-                    />
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="col-span-2">
+                      <span className="mb-1 block text-[9px] text-neutral-600">买入金额</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={amount}
+                        onChange={event => setAmounts(prev => ({ ...prev, [key]: event.target.value }))}
+                        className="w-full px-2 py-1 text-right tabular-nums"
+                        aria-label="模拟买入金额"
+                      />
+                    </label>
                     <button
                       onClick={() => signal.id && onSignalStatus?.(signal.id, 'simulated', amountForSave)}
                       disabled={locked || !signal.id}
@@ -219,7 +222,7 @@ export function SignalsTable({
                         href={signal.event_url}
                         target="_blank"
                         rel="noreferrer"
-                        className="inline-flex items-center gap-1 border border-neutral-700 px-2 py-1 text-neutral-300 hover:text-cyan-300"
+                        className="inline-flex min-h-9 items-center justify-center gap-1 border border-neutral-700 px-2 py-1 text-neutral-300 hover:text-cyan-300"
                       >
                         <ExternalLink className="h-3.5 w-3.5" />
                         Polymarket
@@ -231,7 +234,7 @@ export function SignalsTable({
                 <div className="grid gap-2 md:grid-cols-2">
                   <div className="border border-neutral-800 p-2 leading-relaxed">
                     <div className="mb-1 text-[10px] text-neutral-500">为什么买/不买</div>
-                    <p>{signal.reasoning}</p>
+                    <p className="break-words">{signal.reasoning}</p>
                     {allReasons.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1">
                         {allReasons.slice(0, 8).map(reason => (
@@ -248,7 +251,7 @@ export function SignalsTable({
                     <div>独立样本 {signal.fit_markets ?? 0} 天 / 快照 {signal.fit_samples ?? 0}</div>
                     <div>MAE {signal.fit_mae_f?.toFixed?.(1) ?? '--'}F / Bias {signal.fit_bias_f?.toFixed?.(1) ?? '--'}F</div>
                     <div>truth {signal.truth?.latest_provider || '缺失'} / 站点 {signal.truth?.station_id || '未映射'}</div>
-                    {signal.yes_token_id && <div className="mt-1 text-neutral-600">YES token {shortToken(signal.yes_token_id)}</div>}
+                    {signal.yes_token_id && <div className="mt-1 break-all text-neutral-600">YES token {shortToken(signal.yes_token_id)}</div>}
                   </div>
                 </div>
 

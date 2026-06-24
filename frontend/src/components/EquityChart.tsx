@@ -8,7 +8,7 @@ import {
   ResponsiveContainer,
   ReferenceLine
 } from 'recharts'
-import { motion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
 import type { EquityPoint } from '../types'
 
 interface Props {
@@ -32,6 +32,7 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 }
 
 export function EquityChart({ data, initialBankroll }: Props) {
+  const reduceMotion = useReducedMotion()
   if (data.length === 0) {
     return (
       <div className="h-full flex flex-col items-center justify-center text-neutral-600">
@@ -60,9 +61,11 @@ export function EquityChart({ data, initialBankroll }: Props) {
   return (
     <motion.div
       className="h-full"
-      initial={{ opacity: 0 }}
+      role="img"
+      aria-label={`模拟账户已结算资金曲线。起始本金 ${initialBankroll.toFixed(2)} 美元，当前累计已结算盈亏 ${currentPnl.toFixed(2)} 美元，共 ${data.length} 个结算点。`}
+      initial={reduceMotion ? false : { opacity: 0 }}
       animate={{ opacity: 1 }}
-      transition={{ duration: 0.5 }}
+      transition={{ duration: reduceMotion ? 0 : 0.5 }}
     >
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={chartData} margin={{ top: 5, right: 5, left: -15, bottom: 0 }}>
@@ -114,7 +117,8 @@ export function EquityChart({ data, initialBankroll }: Props) {
             stroke={isPositive ? '#22c55e' : '#ef4444'}
             strokeWidth={1.5}
             fill={`url(#${gradientId})`}
-            animationDuration={800}
+            isAnimationActive={!reduceMotion}
+            animationDuration={reduceMotion ? 0 : 800}
           />
         </AreaChart>
       </ResponsiveContainer>

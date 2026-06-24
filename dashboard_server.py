@@ -50,7 +50,10 @@ MARKETS_DIR = DATA_DIR / "markets"
 DASHBOARD_DIR = ROOT / "dashboard"
 BOT_LOG_PATH = DATA_DIR / "weatherbet-dashboard.log"
 BOT_PID_PATH = DATA_DIR / "weatherbet-dashboard.pid"
+AUTO_SIMULATION_PATH = DATA_DIR / "auto-simulation.json"
 bot_process: subprocess.Popen | None = None
+auto_simulation_task: asyncio.Task | None = None
+bulk_simulation_lock = asyncio.Lock()
 _market_rule_sync_signature: tuple[tuple[str, float], ...] | None = None
 
 app = FastAPI(title="WeatherBot Dashboard", version="1.0")
@@ -80,6 +83,11 @@ class SimulationReset(BaseModel):
     clear_marks: bool = False
 
 
+class AutoSimulationUpdate(BaseModel):
+    enabled: bool
+    interval_seconds: int = 300
+
+
 class LiveOrderUpdate(BaseModel):
     signal_id: int
     amount: float | None = None
@@ -100,6 +108,24 @@ def _read_json(path, fallback):
 def _write_json(path, payload):
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _auto_simulation_state():
+    state = _read_json(AUTO_SIMULATION_PATH, {})
+    return {
+        "enabled": bool(state.get("enabled", False)),
+        "interval_seconds": max(60, min(int(state.get("interval_seconds") or 300), 3600)),
+        "last_run": state.get("last_run"),
+        "last_result": state.get("last_result"),
+        "last_error": state.get("last_error"),
+    }
+
+
+def _save_auto_simulation_state(**updates):
+    state = _auto_simulation_state()
+    state.update(updates)
+    _write_json(AUTO_SIMULATION_PATH, state)
+    return state
 
 
 def load_markets():
@@ -2601,6 +2627,7 @@ def build_dashboard_payload():
         "strategy_allowed_resolved": strategy_readiness.get("allowed_resolved"),
         "simulation_started_at": simulation_started_at,
         "scanner_status": "running" if _bot_running() else "stopped",
+        "auto_simulation": _auto_simulation_state(),
     }
 
     return {
@@ -2622,13 +2649,72 @@ def build_dashboard_payload():
     }
 
 
+async def _auto_simulation_loop():
+    global auto_simulation_task
+    try:
+        while True:
+            state = _auto_simulation_state()
+            if not state["enabled"]:
+                return
+            try:
+                async with bulk_simulation_lock:
+                    result = await asyncio.to_thread(_bulk_simulate_signals_once, False)
+                _save_auto_simulation_state(
+                    last_run=datetime.now(timezone.utc).isoformat(),
+                    last_result={
+                        "count": result.get("count", 0),
+                        "spent": result.get("spent", 0),
+                        "skipped": result.get("skipped", 0),
+                        "remaining": result.get("remaining", 0),
+                    },
+                    last_error=None,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _save_auto_simulation_state(
+                    last_run=datetime.now(timezone.utc).isoformat(),
+                    last_error=str(exc),
+                )
+                log_event("error", f"自动模拟运行失败：{exc}")
+            await asyncio.sleep(state["interval_seconds"])
+    finally:
+        auto_simulation_task = None
+
+
+def _ensure_auto_simulation_task():
+    global auto_simulation_task
+    if not _auto_simulation_state()["enabled"]:
+        return
+    if auto_simulation_task is None or auto_simulation_task.done():
+        auto_simulation_task = asyncio.create_task(_auto_simulation_loop())
+
+
+async def _stop_auto_simulation_task():
+    global auto_simulation_task
+    task = auto_simulation_task
+    auto_simulation_task = None
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 @app.on_event("startup")
 async def startup():
     init_db()
     init_v3_db()
     migrate_legacy_signals(500)
     _cleanup_stale_bot_process()
+    _ensure_auto_simulation_task()
     log_event("info", "Dashboard started")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await _stop_auto_simulation_task()
 
 
 @app.get("/")
@@ -2879,8 +2965,7 @@ async def reset_simulation(update: SimulationReset):
     }
 
 
-@app.post("/api/signals/bulk-simulate")
-async def bulk_simulate_signals():
+def _bulk_simulate_signals_once(log_when_idle=True):
     today = _today_str()
     count = 0
     spent = 0.0
@@ -2978,8 +3063,37 @@ async def bulk_simulate_signals():
         "reason_counts": reason_counts,
         "examples": skipped[:10],
     }
-    log_event("success" if count else "warning", message, payload)
+    if count or log_when_idle:
+        log_event("success" if count else "warning", message, payload)
     return {"ok": True, **payload}
+
+
+@app.post("/api/signals/bulk-simulate")
+async def bulk_simulate_signals():
+    async with bulk_simulation_lock:
+        return await asyncio.to_thread(_bulk_simulate_signals_once)
+
+
+@app.get("/api/simulation/auto")
+async def auto_simulation_status():
+    return _auto_simulation_state()
+
+
+@app.post("/api/simulation/auto")
+async def update_auto_simulation(update: AutoSimulationUpdate):
+    interval = max(60, min(int(update.interval_seconds or 300), 3600))
+    state = _save_auto_simulation_state(
+        enabled=bool(update.enabled),
+        interval_seconds=interval,
+        last_error=None,
+    )
+    if update.enabled:
+        _ensure_auto_simulation_task()
+        log_event("success", f"自动模拟已启动，每 {interval // 60} 分钟检查一次新信号")
+    else:
+        await _stop_auto_simulation_task()
+        log_event("warning", "自动模拟已停止")
+    return {"ok": True, **state}
 
 
 @app.post("/api/signals/{signal_id}/status")
