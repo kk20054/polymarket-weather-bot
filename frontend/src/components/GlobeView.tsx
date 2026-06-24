@@ -46,14 +46,15 @@ export function GlobeView({ forecasts, signals }: Props) {
   const [size, setSize] = useState({ width: 0, height: 0 })
 
   const markers: CityMarker[] = useMemo(() => {
+    const signalGap = (signal: WeatherSignal) => Math.abs(signal.probability_edge ?? signal.edge ?? 0)
     return Object.entries(CITIES).map(([key, city]) => {
       const forecast = forecasts.find(f => f.city_key === key) || null
       const citySignals = signals.filter(s => s.city_key === key)
       const actionableSignals = citySignals.filter(s => s.actionable)
       const bestSignal = actionableSignals.length > 0
-        ? actionableSignals.reduce((a, b) => Math.abs(a.edge) > Math.abs(b.edge) ? a : b)
+        ? actionableSignals.reduce((a, b) => signalGap(a) > signalGap(b) ? a : b)
         : citySignals.length > 0
-          ? citySignals.reduce((a, b) => Math.abs(a.edge) > Math.abs(b.edge) ? a : b)
+          ? citySignals.reduce((a, b) => signalGap(a) > signalGap(b) ? a : b)
           : null
 
       return {
@@ -138,12 +139,13 @@ export function GlobeView({ forecasts, signals }: Props) {
       label.appendChild(tempSpan)
     }
 
-    if (marker.bestSignal) {
+    if (marker.bestSignal?.actionable) {
       const edgeSpan = document.createElement('div')
       edgeSpan.className = 'marker-edge'
-      const edgeVal = (marker.bestSignal.edge * 100).toFixed(1)
-      edgeSpan.style.color = marker.bestSignal.edge > 0 ? '#22c55e' : '#dc2626'
-      edgeSpan.textContent = `${marker.bestSignal.edge > 0 ? '+' : ''}${edgeVal}%`
+      const probabilityGap = marker.bestSignal.probability_edge ?? marker.bestSignal.edge
+      const edgeVal = (probabilityGap * 100).toFixed(1)
+      edgeSpan.style.color = probabilityGap > 0 ? '#22c55e' : '#dc2626'
+      edgeSpan.textContent = `Δ${probabilityGap > 0 ? '+' : ''}${edgeVal}pp`
       label.appendChild(edgeSpan)
     }
 

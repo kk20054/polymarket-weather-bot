@@ -10,6 +10,7 @@ interface Props {
   onSignalStatus?: (signalId: number, status: string, amount?: number) => void
   onLiveOrder?: (signalId: number, amount?: number) => void
   liveModeAvailable?: boolean
+  tradeMode?: 'paper' | 'live'
 }
 
 function pct(value?: number | null, signed = false) {
@@ -67,6 +68,10 @@ function reasonLabel(reason: string) {
     already_simulated: '已模拟',
     already_bought: '已买入/标记',
     already_skipped: '已跳过',
+    city_bias_high: '该城市历史偏差较大',
+    truth_independent_days_low: '高置信结算日不足',
+    strategy_score_low: '综合策略评分不足',
+    fit_sample_low: '拟合样本偏少',
   }
   return map[reason] ?? reason
 }
@@ -81,6 +86,7 @@ export function SignalsTable({
   onSignalStatus,
   onLiveOrder,
   liveModeAvailable = false,
+  tradeMode = 'paper',
 }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null)
   const [amounts, setAmounts] = useState<Record<string, string>>({})
@@ -117,6 +123,7 @@ export function SignalsTable({
         const liveReasons = signal.live_block_reasons ?? []
         const qualityFlags = signal.quality_flags ?? []
         const decisionReasons = signal.decision?.reasons ?? []
+        const allReasons = [...new Set([...decisionReasons, ...liveReasons, ...qualityFlags])]
 
         return (
           <div key={key} className="bg-black text-[11px] hover:bg-neutral-950">
@@ -136,13 +143,13 @@ export function SignalsTable({
               </div>
               <div className="text-right">
                 <div className={signal.edge >= 0 ? 'tabular-nums text-green-400' : 'tabular-nums text-red-400'}>
-                  {pct(signal.edge, true)}
+                  {pct(signal.probability_edge ?? signal.edge, true)}
                 </div>
-                <div className="text-[9px] text-neutral-600">EV</div>
+                <div className="text-[9px] text-neutral-600">模型概率差</div>
               </div>
               <div className="text-right">
                 <div className="tabular-nums text-blue-300">{money(signal.suggested_size)}</div>
-                <div className="text-[9px] text-neutral-600">建议模拟</div>
+                <div className="text-[9px] text-neutral-600">{tradeMode === 'paper' ? '模拟金额' : '实盘上限'}</div>
               </div>
             </button>
 
@@ -178,7 +185,11 @@ export function SignalsTable({
                     <button
                       onClick={() => signal.id && onSignalStatus?.(signal.id, 'simulated', amountForSave)}
                       disabled={locked || !signal.id}
-                      className="inline-flex items-center gap-1 border border-green-500/30 px-2 py-1 text-green-300 hover:bg-green-500/10 disabled:opacity-30"
+                      className={`inline-flex min-h-9 items-center gap-1 border px-2 py-1 disabled:opacity-30 ${
+                        tradeMode === 'paper'
+                          ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/15'
+                          : 'border-neutral-700 text-neutral-400 hover:bg-neutral-900'
+                      }`}
                     >
                       <Check className="h-3.5 w-3.5" />
                       模拟买入
@@ -186,10 +197,14 @@ export function SignalsTable({
                     <button
                       onClick={() => signal.id && onLiveOrder?.(signal.id, amountForSave)}
                       disabled={locked || !signal.id || !liveAllowed}
-                      className="border border-blue-500/30 px-2 py-1 text-blue-300 hover:bg-blue-500/10 disabled:opacity-30"
+                      className={`min-h-9 border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-30 ${
+                        tradeMode === 'live'
+                          ? 'border-blue-500/40 bg-blue-500/10 text-blue-200 hover:bg-blue-500/15'
+                          : 'border-blue-500/20 text-blue-300 hover:bg-blue-500/10'
+                      }`}
                       title={liveAllowed ? '执行后端实盘/dry-run 检查' : '当前实盘未开放或该信号未通过实盘门槛'}
                     >
-                      实盘买入
+                      {liveModeAvailable ? '实盘买入' : '实盘未开放'}
                     </button>
                     <button
                       onClick={() => signal.id && onSignalStatus?.(signal.id, 'skipped')}
@@ -217,9 +232,9 @@ export function SignalsTable({
                   <div className="border border-neutral-800 p-2 leading-relaxed">
                     <div className="mb-1 text-[10px] text-neutral-500">为什么买/不买</div>
                     <p>{signal.reasoning}</p>
-                    {[...decisionReasons, ...liveReasons, ...qualityFlags].length > 0 && (
+                    {allReasons.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1">
-                        {[...decisionReasons, ...liveReasons, ...qualityFlags].slice(0, 12).map(reason => (
+                        {allReasons.slice(0, 8).map(reason => (
                           <span key={reason} className="border border-amber-500/20 bg-amber-500/5 px-1.5 py-0.5 text-[9px] text-amber-200">
                             {reasonLabel(reason)}
                           </span>

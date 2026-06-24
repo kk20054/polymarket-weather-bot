@@ -10,7 +10,7 @@ from weatherbot_v3.polymarket import quote_from_market_payload, validate_order_c
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.truth import infer_settlement_rule
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from dashboard_server import _augment_strategy_replay_record, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _entry_snapshot_features, _fit_trade_readiness, _live_gate, _metric_summary
+from dashboard_server import _augment_strategy_replay_record, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _live_gate, _metric_summary
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric
 
 
@@ -343,6 +343,31 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("fit_independent_days_too_low", blocked["fit_reasons"])
         self.assertIn("fit_samples_too_low", blocked["fit_reasons"])
         self.assertIn("fit_mae_block", blocked["fit_reasons"])
+
+    def test_temperature_fit_counts_independent_days_not_scanner_snapshots(self):
+        fit = _build_temperature_fit([
+            {
+                "city": "chicago",
+                "city_name": "Chicago",
+                "date": "2026-06-24",
+                "unit": "F",
+                "actual_temp": 74.0,
+                "actual_provider": "nws_station",
+                "actual_station": "KORD",
+                "actual_confidence": 0.95,
+                "actual_calibration_eligible": True,
+                "forecast_snapshots": [
+                    {"ts": "2026-06-23T00:00:00+00:00", "hours_left": 40.0, "best": 70.0},
+                    {"ts": "2026-06-23T16:00:00+00:00", "hours_left": 24.0, "best": 73.0},
+                    {"ts": "2026-06-24T04:00:00+00:00", "hours_left": 12.0, "best": 75.0},
+                ],
+            }
+        ])
+        self.assertEqual(fit["summary"]["snapshot_samples"], 3)
+        self.assertEqual(fit["summary"]["observed_samples"], 1)
+        self.assertEqual(len(fit["records"]), 1)
+        self.assertEqual(fit["records"][0]["hours_left"], 24.0)
+        self.assertEqual(fit["records"][0]["forecast"], 73.0)
 
     def test_live_gate_blocks_thin_independent_days_and_spread_cost(self):
         thin = _live_gate(

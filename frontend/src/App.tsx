@@ -4,6 +4,7 @@ import {
   Activity,
   BarChart3,
   CheckCircle2,
+  FlaskConical,
   PauseCircle,
   PlayCircle,
   RefreshCw,
@@ -32,6 +33,7 @@ import { WeatherPanel } from './components/WeatherPanel'
 import type { BotStats, BulkSimulateResult } from './types'
 
 const GlobeView = lazy(() => import('./components/GlobeView').then(module => ({ default: module.GlobeView })))
+type TradeMode = 'paper' | 'live'
 
 const EMPTY_STATS: BotStats = {
   is_running: false,
@@ -135,6 +137,75 @@ function ReadinessBanner({ stats }: { stats: BotStats }) {
   )
 }
 
+function TradeModeSwitch({
+  mode,
+  liveAvailable,
+  onMode,
+}: {
+  mode: TradeMode
+  liveAvailable: boolean
+  onMode: (mode: TradeMode) => void
+}) {
+  return (
+    <div className="border border-neutral-800 bg-black p-3">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium text-neutral-100">交易模式</div>
+          <div className="text-[11px] text-neutral-500">
+            {mode === 'paper' ? '当前所有买入操作只写入模拟账户。' : '当前操作会进入实盘下单检查。'}
+          </div>
+        </div>
+        <span
+          className={`shrink-0 border px-2 py-1 text-[10px] ${
+            mode === 'paper'
+              ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-200'
+              : 'border-blue-500/30 bg-blue-500/10 text-blue-200'
+          }`}
+          aria-live="polite"
+        >
+          {mode === 'paper' ? '模拟盘' : '实盘'}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 border border-neutral-800" role="group" aria-label="选择交易模式">
+        <button
+          type="button"
+          onClick={() => onMode('paper')}
+          aria-pressed={mode === 'paper'}
+          className={`inline-flex min-h-10 items-center justify-center gap-2 px-3 py-2 text-xs ${
+            mode === 'paper' ? 'bg-cyan-500/15 text-cyan-200' : 'text-neutral-500 hover:bg-neutral-900'
+          }`}
+        >
+          <FlaskConical className="h-4 w-4" />
+          模拟
+        </button>
+        <button
+          type="button"
+          onClick={() => liveAvailable && onMode('live')}
+          disabled={!liveAvailable}
+          aria-pressed={mode === 'live'}
+          aria-describedby={!liveAvailable ? 'live-mode-unavailable' : undefined}
+          className={`inline-flex min-h-10 items-center justify-center gap-2 border-l border-neutral-800 px-3 py-2 text-xs ${
+            mode === 'live'
+              ? 'bg-blue-500/15 text-blue-200'
+              : liveAvailable
+                ? 'text-neutral-400 hover:bg-neutral-900'
+                : 'cursor-not-allowed text-neutral-700'
+          }`}
+        >
+          <Wallet className="h-4 w-4" />
+          实盘
+        </button>
+      </div>
+      {!liveAvailable && (
+        <p id="live-mode-unavailable" className="mt-2 text-[10px] leading-relaxed text-amber-300">
+          实盘尚未连接或策略门槛未通过，因此目前只能使用模拟盘。
+        </p>
+      )}
+    </div>
+  )
+}
+
 function SimulationCard({
   stats,
   value,
@@ -168,8 +239,19 @@ function SimulationCard({
         <Wallet className="h-4 w-4 text-cyan-300" />
         <div>
           <div className="text-sm font-medium text-neutral-100">模拟账户</div>
-          <div className="text-[11px] text-neutral-600">手动模式：点击“一键模拟当前信号”才会写入模拟持仓。</div>
+          <div className="text-[11px] text-neutral-500">设置本金、批量模拟当前可操作信号、检查已有持仓结算。</div>
         </div>
+      </div>
+
+      <div className="mb-3 flex items-center justify-between gap-3 border border-amber-500/20 bg-amber-500/5 px-2 py-2">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 shrink-0 rounded-full bg-amber-300" aria-hidden="true" />
+          <div>
+            <div className="text-[11px] font-medium text-amber-200">自动模拟未开启</div>
+            <div className="text-[10px] text-neutral-500">新信号不会自动买入，需要点击下方按钮。</div>
+          </div>
+        </div>
+        <span className="shrink-0 border border-neutral-700 px-1.5 py-0.5 text-[9px] text-neutral-400">手动触发</span>
       </div>
 
       <div className="grid grid-cols-2 gap-2 text-[11px]">
@@ -265,6 +347,7 @@ function SimulationCard({
 function App() {
   const queryClient = useQueryClient()
   const [view, setView] = useState<'dashboard' | 'temperature-fit'>('dashboard')
+  const [tradeMode, setTradeMode] = useState<TradeMode>('paper')
   const [simBalance, setSimBalance] = useState('40')
   const [clearMarks, setClearMarks] = useState(false)
   const [lastBulkResult, setLastBulkResult] = useState<BulkSimulateResult | null>(null)
@@ -341,6 +424,12 @@ function App() {
     }
   }, [data?.stats?.bankroll])
 
+  useEffect(() => {
+    if (!liveAvailable && tradeMode === 'live') {
+      setTradeMode('paper')
+    }
+  }, [liveAvailable, tradeMode])
+
   if (view === 'temperature-fit') {
     return (
       <TemperatureFitPage
@@ -379,13 +468,13 @@ function App() {
   }
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-black text-neutral-200">
-      <header className="flex shrink-0 items-center gap-3 border-b border-neutral-800 px-3 py-2">
+    <div className="flex min-h-screen flex-col bg-black text-neutral-200 xl:h-screen xl:overflow-hidden">
+      <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-neutral-800 px-3 py-2">
         <div className="min-w-[190px] shrink-0">
           <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot 生产化看板</h1>
           <div className="text-[11px] text-neutral-600">当前是模拟优先模式；实盘未达标前不会自动下单。</div>
         </div>
-        <div className="min-w-0 flex-1 overflow-x-auto">
+        <div className="order-3 min-w-0 basis-full overflow-x-auto xl:order-none xl:basis-auto xl:flex-1">
           <StatsCards stats={stats} />
         </div>
         <button
@@ -397,8 +486,8 @@ function App() {
         </button>
       </header>
 
-      <main className="grid min-h-0 flex-1 grid-cols-[320px_minmax(500px,1fr)_390px] overflow-hidden">
-        <aside className="min-h-0 space-y-3 overflow-y-auto border-r border-neutral-800 bg-neutral-950/40 p-3">
+      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[320px_minmax(500px,1fr)_390px] xl:overflow-hidden">
+        <aside className="order-3 space-y-3 border-t border-neutral-800 bg-neutral-950/40 p-3 xl:order-1 xl:min-h-0 xl:overflow-y-auto xl:border-r xl:border-t-0">
           <div className="grid grid-cols-2 gap-2 text-[11px]">
             <div className={`border p-2 ${stats.is_running ? 'border-green-500/30 bg-green-500/10' : 'border-neutral-800'}`}>
               <div className="mb-1 flex items-center gap-1 text-neutral-500">
@@ -439,6 +528,8 @@ function App() {
               停止扫描
             </button>
           </div>
+
+          <TradeModeSwitch mode={tradeMode} liveAvailable={liveAvailable} onMode={setTradeMode} />
 
           <ReadinessBanner stats={stats} />
 
@@ -486,8 +577,8 @@ function App() {
           </div>
         </aside>
 
-        <section className="flex min-h-0 flex-col overflow-hidden">
-          <div className="relative min-h-[300px] flex-[0.95] border-b border-neutral-800">
+        <section className="order-1 min-h-0 overflow-y-auto xl:order-2">
+          <div className="relative h-[300px] min-h-[300px] border-b border-neutral-800 2xl:h-[340px]">
             <Suspense fallback={<div className="flex h-full items-center justify-center text-neutral-600">加载地球视图...</div>}>
               <GlobeView forecasts={forecasts} signals={signals} />
             </Suspense>
@@ -499,8 +590,8 @@ function App() {
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 border-b border-neutral-800">
-            <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-1.5">
+          <div className="h-[520px] min-h-[520px] border-b border-neutral-800 xl:h-[390px] xl:min-h-[390px] 2xl:h-[430px] 2xl:min-h-[430px]">
+            <div className="flex flex-col items-start gap-0.5 border-b border-neutral-800 px-3 py-1.5 sm:flex-row sm:items-center sm:justify-between">
               <div className="text-sm text-neutral-100">机场天气趋势</div>
               <div className="text-[11px] text-neutral-600">温度来自 forecast 快照；湿度当前仅在数据源提供时显示。</div>
             </div>
@@ -514,7 +605,7 @@ function App() {
             />
           </div>
 
-          <div className="h-[150px] shrink-0">
+          <div className="h-[160px] min-h-[160px]">
             <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-1.5">
               <div className="text-sm text-neutral-100">资金曲线</div>
               <div className={`tabular-nums text-[11px] ${(stats.total_pnl ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
@@ -527,7 +618,7 @@ function App() {
           </div>
         </section>
 
-        <aside className="flex min-h-0 flex-col border-l border-neutral-800">
+        <aside className="order-2 flex h-[760px] min-h-0 flex-col border-t border-neutral-800 xl:order-3 xl:h-auto xl:border-l xl:border-t-0">
           <div className="flex min-h-0 flex-[1.15] flex-col">
             <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-1.5">
               <div>
@@ -545,6 +636,7 @@ function App() {
                 onSignalStatus={(signalId, status, amount) => signalStatusMutation.mutate({ signalId, status, amount })}
                 onLiveOrder={(signalId, amount) => liveOrderMutation.mutate({ signalId, amount })}
                 liveModeAvailable={liveAvailable}
+                tradeMode={tradeMode}
               />
             </div>
           </div>

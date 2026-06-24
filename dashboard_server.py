@@ -1688,7 +1688,26 @@ def _build_temperature_fit(markets):
                     "ensemble_std_f": round(float(ensemble_std_f), 2) if ensemble_std_f is not None else None,
                 })
 
-    best_records = [r for r in records if r["source"] == "model_best"]
+    best_snapshot_records = [r for r in records if r["source"] == "model_best"]
+
+    # Calibration must count independent weather days, not repeated scanner snapshots
+    # or duplicate bucket markets for the same city/date. Use the observation closest
+    # to a consistent D+1 reference point so the headline MAE is comparable over time.
+    canonical_by_day = {}
+    for record in best_snapshot_records:
+        key = f"{record['city_key']}:{record['target_date']}"
+        distance_to_reference = abs(float(record.get("hours_left") or 0) - 24.0)
+        current = canonical_by_day.get(key)
+        if current is None:
+            canonical_by_day[key] = record
+            continue
+        current_distance = abs(float(current.get("hours_left") or 0) - 24.0)
+        if distance_to_reference < current_distance:
+            canonical_by_day[key] = record
+        elif distance_to_reference == current_distance and (record.get("timestamp") or "") > (current.get("timestamp") or ""):
+            canonical_by_day[key] = record
+
+    best_records = list(canonical_by_day.values())
     eligible_best_records = [r for r in best_records if r.get("calibration_eligible")]
     by_city = {}
     for record in best_records:
@@ -1749,6 +1768,7 @@ def _build_temperature_fit(markets):
             "eligible_markets": len(eligible_market_keys),
             "eligible_samples": len(eligible_best_records),
             "observed_samples": len(best_records),
+            "snapshot_samples": len(best_snapshot_records),
             "provider_counts": provider_counts,
             "tier_counts": tier_counts,
             "ineligible_counts": ineligible_counts,
@@ -1775,8 +1795,9 @@ def _build_temperature_fit(markets):
             },
         },
         "notes": [
-            "拟合页基于本地 forecast_snapshots 与 actual_temp，适合发现模型偏差，不等同于完整盘口回放。",
-            "页面会展示所有本地观察样本；只有 calibration_eligible=true 的样本才应进入自动实盘校准。",
+            "拟合页按城市和日期合并重复市场及扫描快照，选取最接近赛前 24 小时的预测作为独立天气日样本。",
+            "原始 forecast_snapshots 仍保留用于审计和分时研究，但不会重复放大首页 MAE、Bias 和样本量。",
+            "页面展示按城市/日期去重后的独立天气日；只有 calibration_eligible=true 的样本才应进入自动实盘校准。",
             "MAE/RMSE 统一折算为华氏度，便于跨 °C/°F 城市比较；表格仍展示原市场单位。",
             "下一步交易过滤应要求：样本数足够、城市 MAE 可控、数据源分歧低、盘口 spread/orderMinSize/tick size 合格。",
         ],

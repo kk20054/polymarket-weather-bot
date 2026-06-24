@@ -328,6 +328,7 @@ export interface TemperatureFitSummary {
   eligible_markets?: number
   eligible_samples?: number
   observed_samples?: number
+  snapshot_samples?: number
   provider_counts?: Record<string, number>
   tier_counts?: Record<string, number>
   ineligible_counts?: Record<string, number>

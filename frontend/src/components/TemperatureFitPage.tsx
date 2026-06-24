@@ -92,8 +92,8 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
   const ineligibleCounts = Object.entries(summary?.ineligible_counts ?? {})
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-black text-neutral-200">
-      <header className="flex shrink-0 items-center gap-3 border-b border-neutral-800 px-3 py-2">
+    <div className="flex min-h-screen flex-col bg-black text-neutral-200 xl:h-screen xl:overflow-hidden">
+      <header className="flex shrink-0 items-start gap-3 border-b border-neutral-800 px-3 py-2 sm:items-center">
         <button
           onClick={onBack}
           className="inline-flex items-center gap-1 border border-neutral-700 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-300 hover:border-neutral-500"
@@ -121,15 +121,15 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
           </div>
         </div>
       ) : (
-        <main className="grid min-h-0 flex-1 grid-cols-[320px_minmax(0,1fr)] overflow-hidden">
-          <aside className="min-h-0 overflow-y-auto border-r border-neutral-800 p-3 text-[11px]">
+        <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[320px_minmax(0,1fr)] xl:overflow-hidden">
+          <aside className="border-b border-neutral-800 p-3 text-[11px] xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
             <div className="mb-3 grid grid-cols-2 gap-2">
               <div className="border border-neutral-800 p-2">
-                <div className="text-neutral-600">观察市场</div>
+                <div className="text-neutral-600">独立天气日</div>
                 <div className="tabular-nums text-xl font-semibold text-neutral-100">{summary?.markets ?? 0}</div>
               </div>
               <div className="border border-neutral-800 p-2">
-                <div className="text-neutral-600">实盘校准市场</div>
+                <div className="text-neutral-600">实盘校准天气日</div>
                 <div className="tabular-nums text-xl font-semibold text-green-300">{summary?.eligible_markets ?? 0}</div>
               </div>
               <div className="border border-neutral-800 p-2">
@@ -181,6 +181,10 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
               <p className="mt-2 text-[10px] leading-relaxed text-neutral-600">
                 研究级历史样本用于快速发现偏差和调算法；只有实盘结算校准样本可用于解锁自动实盘。
               </p>
+              <p className="mt-1 text-[10px] leading-relaxed text-neutral-600">
+                页面按城市/日期去重，当前展示 {summary?.observed_samples ?? records.length} 个独立天气日；
+                后台仍保留 {summary?.snapshot_samples ?? records.length} 个原始扫描快照供审计。
+              </p>
             </div>
 
             <div className="mb-3 border border-neutral-800 p-2">
@@ -210,14 +214,14 @@ export function TemperatureFitPage({ data, loading, onBack }: Props) {
             </div>
           </aside>
 
-          <section className="grid min-h-0 grid-rows-[46%_26%_28%] overflow-hidden">
+          <section className="grid min-h-0 grid-rows-[360px_300px_460px] xl:grid-rows-[46%_26%_28%] xl:overflow-hidden">
             <div className="min-h-0 border-b border-neutral-800 p-3">
               <div className="mb-2 flex items-center justify-between">
                 <div>
                   <div className="text-sm text-neutral-100">预测 vs 实际</div>
                   <div className="text-[11px] text-neutral-600">越靠近斜线越好；偏离越大，越不适合自动实盘。</div>
                 </div>
-                <div className="text-[11px] text-neutral-500">显示 {visibleRecords.length} 个快照</div>
+                <div className="text-[11px] text-neutral-500">显示 {visibleRecords.length} 个独立天气日</div>
               </div>
               <ResponsiveContainer width="100%" height="84%">
                 <ScatterChart margin={{ top: 12, right: 20, bottom: 4, left: 0 }}>

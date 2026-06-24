@@ -169,8 +169,13 @@ export function WeatherPanel({
 
       <div className="min-h-0 border border-neutral-800 bg-black p-2">
         {chartData.length > 0 ? (
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: -8 }}>
+          <div
+            className="h-full"
+            role="img"
+            aria-label={`${series?.city_name ?? '当前城市'}最近 ${series?.history_count ?? 0} 个历史天气点与未来预测趋势。蓝色实线表示历史实际最高温，绿色虚线表示预测最高温，琥珀色点线表示平均湿度。`}
+          >
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: -8 }}>
               <CartesianGrid stroke="#1f1f1f" strokeDasharray="3 3" />
               <XAxis dataKey="label" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} minTickGap={14} />
               <YAxis yAxisId="temp" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} />
@@ -184,11 +189,12 @@ export function WeatherPanel({
                 labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ''}
               />
               <Legend wrapperStyle={{ fontSize: 10 }} />
-              <Line yAxisId="temp" type="monotone" dataKey="actual_high" name="历史实际高温" stroke="#38bdf8" dot={false} strokeWidth={2.2} connectNulls={false} />
-              <Line yAxisId="temp" type="monotone" dataKey="forecast_high" name="预测高温" stroke="#22c55e" dot={false} strokeWidth={2.2} connectNulls={false} />
-              <Line yAxisId="humidity" type="monotone" dataKey="humidity_mean" name="湿度" stroke="#f59e0b" dot={false} strokeWidth={1.5} connectNulls={false} />
-            </LineChart>
-          </ResponsiveContainer>
+              <Line yAxisId="temp" type="monotone" dataKey="actual_high" name="历史实际高温" stroke="#38bdf8" dot={false} strokeWidth={2.4} connectNulls={false} />
+              <Line yAxisId="temp" type="monotone" dataKey="forecast_high" name="预测高温" stroke="#22c55e" strokeDasharray="7 4" dot={false} strokeWidth={2.4} connectNulls={false} />
+              <Line yAxisId="humidity" type="monotone" dataKey="humidity_mean" name="湿度" stroke="#f59e0b" strokeDasharray="2 4" dot={false} strokeWidth={1.7} connectNulls={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
         ) : (
           <div className="flex h-full items-center justify-center text-center text-neutral-600">
             该城市还没有历史或预测曲线。可以先点击“补历史数据”，再启动扫描器获取预测线。
