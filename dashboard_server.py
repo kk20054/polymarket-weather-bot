@@ -41,6 +41,7 @@ from weatherbot_v3.executor import LiveExecutor, PaperExecutor
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
 from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.notifier import FeishuNotifier
+from weatherbot_v3.polymarket import PolymarketDataClient
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
 from weatherbot_v3.truth import infer_settlement_rule
 
@@ -2686,6 +2687,8 @@ async def _auto_simulation_loop():
                         "spent": result.get("spent", 0),
                         "skipped": result.get("skipped", 0),
                         "remaining": result.get("remaining", 0),
+                        "orderbooks_refreshed": result.get("orderbooks_refreshed", 0),
+                        "orderbook_refresh_failed": result.get("orderbook_refresh_failed", 0),
                     },
                     last_error=None,
                 )
@@ -3001,6 +3004,11 @@ def _bulk_simulate_signals_once(log_when_idle=True):
     state = _read_json(DATA_DIR / "state.json", {})
     simulation_start = _parse_iso(state.get("simulation_started_at"))
     opened_at = datetime.now(timezone.utc).isoformat()
+    current_signals = [
+        s for s in list_signals(500)
+        if (s.get("date") or "") >= today and not _is_dashboard_position_import(s)
+    ]
+    quote_refresh = _refresh_signal_orderbooks(current_signals)
     dashboard = build_dashboard_payload()
     remaining = max(
         0.0,
@@ -3011,10 +3019,6 @@ def _bulk_simulate_signals_once(log_when_idle=True):
         for s in dashboard.get("weather_signals", [])
         if s.get("id") is not None
     }
-    current_signals = [
-        s for s in list_signals(500)
-        if (s.get("date") or "") >= today and not _is_dashboard_position_import(s)
-    ]
 
     def skip(signal, reason):
         skipped.append({
@@ -3099,10 +3103,40 @@ def _bulk_simulate_signals_once(log_when_idle=True):
         "skipped": len(skipped),
         "reason_counts": reason_counts,
         "examples": skipped[:10],
+        "orderbooks_refreshed": quote_refresh["refreshed"],
+        "orderbook_refresh_failed": quote_refresh["failed"],
     }
     if count or log_when_idle:
         log_event("success" if count else "warning", message, payload)
     return {"ok": True, **payload}
+
+
+def _refresh_signal_orderbooks(signals, limit=50):
+    market_ids = []
+    seen = set()
+    for signal in signals:
+        market_id = str(signal.get("market_id") or "")
+        if not market_id or market_id in seen:
+            continue
+        market_ids.append(market_id)
+        seen.add(market_id)
+        if len(market_ids) >= limit:
+            break
+    if not market_ids:
+        return {"requested": 0, "refreshed": 0, "failed": 0}
+    client = PolymarketDataClient()
+    refreshed = 0
+    failed = 0
+    for market_id in market_ids:
+        try:
+            quote = client.quote(market_id)
+            if quote.book_source == "clob":
+                refreshed += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    return {"requested": len(market_ids), "refreshed": refreshed, "failed": failed}
 
 
 @app.post("/api/signals/bulk-simulate")

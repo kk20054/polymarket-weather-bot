@@ -125,6 +125,8 @@ export interface AutoSimulationStatus {
     spent: number
     skipped: number
     remaining: number
+    orderbooks_refreshed?: number
+    orderbook_refresh_failed?: number
   } | null
   last_error?: string | null
 }

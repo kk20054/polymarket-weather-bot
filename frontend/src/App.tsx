@@ -333,7 +333,14 @@ function SimulationCard({
         <div className="mt-3 border border-neutral-800 p-2 text-[11px] leading-relaxed text-neutral-400">
           <div className="mb-1 text-neutral-200">最近一次自动检查 · {timeText(autoSimulation.last_run)}</div>
           {lastResult && (
-            <div>买入 {lastResult.count} 笔，跳过 {lastResult.skipped} 笔，花费 {money(lastResult.spent)}，剩余 {money(lastResult.remaining)}</div>
+            <div>
+              买入 {lastResult.count} 笔，跳过 {lastResult.skipped} 笔，花费 {money(lastResult.spent)}，剩余 {money(lastResult.remaining)}
+              {lastResult.orderbooks_refreshed !== undefined && (
+                <span title={`盘口刷新失败 ${lastResult.orderbook_refresh_failed ?? 0} 个`}>
+                  {' '}· 盘口 {lastResult.orderbooks_refreshed}
+                </span>
+              )}
+            </div>
           )}
           {autoSimulation.last_error && <div className="text-red-300">{autoSimulation.last_error}</div>}
         </div>

@@ -13,7 +13,7 @@ from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.truth import infer_settlement_rule
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from dashboard_server import AutoSimulationUpdate, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _live_gate, _metric_summary, _position_from_signal, _save_auto_simulation_state, update_auto_simulation
+from dashboard_server import AutoSimulationUpdate, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timezone
 
@@ -167,6 +167,21 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(position["shares"], 5.0)
         self.assertEqual(position["unfilled_amount"], 0.90)
         self.assertEqual(position["fill_status"], "paper_partial")
+
+    def test_orderbook_refresh_deduplicates_signal_markets(self):
+        with patch("dashboard_server.PolymarketDataClient") as client_cls:
+            client_cls.return_value.quote.side_effect = [
+                type("Quote", (), {"book_source": "clob"})(),
+                type("Quote", (), {"book_source": "gamma_fallback"})(),
+            ]
+            result = _refresh_signal_orderbooks([
+                {"market_id": "1"},
+                {"market_id": "1"},
+                {"market_id": "2"},
+                {"market_id": ""},
+            ])
+        self.assertEqual(result, {"requested": 2, "refreshed": 1, "failed": 1})
+        self.assertEqual(client_cls.return_value.quote.call_count, 2)
 
     def test_ai_disabled_default_allows_quant_flow(self):
         db_path = test_db_path("ai_disabled")
