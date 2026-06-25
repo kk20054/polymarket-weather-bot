@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import requests
 
 from .config import load_config
+from .registry import REGISTRY_VERSION, get_city_profile
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,15 @@ class SettlementRule:
     source_url: str
     truth_confidence: float
     confidence_reason: str
+    contract_id: str
+    target_local_date: str
+    bucket_boundary: str
+    rounding_rule: str
+    truth_provider_priority: list[str]
+    rule_version: str
+    registry_version: str
+    parsed_at: str
+    manual_verified_at: str | None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -76,6 +86,7 @@ def infer_settlement_rule(
     locations = locations or {}
     timezones = timezones or {}
     city = str(market.get("city") or market.get("city_key") or "")
+    profile = get_city_profile(city)
     loc = locations.get(city, {})
     event_url = str(market.get("event_url") or "")
     event_slug = _slug_from_url(event_url)
@@ -98,7 +109,7 @@ def infer_settlement_rule(
         )
     ).strip()
     source_url = _extract_url(rule_text) or event_url
-    station_id = str(market.get("station") or loc.get("station") or "").upper()
+    station_id = str(market.get("station") or loc.get("station") or (profile.station_id if profile else "")).upper()
     has_wunderground = "wunderground" in rule_text.lower()
     confidence = 0.35
     reason = "missing_station_mapping"
@@ -116,9 +127,9 @@ def infer_settlement_rule(
         city=city,
         city_name=str(market.get("city_name") or loc.get("name") or city),
         station_id=station_id,
-        station_name=str(loc.get("name") or market.get("city_name") or city),
-        timezone=str(timezones.get(city) or market.get("timezone") or "UTC"),
-        unit=str(market.get("unit") or loc.get("unit") or "F"),
+        station_name=str((profile.station_name if profile else "") or loc.get("name") or market.get("city_name") or city),
+        timezone=str(timezones.get(city) or market.get("timezone") or (profile.timezone if profile else "UTC")),
+        unit=str(market.get("unit") or loc.get("unit") or (profile.unit if profile else "F")),
         bucket_low=bucket_low,
         bucket_high=bucket_high,
         metric="highest_temperature",
@@ -126,6 +137,20 @@ def infer_settlement_rule(
         source_url=source_url,
         truth_confidence=round(confidence, 3),
         confidence_reason=reason,
+        contract_id=f"{event_slug}:{str((market.get('position') or {}).get('market_id') or market.get('market_id') or '')}",
+        target_local_date=str(market.get("date") or market.get("target_date") or ""),
+        bucket_boundary="inclusive",
+        rounding_rule="source_reported_daily_high",
+        truth_provider_priority=[
+            "polymarket_resolved",
+            "official_station",
+            "visual_crossing_station",
+            "open_meteo_archive",
+        ],
+        rule_version="settlement-rule-v1",
+        registry_version=REGISTRY_VERSION,
+        parsed_at=datetime.now(timezone.utc).isoformat(),
+        manual_verified_at=None,
     )
 
 

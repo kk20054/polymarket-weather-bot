@@ -154,6 +154,53 @@ export interface TruthHealth {
   cities: TruthCityHealth[]
 }
 
+export interface DataReadinessReason {
+  code: string
+  count: number
+}
+
+export interface DataReadinessStage {
+  key: string
+  label: string
+  status: 'ready' | 'blocked'
+  reasons: DataReadinessReason[]
+  metrics: Record<string, unknown>
+}
+
+export interface DataReadiness {
+  audit_version: string
+  generated_at: string
+  status: 'ready' | 'blocked'
+  score: number
+  live_allowed: boolean
+  stages: DataReadinessStage[]
+  blockers: DataReadinessReason[]
+  cities: Array<{
+    city: string
+    city_name: string
+    station_id: string
+    station_name: string
+    timezone: string
+    unit: string
+    market_rules: number
+    verified_rules: number
+    truth_days: number
+    eligible_truth_days: number
+    forecast_runs: number
+    status: 'eligible' | 'blocked'
+    reasons: string[]
+  }>
+  summary: {
+    registered_cities: number
+    eligible_cities: number
+    market_rules: number
+    eligible_truth_days: number
+    forecast_runs: number
+    forecast_members: number
+    orderbook_snapshots: number
+  }
+}
+
 export interface DistributionItem {
   market_id: string
   question: string
@@ -531,6 +578,7 @@ export interface BulkSimulateResult {
 export interface DashboardData {
   stats: BotStats
   v3?: V3Summary
+  data_readiness?: DataReadiness
   truth_health?: TruthHealth
   btc_price: BtcPrice | null
   microstructure: Microstructure | null

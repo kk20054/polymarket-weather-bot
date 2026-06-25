@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +69,7 @@ def init_v3_db(path: Path | None = None) -> None:
 
             CREATE TABLE IF NOT EXISTS orderbooks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_key TEXT UNIQUE,
                 market_id TEXT,
                 yes_token_id TEXT,
                 best_bid REAL,
@@ -77,6 +79,15 @@ def init_v3_db(path: Path | None = None) -> None:
                 order_min_size REAL,
                 tick_size REAL,
                 enable_order_book INTEGER,
+                snapshot_type TEXT,
+                quote_timestamp TEXT,
+                book_hash TEXT,
+                bids_json TEXT,
+                asks_json TEXT,
+                bid_depth REAL,
+                ask_depth REAL,
+                source_url TEXT,
+                raw_response_hash TEXT,
                 raw_json TEXT,
                 created_at TEXT NOT NULL
             );
@@ -224,13 +235,33 @@ def init_v3_db(path: Path | None = None) -> None:
 
             CREATE TABLE IF NOT EXISTS forecast_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_key TEXT UNIQUE,
                 city TEXT,
                 target_date TEXT,
                 source TEXT,
+                provider TEXT,
+                model TEXT,
+                model_version TEXT,
+                run_type TEXT,
                 run_at TEXT,
+                retrieved_at TEXT,
+                valid_at TEXT,
                 horizon TEXT,
+                lead_hours REAL,
+                latitude REAL,
+                longitude REAL,
+                station_id TEXT,
+                timezone TEXT,
+                unit TEXT,
                 mean_high REAL,
                 std_high REAL,
+                member_count INTEGER,
+                source_url TEXT,
+                raw_response_hash TEXT,
+                data_license TEXT,
+                quality_flags TEXT,
+                training_eligible INTEGER,
+                ineligibility_reason TEXT,
                 raw_json TEXT,
                 created_at TEXT NOT NULL
             );
@@ -240,8 +271,11 @@ def init_v3_db(path: Path | None = None) -> None:
                 run_id INTEGER,
                 member_name TEXT,
                 high_temp REAL,
+                member_id TEXT,
+                hourly_json TEXT,
                 raw_json TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                UNIQUE(run_id, member_id)
             );
 
             CREATE TABLE IF NOT EXISTS event_distributions (
@@ -286,6 +320,16 @@ def init_v3_db(path: Path | None = None) -> None:
                 raw_json TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS data_qualification_audits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                audit_version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                score REAL NOT NULL,
+                live_allowed INTEGER NOT NULL,
+                raw_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         _ensure_columns(conn)
@@ -306,12 +350,79 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "station_id": "TEXT",
             "truth_confidence": "REAL",
         },
+        "market_rules": {
+            "contract_id": "TEXT",
+            "target_local_date": "TEXT",
+            "bucket_boundary": "TEXT",
+            "rounding_rule": "TEXT",
+            "truth_provider_priority": "TEXT",
+            "rule_version": "TEXT",
+            "registry_version": "TEXT",
+            "parsed_at": "TEXT",
+            "manual_verified_at": "TEXT",
+        },
+        "truth_observations": {
+            "truth_version": "TEXT",
+            "supersedes_truth_id": "INTEGER",
+        },
+        "forecast_runs": {
+            "run_key": "TEXT",
+            "provider": "TEXT",
+            "model": "TEXT",
+            "model_version": "TEXT",
+            "run_type": "TEXT",
+            "retrieved_at": "TEXT",
+            "valid_at": "TEXT",
+            "lead_hours": "REAL",
+            "latitude": "REAL",
+            "longitude": "REAL",
+            "station_id": "TEXT",
+            "timezone": "TEXT",
+            "unit": "TEXT",
+            "member_count": "INTEGER",
+            "source_url": "TEXT",
+            "raw_response_hash": "TEXT",
+            "data_license": "TEXT",
+            "quality_flags": "TEXT",
+            "training_eligible": "INTEGER",
+            "ineligibility_reason": "TEXT",
+        },
+        "forecast_members": {
+            "member_id": "TEXT",
+            "hourly_json": "TEXT",
+        },
+        "orderbooks": {
+            "snapshot_key": "TEXT",
+            "snapshot_type": "TEXT",
+            "quote_timestamp": "TEXT",
+            "book_hash": "TEXT",
+            "bids_json": "TEXT",
+            "asks_json": "TEXT",
+            "bid_depth": "REAL",
+            "ask_depth": "REAL",
+            "source_url": "TEXT",
+            "raw_response_hash": "TEXT",
+        },
     }
     for table, columns in ensure.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         for name, ddl in columns.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_runs_run_key ON forecast_runs(run_key)")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_members_run_member "
+        "ON forecast_members(run_id, member_id)"
+    )
+    conn.execute(
+        """
+        UPDATE forecast_runs
+        SET training_eligible = 0,
+            ineligibility_reason = COALESCE(ineligibility_reason, 'legacy_run_before_training_gate')
+        WHERE training_eligible IS NULL
+        """
+    )
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_orderbooks_snapshot_key ON orderbooks(snapshot_key)")
 
 
 def dump_json(payload: Any) -> str:
@@ -385,33 +496,84 @@ def upsert_signal(signal: dict[str, Any], legacy_signal_id: int | None = None) -
         return int(conn.execute("SELECT id FROM signals WHERE signal_key = ?", (signal_key,)).fetchone()["id"])
 
 
-def insert_orderbook(market_id: str, payload: dict[str, Any]) -> None:
+def insert_orderbook(market_id: str, payload: dict[str, Any]) -> int:
     init_v3_db()
-    best_bid = _num(payload.get("bestBid"), _num(payload.get("best_bid"), 0.0))
-    best_ask = _num(payload.get("bestAsk"), _num(payload.get("best_ask"), 0.0))
+    bids = _levels(payload.get("bids"))
+    asks = _levels(payload.get("asks"))
+    best_bid = max((level["price"] for level in bids), default=_num(payload.get("bestBid"), _num(payload.get("best_bid"), 0.0)))
+    best_ask = min((level["price"] for level in asks), default=_num(payload.get("bestAsk"), _num(payload.get("best_ask"), 0.0)))
     spread = _num(payload.get("spread"), best_ask - best_bid if best_ask and best_bid else 0.0)
+    raw_response_hash = str(payload.get("raw_response_hash") or _json_hash(payload))
+    snapshot_key = str(
+        payload.get("snapshot_key")
+        or f"{payload.get('yes_token_id') or payload.get('asset_id') or market_id}:{payload.get('hash') or raw_response_hash}"
+    )
     with connect() as conn:
         conn.execute(
             """
             INSERT INTO orderbooks (
-                market_id, yes_token_id, best_bid, best_ask, spread, volume,
-                order_min_size, tick_size, enable_order_book, raw_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                snapshot_key, market_id, yes_token_id, best_bid, best_ask, spread,
+                volume, order_min_size, tick_size, enable_order_book, snapshot_type,
+                quote_timestamp, book_hash, bids_json, asks_json, bid_depth,
+                ask_depth, source_url, raw_response_hash, raw_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_key) DO UPDATE SET
+                best_bid=excluded.best_bid,
+                best_ask=excluded.best_ask,
+                spread=excluded.spread,
+                bids_json=excluded.bids_json,
+                asks_json=excluded.asks_json,
+                bid_depth=excluded.bid_depth,
+                ask_depth=excluded.ask_depth,
+                quote_timestamp=excluded.quote_timestamp,
+                raw_json=excluded.raw_json,
+                created_at=excluded.created_at
             """,
             (
+                snapshot_key,
                 market_id,
-                str(payload.get("yes_token_id") or ""),
+                str(payload.get("yes_token_id") or payload.get("asset_id") or ""),
                 best_bid,
                 best_ask,
                 spread,
                 _num(payload.get("volume"), 0.0),
-                _num(payload.get("orderMinSize"), _num(payload.get("order_min_size"), 0.0)),
+                _num(payload.get("orderMinSize"), _num(payload.get("order_min_size"), _num(payload.get("min_order_size"), 0.0))),
                 _num(payload.get("orderPriceMinTickSize"), _num(payload.get("tick_size"), 0.0)),
                 1 if payload.get("enableOrderBook", payload.get("enable_order_book", True)) else 0,
+                str(payload.get("snapshot_type") or ("clob" if bids or asks else "gamma")),
+                str(payload.get("quote_timestamp") or payload.get("timestamp") or ""),
+                str(payload.get("hash") or ""),
+                dump_json(bids),
+                dump_json(asks),
+                round(sum(level["size"] for level in bids), 6),
+                round(sum(level["size"] for level in asks), 6),
+                str(payload.get("source_url") or ""),
+                raw_response_hash,
                 dump_json(payload),
                 utc_now(),
             ),
         )
+        return int(conn.execute("SELECT id FROM orderbooks WHERE snapshot_key = ?", (snapshot_key,)).fetchone()["id"])
+
+
+def _levels(raw: Any) -> list[dict[str, float]]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+    levels = []
+    for item in raw or []:
+        try:
+            levels.append({"price": float(item.get("price")), "size": float(item.get("size"))})
+        except Exception:
+            continue
+    return levels
+
+
+def _json_hash(payload: Any) -> str:
+    encoded = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def insert_ai_review(signal_id: int, review: dict[str, Any]) -> None:
@@ -442,6 +604,7 @@ def insert_ai_review(signal_id: int, review: dict[str, Any]) -> None:
 def upsert_market_rule(rule: dict[str, Any]) -> None:
     init_v3_db()
     now = utc_now()
+    rule = _normalize_market_rule(rule, now)
     with connect() as conn:
         conn.execute(
             """
@@ -449,12 +612,16 @@ def upsert_market_rule(rule: dict[str, Any]) -> None:
                 market_id, event_slug, market_slug, question, city, city_name,
                 station_id, station_name, timezone, unit, bucket_low, bucket_high,
                 metric, resolution_source_text, source_url, truth_confidence,
-                confidence_reason, raw_json, updated_at
+                confidence_reason, contract_id, target_local_date, bucket_boundary,
+                rounding_rule, truth_provider_priority, rule_version, registry_version,
+                parsed_at, manual_verified_at, raw_json, updated_at
             ) VALUES (
                 :market_id, :event_slug, :market_slug, :question, :city, :city_name,
                 :station_id, :station_name, :timezone, :unit, :bucket_low, :bucket_high,
                 :metric, :resolution_source_text, :source_url, :truth_confidence,
-                :confidence_reason, :raw_json, :updated_at
+                :confidence_reason, :contract_id, :target_local_date, :bucket_boundary,
+                :rounding_rule, :truth_provider_priority, :rule_version, :registry_version,
+                :parsed_at, :manual_verified_at, :raw_json, :updated_at
             )
             ON CONFLICT(market_id) DO UPDATE SET
                 event_slug=excluded.event_slug,
@@ -473,6 +640,15 @@ def upsert_market_rule(rule: dict[str, Any]) -> None:
                 source_url=excluded.source_url,
                 truth_confidence=excluded.truth_confidence,
                 confidence_reason=excluded.confidence_reason,
+                contract_id=excluded.contract_id,
+                target_local_date=excluded.target_local_date,
+                bucket_boundary=excluded.bucket_boundary,
+                rounding_rule=excluded.rounding_rule,
+                truth_provider_priority=excluded.truth_provider_priority,
+                rule_version=excluded.rule_version,
+                registry_version=excluded.registry_version,
+                parsed_at=excluded.parsed_at,
+                manual_verified_at=COALESCE(excluded.manual_verified_at, market_rules.manual_verified_at),
                 raw_json=excluded.raw_json,
                 updated_at=excluded.updated_at
             """,
@@ -485,6 +661,7 @@ def upsert_market_rules(rules: list[dict[str, Any]]) -> None:
         return
     init_v3_db()
     now = utc_now()
+    normalized = [_normalize_market_rule(rule, now) for rule in rules]
     with connect() as conn:
         conn.executemany(
             """
@@ -492,12 +669,16 @@ def upsert_market_rules(rules: list[dict[str, Any]]) -> None:
                 market_id, event_slug, market_slug, question, city, city_name,
                 station_id, station_name, timezone, unit, bucket_low, bucket_high,
                 metric, resolution_source_text, source_url, truth_confidence,
-                confidence_reason, raw_json, updated_at
+                confidence_reason, contract_id, target_local_date, bucket_boundary,
+                rounding_rule, truth_provider_priority, rule_version, registry_version,
+                parsed_at, manual_verified_at, raw_json, updated_at
             ) VALUES (
                 :market_id, :event_slug, :market_slug, :question, :city, :city_name,
                 :station_id, :station_name, :timezone, :unit, :bucket_low, :bucket_high,
                 :metric, :resolution_source_text, :source_url, :truth_confidence,
-                :confidence_reason, :raw_json, :updated_at
+                :confidence_reason, :contract_id, :target_local_date, :bucket_boundary,
+                :rounding_rule, :truth_provider_priority, :rule_version, :registry_version,
+                :parsed_at, :manual_verified_at, :raw_json, :updated_at
             )
             ON CONFLICT(market_id) DO UPDATE SET
                 event_slug=excluded.event_slug,
@@ -516,11 +697,46 @@ def upsert_market_rules(rules: list[dict[str, Any]]) -> None:
                 source_url=excluded.source_url,
                 truth_confidence=excluded.truth_confidence,
                 confidence_reason=excluded.confidence_reason,
+                contract_id=excluded.contract_id,
+                target_local_date=excluded.target_local_date,
+                bucket_boundary=excluded.bucket_boundary,
+                rounding_rule=excluded.rounding_rule,
+                truth_provider_priority=excluded.truth_provider_priority,
+                rule_version=excluded.rule_version,
+                registry_version=excluded.registry_version,
+                parsed_at=excluded.parsed_at,
+                manual_verified_at=COALESCE(excluded.manual_verified_at, market_rules.manual_verified_at),
                 raw_json=excluded.raw_json,
                 updated_at=excluded.updated_at
             """,
-            [{**rule, "raw_json": dump_json(rule), "updated_at": now} for rule in rules],
+            [{**rule, "raw_json": dump_json(rule), "updated_at": now} for rule in normalized],
         )
+
+
+def _normalize_market_rule(rule: dict[str, Any], now: str) -> dict[str, Any]:
+    market_id = str(rule.get("market_id") or "")
+    event_slug = str(rule.get("event_slug") or "")
+    priority = rule.get("truth_provider_priority") or [
+        "polymarket_resolved",
+        "official_station",
+        "visual_crossing_station",
+        "open_meteo_archive",
+    ]
+    if not isinstance(priority, str):
+        priority = dump_json(priority)
+    return {
+        **rule,
+        "market_id": market_id,
+        "contract_id": str(rule.get("contract_id") or f"{event_slug}:{market_id}"),
+        "target_local_date": str(rule.get("target_local_date") or rule.get("target_date") or ""),
+        "bucket_boundary": str(rule.get("bucket_boundary") or "inclusive"),
+        "rounding_rule": str(rule.get("rounding_rule") or "source_reported_daily_high"),
+        "truth_provider_priority": priority,
+        "rule_version": str(rule.get("rule_version") or "settlement-rule-v1"),
+        "registry_version": str(rule.get("registry_version") or "airport-settlement-registry-v1"),
+        "parsed_at": str(rule.get("parsed_at") or now),
+        "manual_verified_at": rule.get("manual_verified_at"),
+    }
 
 
 def upsert_truth_observation(observation: dict[str, Any]) -> None:
@@ -562,31 +778,100 @@ def upsert_truth_observation(observation: dict[str, Any]) -> None:
 def insert_forecast_run(run: dict[str, Any], members: list[dict[str, Any]] | None = None) -> int:
     init_v3_db()
     now = utc_now()
+    run_key = str(
+        run.get("run_key")
+        or ":".join(
+            [
+                str(run.get("provider") or run.get("source") or "unknown"),
+                str(run.get("model") or "unknown"),
+                str(run.get("city") or ""),
+                str(run.get("target_date") or ""),
+                str(run.get("raw_response_hash") or run.get("retrieved_at") or now),
+            ]
+        )
+    )
     with connect() as conn:
-        cur = conn.execute(
+        conn.execute(
             """
             INSERT INTO forecast_runs (
-                city, target_date, source, run_at, horizon, mean_high,
-                std_high, raw_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                run_key, city, target_date, source, provider, model, model_version,
+                run_type, run_at, retrieved_at, valid_at, horizon, lead_hours,
+                latitude, longitude, station_id, timezone, unit, mean_high, std_high,
+                member_count, source_url, raw_response_hash, data_license,
+                quality_flags, training_eligible, ineligibility_reason,
+                raw_json, created_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            ON CONFLICT(run_key) DO UPDATE SET
+                retrieved_at=excluded.retrieved_at,
+                valid_at=excluded.valid_at,
+                horizon=excluded.horizon,
+                lead_hours=excluded.lead_hours,
+                mean_high=excluded.mean_high,
+                std_high=excluded.std_high,
+                member_count=excluded.member_count,
+                quality_flags=excluded.quality_flags,
+                training_eligible=excluded.training_eligible,
+                ineligibility_reason=excluded.ineligibility_reason,
+                raw_json=excluded.raw_json
             """,
             (
+                run_key,
                 run.get("city"),
                 run.get("target_date"),
                 run.get("source"),
+                run.get("provider"),
+                run.get("model"),
+                run.get("model_version"),
+                run.get("run_type", "forecast"),
                 run.get("run_at"),
+                run.get("retrieved_at"),
+                run.get("valid_at"),
                 run.get("horizon"),
+                _num(run.get("lead_hours"), 0.0),
+                _num(run.get("latitude"), 0.0),
+                _num(run.get("longitude"), 0.0),
+                run.get("station_id"),
+                run.get("timezone"),
+                run.get("unit"),
                 _num(run.get("mean_high"), 0.0),
                 _num(run.get("std_high"), 0.0),
+                int(run.get("member_count") or len(members or [])),
+                run.get("source_url"),
+                run.get("raw_response_hash"),
+                run.get("data_license"),
+                dump_json(run.get("quality_flags", [])),
+                1 if run.get("training_eligible") else 0,
+                run.get("ineligibility_reason"),
                 dump_json(run),
                 now,
             ),
         )
-        run_id = int(cur.lastrowid)
+        run_id = int(conn.execute("SELECT id FROM forecast_runs WHERE run_key = ?", (run_key,)).fetchone()["id"])
         for member in members or []:
             conn.execute(
-                "INSERT INTO forecast_members (run_id, member_name, high_temp, raw_json, created_at) VALUES (?, ?, ?, ?, ?)",
-                (run_id, member.get("member_name"), _num(member.get("high_temp"), 0.0), dump_json(member), now),
+                """
+                INSERT INTO forecast_members (
+                    run_id, member_name, high_temp, member_id, hourly_json,
+                    raw_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, member_id) DO UPDATE SET
+                    member_name=excluded.member_name,
+                    high_temp=excluded.high_temp,
+                    hourly_json=excluded.hourly_json,
+                    raw_json=excluded.raw_json
+                """,
+                (
+                    run_id,
+                    member.get("member_name") or member.get("member_id"),
+                    _num(member.get("high_temp"), 0.0),
+                    str(member.get("member_id") or member.get("member_name") or "deterministic"),
+                    dump_json(member.get("hourly", [])),
+                    dump_json(member),
+                    now,
+                ),
             )
         return run_id
 

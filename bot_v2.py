@@ -3,7 +3,7 @@
 """
 weatherbet.py — Weather Trading Bot for Polymarket
 =====================================================
-Tracks weather forecasts from 3 sources (ECMWF, HRRR, METAR),
+Tracks weather forecasts from ECMWF, GFS ensemble/seamless and METAR,
 compares with Polymarket markets, paper trades using Kelly criterion.
 
 Usage:
@@ -16,11 +16,13 @@ import re
 import sys
 import json
 import math
+import hashlib
 import statistics
 import time
 import requests
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from dashboard_db import log_signal
@@ -28,11 +30,18 @@ except Exception:
     log_signal = None
 
 try:
-    from weatherbot_v3.db import upsert_truth_observation
+    from weatherbot_v3.db import insert_forecast_run, upsert_truth_observation
+    from weatherbot_v3.polymarket import PolymarketDataClient, estimate_buy_fill, validate_order_constraints
+    from weatherbot_v3.registry import SETTLEMENT_REGISTRY
     from weatherbot_v3.truth import get_actual_observation as get_v4_actual_observation
     from weatherbot_v3.truth import infer_settlement_rule
 except Exception:
+    insert_forecast_run = None
+    PolymarketDataClient = None
+    estimate_buy_fill = None
+    validate_order_constraints = None
     upsert_truth_observation = None
+    SETTLEMENT_REGISTRY = {}
     get_v4_actual_observation = None
     infer_settlement_rule = None
 
@@ -107,6 +116,20 @@ TIMEZONES = {
     "toronto": "America/Toronto", "sao-paulo": "America/Sao_Paulo",
     "buenos-aires": "America/Argentina/Buenos_Aires", "wellington": "Pacific/Auckland",
 }
+
+if SETTLEMENT_REGISTRY:
+    LOCATIONS = {
+        city: {
+            "lat": profile.latitude,
+            "lon": profile.longitude,
+            "name": profile.city_name,
+            "station": profile.station_id,
+            "unit": profile.unit,
+            "region": profile.region,
+        }
+        for city, profile in SETTLEMENT_REGISTRY.items()
+    }
+    TIMEZONES = {city: profile.timezone for city, profile in SETTLEMENT_REGISTRY.items()}
 
 MONTHS = ["january","february","march","april","may","june",
           "july","august","september","october","november","december"]
@@ -322,60 +345,133 @@ def run_calibration(markets):
 # FORECASTS
 # =============================================================================
 
-def get_ecmwf(city_slug, dates):
-    """ECMWF via Open-Meteo with bias correction. For all cities."""
+FORECAST_HOURLY_VARIABLES = (
+    "temperature_2m",
+    "relative_humidity_2m",
+    "dew_point_2m",
+    "cloud_cover",
+    "wind_speed_10m",
+    "precipitation",
+    "shortwave_radiation",
+)
+
+
+def _payload_hash(payload):
+    encoded = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _timezone(city_slug):
+    try:
+        return ZoneInfo(TIMEZONES.get(city_slug, "UTC"))
+    except ZoneInfoNotFoundError:
+        return timezone.utc
+
+
+def target_dates_for_city(city_slug, days=4, now_utc=None):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    local_now = now_utc.astimezone(_timezone(city_slug))
+    return [(local_now + timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(days)]
+
+
+def _hourly_rows_by_date(data, dates):
+    hourly = data.get("hourly") or {}
+    times = hourly.get("time") or []
+    rows = {date: [] for date in dates}
+    for idx, timestamp in enumerate(times):
+        date = str(timestamp)[:10]
+        if date not in rows:
+            continue
+        item = {"valid_at": timestamp}
+        for variable in FORECAST_HOURLY_VARIABLES:
+            values = hourly.get(variable) or []
+            item[variable] = values[idx] if idx < len(values) else None
+        rows[date].append(item)
+    return rows
+
+
+def _get_deterministic_forecast(city_slug, dates, model, source_name, forecast_days):
+    if not dates:
+        return {}
     loc = LOCATIONS[city_slug]
     unit = loc["unit"]
     temp_unit = "fahrenheit" if unit == "F" else "celsius"
-    result = {}
-    url = (
-        f"https://api.open-meteo.com/v1/forecast"
-        f"?latitude={loc['lat']}&longitude={loc['lon']}"
-        f"&daily=temperature_2m_max&temperature_unit={temp_unit}"
-        f"&forecast_days=7&timezone={TIMEZONES.get(city_slug, 'UTC')}"
-        f"&models=ecmwf_ifs025&bias_correction=true"
-    )
+    session = requests.Session()
+    session.trust_env = False
+    endpoint = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": loc["lat"],
+        "longitude": loc["lon"],
+        "daily": "temperature_2m_max",
+        "hourly": ",".join(FORECAST_HOURLY_VARIABLES),
+        "temperature_unit": temp_unit,
+        "forecast_days": forecast_days,
+        "timezone": TIMEZONES.get(city_slug, "UTC"),
+        "models": model,
+    }
+    if source_name == "ecmwf":
+        params["bias_correction"] = "true"
     for attempt in range(3):
         try:
-            data = get_json(url, timeout=(5, 10))
-            if "error" not in data:
-                for date, temp in zip(data["daily"]["time"], data["daily"]["temperature_2m_max"]):
-                    if date in dates and temp is not None:
-                        result[date] = round(temp, 1) if unit == "C" else round(temp)
-            break
-        except Exception as e:
+            retrieved_at = datetime.now(timezone.utc).isoformat()
+            response = session.get(endpoint, params=params, timeout=(5, 20))
+            response.raise_for_status()
+            data = response.json()
+            if data.get("error"):
+                raise RuntimeError(data.get("reason") or "Open-Meteo error")
+            result = {}
+            daily = data.get("daily") or {}
+            for date, temp in zip(daily.get("time") or [], daily.get("temperature_2m_max") or []):
+                if date in dates and temp is not None:
+                    result[date] = round(float(temp), 1) if unit == "C" else round(float(temp))
+            result["__meta__"] = {
+                "provider": "open_meteo",
+                "model": model,
+                "model_version": "provider_current",
+                "source": source_name,
+                "run_at": None,
+                "retrieved_at": retrieved_at,
+                "source_url": response.url,
+                "raw_response_hash": _payload_hash(data),
+                "data_license": "CC-BY-4.0",
+                "quality_flags": ["provider_run_time_unavailable"],
+                "hourly_by_date": _hourly_rows_by_date(data, dates),
+                "response_metadata": {
+                    key: data.get(key)
+                    for key in (
+                        "latitude",
+                        "longitude",
+                        "generationtime_ms",
+                        "utc_offset_seconds",
+                        "timezone",
+                        "timezone_abbreviation",
+                        "elevation",
+                    )
+                },
+            }
+            return result
+        except Exception as exc:
             if attempt < 2:
                 time.sleep(3)
             else:
-                print(f"  [ECMWF] {city_slug}: {e}")
-    return result
+                print(f"  [{source_name.upper()}] {city_slug}: {exc}")
+    return {}
+
+
+def get_ecmwf(city_slug, dates):
+    """ECMWF via Open-Meteo with bias correction. For all cities."""
+    return _get_deterministic_forecast(city_slug, dates, "ecmwf_ifs025", "ecmwf", 7)
 
 def get_hrrr(city_slug, dates):
-    """HRRR via Open-Meteo. US cities only, up to 48h horizon."""
+    """Open-Meteo GFS seamless short range (legacy field name: HRRR)."""
     loc = LOCATIONS[city_slug]
     if loc["region"] != "us":
         return {}
-    result = {}
-    url = (
-        f"https://api.open-meteo.com/v1/forecast"
-        f"?latitude={loc['lat']}&longitude={loc['lon']}"
-        f"&daily=temperature_2m_max&temperature_unit=fahrenheit"
-        f"&forecast_days=3&timezone={TIMEZONES.get(city_slug, 'UTC')}"
-        f"&models=gfs_seamless"  # HRRR+GFS seamless — best option for US
-    )
-    for attempt in range(3):
-        try:
-            data = get_json(url, timeout=(5, 10))
-            if "error" not in data:
-                for date, temp in zip(data["daily"]["time"], data["daily"]["temperature_2m_max"]):
-                    if date in dates and temp is not None:
-                        result[date] = round(temp)
-            break
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(3)
-            else:
-                print(f"  [HRRR] {city_slug}: {e}")
+    result = _get_deterministic_forecast(city_slug, dates, "gfs_seamless", "gfs_seamless_short_range", 3)
+    meta = result.get("__meta__") or {}
+    meta["quality_flags"] = list(meta.get("quality_flags") or []) + ["legacy_alias_hrrr"]
     return result
 
 def get_gfs_ensemble(city_slug, dates):
@@ -390,7 +486,7 @@ def get_gfs_ensemble(city_slug, dates):
     params = {
         "latitude": loc["lat"],
         "longitude": loc["lon"],
-        "daily": "temperature_2m_max",
+        "hourly": ",".join(FORECAST_HOURLY_VARIABLES),
         "temperature_unit": temp_unit,
         "start_date": min(dates),
         "end_date": max(dates),
@@ -399,19 +495,50 @@ def get_gfs_ensemble(city_slug, dates):
     }
     for attempt in range(3):
         try:
-            response = session.get("https://ensemble-api.open-meteo.com/v1/ensemble", params=params, timeout=(5, 15))
+            retrieved_at = datetime.now(timezone.utc).isoformat()
+            response = session.get("https://ensemble-api.open-meteo.com/v1/ensemble", params=params, timeout=(5, 30))
             response.raise_for_status()
             data = response.json()
-            daily = data.get("daily", {})
-            date_index = {date: idx for idx, date in enumerate(daily.get("time", []))}
-            result = {date: {"members": []} for date in dates if date in date_index}
-            for key, values in daily.items():
-                if "temperature_2m_max" not in key or not isinstance(values, list):
-                    continue
-                for date, idx in date_index.items():
-                    if date not in result or idx >= len(values) or values[idx] is None:
+            hourly = data.get("hourly") or {}
+            times = hourly.get("time") or []
+            date_indices = {
+                date: [idx for idx, timestamp in enumerate(times) if str(timestamp).startswith(date)]
+                for date in dates
+            }
+            result = {date: {"members": [], "member_paths": []} for date in dates if date_indices.get(date)}
+            temperature_keys = [
+                key for key, values in hourly.items()
+                if key == "temperature_2m" or (key.startswith("temperature_2m_member") and isinstance(values, list))
+            ]
+            for temperature_key in temperature_keys:
+                suffix = temperature_key.removeprefix("temperature_2m")
+                member_id = "control" if not suffix else suffix.removeprefix("_")
+                for date, indices in date_indices.items():
+                    if date not in result:
                         continue
-                    result[date]["members"].append(round(float(values[idx]), 1))
+                    temperatures = [
+                        hourly[temperature_key][idx]
+                        for idx in indices
+                        if idx < len(hourly[temperature_key]) and hourly[temperature_key][idx] is not None
+                    ]
+                    if not temperatures:
+                        continue
+                    path = []
+                    for idx in indices:
+                        row = {"valid_at": times[idx]}
+                        for variable in FORECAST_HOURLY_VARIABLES:
+                            key = f"{variable}{suffix}"
+                            values = hourly.get(key) or []
+                            row[variable] = values[idx] if idx < len(values) else None
+                        path.append(row)
+                    high = round(max(float(value) for value in temperatures), 1)
+                    result[date]["members"].append(high)
+                    result[date]["member_paths"].append({
+                        "member_id": member_id,
+                        "member_name": member_id,
+                        "high_temp": high,
+                        "hourly": path,
+                    })
             for date, item in list(result.items()):
                 members = item["members"]
                 if len(members) < ENSEMBLE_MIN_MEMBERS:
@@ -420,6 +547,30 @@ def get_gfs_ensemble(city_slug, dates):
                 item["mean"] = round(statistics.mean(members), 1)
                 item["std"] = round(statistics.stdev(members), 2) if len(members) > 1 else 0.0
                 item["count"] = len(members)
+            result["__meta__"] = {
+                "provider": "open_meteo",
+                "model": "gfs_seamless",
+                "model_version": "provider_current",
+                "source": "gfs_ensemble",
+                "run_at": None,
+                "retrieved_at": retrieved_at,
+                "source_url": response.url,
+                "raw_response_hash": _payload_hash(data),
+                "data_license": "CC-BY-4.0",
+                "quality_flags": ["provider_run_time_unavailable"],
+                "response_metadata": {
+                    key: data.get(key)
+                    for key in (
+                        "latitude",
+                        "longitude",
+                        "generationtime_ms",
+                        "utc_offset_seconds",
+                        "timezone",
+                        "timezone_abbreviation",
+                        "elevation",
+                    )
+                },
+            }
             return result
         except Exception as e:
             if attempt < 2:
@@ -428,23 +579,158 @@ def get_gfs_ensemble(city_slug, dates):
                 print(f"  [GFS-ENS] {city_slug}: {e}")
     return {}
 
-def get_metar(city_slug):
-    """Current observed temperature from METAR station. D+0 only."""
+def get_metar_record(city_slug):
+    """Current observed temperature and raw metadata from the airport station."""
     loc = LOCATIONS[city_slug]
     station = loc["station"]
     unit = loc["unit"]
     try:
         url = f"https://aviationweather.gov/api/data/metar?ids={station}&format=json"
+        retrieved_at = datetime.now(timezone.utc).isoformat()
         data = get_json(url, timeout=(5, 8))
         if data and isinstance(data, list):
             temp_c = data[0].get("temp")
             if temp_c is not None:
-                if unit == "F":
-                    return round(float(temp_c) * 9/5 + 32)
-                return round(float(temp_c), 1)
+                temperature = round(float(temp_c) * 9/5 + 32) if unit == "F" else round(float(temp_c), 1)
+                return {
+                    "temperature": temperature,
+                    "observed_at": data[0].get("obsTime") or data[0].get("reportTime"),
+                    "retrieved_at": retrieved_at,
+                    "provider": "aviationweather",
+                    "model": "metar_observation",
+                    "source_url": url,
+                    "raw_response_hash": _payload_hash(data),
+                    "raw": data[0],
+                }
     except Exception as e:
         print(f"  [METAR] {city_slug}: {e}")
     return None
+
+
+def get_metar(city_slug):
+    record = get_metar_record(city_slug)
+    return record.get("temperature") if record else None
+
+
+def _forecast_valid_at(city_slug, target_date):
+    tz = _timezone(city_slug)
+    start = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=tz)
+    return (start + timedelta(days=1)).astimezone(timezone.utc).isoformat()
+
+
+def _forecast_lead_hours(valid_at, retrieved_at):
+    try:
+        valid = datetime.fromisoformat(str(valid_at).replace("Z", "+00:00"))
+        retrieved = datetime.fromisoformat(str(retrieved_at).replace("Z", "+00:00"))
+        return round((valid - retrieved).total_seconds() / 3600.0, 3)
+    except Exception:
+        return 0.0
+
+
+def persist_forecast_batches(city_slug, dates, batches, metar_record=None):
+    if not insert_forecast_run:
+        return []
+    loc = LOCATIONS[city_slug]
+    run_ids = []
+    for batch in batches:
+        meta = batch.get("__meta__") or {}
+        if not meta:
+            continue
+        for target_date in dates:
+            value = batch.get(target_date)
+            if value is None:
+                continue
+            if isinstance(value, dict):
+                mean_high = value.get("mean")
+                std_high = value.get("std")
+                members = value.get("member_paths") or []
+            else:
+                mean_high = value
+                std_high = 0.0
+                members = [{
+                    "member_id": "deterministic",
+                    "member_name": "deterministic",
+                    "high_temp": value,
+                    "hourly": (meta.get("hourly_by_date") or {}).get(target_date, []),
+                }]
+            valid_at = _forecast_valid_at(city_slug, target_date)
+            retrieved_at = meta.get("retrieved_at") or datetime.now(timezone.utc).isoformat()
+            lead_hours = _forecast_lead_hours(valid_at, retrieved_at)
+            source = str(meta.get("source") or meta.get("model") or "unknown")
+            raw_hash = str(meta.get("raw_response_hash") or "")
+            run = {
+                "run_key": f"{source}:{city_slug}:{target_date}:{raw_hash}",
+                "city": city_slug,
+                "target_date": target_date,
+                "source": source,
+                "provider": meta.get("provider"),
+                "model": meta.get("model"),
+                "model_version": meta.get("model_version"),
+                "run_type": "forecast",
+                "run_at": meta.get("run_at"),
+                "retrieved_at": retrieved_at,
+                "valid_at": valid_at,
+                "horizon": f"D+{max(0, (datetime.strptime(target_date, '%Y-%m-%d').date() - datetime.now(timezone.utc).date()).days)}",
+                "lead_hours": lead_hours,
+                "latitude": loc["lat"],
+                "longitude": loc["lon"],
+                "station_id": loc["station"],
+                "timezone": TIMEZONES.get(city_slug, "UTC"),
+                "unit": loc["unit"],
+                "mean_high": mean_high,
+                "std_high": std_high,
+                "member_count": len(members),
+                "source_url": meta.get("source_url"),
+                "raw_response_hash": raw_hash,
+                "data_license": meta.get("data_license"),
+                "quality_flags": meta.get("quality_flags") or [],
+                "training_eligible": lead_hours > 0,
+                "ineligibility_reason": None if lead_hours > 0 else "retrieved_after_target_local_day",
+                "response_metadata": meta.get("response_metadata") or {},
+            }
+            try:
+                run_ids.append(insert_forecast_run(run, members))
+            except Exception as exc:
+                print(f"  [FORECAST-STORE] {city_slug} {target_date} {source}: {exc}")
+
+    if metar_record:
+        today = datetime.now(ZoneInfo(TIMEZONES.get(city_slug, "UTC"))).strftime("%Y-%m-%d")
+        retrieved_at = metar_record.get("retrieved_at") or datetime.now(timezone.utc).isoformat()
+        run = {
+            "run_key": f"metar:{city_slug}:{metar_record.get('raw_response_hash') or retrieved_at}",
+            "city": city_slug,
+            "target_date": today,
+            "source": "metar",
+            "provider": metar_record.get("provider"),
+            "model": metar_record.get("model"),
+            "model_version": "station_report",
+            "run_type": "observation",
+            "run_at": metar_record.get("observed_at"),
+            "retrieved_at": retrieved_at,
+            "valid_at": metar_record.get("observed_at"),
+            "horizon": "D+0",
+            "lead_hours": 0.0,
+            "latitude": loc["lat"],
+            "longitude": loc["lon"],
+            "station_id": loc["station"],
+            "timezone": TIMEZONES.get(city_slug, "UTC"),
+            "unit": loc["unit"],
+            "mean_high": metar_record.get("temperature"),
+            "std_high": 0.0,
+            "member_count": 0,
+            "source_url": metar_record.get("source_url"),
+            "raw_response_hash": metar_record.get("raw_response_hash"),
+            "data_license": "US government public data",
+            "quality_flags": ["point_observation_not_daily_high"],
+            "training_eligible": False,
+            "ineligibility_reason": "observation_not_forecast",
+            "observation": metar_record.get("raw") or {},
+        }
+        try:
+            run_ids.append(insert_forecast_run(run))
+        except Exception as exc:
+            print(f"  [FORECAST-STORE] {city_slug} METAR: {exc}")
+    return run_ids
 
 def get_actual_observation(city_slug, date_str):
     """Actual high temperature plus provider metadata for calibration."""
@@ -757,7 +1043,10 @@ def take_forecast_snapshot(city_slug, dates):
     ensemble = get_gfs_ensemble(city_slug, dates)
     ecmwf   = get_ecmwf(city_slug, dates)
     hrrr    = get_hrrr(city_slug, dates)
-    today   = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    local_now = datetime.now(_timezone(city_slug))
+    today   = local_now.strftime("%Y-%m-%d")
+    metar_record = get_metar_record(city_slug) if today in dates else None
+    persist_forecast_batches(city_slug, dates, [ensemble, ecmwf, hrrr], metar_record)
 
     snapshots = {}
     for date in dates:
@@ -765,17 +1054,17 @@ def take_forecast_snapshot(city_slug, dates):
             "ts":    now_str,
             "ensemble": ensemble.get(date),
             "ecmwf": ecmwf.get(date),
-            "hrrr":  hrrr.get(date) if date <= (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y-%m-%d") else None,
-            "metar": get_metar(city_slug) if date == today else None,
+            "hrrr":  hrrr.get(date),
+            "metar": metar_record.get("temperature") if date == today and metar_record else None,
         }
-        # Best forecast: ensemble mean first, then HRRR for US D+0/D+1, otherwise ECMWF.
+        # Best forecast: ensemble mean first, then GFS seamless short range for US, otherwise ECMWF.
         loc = LOCATIONS[city_slug]
         if snap["ensemble"] and snap["ensemble"].get("mean") is not None:
             snap["best"] = snap["ensemble"]["mean"]
             snap["best_source"] = "gfs_ensemble"
         elif loc["region"] == "us" and snap["hrrr"] is not None:
             snap["best"] = snap["hrrr"]
-            snap["best_source"] = "hrrr"
+            snap["best_source"] = "gfs_seamless_short_range"
         elif snap["ecmwf"] is not None:
             snap["best"] = snap["ecmwf"]
             snap["best_source"] = "ecmwf"
@@ -802,7 +1091,7 @@ def scan_and_update():
         print(f"  -> {loc['name']}...", end=" ", flush=True)
 
         try:
-            dates = [(now + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(4)]
+            dates = target_dates_for_city(city_slug, 4, now)
             snapshots = take_forecast_snapshot(city_slug, dates)
             time.sleep(0.3)
         except Exception as e:
@@ -1083,20 +1372,41 @@ def scan_and_update():
                                     best_signal = candidate
 
                 if best_signal:
-                    # Fetch real bestAsk from Polymarket API for accurate entry price
+                    # Refresh the real CLOB book before accepting a signal.
                     skip_position = False
                     try:
-                        mdata = get_json(f"https://gamma-api.polymarket.com/markets/{best_signal['market_id']}", timeout=(3, 5))
-                        real_ask = float(mdata.get("bestAsk", best_signal["entry_price"]))
-                        real_bid = float(mdata.get("bestBid", best_signal["bid_at_entry"]))
-                        real_spread = round(real_ask - real_bid, 4)
+                        if not PolymarketDataClient:
+                            raise RuntimeError("v3 Polymarket client unavailable")
+                        quote = PolymarketDataClient().quote(best_signal["market_id"])
+                        real_ask = quote.best_ask
+                        real_bid = quote.best_bid
+                        real_spread = quote.spread
                         real_ev = round(calc_ev(best_signal["p"], real_ask), 4)
                         real_prob_edge = round(best_signal["p"] - real_ask, 4)
                         real_raw_ev = round(calc_ev(best_signal.get("raw_p", best_signal["p"]), real_ask), 4)
                         real_raw_prob_edge = round(best_signal.get("raw_p", best_signal["p"]) - real_ask, 4)
+                        constraint_errors = validate_order_constraints(
+                            quote,
+                            best_signal["cost"],
+                            real_ask,
+                        ) if validate_order_constraints else []
+                        fill = estimate_buy_fill(
+                            quote,
+                            best_signal["cost"],
+                            real_ask,
+                        ) if estimate_buy_fill else {
+                            "filled_amount": best_signal["cost"],
+                            "filled_shares": best_signal["cost"] / real_ask,
+                            "fully_filled": True,
+                            "remaining_amount": 0,
+                            "average_price": real_ask,
+                        }
                         # Re-check slippage and price with real values
                         if (
-                            real_spread > MAX_SLIPPAGE
+                            quote.book_source != "clob"
+                            or constraint_errors
+                            or fill["filled_shares"] <= 0
+                            or real_spread > MAX_SLIPPAGE
                             or real_ask < MIN_PRICE
                             or real_ask >= MAX_PRICE
                             or real_ev < MIN_EV
@@ -1105,27 +1415,30 @@ def scan_and_update():
                             print(
                                 f"  [SKIP] {loc['name']} {date} — real ask ${real_ask:.3f} "
                                 f"spread ${real_spread:.3f} EV {real_ev:+.2f} "
-                                f"prob edge {real_prob_edge:+.1%}"
+                                f"prob edge {real_prob_edge:+.1%} "
+                                f"book {quote.book_source} gates {','.join(constraint_errors) or 'ok'}"
                             )
                             skip_position = True
                         else:
-                            best_signal["entry_price"]  = real_ask
+                            best_signal["entry_price"]  = fill["average_price"] or real_ask
                             best_signal["bid_at_entry"] = real_bid
                             best_signal["spread"]       = real_spread
-                            best_signal["shares"]       = round(best_signal["cost"] / real_ask, 2)
+                            best_signal["requested_cost"] = best_signal["cost"]
+                            best_signal["cost"]         = round(fill["filled_amount"], 2)
+                            best_signal["shares"]       = round(fill["filled_shares"], 2)
+                            best_signal["unfilled_amount"] = fill["remaining_amount"]
+                            best_signal["fill_status"]  = "filled" if fill["fully_filled"] else "partial"
+                            best_signal["fill_levels"]  = fill["fills"]
                             best_signal["ev"]           = real_ev
                             best_signal["prob_edge"]    = real_prob_edge
                             best_signal["calibrated_ev"] = real_ev
                             best_signal["calibrated_prob_edge"] = real_prob_edge
                             best_signal["raw_ev"]       = real_raw_ev
                             best_signal["raw_prob_edge"] = real_raw_prob_edge
-                            real_tokens = parse_json_list(mdata.get("clobTokenIds", "[]"))
-                            if len(real_tokens) > 0:
-                                best_signal["yes_token_id"] = str(real_tokens[0])
-                            if len(real_tokens) > 1:
-                                best_signal["no_token_id"] = str(real_tokens[1])
+                            best_signal["yes_token_id"] = quote.yes_token_id or best_signal["yes_token_id"]
                     except Exception as e:
                         print(f"  [WARN] Could not fetch real ask for {best_signal['market_id']}: {e}")
+                        skip_position = True
 
                     if not skip_position and best_signal["entry_price"] < MAX_PRICE:
                         balance -= best_signal["cost"]
@@ -1430,7 +1743,7 @@ def run_loop():
     print(f"  Cities:     {len(LOCATIONS)}")
     print(f"  Balance:    ${BALANCE:,.0f} | Max bet: ${MAX_BET}")
     print(f"  Scan:       {SCAN_INTERVAL//60} min | Monitor: {MONITOR_INTERVAL//60} min")
-    print(f"  Sources:    ECMWF + HRRR(US) + METAR(D+0)")
+    print(f"  Sources:    ECMWF + GFS ensemble/seamless + METAR(D+0)")
     print(f"  Data:       {DATA_DIR.resolve()}")
     print(f"  Ctrl+C to stop\n")
 

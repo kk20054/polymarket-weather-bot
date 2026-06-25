@@ -5,14 +5,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.db import connect, init_v3_db
+from weatherbot_v3.db import connect, init_v3_db, insert_forecast_run, insert_orderbook, upsert_market_rule
 from weatherbot_v3.executor import PaperExecutor
-from weatherbot_v3.polymarket import quote_from_market_payload, validate_order_constraints
+from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.distribution import build_event_distribution
+from weatherbot_v3.qualification import build_data_readiness
+from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.truth import infer_settlement_rule
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from dashboard_server import AutoSimulationUpdate, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _live_gate, _metric_summary, _save_auto_simulation_state, update_auto_simulation
-from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric
+from dashboard_server import AutoSimulationUpdate, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _live_gate, _metric_summary, _position_from_signal, _save_auto_simulation_state, update_auto_simulation
+from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
+from datetime import datetime, timezone
 
 
 TEST_DB_DIR = Path(__file__).resolve().parents[1] / ".tmp-tests"
@@ -26,6 +29,11 @@ def test_db_path(name: str) -> Path:
 
 
 class V3CoreTests(unittest.TestCase):
+    def test_target_dates_follow_airport_local_day_not_utc_day(self):
+        now_utc = datetime(2026, 6, 25, 2, 0, tzinfo=timezone.utc)
+        self.assertEqual(target_dates_for_city("nyc", 2, now_utc), ["2026-06-24", "2026-06-25"])
+        self.assertEqual(target_dates_for_city("shanghai", 2, now_utc), ["2026-06-25", "2026-06-26"])
+
     def test_auto_simulation_state_persists_and_clamps_interval(self):
         TEST_DB_DIR.mkdir(exist_ok=True)
         state_path = TEST_DB_DIR / "auto-simulation.json"
@@ -74,6 +82,92 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(validate_order_constraints(quote, 5.0, 0.21), [])
         self.assertIn("below_order_min_size", validate_order_constraints(quote, 1.0, 0.21))
 
+    def test_clob_quote_uses_true_depth_and_estimates_partial_fill(self):
+        quote = quote_from_market_payload({
+            "id": "1",
+            "yes_token_id": "yes",
+            "snapshot_type": "clob",
+            "bids": [{"price": "0.18", "size": "20"}, {"price": "0.20", "size": "10"}],
+            "asks": [{"price": "0.25", "size": "20"}, {"price": "0.22", "size": "5"}],
+            "min_order_size": "5",
+            "tick_size": "0.01",
+            "enableOrderBook": True,
+        })
+        self.assertEqual(quote.best_bid, 0.20)
+        self.assertEqual(quote.best_ask, 0.22)
+        fill = estimate_buy_fill(quote, 2.0, 0.22)
+        self.assertFalse(fill["fully_filled"])
+        self.assertEqual(fill["filled_shares"], 5.0)
+        self.assertEqual(fill["filled_amount"], 1.1)
+
+    def test_orderbook_timestamp_blocks_stale_execution(self):
+        quote = quote_from_market_payload({
+            "id": "1",
+            "yes_token_id": "yes",
+            "snapshot_type": "clob",
+            "timestamp": "1609459200000",
+            "bids": [{"price": "0.20", "size": "10"}],
+            "asks": [{"price": "0.22", "size": "10"}],
+            "min_order_size": "5",
+            "tick_size": "0.01",
+            "enableOrderBook": True,
+        })
+        self.assertIn("orderbook_stale", validate_order_constraints(quote, 2.0, 0.22))
+
+    def test_orderbook_store_deduplicates_clob_hash_and_keeps_depth(self):
+        db_path = test_db_path("orderbook_store")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        payload = {
+            "yes_token_id": "yes",
+            "snapshot_type": "clob",
+            "timestamp": "1782355609949",
+            "hash": "book-hash",
+            "bids": [{"price": "0.20", "size": "10"}],
+            "asks": [{"price": "0.22", "size": "5"}],
+            "min_order_size": "5",
+            "tick_size": "0.01",
+        }
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            first_id = insert_orderbook("1", payload)
+            second_id = insert_orderbook("1", payload)
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) n, MAX(best_bid) bid, MAX(best_ask) ask, MAX(ask_depth) depth "
+                    "FROM orderbooks"
+                ).fetchone()
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(row["n"], 1)
+        self.assertEqual(row["bid"], 0.20)
+        self.assertEqual(row["ask"], 0.22)
+        self.assertEqual(row["depth"], 5.0)
+
+    def test_dashboard_position_uses_actual_partial_fill_not_requested_amount(self):
+        position = _position_from_signal(
+            {
+                "market_id": "1",
+                "limit_price": 0.22,
+                "bid_price": 0.20,
+                "question": "test",
+                "raw_json": "{}",
+            },
+            1.10,
+            "2026-06-25T00:00:00+00:00",
+            {
+                "status": "paper_partial",
+                "average_fill_price": 0.22,
+                "shares": 5.0,
+                "fill": {
+                    "filled_amount": 1.10,
+                    "remaining_amount": 0.90,
+                    "fills": [{"price": 0.22, "shares": 5.0, "amount": 1.10}],
+                },
+            },
+        )
+        self.assertEqual(position["cost"], 1.10)
+        self.assertEqual(position["shares"], 5.0)
+        self.assertEqual(position["unfilled_amount"], 0.90)
+        self.assertEqual(position["fill_status"], "paper_partial")
+
     def test_ai_disabled_default_allows_quant_flow(self):
         db_path = test_db_path("ai_disabled")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -95,6 +189,15 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("truth_observations", tables)
         self.assertIn("event_distributions", tables)
         self.assertIn("signal_decisions", tables)
+        self.assertIn("data_qualification_audits", tables)
+
+    def test_settlement_registry_has_station_and_timezone_for_all_cities(self):
+        self.assertEqual(len(SETTLEMENT_REGISTRY), 20)
+        for city, profile in SETTLEMENT_REGISTRY.items():
+            self.assertEqual(city, profile.city)
+            self.assertTrue(profile.station_id)
+            self.assertNotEqual(profile.timezone, "UTC")
+            self.assertIn(profile.unit, {"F", "C"})
 
     def test_settlement_rule_infers_station_and_wunderground_confidence(self):
         rule = infer_settlement_rule(
@@ -113,6 +216,141 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(rule.bucket_low, 80)
         self.assertEqual(rule.bucket_high, 81)
         self.assertGreaterEqual(rule.truth_confidence, 0.8)
+        self.assertEqual(rule.registry_version, "airport-settlement-registry-v1")
+        self.assertEqual(rule.timezone, "America/New_York")
+
+    def test_data_readiness_blocks_unverified_rules_and_missing_forecast_runs(self):
+        db_path = test_db_path("data_readiness")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            upsert_market_rule(infer_settlement_rule(
+                {
+                    "market_id": "nyc-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-test",
+                    "question": "Will the highest temperature in NYC be between 80-81°F on June 23?",
+                    "description": "Resolves according to Wunderground station history.",
+                    "date": "2026-06-23",
+                }
+            ).to_dict())
+            readiness = build_data_readiness(db_path)
+        self.assertFalse(readiness["live_allowed"])
+        self.assertEqual(readiness["summary"]["market_rules"], 1)
+        blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertIn("settlement_rule_not_manually_verified", blocker_codes)
+        self.assertIn("versioned_forecast_runs_missing", blocker_codes)
+
+    def test_forecast_run_store_deduplicates_response_and_keeps_hourly_members(self):
+        db_path = test_db_path("forecast_store")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        run = {
+            "run_key": "gfs:nyc:2026-06-25:hash1",
+            "city": "nyc",
+            "target_date": "2026-06-25",
+            "source": "gfs_ensemble",
+            "provider": "open_meteo",
+            "model": "gfs_seamless",
+            "model_version": "provider_current",
+            "run_type": "forecast",
+            "retrieved_at": "2026-06-25T00:00:00+00:00",
+            "valid_at": "2026-06-25T16:00:00+00:00",
+            "lead_hours": 16,
+            "latitude": 40.7772,
+            "longitude": -73.8726,
+            "station_id": "KLGA",
+            "timezone": "America/New_York",
+            "unit": "F",
+            "mean_high": 80,
+            "std_high": 1.5,
+            "member_count": 2,
+            "source_url": "https://ensemble-api.open-meteo.com/v1/ensemble",
+            "raw_response_hash": "hash1",
+            "data_license": "CC-BY-4.0",
+            "quality_flags": ["provider_run_time_unavailable"],
+        }
+        members = [
+            {
+                "member_id": "member01",
+                "high_temp": 79,
+                "hourly": [{"valid_at": "2026-06-25T12:00", "temperature_2m": 79}],
+            },
+            {
+                "member_id": "member02",
+                "high_temp": 81,
+                "hourly": [{"valid_at": "2026-06-25T12:00", "temperature_2m": 81}],
+            },
+        ]
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            first_id = insert_forecast_run(run, members)
+            second_id = insert_forecast_run(run, members)
+            with connect(db_path) as conn:
+                run_count = conn.execute("SELECT COUNT(*) FROM forecast_runs").fetchone()[0]
+                member_count = conn.execute("SELECT COUNT(*) FROM forecast_members").fetchone()[0]
+                hourly_json = conn.execute(
+                    "SELECT hourly_json FROM forecast_members WHERE member_id = 'member01'"
+                ).fetchone()[0]
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(run_count, 1)
+        self.assertEqual(member_count, 2)
+        self.assertIn("temperature_2m", hourly_json)
+
+    def test_scanner_batch_persistence_records_deterministic_and_ensemble_sources(self):
+        db_path = test_db_path("scanner_forecast_store")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        retrieved_at = "2026-06-25T00:00:00+00:00"
+        deterministic = {
+            "2026-06-25": 79,
+            "__meta__": {
+                "provider": "open_meteo",
+                "model": "ecmwf_ifs025",
+                "model_version": "provider_current",
+                "source": "ecmwf",
+                "retrieved_at": retrieved_at,
+                "source_url": "https://api.open-meteo.com/v1/forecast",
+                "raw_response_hash": "ecmwf-hash",
+                "data_license": "CC-BY-4.0",
+                "quality_flags": ["provider_run_time_unavailable"],
+                "hourly_by_date": {
+                    "2026-06-25": [{"valid_at": "2026-06-25T12:00", "temperature_2m": 79}]
+                },
+            },
+        }
+        ensemble = {
+            "2026-06-25": {
+                "mean": 80,
+                "std": 1,
+                "members": [79, 81],
+                "member_paths": [
+                    {"member_id": "member01", "high_temp": 79, "hourly": []},
+                    {"member_id": "member02", "high_temp": 81, "hourly": []},
+                ],
+            },
+            "__meta__": {
+                "provider": "open_meteo",
+                "model": "gfs_seamless",
+                "model_version": "provider_current",
+                "source": "gfs_ensemble",
+                "retrieved_at": retrieved_at,
+                "source_url": "https://ensemble-api.open-meteo.com/v1/ensemble",
+                "raw_response_hash": "gfs-hash",
+                "data_license": "CC-BY-4.0",
+                "quality_flags": ["provider_run_time_unavailable"],
+            },
+        }
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            run_ids = persist_forecast_batches("nyc", ["2026-06-25"], [ensemble, deterministic])
+            with connect(db_path) as conn:
+                sources = {
+                    row[0]: row[1]
+                    for row in conn.execute(
+                        "SELECT source, member_count FROM forecast_runs ORDER BY source"
+                    ).fetchall()
+                }
+        self.assertEqual(len(run_ids), 2)
+        self.assertEqual(sources["ecmwf"], 1)
+        self.assertEqual(sources["gfs_ensemble"], 2)
 
     def test_event_distribution_normalizes_all_buckets(self):
         dist = build_event_distribution(

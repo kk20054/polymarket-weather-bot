@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -23,6 +24,12 @@ class MarketQuote:
     tick_size: float
     enable_order_book: bool
     raw: dict[str, Any]
+    book_source: str = "gamma"
+    quote_timestamp: str = ""
+    book_hash: str = ""
+    bids: tuple[dict[str, float], ...] = ()
+    asks: tuple[dict[str, float], ...] = ()
+    quote_age_seconds: float | None = None
 
 
 class PolymarketDataClient:
@@ -36,10 +43,34 @@ class PolymarketDataClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_orderbook(self, token_id: str) -> dict[str, Any]:
+        resp = self.session.get(
+            "https://clob.polymarket.com/book",
+            params={"token_id": token_id},
+            timeout=(5, 10),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        data["snapshot_type"] = "clob"
+        data["source_url"] = resp.url
+        return data
+
     def quote(self, market_id: str) -> MarketQuote:
         data = self.get_market(market_id)
-        quote = quote_from_market_payload(data, self.cfg.default_order_min_size, self.cfg.default_tick_size)
-        insert_orderbook(market_id, {**data, "yes_token_id": quote.yes_token_id})
+        gamma_quote = quote_from_market_payload(data, self.cfg.default_order_min_size, self.cfg.default_tick_size)
+        merged = {**data, "yes_token_id": gamma_quote.yes_token_id}
+        if gamma_quote.yes_token_id:
+            try:
+                book = self.get_orderbook(gamma_quote.yes_token_id)
+                merged.update(book)
+                merged["yes_token_id"] = gamma_quote.yes_token_id
+                merged["volume"] = data.get("volume")
+                merged["enableOrderBook"] = data.get("enableOrderBook", True)
+            except Exception as exc:
+                merged["snapshot_type"] = "gamma_fallback"
+                merged["orderbook_error"] = str(exc)
+        quote = quote_from_market_payload(merged, self.cfg.default_order_min_size, self.cfg.default_tick_size)
+        insert_orderbook(market_id, merged)
         return quote
 
 
@@ -47,14 +78,18 @@ def quote_from_market_payload(data: dict[str, Any], default_order_min_size: floa
     prices = _parse_list(data.get("outcomePrices"))
     tokens = _parse_list(data.get("clobTokenIds"))
     yes_price = _to_float(prices[0], 0.0) if prices else 0.0
-    best_bid = _to_float(data.get("bestBid"), yes_price)
-    best_ask = _to_float(data.get("bestAsk"), yes_price)
+    bids = tuple(_levels(data.get("bids")))
+    asks = tuple(_levels(data.get("asks")))
+    best_bid = max((level["price"] for level in bids), default=_to_float(data.get("bestBid"), yes_price))
+    best_ask = min((level["price"] for level in asks), default=_to_float(data.get("bestAsk"), yes_price))
     spread = _to_float(data.get("spread"), best_ask - best_bid)
-    tick_size = _to_float(data.get("orderPriceMinTickSize"), default_tick_size)
-    order_min_size = _to_float(data.get("orderMinSize"), default_order_min_size)
+    tick_size = _to_float(data.get("tick_size"), _to_float(data.get("orderPriceMinTickSize"), default_tick_size))
+    order_min_size = _to_float(data.get("min_order_size"), _to_float(data.get("orderMinSize"), default_order_min_size))
+    quote_timestamp = str(data.get("quote_timestamp") or data.get("timestamp") or "")
+    quote_age_seconds = _quote_age_seconds(quote_timestamp)
     return MarketQuote(
         market_id=str(data.get("id") or ""),
-        yes_token_id=str(tokens[0]) if tokens else "",
+        yes_token_id=str(tokens[0]) if tokens else str(data.get("yes_token_id") or data.get("asset_id") or ""),
         best_bid=round(best_bid, 4),
         best_ask=round(best_ask, 4),
         spread=round(spread, 4),
@@ -63,6 +98,12 @@ def quote_from_market_payload(data: dict[str, Any], default_order_min_size: floa
         tick_size=tick_size,
         enable_order_book=bool(data.get("enableOrderBook", True)),
         raw=data,
+        book_source=str(data.get("snapshot_type") or ("clob" if bids or asks else "gamma")),
+        quote_timestamp=quote_timestamp,
+        book_hash=str(data.get("hash") or ""),
+        bids=bids,
+        asks=asks,
+        quote_age_seconds=quote_age_seconds,
     )
 
 
@@ -88,7 +129,38 @@ def validate_order_constraints(quote: MarketQuote, amount: float, limit_price: f
         errors.append("non_positive_amount")
     if not quote.yes_token_id:
         errors.append("missing_yes_token")
+    if quote.quote_age_seconds is not None and quote.quote_age_seconds > cfg.orderbook_max_age_minutes * 60:
+        errors.append("orderbook_stale")
     return errors
+
+
+def estimate_buy_fill(quote: MarketQuote, amount: float, limit_price: float) -> dict[str, Any]:
+    remaining = max(0.0, float(amount))
+    filled_shares = 0.0
+    spent = 0.0
+    fills = []
+    for level in sorted(quote.asks, key=lambda item: item["price"]):
+        price = float(level["price"])
+        if price > limit_price + 1e-9 or remaining <= 1e-9:
+            break
+        available_shares = max(0.0, float(level["size"]))
+        shares = min(available_shares, remaining / price)
+        if shares <= 0:
+            continue
+        cost = shares * price
+        fills.append({"price": price, "shares": shares, "amount": cost})
+        filled_shares += shares
+        spent += cost
+        remaining -= cost
+    average_price = spent / filled_shares if filled_shares > 0 else 0.0
+    return {
+        "filled_shares": round(filled_shares, 6),
+        "filled_amount": round(spent, 6),
+        "remaining_amount": round(max(0.0, remaining), 6),
+        "average_price": round(average_price, 6),
+        "fully_filled": remaining <= 0.01,
+        "fills": fills,
+    }
 
 
 def round_price_to_tick(price: float, tick_size: float) -> float:
@@ -115,6 +187,33 @@ def _parse_list(raw: Any) -> list[Any]:
         return value if isinstance(value, list) else []
     except Exception:
         return []
+
+
+def _levels(raw: Any) -> list[dict[str, float]]:
+    values = _parse_list(raw) if isinstance(raw, str) else (raw or [])
+    levels = []
+    for item in values:
+        try:
+            levels.append({"price": float(item.get("price")), "size": float(item.get("size"))})
+        except Exception:
+            continue
+    return levels
+
+
+def _quote_age_seconds(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        raw = str(value)
+        if raw.isdigit():
+            timestamp = datetime.fromtimestamp(int(raw) / 1000.0, tz=timezone.utc)
+        else:
+            timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)).total_seconds())
+    except Exception:
+        return None
 
 
 def _to_float(value: Any, default: float) -> float:

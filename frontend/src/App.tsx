@@ -24,6 +24,7 @@ import {
   updateSignalStatus,
 } from './api'
 import { EquityChart } from './components/EquityChart'
+import { DataReadinessPanel } from './components/DataReadinessPanel'
 import { SignalsTable } from './components/SignalsTable'
 import { StatsCards } from './components/StatsCards'
 import { TemperatureFitPage } from './components/TemperatureFitPage'
@@ -86,6 +87,16 @@ function reasonLabel(reason: string) {
     roi_negative: 'ROI 为负',
     win_rate_low: '胜率偏低',
     strategy_not_ready: '策略尚未达标',
+    resolved_sample_below_30: '已结算样本 < 30',
+    allowed_sample_below_20: '允许组样本 < 20',
+    allowed_group_pnl_negative: '允许组 PnL 为负',
+    allowed_group_roi_negative: '允许组 ROI 为负',
+    allowed_win_rate_low: '允许组胜率偏低',
+    settlement_rule_not_manually_verified: '结算规则未核验',
+    timezone_mismatch: '规则时区不一致',
+    independent_truth_days_below_min: '独立 Truth 日不足',
+    all_orderbooks_stale: '盘口快照已过期',
+    fresh_clob_depth_missing: 'CLOB 深度缺失',
   }
   return map[reason] ?? reason
 }
@@ -404,6 +415,7 @@ function App() {
   const trades = data?.recent_trades ?? []
   const equityCurve = data?.equity_curve ?? []
   const truthHealth = data?.truth_health ?? null
+  const dataReadiness = data?.data_readiness ?? null
   const actionable = signals.filter(signal => signal.actionable).length
   const liveAvailable = Boolean(stats.strategy_live_ready && data?.v3?.config?.live_trading)
   const autoSimulation = stats.auto_simulation ?? {
@@ -529,6 +541,10 @@ function App() {
           <TradeModeSwitch mode={tradeMode} liveAvailable={liveAvailable} onMode={setTradeMode} />
 
           <ReadinessBanner stats={stats} />
+
+          <div className="border border-neutral-800 bg-black">
+            <DataReadinessPanel readiness={dataReadiness} />
+          </div>
 
           <div>
             <SimulationCard

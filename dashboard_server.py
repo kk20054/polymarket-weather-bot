@@ -41,6 +41,7 @@ from weatherbot_v3.executor import LiveExecutor, PaperExecutor
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
 from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.notifier import FeishuNotifier
+from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
 from weatherbot_v3.truth import infer_settlement_rule
 
 
@@ -494,12 +495,18 @@ def _market_path_for_signal(signal):
     return MARKETS_DIR / f"{city}_{date}.json"
 
 
-def _position_from_signal(signal, amount, opened_at):
+def _position_from_signal(signal, amount, opened_at, execution=None):
     raw = _read_json_from_text(signal.get("raw_json"), {})
+    execution = execution or {}
     low, high = _bucket_bounds(signal)
-    entry_price = float(signal.get("limit_price") or raw.get("entry_price") or 0)
+    entry_price = float(
+        execution.get("average_fill_price")
+        or signal.get("limit_price")
+        or raw.get("entry_price")
+        or 0
+    )
     bid_price = float(signal.get("bid_price") or raw.get("bid_at_entry") or entry_price)
-    shares = round(amount / entry_price, 2) if entry_price > 0 else 0
+    shares = float(execution.get("shares") or (round(amount / entry_price, 2) if entry_price > 0 else 0))
     return {
         "market_id": signal.get("market_id") or raw.get("market_id"),
         "event_url": signal.get("event_url") or raw.get("event_url"),
@@ -513,6 +520,11 @@ def _position_from_signal(signal, amount, opened_at):
         "spread": signal.get("spread") if signal.get("spread") is not None else raw.get("spread"),
         "shares": shares,
         "cost": round(amount, 2),
+        "requested_cost": execution.get("fill", {}).get("filled_amount", amount)
+        + execution.get("fill", {}).get("remaining_amount", 0),
+        "unfilled_amount": execution.get("fill", {}).get("remaining_amount", 0),
+        "fill_status": execution.get("status") or "legacy_fill",
+        "fill_levels": execution.get("fill", {}).get("fills", []),
         "p": signal.get("probability") if signal.get("probability") is not None else raw.get("p"),
         "ev": signal.get("ev") if signal.get("ev") is not None else raw.get("ev"),
         "kelly": signal.get("kelly") if signal.get("kelly") is not None else raw.get("kelly"),
@@ -530,7 +542,7 @@ def _position_from_signal(signal, amount, opened_at):
     }
 
 
-def _open_paper_position(signal, amount, simulation_start, opened_at):
+def _open_paper_position(signal, amount, simulation_start, opened_at, execution=None):
     path = _market_path_for_signal(signal)
     if not path or amount <= 0:
         return False
@@ -551,7 +563,7 @@ def _open_paper_position(signal, amount, simulation_start, opened_at):
         history.append(archived)
         market["position_history"] = history
 
-    market["position"] = _position_from_signal(signal, amount, opened_at)
+    market["position"] = _position_from_signal(signal, amount, opened_at, execution)
     market["status"] = "open"
     market["pnl"] = None
     market["resolved_outcome"] = None
@@ -2239,6 +2251,7 @@ def build_dashboard_payload():
     weather_forecasts_by_city = {}
     weather_city_series = _build_weather_city_series(markets)
     truth_health = _build_truth_health(markets)
+    data_readiness = build_data_readiness()
     truth_by_city = _truth_city_lookup(truth_health)
     temperature_fit = _build_temperature_fit(markets)
     fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
@@ -2580,6 +2593,12 @@ def build_dashboard_payload():
         readiness_reasons.append("open_meteo_truth_fallback_present")
     if truth_health.get("legacy_unknown", 0) > 0:
         readiness_reasons.append("legacy_truth_unknown")
+    if not data_readiness.get("live_allowed"):
+        readiness_reasons.extend(
+            str(reason.get("code") or "")
+            for reason in data_readiness.get("blockers", [])
+            if reason.get("code")
+        )
     if readiness_reasons:
         strategy_readiness = {
             **strategy_readiness,
@@ -2633,6 +2652,7 @@ def build_dashboard_payload():
     return {
         "stats": stats,
         "v3": v3_dashboard_summary(),
+        "data_readiness": data_readiness,
         "truth_health": truth_health,
         "btc_price": None,
         "microstructure": None,
@@ -2707,6 +2727,7 @@ async def startup():
     init_db()
     init_v3_db()
     migrate_legacy_signals(500)
+    persist_data_readiness(build_data_readiness())
     _cleanup_stale_bot_process()
     _ensure_auto_simulation_task()
     log_event("info", "Dashboard started")
@@ -2764,6 +2785,13 @@ async def truth_coverage():
         "local": _build_truth_health(markets),
         "db": truth_coverage_summary(),
     }
+
+
+@app.get("/api/data-readiness")
+async def data_readiness():
+    payload = build_data_readiness()
+    persist_data_readiness(payload)
+    return payload
 
 
 @app.post("/api/weather/backfill-history")
@@ -3035,13 +3063,22 @@ def _bulk_simulate_signals_once(log_when_idle=True):
             update_signal_status(signal["id"], "skipped", f"v3 paper rejected: {result.reason}", amount)
             skip(signal, f"paper_rejected:{result.reason or 'unknown'}")
             continue
-        if not _open_paper_position(signal, amount, simulation_start, opened_at):
+        filled_amount = float(result.payload.get("amount") or 0)
+        if filled_amount <= 0:
+            skip(signal, "paper_fill_zero")
+            continue
+        if not _open_paper_position(signal, filled_amount, simulation_start, opened_at, result.payload):
             skip(signal, "position_write_failed")
             continue
-        update_signal_status(signal["id"], "simulated", f"Bulk paper amount ${amount:.2f}", amount)
+        update_signal_status(
+            signal["id"],
+            "simulated",
+            f"Bulk paper {result.status} ${filled_amount:.2f}",
+            filled_amount,
+        )
         count += 1
-        spent += amount
-        remaining -= amount
+        spent += filled_amount
+        remaining -= filled_amount
     if spent > 0:
         state["balance"] = round(max(0.0, remaining), 2)
         state["total_trades"] = int(state.get("total_trades", 0) or 0) + count
@@ -3117,8 +3154,16 @@ async def signal_status(signal_id: int, update: StatusUpdate):
             log_event("warning", f"Signal {signal_id} v3 paper rejected: {result.reason}", result.payload)
             return {"ok": False, "error": result.reason or "paper_rejected"}
         opened_at = datetime.now(timezone.utc).isoformat()
-        if _open_paper_position(signal, amount, _parse_iso(state.get("simulation_started_at")), opened_at):
-            state["balance"] = round(cash - amount, 2)
+        filled_amount = float(result.payload.get("amount") or 0)
+        if _open_paper_position(
+            signal,
+            filled_amount,
+            _parse_iso(state.get("simulation_started_at")),
+            opened_at,
+            result.payload,
+        ):
+            amount = filled_amount
+            state["balance"] = round(cash - filled_amount, 2)
             state["total_trades"] = int(state.get("total_trades", 0) or 0) + 1
             _write_json(DATA_DIR / "state.json", state)
     if amount is not None:
