@@ -9,6 +9,7 @@ from weatherbot_v3.db import bulk_settlement_contract_verification, connect, ini
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.distribution import build_event_distribution
+from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
@@ -469,6 +470,103 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(run_count, 1)
         self.assertEqual(member_count, 2)
         self.assertIn("temperature_2m", hourly_json)
+
+    def test_model_dataset_audit_requires_no_leak_forecasts_and_verified_contract(self):
+        db_path = test_db_path("model_dataset_audit")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-dataset-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-dataset",
+                    "question": "Will the highest temperature in NYC be between 80-81°F on June 23?",
+                    "description": "Resolves using Wunderground station KLGA history.",
+                    "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/2026-6-23",
+                    "date": "2026-06-23",
+                }
+            )
+            upsert_market_rule(rule.to_dict())
+            upsert_settlement_contracts([settlement_contract_from_rule(rule)])
+            set_settlement_contract_verification("nyc-dataset", True, reviewer="test", note="station checked")
+            upsert_truth_observation({
+                "city": "nyc",
+                "city_name": "New York City",
+                "target_date": "2026-06-23",
+                "station_id": "KLGA",
+                "station_name": "LaGuardia Airport",
+                "unit": "F",
+                "actual_temp": 80,
+                "provider": "nws_station",
+                "source_url": "https://example.test/noaa",
+                "observation_count": 24,
+                "source_confidence": 0.95,
+                "calibration_eligible": True,
+                "reason_if_ineligible": "",
+            })
+            for source in ("ecmwf", "gfs_ensemble"):
+                insert_forecast_run(
+                    {
+                        "run_key": f"{source}:nyc:2026-06-23:no-leak",
+                        "city": "nyc",
+                        "target_date": "2026-06-23",
+                        "source": source,
+                        "provider": "open_meteo",
+                        "model": source,
+                        "model_version": "test",
+                        "run_type": "forecast",
+                        "run_at": "2026-06-22T12:00:00+00:00",
+                        "retrieved_at": "2026-06-22T12:05:00+00:00",
+                        "valid_at": "2026-06-23T18:00:00+00:00",
+                        "lead_hours": 30,
+                        "station_id": "KLGA",
+                        "timezone": "America/New_York",
+                        "unit": "F",
+                        "mean_high": 80,
+                        "std_high": 2,
+                        "training_eligible": True,
+                    },
+                    [{"member_id": "m1", "high_temp": 80.2}],
+                )
+            insert_forecast_run(
+                {
+                    "run_key": "ecmwf:nyc:2026-06-23:future",
+                    "city": "nyc",
+                    "target_date": "2026-06-23",
+                    "source": "ecmwf",
+                    "provider": "open_meteo",
+                    "model": "ecmwf",
+                    "model_version": "test",
+                    "run_type": "forecast",
+                    "run_at": "2026-06-24T12:00:00+00:00",
+                    "retrieved_at": "2026-06-24T12:05:00+00:00",
+                    "valid_at": "2026-06-23T18:00:00+00:00",
+                    "lead_hours": 30,
+                    "station_id": "KLGA",
+                    "timezone": "America/New_York",
+                    "unit": "F",
+                    "mean_high": 81,
+                    "std_high": 1,
+                    "training_eligible": True,
+                },
+                [{"member_id": "future", "high_temp": 81.0}],
+            )
+            insert_orderbook("nyc-dataset-1", {
+                "snapshot_key": "nyc-dataset-ob",
+                "bids": [{"price": "0.30", "size": "50"}],
+                "asks": [{"price": "0.33", "size": "40"}],
+                "quote_timestamp": "2026-06-22T12:10:00+00:00",
+            })
+            audit = build_model_dataset_audit(db_path, min_samples=1)
+
+        self.assertEqual(audit["status"], "ready")
+        self.assertEqual(audit["summary"]["training_eligible_samples"], 1)
+        self.assertEqual(audit["summary"]["baseline_ready_samples"], 1)
+        self.assertEqual(audit["summary"]["replay_ready_samples"], 1)
+        self.assertEqual(audit["leakage_flags"]["forecast_after_target_start"], 1)
+        self.assertEqual(audit["samples"][0]["no_leak_forecast_runs"], 2)
 
     def test_scanner_batch_persistence_records_deterministic_and_ensemble_sources(self):
         db_path = test_db_path("scanner_forecast_store")

@@ -640,10 +640,44 @@ export interface BulkSimulateResult {
   examples: BulkSimulateSkipExample[]
 }
 
+export interface ModelDatasetAudit {
+  audit_version: string
+  generated_at: string
+  status: 'ready' | 'blocked'
+  required_samples: number
+  summary: {
+    event_days: number
+    training_eligible_samples: number
+    baseline_ready_samples: number
+    replay_ready_samples: number
+    blocked_samples: number
+    cities: number
+    eligible_cities: number
+    baseline_ready_cities: number
+  }
+  reason_counts: Record<string, number>
+  leakage_flags: Record<string, number>
+  source_counts: Record<string, number>
+  horizon_counts: Record<string, number>
+  cities: Array<{
+    city: string
+    city_name: string
+    samples: number
+    training_eligible: number
+    baseline_ready: number
+    replay_ready: number
+    eligible_truth: number
+    no_leak_forecast_runs: number
+    warnings: Record<string, number>
+    reasons: Record<string, number>
+  }>
+}
+
 export interface DashboardData {
   stats: BotStats
   v3?: V3Summary
   data_readiness?: DataReadiness
+  model_dataset_audit?: ModelDatasetAudit
   truth_health?: TruthHealth
   btc_price: BtcPrice | null
   microstructure: Microstructure | null

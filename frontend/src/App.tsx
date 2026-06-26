@@ -34,6 +34,7 @@ import { TemperatureFitPage } from './components/TemperatureFitPage'
 import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
+import { ModelDatasetPanel } from './components/ModelDatasetPanel'
 import type { AutoSimulationStatus, BotStats, DataReadiness } from './types'
 
 const GlobeView = lazy(() => import('./components/GlobeView').then(module => ({ default: module.GlobeView })))
@@ -453,6 +454,7 @@ function App() {
   const equityCurve = data?.equity_curve ?? []
   const truthHealth = data?.truth_health ?? null
   const dataReadiness = data?.data_readiness ?? null
+  const modelDatasetAudit = data?.model_dataset_audit ?? null
   const actionable = signals.filter(signal => signal.actionable).length
   const liveAvailable = Boolean(stats.strategy_live_ready && data?.v3?.config?.live_trading)
   const autoSimulation = stats.auto_simulation ?? {
@@ -641,6 +643,10 @@ function App() {
             >
               打开温度拟合
             </button>
+          </div>
+
+          <div className="border border-neutral-800 bg-black">
+            <ModelDatasetPanel audit={modelDatasetAudit} />
           </div>
 
           <div className="border border-neutral-800 bg-black p-3">

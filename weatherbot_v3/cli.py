@@ -7,6 +7,7 @@ import time
 
 from .db import bulk_settlement_contract_verification, connect, dashboard_summary, init_v3_db, list_settlement_contracts, set_settlement_contract_verification
 from .migration import audit_market_files, migrate_legacy_signals, repair_truth_temporal_mismatches, sync_settlement_contracts
+from .model_dataset import build_model_dataset_audit
 from .notifier import FeishuNotifier
 from .qualification import build_data_readiness, persist_data_readiness
 
@@ -23,6 +24,7 @@ def main() -> None:
             "summary",
             "notify-daily",
             "data-readiness",
+            "model-dataset-audit",
             "forecast-backfill",
             "orderbook-backfill",
             "contracts-sync",
@@ -62,6 +64,9 @@ def main() -> None:
     elif args.command == "data-readiness":
         payload = build_data_readiness()
         persist_data_readiness(payload)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.command == "model-dataset-audit":
+        payload = build_model_dataset_audit(min_samples=args.limit)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "forecast-backfill":
         from bot_v2 import LOCATIONS, take_forecast_snapshot, target_dates_for_city

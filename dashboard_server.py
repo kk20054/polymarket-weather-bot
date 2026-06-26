@@ -40,6 +40,7 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
 from weatherbot_v3.migration import migrate_legacy_signals
+from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.notifier import FeishuNotifier
 from weatherbot_v3.polymarket import PolymarketDataClient
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
@@ -2556,6 +2557,7 @@ def build_dashboard_payload():
         "brier_score": (sum(brier_values) / len(brier_values)) if brier_values else 0,
     }
     backtest_summary = _build_backtest_summary(markets)
+    model_dataset_audit = build_model_dataset_audit()
     strategy_readiness = backtest_summary.get("strategy_readiness") or {}
     cfg = load_v3_config()
     readiness_reasons = list(strategy_readiness.get("reasons") or [])
@@ -2621,6 +2623,7 @@ def build_dashboard_payload():
         "stats": stats,
         "v3": v3_dashboard_summary(),
         "data_readiness": data_readiness,
+        "model_dataset_audit": model_dataset_audit,
         "truth_health": truth_health,
         "btc_price": None,
         "microstructure": None,
@@ -2741,6 +2744,11 @@ async def backtest_policies():
         "strategy_readiness": summary.get("strategy_readiness", {}),
         "notes": summary.get("notes", []),
     }
+
+
+@app.get("/api/model-dataset/audit")
+async def model_dataset_audit():
+    return build_model_dataset_audit()
 
 
 @app.get("/api/temperature-fit")
