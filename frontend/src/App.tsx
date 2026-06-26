@@ -24,6 +24,7 @@ import {
   stopBot,
   updateSignalStatus,
   verifySettlementContract,
+  verifySettlementContractsBulk,
 } from './api'
 import { EquityChart } from './components/EquityChart'
 import { DataReadinessPanel } from './components/DataReadinessPanel'
@@ -33,7 +34,7 @@ import { TemperatureFitPage } from './components/TemperatureFitPage'
 import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
-import type { AutoSimulationStatus, BotStats } from './types'
+import type { AutoSimulationStatus, BotStats, DataReadiness } from './types'
 
 const GlobeView = lazy(() => import('./components/GlobeView').then(module => ({ default: module.GlobeView })))
 type TradeMode = 'paper' | 'live'
@@ -104,15 +105,21 @@ function reasonLabel(reason: string) {
   return map[reason] ?? reason
 }
 
-function ReadinessBanner({ stats }: { stats: BotStats }) {
+function ReadinessBanner({ stats, readiness }: { stats: BotStats; readiness?: DataReadiness | null }) {
   const ready = Boolean(stats.strategy_live_ready)
   const reasons = stats.strategy_readiness_reasons ?? []
+  const phase = readiness?.production_phase
   return (
     <div className={`border px-3 py-2 ${ready ? 'border-green-500/30 bg-green-500/10' : 'border-amber-500/30 bg-amber-500/10'}`}>
       <div className="flex items-center gap-2">
         {ready ? <CheckCircle2 className="h-4 w-4 text-green-300" /> : <ShieldAlert className="h-4 w-4 text-amber-300" />}
-        <div className="text-sm font-medium text-neutral-100">
-          {ready ? '实盘门槛已通过，但仍建议从 $1-$2 canary 开始' : '当前只允许模拟观察，实盘按钮已锁定'}
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-neutral-100">
+            {phase ? `${phase.label}：${phase.name}` : ready ? '实盘门槛已通过，但仍建议从 $1-$2 canary 开始' : '当前只允许模拟观察，实盘按钮已锁定'}
+          </div>
+          <div className="truncate text-[10px] text-neutral-500">
+            {ready ? '实盘门槛已通过，但仍建议从 $1-$2 canary 开始。' : phase?.operator_action ?? '当前只允许模拟观察，实盘按钮已锁定。'}
+          </div>
         </div>
       </div>
       {!ready && (
@@ -415,6 +422,13 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     },
   })
+  const bulkVerifyContractMutation = useMutation({
+    mutationFn: (contractIds: string[]) => verifySettlementContractsBulk(contractIds, true),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    },
+  })
   const resetSimulationMutation = useMutation({
     mutationFn: ({ balance, clear }: { balance: number; clear: boolean }) => resetSimulation(balance, clear),
     onSuccess: result => {
@@ -563,14 +577,16 @@ function App() {
 
           <TradeModeSwitch mode={tradeMode} liveAvailable={liveAvailable} onMode={setTradeMode} />
 
-          <ReadinessBanner stats={stats} />
+          <ReadinessBanner stats={stats} readiness={dataReadiness} />
 
           <div className="border border-neutral-800 bg-black">
             <DataReadinessPanel
               readiness={dataReadiness}
               contracts={contractsQuery.data}
               verifyingContractId={verifyContractMutation.variables}
+              bulkVerifying={bulkVerifyContractMutation.isPending}
               onVerifyContract={(contractId) => verifyContractMutation.mutate(contractId)}
+              onVerifyVisibleContracts={(contractIds) => bulkVerifyContractMutation.mutate(contractIds)}
             />
           </div>
 

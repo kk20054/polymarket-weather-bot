@@ -280,12 +280,14 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         for reason in stage["reasons"]
         if reason["count"] > 0
     ]
+    phase = _production_phase(stages, blockers, len(contracts), len(rules))
     return {
         "audit_version": AUDIT_VERSION,
         "generated_at": now.isoformat(),
         "status": "ready" if passed == len(stages) else "blocked",
         "score": round(passed / len(stages), 3),
         "live_allowed": passed == len(stages),
+        "production_phase": phase,
         "stages": stages,
         "blockers": blockers,
         "cities": city_rows,
@@ -299,6 +301,60 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             "forecast_members": forecast_member_count,
             "orderbook_snapshots": len(orderbooks),
         },
+    }
+
+
+def _production_phase(
+    stages: list[dict[str, Any]],
+    blockers: list[dict[str, Any]],
+    contract_count: int,
+    rule_count: int,
+) -> dict[str, Any]:
+    stage_status = {str(stage.get("key")): str(stage.get("status")) for stage in stages}
+    blocker_codes = {str(reason.get("code") or "") for reason in blockers}
+    blocked_keys = [str(stage.get("key")) for stage in stages if stage.get("status") != "ready"]
+
+    if not rule_count or not contract_count or "settlement_contracts_missing" in blocker_codes:
+        return {
+            "id": "phase0",
+            "label": "Phase 0",
+            "name": "审计与数据基座启动",
+            "status": "active",
+            "next": "Phase 1：合同、Truth、预测和盘口入库",
+            "operator_action": "先同步市场规则和结算合同，再生成数据资格审计。",
+            "blocked_keys": blocked_keys,
+        }
+
+    if "settlement_rule_not_manually_verified" in blocker_codes:
+        return {
+            "id": "phase1_5",
+            "label": "Phase 1.5",
+            "name": "合同核验与数据闸门收尾",
+            "status": "active",
+            "next": "Phase 2：无泄漏概率模型与策略稳定化",
+            "operator_action": "优先核验自动解析可信的结算合同，清掉实盘数据闸门。",
+            "blocked_keys": blocked_keys,
+        }
+
+    if any(status != "ready" for status in stage_status.values()):
+        return {
+            "id": "phase1",
+            "label": "Phase 1",
+            "name": "真实数据基座补齐",
+            "status": "active",
+            "next": "Phase 2：无泄漏概率模型与策略稳定化",
+            "operator_action": "补齐 blocked 阶段所需的 Truth、预测运行或 CLOB 盘口快照。",
+            "blocked_keys": blocked_keys,
+        }
+
+    return {
+        "id": "phase2_ready",
+        "label": "Phase 2",
+        "name": "可进入概率模型稳定化",
+        "status": "ready_for_next",
+        "next": "Phase 2：训练、回放、校准和策略组验证",
+        "operator_action": "数据闸门已过，下一步验证概率模型和 paper trading edge。",
+        "blocked_keys": blocked_keys,
     }
 
 

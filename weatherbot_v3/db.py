@@ -1141,6 +1141,88 @@ def set_settlement_contract_verification(
     return _decode_contract_row(dict(updated))
 
 
+def bulk_settlement_contract_verification(
+    contract_ids: list[str] | None = None,
+    limit: int = 5,
+    reviewer: str = "",
+    note: str = "",
+    require_auto_verified: bool = True,
+    apply: bool = False,
+) -> dict[str, Any]:
+    init_v3_db()
+    limit = max(1, min(int(limit or 5), 50))
+    contract_ids = [str(item).strip() for item in (contract_ids or []) if str(item).strip()]
+    where = ["(manual_verified_at IS NULL OR manual_verified_at = '')"]
+    params: list[Any] = []
+    if require_auto_verified:
+        where.append("auto_verified_at IS NOT NULL AND auto_verified_at != ''")
+    if contract_ids:
+        placeholders = ",".join("?" for _ in contract_ids)
+        where.append(f"(contract_id IN ({placeholders}) OR event_slug IN ({placeholders}))")
+        params.extend(contract_ids)
+        params.extend(contract_ids)
+    clause = " AND ".join(where)
+    now = utc_now()
+    with connect() as conn:
+        rows = [
+            _decode_contract_row(dict(row))
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM settlement_contracts
+                WHERE {clause}
+                ORDER BY target_local_date DESC, city, event_slug
+                LIMIT ?
+                """,
+                [*params, limit],
+            ).fetchall()
+        ]
+        selected_ids = [str(row["contract_id"]) for row in rows]
+        skipped_requested = [
+            item for item in contract_ids
+            if item not in selected_ids and item not in {str(row.get("event_slug") or "") for row in rows}
+        ]
+        if apply and selected_ids:
+            placeholders = ",".join("?" for _ in selected_ids)
+            conn.execute(
+                f"""
+                UPDATE settlement_contracts
+                SET manual_verified_at = ?,
+                    manual_verified_by = ?,
+                    manual_verification_note = ?,
+                    updated_at = ?
+                WHERE contract_id IN ({placeholders})
+                """,
+                [now, reviewer, note, now, *selected_ids],
+            )
+            conn.execute(
+                f"""
+                UPDATE market_rules
+                SET manual_verified_at = ?
+                WHERE contract_id IN ({placeholders}) OR event_slug IN (
+                    SELECT event_slug FROM settlement_contracts WHERE contract_id IN ({placeholders})
+                )
+                """,
+                [now, *selected_ids, *selected_ids],
+            )
+            rows = [
+                _decode_contract_row(dict(row))
+                for row in conn.execute(
+                    f"SELECT * FROM settlement_contracts WHERE contract_id IN ({placeholders}) ORDER BY target_local_date DESC, city, event_slug",
+                    selected_ids,
+                ).fetchall()
+            ]
+    return {
+        "ok": True,
+        "applied": bool(apply),
+        "selected": len(rows),
+        "verified": len(rows) if apply else 0,
+        "skipped_requested": skipped_requested,
+        "require_auto_verified": require_auto_verified,
+        "contracts": rows,
+    }
+
+
 def _decode_contract_row(row: dict[str, Any]) -> dict[str, Any]:
     for key in ("truth_provider_priority", "verification_evidence"):
         value = row.get(key)

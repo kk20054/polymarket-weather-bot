@@ -175,6 +175,15 @@ export interface DataReadiness {
   status: 'ready' | 'blocked'
   score: number
   live_allowed: boolean
+  production_phase?: {
+    id: string
+    label: string
+    name: string
+    status: 'active' | 'ready_for_next'
+    next: string
+    operator_action: string
+    blocked_keys: string[]
+  }
   stages: DataReadinessStage[]
   blockers: DataReadinessReason[]
   cities: Array<{
@@ -244,6 +253,16 @@ export interface SettlementContractList {
     auto_verified: number
     manual_progress: number
   }
+  contracts: SettlementContract[]
+}
+
+export interface BulkContractVerificationResult {
+  ok: boolean
+  applied: boolean
+  selected: number
+  verified: number
+  skipped_requested: string[]
+  require_auto_verified: boolean
   contracts: SettlementContract[]
 }
 

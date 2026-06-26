@@ -12,6 +12,17 @@ WeatherBot v6 的目标不是承诺稳定赚钱，而是建立一个能够持续
 
 专业玩家流暂不进入核心决策，只保留为后续独立研究方向。
 
+## 1.1 当前执行进度
+
+截至当前 PR，系统处于 **Phase 1.5：合同核验与数据闸门收尾**。
+
+- Phase 0 已完成：旧系统审计、v6 蓝图、数据基座方向和 GitHub PR 已建立。
+- Phase 1 已进入后半段：市场规则、结算合同、truth 版本、forecast runs/members、CLOB orderbooks、paper executor 和数据资格闸门已经落地。
+- 当前阻塞：结算合同仍需人工核验；城市级独立 truth 样本仍不足以开放实盘；策略组尚未证明正收益。
+- 下一阶段：Phase 2 将集中在无泄漏概率模型、完整 bucket distribution 校准、walk-forward 回放和策略组验证。
+
+看板会直接显示当前 Phase、下一阶段和 operator action；实盘按钮在 Phase 2/3 验证通过前继续锁定。
+
 ## 2. 当前系统判断
 
 现有系统已经具备可继续演进的基础：

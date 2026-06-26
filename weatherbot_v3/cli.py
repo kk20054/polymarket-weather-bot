@@ -5,7 +5,7 @@ import json
 import sys
 import time
 
-from .db import connect, dashboard_summary, init_v3_db, list_settlement_contracts, set_settlement_contract_verification
+from .db import bulk_settlement_contract_verification, connect, dashboard_summary, init_v3_db, list_settlement_contracts, set_settlement_contract_verification
 from .migration import audit_market_files, migrate_legacy_signals, repair_truth_temporal_mismatches, sync_settlement_contracts
 from .notifier import FeishuNotifier
 from .qualification import build_data_readiness, persist_data_readiness
@@ -28,6 +28,7 @@ def main() -> None:
             "contracts-sync",
             "contracts-list",
             "contracts-verify",
+            "contracts-bulk-verify",
             "truth-backfill",
             "truth-audit",
         ],
@@ -42,6 +43,7 @@ def main() -> None:
     parser.add_argument("--reviewer", default="local-operator", help="Manual verifier name")
     parser.add_argument("--note", default="", help="Manual verification note")
     parser.add_argument("--unverify", action="store_true", help="Clear manual verification instead of setting it")
+    parser.add_argument("--apply", action="store_true", help="Apply a bulk write; without it bulk commands are dry-run")
     args = parser.parse_args()
 
     if args.command == "init-db":
@@ -172,6 +174,25 @@ def main() -> None:
         print(json.dumps({
             "ok": True,
             "contract": contract,
+            "contract_stage": next(
+                (stage for stage in readiness["stages"] if stage["key"] == "settlement_contracts"),
+                None,
+            ),
+        }, ensure_ascii=False, indent=2))
+    elif args.command == "contracts-bulk-verify":
+        contract_ids = [item.strip() for item in args.contract_id.split(",") if item.strip()]
+        result = bulk_settlement_contract_verification(
+            contract_ids=contract_ids or None,
+            limit=args.limit,
+            reviewer=args.reviewer,
+            note=args.note or "bulk review from CLI",
+            require_auto_verified=True,
+            apply=args.apply,
+        )
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        print(json.dumps({
+            **result,
             "contract_stage": next(
                 (stage for stage in readiness["stages"] if stage["key"] == "settlement_contracts"),
                 None,

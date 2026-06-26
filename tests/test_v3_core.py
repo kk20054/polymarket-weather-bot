@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.db import connect, init_v3_db, insert_forecast_run, insert_orderbook, list_settlement_contracts, set_settlement_contract_verification, upsert_market_rule, upsert_market_rules, upsert_settlement_contracts
+from weatherbot_v3.db import bulk_settlement_contract_verification, connect, init_v3_db, insert_forecast_run, insert_orderbook, list_settlement_contracts, set_settlement_contract_verification, upsert_market_rule, upsert_market_rules, upsert_settlement_contracts
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.distribution import build_event_distribution
@@ -316,6 +316,7 @@ class V3CoreTests(unittest.TestCase):
             readiness = build_data_readiness(db_path)
         self.assertFalse(readiness["live_allowed"])
         self.assertEqual(readiness["summary"]["market_rules"], 1)
+        self.assertEqual(readiness["production_phase"]["id"], "phase1_5")
         blocker_codes = {item["code"] for item in readiness["blockers"]}
         self.assertIn("settlement_rule_not_manually_verified", blocker_codes)
         self.assertIn("versioned_forecast_runs_missing", blocker_codes)
@@ -348,6 +349,72 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(after["summary"]["unverified"], 0)
         self.assertEqual(verified["manual_verified_by"], "test")
         self.assertIsNotNone(rule_row["manual_verified_at"])
+
+    def test_bulk_contract_verification_only_applies_auto_verified_contracts(self):
+        db_path = test_db_path("bulk_contract_verification")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            strong_rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-bulk-strong-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-bulk-strong",
+                    "question": "Will the highest temperature in NYC be between 80-81°F on June 23?",
+                    "description": "Resolves using Wunderground station KLGA history.",
+                    "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/2026-6-23",
+                    "date": "2026-06-23",
+                }
+            )
+            weak_rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-bulk-weak-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-bulk-weak",
+                    "question": "Will the highest temperature in NYC be between 82-83°F on June 24?",
+                    "description": "Resolves using weather history.",
+                    "date": "2026-06-24",
+                }
+            )
+            upsert_market_rules([strong_rule.to_dict(), weak_rule.to_dict()])
+            upsert_settlement_contracts([
+                settlement_contract_from_rule(strong_rule),
+                settlement_contract_from_rule(weak_rule),
+            ])
+            dry_run = bulk_settlement_contract_verification(
+                ["nyc-bulk-strong", "nyc-bulk-weak"],
+                reviewer="test",
+                note="bulk checked",
+                apply=False,
+            )
+            applied = bulk_settlement_contract_verification(
+                ["nyc-bulk-strong", "nyc-bulk-weak"],
+                reviewer="test",
+                note="bulk checked",
+                apply=True,
+            )
+            with connect(db_path) as conn:
+                strong = conn.execute(
+                    "SELECT manual_verified_at FROM market_rules WHERE market_id = ?",
+                    ("nyc-bulk-strong-1",),
+                ).fetchone()
+                weak = conn.execute(
+                    "SELECT manual_verified_at FROM market_rules WHERE market_id = ?",
+                    ("nyc-bulk-weak-1",),
+                ).fetchone()
+
+        self.assertFalse(dry_run["applied"])
+        self.assertEqual(dry_run["selected"], 1)
+        self.assertEqual(dry_run["verified"], 0)
+        self.assertTrue(applied["applied"])
+        self.assertEqual(applied["selected"], 1)
+        self.assertEqual(applied["verified"], 1)
+        self.assertIn("nyc-bulk-weak", applied["skipped_requested"])
+        self.assertIsNotNone(strong["manual_verified_at"])
+        self.assertIsNone(weak["manual_verified_at"])
 
     def test_forecast_run_store_deduplicates_response_and_keeps_hourly_members(self):
         db_path = test_db_path("forecast_store")

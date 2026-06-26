@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AutoSimulationStatus, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList } from './types'
+import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -118,6 +118,17 @@ export async function verifySettlementContract(contractId: string, verified = tr
     verified,
     reviewer: 'dashboard',
     note,
+  })
+  return data
+}
+
+export async function verifySettlementContractsBulk(contractIds: string[], apply = true): Promise<BulkContractVerificationResult> {
+  const { data } = await api.post<BulkContractVerificationResult>('/contracts/bulk-verification', {
+    contract_ids: contractIds,
+    limit: contractIds.length,
+    reviewer: 'dashboard',
+    note: 'dashboard visible batch review',
+    apply,
   })
   return data
 }

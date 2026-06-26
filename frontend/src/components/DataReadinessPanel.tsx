@@ -6,7 +6,9 @@ interface Props {
   readiness?: DataReadiness | null
   contracts?: SettlementContractList | null
   verifyingContractId?: string
+  bulkVerifying?: boolean
   onVerifyContract?: (contractId: string) => void
+  onVerifyVisibleContracts?: (contractIds: string[]) => void
 }
 
 const REASON_LABELS: Record<string, string> = {
@@ -42,7 +44,9 @@ export function DataReadinessPanel({
   readiness,
   contracts,
   verifyingContractId,
+  bulkVerifying = false,
   onVerifyContract,
+  onVerifyVisibleContracts,
 }: Props) {
   const [openContracts, setOpenContracts] = useState(true)
   const [expandedContract, setExpandedContract] = useState<string | null>(null)
@@ -54,6 +58,8 @@ export function DataReadinessPanel({
   const contractSummary = contracts?.summary
   const progress = contractSummary?.manual_progress ?? 0
   const unverified = contractSummary?.unverified ?? readiness.blockers.find(item => item.code === 'settlement_rule_not_manually_verified')?.count ?? 0
+  const visibleContractIds = (contracts?.contracts ?? []).map(contract => contract.contract_id)
+  const phase = readiness.production_phase
 
   return (
     <div className="space-y-3 p-3 text-[11px]">
@@ -61,9 +67,16 @@ export function DataReadinessPanel({
         <div className="flex min-w-0 items-center gap-2">
           <Database className="h-4 w-4 shrink-0 text-cyan-300" />
           <div className="min-w-0">
-            <div className="text-sm text-neutral-100">数据资格</div>
+            <div className="flex min-w-0 items-center gap-1.5">
+              <div className="text-sm text-neutral-100">数据资格</div>
+              {phase && (
+                <span className="shrink-0 border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[9px] text-cyan-200">
+                  {phase.label}
+                </span>
+              )}
+            </div>
             <div className="truncate text-[10px] text-neutral-500">
-              {readiness.live_allowed ? '实盘门禁已通过' : `实盘仍锁定，剩余 ${readiness.blockers.length} 类阻塞`}
+              {phase?.name ?? (readiness.live_allowed ? '实盘门禁已通过' : `实盘仍锁定，剩余 ${readiness.blockers.length} 类阻塞`)}
             </div>
           </div>
         </div>
@@ -75,6 +88,24 @@ export function DataReadinessPanel({
           {readiness.live_allowed ? '可实盘' : '已锁定'}
         </span>
       </div>
+
+      {phase && (
+        <div className="border border-neutral-800 bg-neutral-950 p-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="truncate text-[10px] text-neutral-300">{phase.operator_action}</div>
+              <div className="truncate text-[9px] text-neutral-600">下一步：{phase.next}</div>
+            </div>
+            <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${
+              phase.status === 'ready_for_next'
+                ? 'border-green-500/30 text-green-300'
+                : 'border-amber-500/30 text-amber-300'
+            }`}>
+              {phase.status === 'ready_for_next' ? '可进入下一阶段' : '进行中'}
+            </span>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-4 border border-neutral-800">
         {readiness.stages.map(stage => (
@@ -128,19 +159,28 @@ export function DataReadinessPanel({
       )}
 
       <div className="border-t border-neutral-800 pt-2">
-        <button
-          type="button"
-          onClick={() => setOpenContracts(value => !value)}
-          className="flex w-full items-center justify-between text-left text-[11px] text-neutral-200"
-        >
-          <span className="inline-flex items-center gap-1">
-            {openContracts ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-            待核验合同
-          </span>
-          <span className="tabular-nums text-neutral-500">
-            {(contracts?.contracts.length ?? 0) > 0 ? `${contracts?.contracts.length}/${contracts?.total}` : contracts?.total ?? unverified}
-          </span>
-        </button>
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setOpenContracts(value => !value)}
+            className="flex min-w-0 flex-1 items-center gap-1 text-left text-[11px] text-neutral-200"
+          >
+            {openContracts ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+            <span className="truncate">待核验合同</span>
+            <span className="shrink-0 tabular-nums text-neutral-500">
+              {(contracts?.contracts.length ?? 0) > 0 ? `${contracts?.contracts.length}/${contracts?.total}` : contracts?.total ?? unverified}
+            </span>
+          </button>
+          <button
+            type="button"
+            disabled={!onVerifyVisibleContracts || visibleContractIds.length === 0 || bulkVerifying}
+            onClick={() => onVerifyVisibleContracts?.(visibleContractIds)}
+            className="shrink-0 border border-cyan-500/30 px-1.5 py-1 text-[9px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"
+            title="批量确认当前列表中后端已自动校验通过的合同"
+          >
+            {bulkVerifying ? '批量写入中' : '批量确认'}
+          </button>
+        </div>
 
         {openContracts && (
           <div className="mt-2 divide-y divide-neutral-900 border border-neutral-900">

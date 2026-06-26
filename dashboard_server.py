@@ -35,7 +35,7 @@ from weatherbot_v3.config import load_config as load_v3_config
 from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
 from weatherbot_v3.db import init_v3_db
 from weatherbot_v3.db import insert_event_distribution, latest_event_distribution, latest_signal_decision
-from weatherbot_v3.db import list_settlement_contracts, set_settlement_contract_verification, truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
+from weatherbot_v3.db import bulk_settlement_contract_verification, list_settlement_contracts, set_settlement_contract_verification, truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
@@ -94,6 +94,14 @@ class ContractVerificationRequest(BaseModel):
     verified: bool = True
     reviewer: str = "local-operator"
     note: str | None = None
+
+
+class BulkContractVerificationRequest(BaseModel):
+    contract_ids: list[str] | None = None
+    limit: int = 5
+    reviewer: str = "dashboard"
+    note: str | None = None
+    apply: bool = False
 
 
 class LiveOrderUpdate(BaseModel):
@@ -2777,6 +2785,21 @@ async def verify_contract(contract_id: str, request: ContractVerificationRequest
     readiness = build_data_readiness()
     persist_data_readiness(readiness)
     return {"ok": True, "contract": contract, "data_readiness": readiness}
+
+
+@app.post("/api/contracts/bulk-verification")
+async def verify_contracts_bulk(request: BulkContractVerificationRequest):
+    result = bulk_settlement_contract_verification(
+        contract_ids=request.contract_ids,
+        limit=request.limit,
+        reviewer=request.reviewer,
+        note=request.note or "dashboard bulk review",
+        require_auto_verified=True,
+        apply=request.apply,
+    )
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    return {"ok": True, **result, "data_readiness": readiness}
 
 
 @app.post("/api/weather/backfill-history")
