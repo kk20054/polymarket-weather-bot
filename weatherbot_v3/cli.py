@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 
-from .db import connect, dashboard_summary, init_v3_db
+from .db import connect, dashboard_summary, init_v3_db, list_settlement_contracts, set_settlement_contract_verification
 from .migration import audit_market_files, migrate_legacy_signals, repair_truth_temporal_mismatches, sync_settlement_contracts
 from .notifier import FeishuNotifier
 from .qualification import build_data_readiness, persist_data_readiness
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="WeatherBot v3 utilities")
     parser.add_argument(
         "command",
@@ -23,6 +26,8 @@ def main() -> None:
             "forecast-backfill",
             "orderbook-backfill",
             "contracts-sync",
+            "contracts-list",
+            "contracts-verify",
             "truth-backfill",
             "truth-audit",
         ],
@@ -32,6 +37,11 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=50, help="Maximum recent signal markets to refresh")
     parser.add_argument("--start-date", default="", help="Inclusive local target date filter")
     parser.add_argument("--end-date", default="", help="Inclusive local target date filter")
+    parser.add_argument("--status", default="unverified", help="Contract status filter: all, unverified, verified, auto")
+    parser.add_argument("--contract-id", default="", help="Settlement contract id or event slug")
+    parser.add_argument("--reviewer", default="local-operator", help="Manual verifier name")
+    parser.add_argument("--note", default="", help="Manual verification note")
+    parser.add_argument("--unverify", action="store_true", help="Clear manual verification instead of setting it")
     args = parser.parse_args()
 
     if args.command == "init-db":
@@ -140,6 +150,28 @@ def main() -> None:
         persist_data_readiness(readiness)
         print(json.dumps({
             **payload,
+            "contract_stage": next(
+                (stage for stage in readiness["stages"] if stage["key"] == "settlement_contracts"),
+                None,
+            ),
+        }, ensure_ascii=False, indent=2))
+    elif args.command == "contracts-list":
+        payload = list_settlement_contracts(status=args.status, limit=args.limit)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.command == "contracts-verify":
+        if not args.contract_id:
+            raise SystemExit("--contract-id is required")
+        contract = set_settlement_contract_verification(
+            args.contract_id,
+            verified=not args.unverify,
+            reviewer=args.reviewer,
+            note=args.note,
+        )
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        print(json.dumps({
+            "ok": True,
+            "contract": contract,
             "contract_stage": next(
                 (stage for stage in readiness["stages"] if stage["key"] == "settlement_contracts"),
                 None,

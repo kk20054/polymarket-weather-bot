@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,7 +35,7 @@ from weatherbot_v3.config import load_config as load_v3_config
 from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
 from weatherbot_v3.db import init_v3_db
 from weatherbot_v3.db import insert_event_distribution, latest_event_distribution, latest_signal_decision
-from weatherbot_v3.db import truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
+from weatherbot_v3.db import list_settlement_contracts, set_settlement_contract_verification, truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
@@ -88,6 +88,12 @@ class SimulationReset(BaseModel):
 class AutoSimulationUpdate(BaseModel):
     enabled: bool
     interval_seconds: int = 300
+
+
+class ContractVerificationRequest(BaseModel):
+    verified: bool = True
+    reviewer: str = "local-operator"
+    note: str | None = None
 
 
 class LiveOrderUpdate(BaseModel):
@@ -2748,6 +2754,29 @@ async def data_readiness():
     payload = build_data_readiness()
     persist_data_readiness(payload)
     return payload
+
+
+@app.get("/api/contracts")
+async def contracts(status: str = "unverified", city: str = "", limit: int = 25, offset: int = 0):
+    return list_settlement_contracts(status=status, city=city, limit=limit, offset=offset)
+
+
+@app.post("/api/contracts/{contract_id}/verification")
+async def verify_contract(contract_id: str, request: ContractVerificationRequest):
+    try:
+        contract = set_settlement_contract_verification(
+            contract_id,
+            verified=request.verified,
+            reviewer=request.reviewer,
+            note=request.note or "",
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="contract_not_found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    return {"ok": True, "contract": contract, "data_readiness": readiness}
 
 
 @app.post("/api/weather/backfill-history")

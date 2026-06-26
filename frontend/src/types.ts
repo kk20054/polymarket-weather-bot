@@ -204,6 +204,49 @@ export interface DataReadiness {
   }
 }
 
+export interface SettlementContract {
+  contract_id: string
+  event_slug: string
+  city: string
+  city_name: string
+  target_local_date: string
+  station_id: string
+  station_name: string
+  timezone: string
+  unit: string
+  metric: string
+  rounding_rule: string
+  bucket_boundary: string
+  resolution_source_text?: string | null
+  source_url?: string | null
+  truth_provider_priority?: string[]
+  rule_version?: string | null
+  registry_version?: string | null
+  parse_confidence?: number | null
+  confidence_reason?: string | null
+  auto_verified_at?: string | null
+  manual_verified_at?: string | null
+  manual_verified_by?: string | null
+  manual_verification_note?: string | null
+  verification_evidence?: string[]
+}
+
+export interface SettlementContractList {
+  status: string
+  city: string
+  limit: number
+  offset: number
+  total: number
+  summary: {
+    contracts: number
+    manual_verified: number
+    unverified: number
+    auto_verified: number
+    manual_progress: number
+  }
+  contracts: SettlementContract[]
+}
+
 export interface DistributionItem {
   market_id: string
   question: string

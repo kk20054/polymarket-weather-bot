@@ -95,3 +95,22 @@
 2. 对非美国城市接入更稳定的 station truth 历史源，优先 Visual Crossing station mode 或同等 paid official archive。
 3. 建立训练集 manifest，把 forecast run、truth version、market event、orderbook snapshot 锁定到不可变版本。
 4. 在模型训练前，禁止使用低置信 legacy/open-meteo truth 作为 production calibration truth。
+
+## 人工核验入口
+
+CLI：
+
+```powershell
+.\.venv\Scripts\python.exe -m weatherbot_v3.cli contracts-list --status unverified --limit 10
+.\.venv\Scripts\python.exe -m weatherbot_v3.cli contracts-verify --contract-id highest-temperature-in-nyc-on-june-23-2026 --reviewer local-operator --note "station/date/unit/source checked"
+```
+
+API：
+
+- `GET /api/contracts?status=unverified&limit=5`
+- `POST /api/contracts/{contract_id}/verification`
+
+看板：
+
+- 左侧“数据资格”模块默认展示合同核验进度和前 5 个待核验事件。
+- 点击事件行可展开规则证据；点击来源图标打开结算来源；点击“确认”会写入 `manual_verified_at` 并刷新实盘门禁。

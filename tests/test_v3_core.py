@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.db import connect, init_v3_db, insert_forecast_run, insert_orderbook, upsert_market_rule, upsert_market_rules, upsert_settlement_contracts
+from weatherbot_v3.db import connect, init_v3_db, insert_forecast_run, insert_orderbook, list_settlement_contracts, set_settlement_contract_verification, upsert_market_rule, upsert_market_rules, upsert_settlement_contracts
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.distribution import build_event_distribution
@@ -319,6 +319,35 @@ class V3CoreTests(unittest.TestCase):
         blocker_codes = {item["code"] for item in readiness["blockers"]}
         self.assertIn("settlement_rule_not_manually_verified", blocker_codes)
         self.assertIn("versioned_forecast_runs_missing", blocker_codes)
+
+    def test_settlement_contract_manual_verification_updates_contract_and_rules(self):
+        db_path = test_db_path("contract_verification")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-verify-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-verify",
+                    "question": "Will the highest temperature in NYC be between 80-81掳F on June 23?",
+                    "description": "Resolves according to Wunderground station history.",
+                    "date": "2026-06-23",
+                }
+            )
+            upsert_market_rule(rule.to_dict())
+            upsert_settlement_contracts([settlement_contract_from_rule(rule)])
+            before = list_settlement_contracts(status="unverified", limit=10)
+            verified = set_settlement_contract_verification("nyc-verify", True, reviewer="test", note="station checked")
+            after = list_settlement_contracts(status="unverified", limit=10)
+            with connect(db_path) as conn:
+                rule_row = conn.execute("SELECT manual_verified_at FROM market_rules WHERE market_id = ?", ("nyc-verify-1",)).fetchone()
+        self.assertEqual(before["summary"]["unverified"], 1)
+        self.assertEqual(after["summary"]["manual_verified"], 1)
+        self.assertEqual(after["summary"]["unverified"], 0)
+        self.assertEqual(verified["manual_verified_by"], "test")
+        self.assertIsNotNone(rule_row["manual_verified_at"])
 
     def test_forecast_run_store_deduplicates_response_and_keeps_hourly_members(self):
         db_path = test_db_path("forecast_store")

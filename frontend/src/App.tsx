@@ -14,6 +14,7 @@ import {
 import {
   backfillWeatherHistory,
   fetchDashboard,
+  fetchSettlementContracts,
   fetchTemperatureFit,
   placeLiveOrder,
   resetSimulation,
@@ -22,6 +23,7 @@ import {
   startBot,
   stopBot,
   updateSignalStatus,
+  verifySettlementContract,
 } from './api'
 import { EquityChart } from './components/EquityChart'
 import { DataReadinessPanel } from './components/DataReadinessPanel'
@@ -377,6 +379,12 @@ function App() {
     refetchInterval: view === 'temperature-fit' ? 30000 : false,
   })
 
+  const contractsQuery = useQuery({
+    queryKey: ['settlement-contracts', 'unverified'],
+    queryFn: () => fetchSettlementContracts('unverified', 5),
+    refetchInterval: 120000,
+  })
+
   const startMutation = useMutation({
     mutationFn: startBot,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
@@ -397,6 +405,13 @@ function App() {
   const autoSimulationMutation = useMutation({
     mutationFn: (enabled: boolean) => setAutoSimulation(enabled, 300),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    },
+  })
+  const verifyContractMutation = useMutation({
+    mutationFn: (contractId: string) => verifySettlementContract(contractId, true, 'dashboard manual review'),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     },
   })
@@ -551,7 +566,12 @@ function App() {
           <ReadinessBanner stats={stats} />
 
           <div className="border border-neutral-800 bg-black">
-            <DataReadinessPanel readiness={dataReadiness} />
+            <DataReadinessPanel
+              readiness={dataReadiness}
+              contracts={contractsQuery.data}
+              verifyingContractId={verifyContractMutation.variables}
+              onVerifyContract={(contractId) => verifyContractMutation.mutate(contractId)}
+            />
           </div>
 
           <div>

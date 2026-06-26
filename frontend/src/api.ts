@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AutoSimulationStatus, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData } from './types'
+import type { AutoSimulationStatus, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -103,6 +103,22 @@ export async function settleTradesApi(): Promise<{ ok: boolean; checked: number;
 
 export async function fetchTemperatureFit(): Promise<TemperatureFitData> {
   const { data } = await api.get<TemperatureFitData>('/temperature-fit')
+  return data
+}
+
+export async function fetchSettlementContracts(status = 'unverified', limit = 12): Promise<SettlementContractList> {
+  const { data } = await api.get<SettlementContractList>('/contracts', {
+    params: { status, limit },
+  })
+  return data
+}
+
+export async function verifySettlementContract(contractId: string, verified = true, note = ''): Promise<{ ok: boolean }> {
+  const { data } = await api.post(`/contracts/${encodeURIComponent(contractId)}/verification`, {
+    verified,
+    reviewer: 'dashboard',
+    note,
+  })
   return data
 }
 

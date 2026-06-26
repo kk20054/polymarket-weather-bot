@@ -19,6 +19,7 @@ cd C:\Users\Administrator\Documents\polymarket\weatherbot
 .\.venv\Scripts\python.exe -m weatherbot_v3.cli forecast-backfill --days 4
 .\.venv\Scripts\python.exe -m weatherbot_v3.cli orderbook-backfill --limit 20
 .\.venv\Scripts\python.exe -m weatherbot_v3.cli contracts-sync
+.\.venv\Scripts\python.exe -m weatherbot_v3.cli contracts-list --status unverified --limit 10
 .\.venv\Scripts\python.exe -m weatherbot_v3.cli truth-backfill --cities nyc,chicago,miami,dallas,seattle,atlanta --limit 100
 ```
 

@@ -283,6 +283,8 @@ def init_v3_db(path: Path | None = None) -> None:
                 confidence_reason TEXT,
                 auto_verified_at TEXT,
                 manual_verified_at TEXT,
+                manual_verified_by TEXT,
+                manual_verification_note TEXT,
                 verification_evidence TEXT,
                 raw_json TEXT,
                 updated_at TEXT NOT NULL
@@ -416,6 +418,10 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "registry_version": "TEXT",
             "parsed_at": "TEXT",
             "manual_verified_at": "TEXT",
+        },
+        "settlement_contracts": {
+            "manual_verified_by": "TEXT",
+            "manual_verification_note": "TEXT",
         },
         "truth_observations": {
             "truth_version": "TEXT",
@@ -966,6 +972,8 @@ def upsert_settlement_contracts(contracts: list[dict[str, Any]]) -> None:
             "event_slug": event_slug,
             "truth_provider_priority": dump_json(contract.get("truth_provider_priority", [])),
             "verification_evidence": dump_json(contract.get("verification_evidence", [])),
+            "manual_verified_by": contract.get("manual_verified_by"),
+            "manual_verification_note": contract.get("manual_verification_note"),
             "raw_json": dump_json(contract),
             "updated_at": now,
         })
@@ -978,14 +986,16 @@ def upsert_settlement_contracts(contracts: list[dict[str, Any]]) -> None:
                 bucket_boundary, resolution_source_text, source_url,
                 truth_provider_priority, rule_version, registry_version,
                 parse_confidence, confidence_reason, auto_verified_at,
-                manual_verified_at, verification_evidence, raw_json, updated_at
+                manual_verified_at, manual_verified_by, manual_verification_note,
+                verification_evidence, raw_json, updated_at
             ) VALUES (
                 :contract_id, :event_slug, :city, :city_name, :target_local_date,
                 :station_id, :station_name, :timezone, :unit, :metric, :rounding_rule,
                 :bucket_boundary, :resolution_source_text, :source_url,
                 :truth_provider_priority, :rule_version, :registry_version,
                 :parse_confidence, :confidence_reason, :auto_verified_at,
-                :manual_verified_at, :verification_evidence, :raw_json, :updated_at
+                :manual_verified_at, :manual_verified_by, :manual_verification_note,
+                :verification_evidence, :raw_json, :updated_at
             )
             ON CONFLICT(contract_id) DO UPDATE SET
                 city=excluded.city,
@@ -1007,12 +1017,139 @@ def upsert_settlement_contracts(contracts: list[dict[str, Any]]) -> None:
                 confidence_reason=excluded.confidence_reason,
                 auto_verified_at=excluded.auto_verified_at,
                 manual_verified_at=COALESCE(excluded.manual_verified_at, settlement_contracts.manual_verified_at),
+                manual_verified_by=COALESCE(excluded.manual_verified_by, settlement_contracts.manual_verified_by),
+                manual_verification_note=COALESCE(excluded.manual_verification_note, settlement_contracts.manual_verification_note),
                 verification_evidence=excluded.verification_evidence,
                 raw_json=excluded.raw_json,
                 updated_at=excluded.updated_at
             """,
             rows,
         )
+
+
+def list_settlement_contracts(
+    status: str = "all",
+    city: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    init_v3_db()
+    where = []
+    params: list[Any] = []
+    if status == "verified":
+        where.append("manual_verified_at IS NOT NULL AND manual_verified_at != ''")
+    elif status == "unverified":
+        where.append("(manual_verified_at IS NULL OR manual_verified_at = '')")
+    elif status == "auto":
+        where.append("auto_verified_at IS NOT NULL AND auto_verified_at != ''")
+    if city:
+        where.append("city = ?")
+        params.append(city)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    limit = max(1, min(int(limit or 50), 200))
+    offset = max(0, int(offset or 0))
+    with connect() as conn:
+        total = int(conn.execute(f"SELECT COUNT(*) FROM settlement_contracts {clause}", params).fetchone()[0])
+        rows = [
+            _decode_contract_row(dict(row))
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM settlement_contracts
+                {clause}
+                ORDER BY
+                    CASE WHEN manual_verified_at IS NULL OR manual_verified_at = '' THEN 0 ELSE 1 END,
+                    target_local_date DESC,
+                    city,
+                    event_slug
+                LIMIT ? OFFSET ?
+                """,
+                [*params, limit, offset],
+            ).fetchall()
+        ]
+        summary = dict(
+            conn.execute(
+                """
+                SELECT
+                    COUNT(*) contracts,
+                    SUM(CASE WHEN manual_verified_at IS NOT NULL AND manual_verified_at != '' THEN 1 ELSE 0 END) manual_verified,
+                    SUM(CASE WHEN auto_verified_at IS NOT NULL AND auto_verified_at != '' THEN 1 ELSE 0 END) auto_verified
+                FROM settlement_contracts
+                """
+            ).fetchone()
+        )
+    contracts = int(summary.get("contracts") or 0)
+    manual_verified = int(summary.get("manual_verified") or 0)
+    auto_verified = int(summary.get("auto_verified") or 0)
+    return {
+        "status": status,
+        "city": city,
+        "limit": limit,
+        "offset": offset,
+        "total": total,
+        "summary": {
+            "contracts": contracts,
+            "manual_verified": manual_verified,
+            "unverified": max(0, contracts - manual_verified),
+            "auto_verified": auto_verified,
+            "manual_progress": round((manual_verified / contracts) if contracts else 0.0, 4),
+        },
+        "contracts": rows,
+    }
+
+
+def set_settlement_contract_verification(
+    contract_id: str,
+    verified: bool,
+    reviewer: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    init_v3_db()
+    contract_id = str(contract_id or "").strip()
+    if not contract_id:
+        raise ValueError("contract_id is required")
+    now = utc_now()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM settlement_contracts WHERE contract_id = ? OR event_slug = ?",
+            (contract_id, contract_id),
+        ).fetchone()
+        if not row:
+            raise KeyError(contract_id)
+        actual_id = str(row["contract_id"] or contract_id)
+        verified_at = now if verified else None
+        conn.execute(
+            """
+            UPDATE settlement_contracts
+            SET manual_verified_at = ?,
+                manual_verified_by = ?,
+                manual_verification_note = ?,
+                updated_at = ?
+            WHERE contract_id = ?
+            """,
+            (verified_at, reviewer, note, now, actual_id),
+        )
+        conn.execute(
+            """
+            UPDATE market_rules
+            SET manual_verified_at = ?
+            WHERE contract_id = ? OR event_slug = ?
+            """,
+            (verified_at, actual_id, str(row["event_slug"] or "")),
+        )
+        updated = conn.execute("SELECT * FROM settlement_contracts WHERE contract_id = ?", (actual_id,)).fetchone()
+    return _decode_contract_row(dict(updated))
+
+
+def _decode_contract_row(row: dict[str, Any]) -> dict[str, Any]:
+    for key in ("truth_provider_priority", "verification_evidence"):
+        value = row.get(key)
+        if isinstance(value, str):
+            try:
+                row[key] = json.loads(value)
+            except Exception:
+                row[key] = []
+    return row
 
 
 def insert_forecast_run(run: dict[str, Any], members: list[dict[str, Any]] | None = None) -> int:

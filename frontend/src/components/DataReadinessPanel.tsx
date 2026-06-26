@@ -1,12 +1,16 @@
-import { CheckCircle2, Database, ShieldAlert } from 'lucide-react'
-import type { DataReadiness } from '../types'
+import { useState } from 'react'
+import { CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, Database, ExternalLink, ShieldAlert } from 'lucide-react'
+import type { DataReadiness, SettlementContractList } from '../types'
 
 interface Props {
   readiness?: DataReadiness | null
+  contracts?: SettlementContractList | null
+  verifyingContractId?: string
+  onVerifyContract?: (contractId: string) => void
 }
 
 const REASON_LABELS: Record<string, string> = {
-  settlement_rule_not_manually_verified: '规则未核验',
+  settlement_rule_not_manually_verified: '合同待人工核验',
   settlement_contracts_missing: '事件合同缺失',
   timezone_mismatch: '时区不一致',
   resolution_source_missing: '来源缺失',
@@ -29,24 +33,46 @@ function reasonLabel(code: string) {
   return REASON_LABELS[code] ?? code
 }
 
-export function DataReadinessPanel({ readiness }: Props) {
+function pct(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '0%'
+  return `${Math.round(Number(value) * 100)}%`
+}
+
+export function DataReadinessPanel({
+  readiness,
+  contracts,
+  verifyingContractId,
+  onVerifyContract,
+}: Props) {
+  const [openContracts, setOpenContracts] = useState(true)
+  const [expandedContract, setExpandedContract] = useState<string | null>(null)
+
   if (!readiness) {
     return <div className="p-3 text-[11px] text-neutral-600">数据资格尚未生成</div>
   }
 
+  const contractSummary = contracts?.summary
+  const progress = contractSummary?.manual_progress ?? 0
+  const unverified = contractSummary?.unverified ?? readiness.blockers.find(item => item.code === 'settlement_rule_not_manually_verified')?.count ?? 0
+
   return (
-    <div className="space-y-2 p-3 text-[11px]">
+    <div className="space-y-3 p-3 text-[11px]">
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Database className="h-4 w-4 text-cyan-300" />
-          <span className="text-sm text-neutral-100">数据资格</span>
+        <div className="flex min-w-0 items-center gap-2">
+          <Database className="h-4 w-4 shrink-0 text-cyan-300" />
+          <div className="min-w-0">
+            <div className="text-sm text-neutral-100">数据资格</div>
+            <div className="truncate text-[10px] text-neutral-500">
+              {readiness.live_allowed ? '实盘门禁已通过' : `实盘仍锁定，剩余 ${readiness.blockers.length} 类阻塞`}
+            </div>
+          </div>
         </div>
-        <span className={`border px-1.5 py-0.5 text-[9px] ${
+        <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${
           readiness.live_allowed
             ? 'border-green-500/30 bg-green-500/10 text-green-300'
             : 'border-red-500/30 bg-red-500/10 text-red-300'
         }`}>
-          {readiness.live_allowed ? '通过' : '阻塞'}
+          {readiness.live_allowed ? '可实盘' : '已锁定'}
         </span>
       </div>
 
@@ -55,7 +81,7 @@ export function DataReadinessPanel({ readiness }: Props) {
           <div
             key={stage.key}
             className="min-w-0 border-r border-neutral-800 p-1.5 last:border-r-0"
-            title={stage.reasons.map(reason => `${reasonLabel(reason.code)}: ${reason.count}`).join('\n')}
+            title={stage.reasons.map(reason => `${reasonLabel(reason.code)}: ${reason.count}`).join('\n') || '通过'}
           >
             <div className="mb-1 flex items-center gap-1">
               {stage.status === 'ready'
@@ -64,26 +90,26 @@ export function DataReadinessPanel({ readiness }: Props) {
               <span className="truncate text-[9px] text-neutral-400">{stage.label}</span>
             </div>
             <div className={`text-[9px] ${stage.status === 'ready' ? 'text-green-300' : 'text-red-300'}`}>
-              {stage.status === 'ready' ? '可用' : `${stage.reasons.length} 项`}
+              {stage.status === 'ready' ? '可用' : stage.reasons.map(reason => reasonLabel(reason.code)).slice(0, 1).join('')}
             </div>
           </div>
         ))}
       </div>
 
-      <div className="grid grid-cols-3 gap-1 text-center">
-        <div className="border border-neutral-800 bg-neutral-950 p-1.5" title="满足实盘校准条件的独立城市日">
-          <div className="text-[9px] text-neutral-600">Truth 日</div>
-          <div className="tabular-nums text-neutral-200">{readiness.summary.eligible_truth_days}</div>
+      <div className="grid grid-cols-4 gap-1 text-center">
+        <Metric label="合同" value={`${contractSummary?.manual_verified ?? 0}/${contractSummary?.contracts ?? readiness.summary.settlement_contracts ?? 0}`} title="人工核验合同数 / 事件合同总数" />
+        <Metric label="Truth 日" value={readiness.summary.eligible_truth_days} title="满足生产校准条件的独立城市日" />
+        <Metric label="预测运行" value={readiness.summary.forecast_runs} title="版本化预测运行档案数量" />
+        <Metric label="盘口" value={readiness.summary.orderbook_snapshots} title="已保存盘口快照数量" />
+      </div>
+
+      <div className="space-y-1">
+        <div className="flex items-center justify-between text-[10px] text-neutral-500">
+          <span>合同核验进度</span>
+          <span className="tabular-nums">{pct(progress)} · 待核验 {unverified}</span>
         </div>
-        <div className="border border-neutral-800 bg-neutral-950 p-1.5" title="版本化预测运行数 / 成员级预测数">
-          <div className="text-[9px] text-neutral-600">运行 / 成员</div>
-          <div className="tabular-nums text-neutral-200">
-            {readiness.summary.forecast_runs} / {readiness.summary.forecast_members}
-          </div>
-        </div>
-        <div className="border border-neutral-800 bg-neutral-950 p-1.5" title="已保存的盘口快照数量">
-          <div className="text-[9px] text-neutral-600">盘口</div>
-          <div className="tabular-nums text-neutral-200">{readiness.summary.orderbook_snapshots}</div>
+        <div className="h-1.5 overflow-hidden bg-neutral-900">
+          <div className="h-full bg-cyan-300" style={{ width: `${Math.max(0, Math.min(progress, 1)) * 100}%` }} />
         </div>
       </div>
 
@@ -93,13 +119,120 @@ export function DataReadinessPanel({ readiness }: Props) {
             <span
               key={reason.code}
               className="border border-red-500/20 bg-red-500/5 px-1.5 py-0.5 text-[9px] text-red-200"
-              title={`${reasonLabel(reason.code)}：${reason.count}`}
+              title={`${reasonLabel(reason.code)}: ${reason.count}`}
             >
               {reasonLabel(reason.code)} {reason.count}
             </span>
           ))}
         </div>
       )}
+
+      <div className="border-t border-neutral-800 pt-2">
+        <button
+          type="button"
+          onClick={() => setOpenContracts(value => !value)}
+          className="flex w-full items-center justify-between text-left text-[11px] text-neutral-200"
+        >
+          <span className="inline-flex items-center gap-1">
+            {openContracts ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+            待核验合同
+          </span>
+          <span className="tabular-nums text-neutral-500">
+            {(contracts?.contracts.length ?? 0) > 0 ? `${contracts?.contracts.length}/${contracts?.total}` : contracts?.total ?? unverified}
+          </span>
+        </button>
+
+        {openContracts && (
+          <div className="mt-2 divide-y divide-neutral-900 border border-neutral-900">
+            {(contracts?.contracts ?? []).length === 0 ? (
+              <div className="p-2 text-[10px] text-neutral-500">暂无待核验合同</div>
+            ) : contracts?.contracts.map(contract => {
+              const expanded = expandedContract === contract.contract_id
+              const verifying = verifyingContractId === contract.contract_id
+              return (
+                <div key={contract.contract_id} className="bg-neutral-950/40">
+                  <div className="grid grid-cols-[1fr_auto] gap-2 p-2">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedContract(expanded ? null : contract.contract_id)}
+                      className="min-w-0 text-left"
+                      title={contract.event_slug}
+                    >
+                      <div className="truncate text-[11px] text-neutral-100">
+                        {contract.city_name} · {contract.target_local_date}
+                      </div>
+                      <div className="truncate text-[10px] text-neutral-500">
+                        {contract.station_id} · {contract.station_name}
+                      </div>
+                    </button>
+                    <div className="flex items-start gap-1">
+                      {contract.source_url && (
+                        <a
+                          href={contract.source_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="border border-neutral-800 p-1 text-neutral-400 hover:border-cyan-400/40 hover:text-cyan-200"
+                          title="打开结算来源"
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        disabled={!onVerifyContract || verifying}
+                        onClick={() => onVerifyContract?.(contract.contract_id)}
+                        className="inline-flex items-center gap-1 border border-cyan-500/30 px-1.5 py-1 text-[9px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"
+                        title="确认该事件的站点、日期、单位和来源 URL 与规则一致"
+                      >
+                        <ClipboardCheck className="h-3 w-3" />
+                        {verifying ? '写入中' : '确认'}
+                      </button>
+                    </div>
+                  </div>
+                  {expanded && (
+                    <div className="space-y-1 border-t border-neutral-900 p-2 text-[10px] text-neutral-400">
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                        <Detail label="时区" value={contract.timezone} />
+                        <Detail label="单位" value={contract.unit} />
+                        <Detail label="边界" value={contract.bucket_boundary} />
+                        <Detail label="舍入" value={contract.rounding_rule} />
+                      </div>
+                      <div className="line-clamp-3 text-neutral-500" title={contract.resolution_source_text ?? ''}>
+                        {contract.resolution_source_text || '无规则文本'}
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {(contract.verification_evidence ?? []).slice(0, 5).map(item => (
+                          <span key={item} className="border border-neutral-800 px-1 py-0.5 text-[9px] text-neutral-500">
+                            {item}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function Metric({ label, value, title }: { label: string; value: string | number; title: string }) {
+  return (
+    <div className="border border-neutral-800 bg-neutral-950 p-1.5" title={title}>
+      <div className="text-[9px] text-neutral-600">{label}</div>
+      <div className="truncate tabular-nums text-neutral-200">{value}</div>
+    </div>
+  )
+}
+
+function Detail({ label, value }: { label: string; value?: string | null }) {
+  return (
+    <div className="min-w-0">
+      <span className="text-neutral-600">{label}</span>
+      <span className="ml-1 text-neutral-300">{value || '--'}</span>
     </div>
   )
 }
