@@ -35,7 +35,7 @@ _PROFILES = (
     CitySettlementProfile("seattle", "Seattle", "KSEA", "Seattle-Tacoma International Airport", "America/Los_Angeles", "F", 47.4502, -122.3088, "us"),
     CitySettlementProfile("atlanta", "Atlanta", "KATL", "Hartsfield-Jackson Atlanta International Airport", "America/New_York", "F", 33.6407, -84.4277, "us"),
     CitySettlementProfile("london", "London", "EGLC", "London City Airport", "Europe/London", "C", 51.5048, 0.0495, "eu"),
-    CitySettlementProfile("paris", "Paris", "LFPG", "Paris Charles de Gaulle Airport", "Europe/Paris", "C", 48.9962, 2.5979, "eu"),
+    CitySettlementProfile("paris", "Paris", "LFPB", "Paris-Le Bourget Airport", "Europe/Paris", "C", 48.967, 2.428, "eu"),
     CitySettlementProfile("munich", "Munich", "EDDM", "Munich Airport", "Europe/Berlin", "C", 48.3537, 11.7750, "eu"),
     CitySettlementProfile("ankara", "Ankara", "LTAC", "Ankara Esenboga Airport", "Europe/Istanbul", "C", 40.1281, 32.9951, "eu"),
     CitySettlementProfile("seoul", "Seoul", "RKSI", "Incheon International Airport", "Asia/Seoul", "C", 37.4691, 126.4505, "asia"),
@@ -59,4 +59,3 @@ def get_city_profile(city: str) -> CitySettlementProfile | None:
 
 def registry_payload() -> list[dict[str, Any]]:
     return [profile.to_dict() for profile in _PROFILES]
-

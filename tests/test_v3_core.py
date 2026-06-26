@@ -5,13 +5,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.db import connect, init_v3_db, insert_forecast_run, insert_orderbook, upsert_market_rule
+from weatherbot_v3.db import connect, init_v3_db, insert_forecast_run, insert_orderbook, upsert_market_rule, upsert_market_rules, upsert_settlement_contracts
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
-from weatherbot_v3.truth import infer_settlement_rule
+from weatherbot_v3.migration import repair_truth_temporal_mismatches
+from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from dashboard_server import AutoSimulationUpdate, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
@@ -33,6 +34,13 @@ class V3CoreTests(unittest.TestCase):
         now_utc = datetime(2026, 6, 25, 2, 0, tzinfo=timezone.utc)
         self.assertEqual(target_dates_for_city("nyc", 2, now_utc), ["2026-06-24", "2026-06-25"])
         self.assertEqual(target_dates_for_city("shanghai", 2, now_utc), ["2026-06-25", "2026-06-26"])
+
+    def test_truth_time_parser_accepts_epoch_seconds_and_milliseconds(self):
+        seconds = _parse_time(1782356400)
+        milliseconds = _parse_time("1782356400000")
+        self.assertIsNotNone(seconds)
+        self.assertEqual(seconds, milliseconds)
+        self.assertEqual(seconds.tzinfo, timezone.utc)
 
     def test_auto_simulation_state_persists_and_clamps_interval(self):
         TEST_DB_DIR.mkdir(exist_ok=True)
@@ -205,6 +213,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("event_distributions", tables)
         self.assertIn("signal_decisions", tables)
         self.assertIn("data_qualification_audits", tables)
+        self.assertIn("settlement_contracts", tables)
+        self.assertIn("truth_observation_versions", tables)
 
     def test_settlement_registry_has_station_and_timezone_for_all_cities(self):
         self.assertEqual(len(SETTLEMENT_REGISTRY), 20)
@@ -234,11 +244,62 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(rule.registry_version, "airport-settlement-registry-v1")
         self.assertEqual(rule.timezone, "America/New_York")
 
+    def test_settlement_rule_url_station_overrides_legacy_city_mapping(self):
+        rule = infer_settlement_rule({
+            "city": "paris",
+            "city_name": "Paris",
+            "date": "2026-06-25",
+            "event_url": "https://polymarket.com/event/highest-temperature-in-paris-on-june-25-2026",
+            "question": "Will the highest temperature in Paris be 30°C on June 25?",
+            "settlement_rule": {
+                "resolution_source_text": "Resolves from Wunderground station LFPB.",
+                "source_url": "https://www.wunderground.com/history/daily/fr/bonneuil-en-france/LFPB",
+                "station_id": "LFPG",
+            },
+        })
+        contract = settlement_contract_from_rule(rule)
+        self.assertEqual(rule.station_id, "LFPB")
+        self.assertEqual(rule.station_name, "Paris-Le Bourget Airport")
+        self.assertEqual(rule.contract_id, "highest-temperature-in-paris-on-june-25-2026")
+        self.assertIsNotNone(contract["auto_verified_at"])
+
+    def test_market_rule_batch_keeps_duplicate_exchange_market_ids_as_separate_buckets(self):
+        db_path = test_db_path("market_rule_duplicate_keys")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            rules = []
+            for question in (
+                "Will the highest temperature in NYC be between 76-77掳F on June 23?",
+                "Will the highest temperature in NYC be between 78-79掳F on June 23?",
+            ):
+                rules.append(
+                    infer_settlement_rule(
+                        {
+                            "market_id": "shared-event-market",
+                            "city": "nyc",
+                            "city_name": "New York City",
+                            "unit": "F",
+                            "event_url": "https://polymarket.com/event/highest-temperature-in-nyc-on-june-23-2026",
+                            "question": question,
+                            "date": "2026-06-23",
+                        }
+                    ).to_dict()
+                )
+            upsert_market_rules(rules)
+            with connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT market_id, exchange_market_id, question FROM market_rules ORDER BY question"
+                ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["exchange_market_id"] for row in rows}, {"shared-event-market"})
+        self.assertEqual(len({row["market_id"] for row in rows}), 2)
+        self.assertTrue(all(str(row["market_id"]).startswith("rule:") for row in rows))
+
     def test_data_readiness_blocks_unverified_rules_and_missing_forecast_runs(self):
         db_path = test_db_path("data_readiness")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
-            upsert_market_rule(infer_settlement_rule(
+            rule = infer_settlement_rule(
                 {
                     "market_id": "nyc-1",
                     "city": "nyc",
@@ -249,7 +310,9 @@ class V3CoreTests(unittest.TestCase):
                     "description": "Resolves according to Wunderground station history.",
                     "date": "2026-06-23",
                 }
-            ).to_dict())
+            )
+            upsert_market_rule(rule.to_dict())
+            upsert_settlement_contracts([settlement_contract_from_rule(rule)])
             readiness = build_data_readiness(db_path)
         self.assertFalse(readiness["live_allowed"])
         self.assertEqual(readiness["summary"]["market_rules"], 1)
@@ -408,6 +471,81 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(summary["total_observations"], 1)
         self.assertEqual(summary["eligible_observations"], 0)
         self.assertEqual(summary["open_meteo_fallbacks"], 1)
+
+    def test_truth_revisions_append_versions_and_keep_latest_materialized_row(self):
+        db_path = test_db_path("truth_versions")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        base = {
+            "city": "nyc",
+            "city_name": "New York City",
+            "target_date": "2026-06-23",
+            "station_id": "KLGA",
+            "station_name": "LaGuardia Airport",
+            "unit": "F",
+            "actual_temp": 77.0,
+            "provider": "nws_station",
+            "source_url": "https://api.weather.gov/stations/KLGA/observations",
+            "observation_count": 24,
+            "source_confidence": 0.9,
+            "calibration_eligible": True,
+            "reason_if_ineligible": "",
+            "is_final": True,
+            "is_preliminary": False,
+            "quality_flags": ["official_station"],
+        }
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            upsert_truth_observation(base)
+            upsert_truth_observation({**base, "actual_temp": 78.0, "observation_count": 25})
+            with connect(db_path) as conn:
+                version_rows = conn.execute(
+                    "SELECT id, supersedes_truth_id FROM truth_observation_versions ORDER BY id"
+                ).fetchall()
+                latest = conn.execute(
+                    "SELECT actual_temp, supersedes_truth_id FROM truth_observations"
+                ).fetchone()
+        self.assertEqual(len(version_rows), 2)
+        self.assertEqual(version_rows[1]["supersedes_truth_id"], version_rows[0]["id"])
+        self.assertEqual(latest["actual_temp"], 78.0)
+        self.assertEqual(latest["supersedes_truth_id"], version_rows[0]["id"])
+
+    def test_truth_temporal_audit_invalidates_wrong_day_metar(self):
+        db_path = test_db_path("truth_temporal_audit")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        payload = {
+            "city": "nyc",
+            "city_name": "New York City",
+            "target_date": "2026-06-16",
+            "station_id": "KLGA",
+            "station_name": "LaGuardia Airport",
+            "unit": "F",
+            "actual_temp": 82.0,
+            "provider": "aviationweather_station",
+            "source_url": "https://aviationweather.gov/api/data/metar",
+            "observation_count": 1,
+            "source_confidence": 0.74,
+            "calibration_eligible": True,
+            "reason_if_ineligible": "",
+            "observed_at": "2026-06-24T18:00:00+00:00",
+            "is_final": True,
+            "is_preliminary": False,
+            "quality_flags": ["official_metar"],
+        }
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            upsert_truth_observation(payload)
+            audit = repair_truth_temporal_mismatches()
+            with connect(db_path) as conn:
+                latest = conn.execute(
+                    "SELECT actual_temp, calibration_eligible, reason_if_ineligible "
+                    "FROM truth_observations"
+                ).fetchone()
+                versions = conn.execute(
+                    "SELECT COUNT(*) FROM truth_observation_versions"
+                ).fetchone()[0]
+        self.assertEqual(audit["invalidated"], 1)
+        self.assertIsNone(latest["actual_temp"])
+        self.assertEqual(latest["calibration_eligible"], 0)
+        self.assertIn("observation_date_mismatch", latest["reason_if_ineligible"])
+        self.assertEqual(versions, 2)
 
     def test_paper_executor_rejects_bad_orderbook(self):
         db_path = test_db_path("paper_reject")

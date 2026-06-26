@@ -7,6 +7,7 @@ interface Props {
 
 const REASON_LABELS: Record<string, string> = {
   settlement_rule_not_manually_verified: '规则未核验',
+  settlement_contracts_missing: '事件合同缺失',
   timezone_mismatch: '时区不一致',
   resolution_source_missing: '来源缺失',
   timezone_database_unavailable: '时区库不可用',

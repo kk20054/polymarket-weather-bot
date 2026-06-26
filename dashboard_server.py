@@ -35,7 +35,7 @@ from weatherbot_v3.config import load_config as load_v3_config
 from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
 from weatherbot_v3.db import init_v3_db
 from weatherbot_v3.db import insert_event_distribution, latest_event_distribution, latest_signal_decision
-from weatherbot_v3.db import truth_coverage_summary, upsert_market_rules, upsert_signal_decision, upsert_truth_observation
+from weatherbot_v3.db import truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
@@ -43,7 +43,7 @@ from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.notifier import FeishuNotifier
 from weatherbot_v3.polymarket import PolymarketDataClient
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
-from weatherbot_v3.truth import infer_settlement_rule
+from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_rule
 
 
 ROOT = Path(__file__).resolve().parent
@@ -314,11 +314,6 @@ def _market_calibration_eligible(market):
 
 
 def _build_truth_health(markets):
-    by_city = {}
-    total = 0
-    eligible = 0
-    open_meteo = 0
-    legacy = 0
     for market in markets:
         obs = _market_truth_observation(market)
         if not obs:
@@ -327,65 +322,22 @@ def _build_truth_health(markets):
             upsert_truth_observation(obs)
         except Exception:
             pass
-        total += 1
-        if obs["calibration_eligible"]:
-            eligible += 1
-        if obs["provider"] == "open_meteo_archive":
-            open_meteo += 1
-        if obs["provider"] == "legacy_unknown":
-            legacy += 1
-        city = obs["city"]
-        item = by_city.setdefault(
-            city,
-            {
-                "city": city,
-                "city_name": obs["city_name"],
-                "station_id": obs["station_id"],
-                "total_observations": 0,
-                "eligible_observations": 0,
-                "open_meteo_fallbacks": 0,
-                "legacy_unknown": 0,
-                "latest_provider": "",
-                "latest_date": "",
-                "latest_confidence": 0.0,
-                "status": "blocked",
-                "reasons": [],
-            },
-        )
-        item["total_observations"] += 1
-        if obs["calibration_eligible"]:
-            item["eligible_observations"] += 1
-        if obs["provider"] == "open_meteo_archive":
-            item["open_meteo_fallbacks"] += 1
-        if obs["provider"] == "legacy_unknown":
-            item["legacy_unknown"] += 1
-        if not item["latest_date"] or obs["target_date"] > item["latest_date"]:
-            item["latest_date"] = obs["target_date"]
-            item["latest_provider"] = obs["provider"]
-            item["latest_confidence"] = obs["source_confidence"]
 
+    summary = truth_coverage_summary()
     cfg = load_v3_config()
-    for item in by_city.values():
+    for item in summary.get("cities", []):
         reasons = []
+        cautions = []
         if item["eligible_observations"] < cfg.min_independent_settlement_days:
             reasons.append("truth_independent_days_low")
         if item["open_meteo_fallbacks"]:
-            reasons.append("open_meteo_truth_fallback_present")
+            cautions.append("open_meteo_truth_fallback_present")
         if item["legacy_unknown"]:
-            reasons.append("legacy_truth_unknown")
+            cautions.append("legacy_truth_unknown_excluded")
         item["status"] = "eligible" if not reasons else "blocked"
         item["reasons"] = reasons
-
-    cities = sorted(by_city.values(), key=lambda row: (row["eligible_observations"], row["total_observations"]), reverse=True)
-    return {
-        "total_observations": total,
-        "eligible_observations": eligible,
-        "coverage_rate": round((eligible / total) if total else 0.0, 4),
-        "open_meteo_fallbacks": open_meteo,
-        "open_meteo_fallback_rate": round((open_meteo / total) if total else 0.0, 4),
-        "legacy_unknown": legacy,
-        "cities": cities,
-    }
+        item["cautions"] = cautions
+    return summary
 
 
 def _truth_city_lookup(truth_health):
@@ -403,6 +355,7 @@ def _sync_v4_market_rules(markets):
     if signature == _market_rule_sync_signature:
         return
     rules = []
+    contracts = {}
     for market in markets:
         outcomes = market.get("all_outcomes") or []
         for outcome in outcomes:
@@ -415,9 +368,13 @@ def _sync_v4_market_rules(markets):
             try:
                 rule = infer_settlement_rule(payload).to_dict()
                 rules.append(rule)
+                contract = settlement_contract_from_rule(rule)
+                if contract.get("event_slug"):
+                    contracts[str(contract["event_slug"])] = contract
             except Exception:
                 continue
     upsert_market_rules(rules)
+    upsert_settlement_contracts(list(contracts.values()))
     _market_rule_sync_signature = signature
 
 
@@ -2590,10 +2547,6 @@ def build_dashboard_payload():
     readiness_reasons = list(strategy_readiness.get("reasons") or [])
     if truth_health.get("eligible_observations", 0) < cfg.min_independent_settlement_days:
         readiness_reasons.append("truth_observations_below_min")
-    if truth_health.get("open_meteo_fallback_rate", 0) > 0:
-        readiness_reasons.append("open_meteo_truth_fallback_present")
-    if truth_health.get("legacy_unknown", 0) > 0:
-        readiness_reasons.append("legacy_truth_unknown")
     if not data_readiness.get("live_allowed"):
         readiness_reasons.extend(
             str(reason.get("code") or "")

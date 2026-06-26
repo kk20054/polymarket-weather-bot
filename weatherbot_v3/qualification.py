@@ -27,6 +27,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     with connect(path) as conn:
         rules = [dict(row) for row in conn.execute("SELECT * FROM market_rules").fetchall()]
+        contracts = [dict(row) for row in conn.execute("SELECT * FROM settlement_contracts").fetchall()]
         truths = [dict(row) for row in conn.execute("SELECT * FROM truth_observations").fetchall()]
         forecast_runs = [
             dict(row)
@@ -53,10 +54,13 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         orderbooks = [dict(row) for row in conn.execute("SELECT * FROM orderbooks").fetchall()]
 
     rules_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    contracts_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     truths_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     runs_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rules:
         rules_by_city[str(row.get("city") or "")].append(row)
+    for row in contracts:
+        contracts_by_city[str(row.get("city") or "")].append(row)
     for row in truths:
         truths_by_city[str(row.get("city") or "")].append(row)
     for row in forecast_runs:
@@ -65,6 +69,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     city_rows = []
     for city, profile in SETTLEMENT_REGISTRY.items():
         city_rules = rules_by_city.get(city, [])
+        city_contracts = contracts_by_city.get(city, [])
         city_truth = truths_by_city.get(city, [])
         city_runs = runs_by_city.get(city, [])
         fresh_city_runs = [
@@ -81,17 +86,18 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         all_truth_days = {str(row.get("target_date") or "") for row in city_truth if row.get("target_date")}
         providers = Counter(str(row.get("provider") or "unknown") for row in city_truth)
         station_mismatch = sum(
-            1 for row in city_rules
+            1 for row in city_contracts
             if str(row.get("station_id") or "").upper() != profile.station_id
         )
         timezone_mismatch = sum(
-            1 for row in city_rules
+            1 for row in city_contracts
             if str(row.get("timezone") or "") != profile.timezone
         )
-        verified_rules = sum(1 for row in city_rules if row.get("manual_verified_at"))
+        verified_rules = sum(1 for row in city_contracts if row.get("manual_verified_at"))
+        auto_verified_rules = sum(1 for row in city_contracts if row.get("auto_verified_at"))
         reasons = []
-        if not city_rules:
-            reasons.append("market_rule_missing")
+        if not city_contracts:
+            reasons.append("settlement_contract_missing")
         if station_mismatch:
             reasons.append("station_mapping_mismatch")
         if timezone_mismatch:
@@ -107,7 +113,9 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         city_rows.append({
             **profile.to_dict(),
             "market_rules": len(city_rules),
+            "settlement_contracts": len(city_contracts),
             "verified_rules": verified_rules,
+            "auto_verified_rules": auto_verified_rules,
             "station_mismatches": station_mismatch,
             "timezone_mismatches": timezone_mismatch,
             "truth_days": len(all_truth_days),
@@ -132,6 +140,11 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         and row.get("actual_temp") is not None
     }
     provider_counts = Counter(str(row.get("provider") or "unknown") for row in truths)
+    eligible_provider_counts = Counter(
+        str(row.get("provider") or "unknown")
+        for row in truths
+        if row.get("calibration_eligible") and row.get("actual_temp") is not None
+    )
     timezone_database_available = _timezone_database_available()
     forecast_source_counts = Counter(str(row.get("source") or "unknown") for row in forecast_runs)
     training_eligible_runs = [row for row in forecast_runs if row.get("training_eligible")]
@@ -142,10 +155,11 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     fresh_forecast_cities = {str(row.get("city") or "") for row in fresh_forecast_runs}
     fresh_training_runs = [row for row in fresh_forecast_runs if row.get("training_eligible")]
     fresh_training_cities = {str(row.get("city") or "") for row in fresh_training_runs}
-    utc_rules = sum(1 for row in rules if str(row.get("timezone") or "") == "UTC")
-    unverified_rules = sum(1 for row in rules if not row.get("manual_verified_at"))
+    utc_rules = sum(1 for row in contracts if str(row.get("timezone") or "") == "UTC")
+    unverified_rules = sum(1 for row in contracts if not row.get("manual_verified_at"))
+    auto_verified_rules = sum(1 for row in contracts if row.get("auto_verified_at"))
     missing_rule_source = sum(
-        1 for row in rules
+        1 for row in contracts
         if not row.get("resolution_source_text") or not row.get("source_url")
     )
     stale_orderbooks = 0
@@ -165,7 +179,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             "settlement_contracts",
             "结算合同",
             (
-                len(rules) > 0
+                len(contracts) > 0
                 and unverified_rules == 0
                 and utc_rules == 0
                 and missing_rule_source == 0
@@ -173,13 +187,17 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             ),
             [
                 ("settlement_rule_not_manually_verified", unverified_rules),
+                ("settlement_contracts_missing", 1 if not contracts else 0),
                 ("timezone_mismatch", utc_rules),
                 ("resolution_source_missing", missing_rule_source),
                 ("timezone_database_unavailable", 1 if not timezone_database_available else 0),
             ],
             {
-                "rules": len(rules),
-                "cities": len(rules_by_city),
+                "contracts": len(contracts),
+                "market_rules": len(rules),
+                "cities": len(contracts_by_city),
+                "auto_verified_contracts": auto_verified_rules,
+                "manual_verified_contracts": len(contracts) - unverified_rules,
                 "registry_version": REGISTRY_VERSION,
                 "timezone_database_available": timezone_database_available,
             },
@@ -187,16 +205,20 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         _stage(
             "truth",
             "结算 Truth",
-            len(eligible_truth_days) >= cfg.min_independent_settlement_days and provider_counts.get("legacy_unknown", 0) == 0,
+            len(eligible_truth_days) >= cfg.min_independent_settlement_days
+            and eligible_provider_counts.get("legacy_unknown", 0) == 0,
             [
                 ("independent_truth_days_below_min", max(0, cfg.min_independent_settlement_days - len(eligible_truth_days))),
-                ("legacy_truth_unknown", provider_counts.get("legacy_unknown", 0)),
+                ("legacy_truth_unknown", eligible_provider_counts.get("legacy_unknown", 0)),
                 ("open_meteo_fallback_present", provider_counts.get("open_meteo_archive", 0)),
             ],
             {
                 "eligible_days": len(eligible_truth_days),
                 "total_days": len(total_truth_days),
                 "providers": dict(provider_counts),
+                "eligible_providers": dict(eligible_provider_counts),
+                "excluded_legacy_unknown": provider_counts.get("legacy_unknown", 0)
+                - eligible_provider_counts.get("legacy_unknown", 0),
                 "minimum_days": cfg.min_independent_settlement_days,
             },
         ),
@@ -271,6 +293,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             "registered_cities": len(SETTLEMENT_REGISTRY),
             "eligible_cities": sum(1 for row in city_rows if row["status"] == "eligible"),
             "market_rules": len(rules),
+            "settlement_contracts": len(contracts),
             "eligible_truth_days": len(eligible_truth_days),
             "forecast_runs": len(forecast_runs),
             "forecast_members": forecast_member_count,

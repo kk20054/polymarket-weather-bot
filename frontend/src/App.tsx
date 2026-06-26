@@ -93,6 +93,7 @@ function reasonLabel(reason: string) {
     allowed_group_roi_negative: '允许组 ROI 为负',
     allowed_win_rate_low: '允许组胜率偏低',
     settlement_rule_not_manually_verified: '结算规则未核验',
+    settlement_contracts_missing: '事件级合同缺失',
     timezone_mismatch: '规则时区不一致',
     independent_truth_days_below_min: '独立 Truth 日不足',
     all_orderbooks_stale: '盘口快照已过期',

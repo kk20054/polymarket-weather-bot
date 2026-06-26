@@ -233,6 +233,61 @@ def init_v3_db(path: Path | None = None) -> None:
                 UNIQUE(city, target_date, station_id, provider)
             );
 
+            CREATE TABLE IF NOT EXISTS truth_observation_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                truth_key TEXT NOT NULL,
+                truth_version TEXT NOT NULL,
+                supersedes_truth_id INTEGER,
+                city TEXT,
+                city_name TEXT,
+                target_date TEXT,
+                station_id TEXT,
+                station_name TEXT,
+                unit TEXT,
+                actual_temp REAL,
+                provider TEXT,
+                source_url TEXT,
+                observation_count INTEGER,
+                source_confidence REAL,
+                calibration_eligible INTEGER,
+                reason_if_ineligible TEXT,
+                observed_at TEXT,
+                retrieved_at TEXT,
+                is_preliminary INTEGER,
+                is_final INTEGER,
+                quality_flags TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(truth_key, truth_version)
+            );
+
+            CREATE TABLE IF NOT EXISTS settlement_contracts (
+                contract_id TEXT PRIMARY KEY,
+                event_slug TEXT UNIQUE,
+                city TEXT,
+                city_name TEXT,
+                target_local_date TEXT,
+                station_id TEXT,
+                station_name TEXT,
+                timezone TEXT,
+                unit TEXT,
+                metric TEXT,
+                rounding_rule TEXT,
+                bucket_boundary TEXT,
+                resolution_source_text TEXT,
+                source_url TEXT,
+                truth_provider_priority TEXT,
+                rule_version TEXT,
+                registry_version TEXT,
+                parse_confidence REAL,
+                confidence_reason TEXT,
+                auto_verified_at TEXT,
+                manual_verified_at TEXT,
+                verification_evidence TEXT,
+                raw_json TEXT,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS forecast_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_key TEXT UNIQUE,
@@ -351,6 +406,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "truth_confidence": "REAL",
         },
         "market_rules": {
+            "exchange_market_id": "TEXT",
             "contract_id": "TEXT",
             "target_local_date": "TEXT",
             "bucket_boundary": "TEXT",
@@ -609,14 +665,14 @@ def upsert_market_rule(rule: dict[str, Any]) -> None:
         conn.execute(
             """
             INSERT INTO market_rules (
-                market_id, event_slug, market_slug, question, city, city_name,
+                market_id, exchange_market_id, event_slug, market_slug, question, city, city_name,
                 station_id, station_name, timezone, unit, bucket_low, bucket_high,
                 metric, resolution_source_text, source_url, truth_confidence,
                 confidence_reason, contract_id, target_local_date, bucket_boundary,
                 rounding_rule, truth_provider_priority, rule_version, registry_version,
                 parsed_at, manual_verified_at, raw_json, updated_at
             ) VALUES (
-                :market_id, :event_slug, :market_slug, :question, :city, :city_name,
+                :market_id, :exchange_market_id, :event_slug, :market_slug, :question, :city, :city_name,
                 :station_id, :station_name, :timezone, :unit, :bucket_low, :bucket_high,
                 :metric, :resolution_source_text, :source_url, :truth_confidence,
                 :confidence_reason, :contract_id, :target_local_date, :bucket_boundary,
@@ -625,6 +681,7 @@ def upsert_market_rule(rule: dict[str, Any]) -> None:
             )
             ON CONFLICT(market_id) DO UPDATE SET
                 event_slug=excluded.event_slug,
+                exchange_market_id=excluded.exchange_market_id,
                 market_slug=excluded.market_slug,
                 question=excluded.question,
                 city=excluded.city,
@@ -656,24 +713,24 @@ def upsert_market_rule(rule: dict[str, Any]) -> None:
         )
 
 
-def upsert_market_rules(rules: list[dict[str, Any]]) -> None:
+def upsert_market_rules(rules: list[dict[str, Any]], prune_missing: bool = False) -> None:
     if not rules:
         return
     init_v3_db()
     now = utc_now()
-    normalized = [_normalize_market_rule(rule, now) for rule in rules]
+    normalized = [_normalize_market_rule(rule, now, duplicate_market_ids=_duplicate_market_ids(rules)) for rule in rules]
     with connect() as conn:
         conn.executemany(
             """
             INSERT INTO market_rules (
-                market_id, event_slug, market_slug, question, city, city_name,
+                market_id, exchange_market_id, event_slug, market_slug, question, city, city_name,
                 station_id, station_name, timezone, unit, bucket_low, bucket_high,
                 metric, resolution_source_text, source_url, truth_confidence,
                 confidence_reason, contract_id, target_local_date, bucket_boundary,
                 rounding_rule, truth_provider_priority, rule_version, registry_version,
                 parsed_at, manual_verified_at, raw_json, updated_at
             ) VALUES (
-                :market_id, :event_slug, :market_slug, :question, :city, :city_name,
+                :market_id, :exchange_market_id, :event_slug, :market_slug, :question, :city, :city_name,
                 :station_id, :station_name, :timezone, :unit, :bucket_low, :bucket_high,
                 :metric, :resolution_source_text, :source_url, :truth_confidence,
                 :confidence_reason, :contract_id, :target_local_date, :bucket_boundary,
@@ -682,6 +739,7 @@ def upsert_market_rules(rules: list[dict[str, Any]]) -> None:
             )
             ON CONFLICT(market_id) DO UPDATE SET
                 event_slug=excluded.event_slug,
+                exchange_market_id=excluded.exchange_market_id,
                 market_slug=excluded.market_slug,
                 question=excluded.question,
                 city=excluded.city,
@@ -711,10 +769,42 @@ def upsert_market_rules(rules: list[dict[str, Any]]) -> None:
             """,
             [{**rule, "raw_json": dump_json(rule), "updated_at": now} for rule in normalized],
         )
+        if prune_missing:
+            keep_ids = [str(rule.get("market_id") or "") for rule in normalized if rule.get("market_id")]
+            if keep_ids:
+                conn.execute("CREATE TEMP TABLE IF NOT EXISTS _market_rule_keep (market_id TEXT PRIMARY KEY)")
+                conn.execute("DELETE FROM _market_rule_keep")
+                conn.executemany("INSERT OR IGNORE INTO _market_rule_keep (market_id) VALUES (?)", [(item,) for item in keep_ids])
+                conn.execute("DELETE FROM market_rules WHERE market_id NOT IN (SELECT market_id FROM _market_rule_keep)")
+                conn.execute("DROP TABLE _market_rule_keep")
 
 
-def _normalize_market_rule(rule: dict[str, Any], now: str) -> dict[str, Any]:
+def _duplicate_market_ids(rules: list[dict[str, Any]]) -> set[str]:
+    counts: dict[str, int] = {}
+    for rule in rules:
+        market_id = str(rule.get("market_id") or "")
+        if market_id:
+            counts[market_id] = counts.get(market_id, 0) + 1
+    return {market_id for market_id, count in counts.items() if count > 1}
+
+
+def _normalize_market_rule(
+    rule: dict[str, Any],
+    now: str,
+    duplicate_market_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    exchange_market_id = str(rule.get("exchange_market_id") or rule.get("market_id") or "")
     market_id = str(rule.get("market_id") or "")
+    if not market_id or market_id in (duplicate_market_ids or set()):
+        basis = "|".join(
+            [
+                str(rule.get("event_slug") or rule.get("contract_id") or ""),
+                str(rule.get("question") or ""),
+                str(rule.get("bucket_low") if rule.get("bucket_low") is not None else ""),
+                str(rule.get("bucket_high") if rule.get("bucket_high") is not None else ""),
+            ]
+        )
+        market_id = "rule:" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
     event_slug = str(rule.get("event_slug") or "")
     priority = rule.get("truth_provider_priority") or [
         "polymarket_resolved",
@@ -727,7 +817,8 @@ def _normalize_market_rule(rule: dict[str, Any], now: str) -> dict[str, Any]:
     return {
         **rule,
         "market_id": market_id,
-        "contract_id": str(rule.get("contract_id") or f"{event_slug}:{market_id}"),
+        "exchange_market_id": exchange_market_id,
+        "contract_id": str(rule.get("contract_id") or event_slug),
         "target_local_date": str(rule.get("target_local_date") or rule.get("target_date") or ""),
         "bucket_boundary": str(rule.get("bucket_boundary") or "inclusive"),
         "rounding_rule": str(rule.get("rounding_rule") or "source_reported_daily_high"),
@@ -742,6 +833,7 @@ def _normalize_market_rule(rule: dict[str, Any], now: str) -> dict[str, Any]:
 def upsert_truth_observation(observation: dict[str, Any]) -> None:
     init_v3_db()
     now = utc_now()
+    _, truth_version, supersedes_truth_id = append_truth_observation(observation)
     with connect() as conn:
         conn.execute(
             """
@@ -749,12 +841,12 @@ def upsert_truth_observation(observation: dict[str, Any]) -> None:
                 city, city_name, target_date, station_id, station_name, unit,
                 actual_temp, provider, source_url, observation_count,
                 source_confidence, calibration_eligible, reason_if_ineligible,
-                raw_json, created_at
+                truth_version, supersedes_truth_id, raw_json, created_at
             ) VALUES (
                 :city, :city_name, :target_date, :station_id, :station_name, :unit,
                 :actual_temp, :provider, :source_url, :observation_count,
                 :source_confidence, :calibration_eligible, :reason_if_ineligible,
-                :raw_json, :created_at
+                :truth_version, :supersedes_truth_id, :raw_json, :created_at
             )
             ON CONFLICT(city, target_date, station_id, provider) DO UPDATE SET
                 actual_temp=excluded.actual_temp,
@@ -763,15 +855,163 @@ def upsert_truth_observation(observation: dict[str, Any]) -> None:
                 source_confidence=excluded.source_confidence,
                 calibration_eligible=excluded.calibration_eligible,
                 reason_if_ineligible=excluded.reason_if_ineligible,
+                truth_version=excluded.truth_version,
+                supersedes_truth_id=excluded.supersedes_truth_id,
                 raw_json=excluded.raw_json,
                 created_at=excluded.created_at
             """,
             {
                 **observation,
                 "calibration_eligible": 1 if observation.get("calibration_eligible") else 0,
+                "truth_version": truth_version,
+                "supersedes_truth_id": supersedes_truth_id,
                 "raw_json": dump_json(observation),
                 "created_at": now,
             },
+        )
+
+
+def append_truth_observation(observation: dict[str, Any]) -> tuple[int, str, int | None]:
+    init_v3_db()
+    now = utc_now()
+    truth_key = ":".join(
+        [
+            str(observation.get("city") or ""),
+            str(observation.get("target_date") or ""),
+            str(observation.get("station_id") or ""),
+            str(observation.get("provider") or ""),
+        ]
+    )
+    version_payload = {
+        key: observation.get(key)
+        for key in (
+            "actual_temp",
+            "observation_count",
+            "source_confidence",
+            "calibration_eligible",
+            "reason_if_ineligible",
+            "source_url",
+            "observed_at",
+            "is_preliminary",
+            "is_final",
+            "quality_flags",
+        )
+    }
+    truth_version = hashlib.sha256(dump_json(version_payload).encode("utf-8")).hexdigest()
+    with connect() as conn:
+        existing = conn.execute(
+            "SELECT id, truth_version FROM truth_observation_versions WHERE truth_key = ? ORDER BY id DESC LIMIT 1",
+            (truth_key,),
+        ).fetchone()
+        if existing and existing["truth_version"] == truth_version:
+            return int(existing["id"]), truth_version, None
+        supersedes_truth_id = int(existing["id"]) if existing else None
+        conn.execute(
+            """
+            INSERT INTO truth_observation_versions (
+                truth_key, truth_version, supersedes_truth_id, city, city_name,
+                target_date, station_id, station_name, unit, actual_temp, provider,
+                source_url, observation_count, source_confidence,
+                calibration_eligible, reason_if_ineligible, observed_at,
+                retrieved_at, is_preliminary, is_final, quality_flags,
+                raw_json, created_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                truth_key,
+                truth_version,
+                supersedes_truth_id,
+                observation.get("city"),
+                observation.get("city_name"),
+                observation.get("target_date"),
+                observation.get("station_id"),
+                observation.get("station_name"),
+                observation.get("unit"),
+                observation.get("actual_temp"),
+                observation.get("provider"),
+                observation.get("source_url"),
+                int(observation.get("observation_count") or 0),
+                _num(observation.get("source_confidence"), 0.0),
+                1 if observation.get("calibration_eligible") else 0,
+                observation.get("reason_if_ineligible"),
+                observation.get("observed_at"),
+                observation.get("retrieved_at") or now,
+                1 if observation.get("is_preliminary") else 0,
+                1 if observation.get("is_final") else 0,
+                dump_json(observation.get("quality_flags", [])),
+                dump_json(observation),
+                now,
+            ),
+        )
+        row = conn.execute(
+            "SELECT id FROM truth_observation_versions WHERE truth_key = ? AND truth_version = ?",
+            (truth_key, truth_version),
+        ).fetchone()
+        return int(row["id"]), truth_version, supersedes_truth_id
+
+
+def upsert_settlement_contracts(contracts: list[dict[str, Any]]) -> None:
+    if not contracts:
+        return
+    init_v3_db()
+    now = utc_now()
+    rows = []
+    for contract in contracts:
+        event_slug = str(contract.get("event_slug") or "")
+        rows.append({
+            **contract,
+            "contract_id": str(contract.get("contract_id") or event_slug),
+            "event_slug": event_slug,
+            "truth_provider_priority": dump_json(contract.get("truth_provider_priority", [])),
+            "verification_evidence": dump_json(contract.get("verification_evidence", [])),
+            "raw_json": dump_json(contract),
+            "updated_at": now,
+        })
+    with connect() as conn:
+        conn.executemany(
+            """
+            INSERT INTO settlement_contracts (
+                contract_id, event_slug, city, city_name, target_local_date,
+                station_id, station_name, timezone, unit, metric, rounding_rule,
+                bucket_boundary, resolution_source_text, source_url,
+                truth_provider_priority, rule_version, registry_version,
+                parse_confidence, confidence_reason, auto_verified_at,
+                manual_verified_at, verification_evidence, raw_json, updated_at
+            ) VALUES (
+                :contract_id, :event_slug, :city, :city_name, :target_local_date,
+                :station_id, :station_name, :timezone, :unit, :metric, :rounding_rule,
+                :bucket_boundary, :resolution_source_text, :source_url,
+                :truth_provider_priority, :rule_version, :registry_version,
+                :parse_confidence, :confidence_reason, :auto_verified_at,
+                :manual_verified_at, :verification_evidence, :raw_json, :updated_at
+            )
+            ON CONFLICT(contract_id) DO UPDATE SET
+                city=excluded.city,
+                city_name=excluded.city_name,
+                target_local_date=excluded.target_local_date,
+                station_id=excluded.station_id,
+                station_name=excluded.station_name,
+                timezone=excluded.timezone,
+                unit=excluded.unit,
+                metric=excluded.metric,
+                rounding_rule=excluded.rounding_rule,
+                bucket_boundary=excluded.bucket_boundary,
+                resolution_source_text=excluded.resolution_source_text,
+                source_url=excluded.source_url,
+                truth_provider_priority=excluded.truth_provider_priority,
+                rule_version=excluded.rule_version,
+                registry_version=excluded.registry_version,
+                parse_confidence=excluded.parse_confidence,
+                confidence_reason=excluded.confidence_reason,
+                auto_verified_at=excluded.auto_verified_at,
+                manual_verified_at=COALESCE(excluded.manual_verified_at, settlement_contracts.manual_verified_at),
+                verification_evidence=excluded.verification_evidence,
+                raw_json=excluded.raw_json,
+                updated_at=excluded.updated_at
+            """,
+            rows,
         )
 
 
@@ -967,42 +1207,76 @@ def truth_coverage_summary() -> dict[str, Any]:
     init_v3_db()
     with connect() as conn:
         rows = [dict(r) for r in conn.execute("SELECT * FROM truth_observations ORDER BY target_date DESC").fetchall()]
-    by_city: dict[str, dict[str, Any]] = {}
+    by_city_date: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
-        city = row.get("city") or ""
+        key = (str(row.get("city") or ""), str(row.get("target_date") or ""))
+        by_city_date.setdefault(key, []).append(row)
+    by_city: dict[str, dict[str, Any]] = {}
+    provider_counts: dict[str, int] = {}
+    excluded = 0
+    for (city, target_date), day_rows in by_city_date.items():
+        for row in day_rows:
+            provider = str(row.get("provider") or "unknown")
+            provider_counts[provider] = provider_counts.get(provider, 0) + 1
+            if not row.get("calibration_eligible"):
+                excluded += 1
+        eligible_rows = [
+            row for row in day_rows
+            if row.get("calibration_eligible") and row.get("actual_temp") is not None
+        ]
+        best_eligible = max(
+            eligible_rows,
+            key=lambda row: _num(row.get("source_confidence"), 0.0),
+            default=None,
+        )
+        display_row = best_eligible or max(
+            day_rows,
+            key=lambda row: (
+                1 if row.get("actual_temp") is not None else 0,
+                _num(row.get("source_confidence"), 0.0),
+            ),
+        )
         item = by_city.setdefault(
             city,
             {
                 "city": city,
-                "city_name": row.get("city_name") or city,
-                "station_id": row.get("station_id") or "",
+                "city_name": display_row.get("city_name") or city,
+                "station_id": display_row.get("station_id") or "",
                 "total_observations": 0,
                 "eligible_observations": 0,
                 "open_meteo_fallbacks": 0,
+                "legacy_unknown": 0,
                 "latest_provider": "",
                 "latest_date": "",
                 "latest_confidence": 0.0,
             },
         )
         item["total_observations"] += 1
-        if row.get("calibration_eligible"):
+        if best_eligible:
             item["eligible_observations"] += 1
-        if row.get("provider") == "open_meteo_archive":
+        if any(row.get("provider") == "open_meteo_archive" for row in day_rows):
             item["open_meteo_fallbacks"] += 1
-        if not item["latest_date"] or str(row.get("target_date") or "") > item["latest_date"]:
-            item["latest_date"] = row.get("target_date") or ""
-            item["latest_provider"] = row.get("provider") or ""
-            item["latest_confidence"] = _num(row.get("source_confidence"), 0.0)
+        if any(row.get("provider") == "legacy_unknown" for row in day_rows):
+            item["legacy_unknown"] += 1
+        if not item["latest_date"] or target_date > item["latest_date"]:
+            item["latest_date"] = target_date
+            item["latest_provider"] = display_row.get("provider") or ""
+            item["latest_confidence"] = _num(display_row.get("source_confidence"), 0.0)
+            item["station_id"] = display_row.get("station_id") or item["station_id"]
     cities = sorted(by_city.values(), key=lambda row: (row["eligible_observations"], row["total_observations"]), reverse=True)
     total = sum(row["total_observations"] for row in cities)
     eligible = sum(row["eligible_observations"] for row in cities)
     fallbacks = sum(row["open_meteo_fallbacks"] for row in cities)
+    legacy = sum(row["legacy_unknown"] for row in cities)
     return {
         "total_observations": total,
         "eligible_observations": eligible,
         "coverage_rate": round((eligible / total) if total else 0.0, 4),
         "open_meteo_fallbacks": fallbacks,
         "open_meteo_fallback_rate": round((fallbacks / total) if total else 0.0, 4),
+        "legacy_unknown": legacy,
+        "excluded_observations": excluded,
+        "provider_counts": provider_counts,
         "cities": cities,
     }
 

@@ -196,6 +196,7 @@ export interface DataReadiness {
     registered_cities: number
     eligible_cities: number
     market_rules: number
+    settlement_contracts?: number
     eligible_truth_days: number
     forecast_runs: number
     forecast_members: number
