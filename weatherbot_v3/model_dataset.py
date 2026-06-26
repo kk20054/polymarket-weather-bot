@@ -91,8 +91,7 @@ def build_model_dataset_audit(
 
     for (city, target_date), city_contracts in sorted(grouped_contracts.items(), key=lambda item: (item[0][1], item[0][0]), reverse=True):
         timezone_name = _first_value(city_contracts, "timezone") or "UTC"
-        bounds = _local_day_bounds(target_date, timezone_name)
-        settlement_pending = bool(bounds and bounds[1] >= now)
+        settlement_pending = is_settlement_pending(target_date, timezone_name, now)
         truth_rows = truths_by_city_date.get((city, target_date), [])
         eligible_truth = [
             truth for truth in truth_rows
@@ -376,6 +375,14 @@ def _forecast_no_leak_check(run: dict[str, Any], target_date: str, timezone_name
         reason = "forecast_after_target_start" if horizon_bucket != "d0" else "forecast_after_target_day"
         return {"ok": False, "reason": reason, "horizon_bucket": horizon_bucket}
     return {"ok": True, "reason": "", "horizon_bucket": horizon_bucket}
+
+
+def is_settlement_pending(target_date: str, timezone_name: str, now: datetime | None = None) -> bool:
+    bounds = _local_day_bounds(target_date, timezone_name)
+    if not bounds:
+        return True
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return bounds[1] >= now
 
 
 def _local_day_bounds(target_date: str, timezone_name: str) -> tuple[datetime, datetime] | None:

@@ -9,7 +9,7 @@ from weatherbot_v3.db import bulk_settlement_contract_verification, connect, ini
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.distribution import build_event_distribution
-from weatherbot_v3.model_dataset import build_model_dataset_audit
+from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
@@ -625,6 +625,22 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("settlement_pending", audit["samples"][0]["warnings"])
         action_keys = {action["key"] for action in audit["next_actions"]}
         self.assertNotIn("backfill_official_truth", action_keys)
+
+    def test_settlement_pending_helper_uses_local_day_end(self):
+        self.assertTrue(
+            is_settlement_pending(
+                "2026-06-28",
+                "America/New_York",
+                datetime(2026, 6, 28, 12, 0, tzinfo=timezone.utc),
+            )
+        )
+        self.assertFalse(
+            is_settlement_pending(
+                "2026-06-28",
+                "America/New_York",
+                datetime(2026, 6, 29, 5, 0, tzinfo=timezone.utc),
+            )
+        )
 
     def test_scanner_batch_persistence_records_deterministic_and_ensemble_sources(self):
         db_path = test_db_path("scanner_forecast_store")

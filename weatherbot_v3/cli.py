@@ -7,7 +7,7 @@ import time
 
 from .db import bulk_settlement_contract_verification, connect, dashboard_summary, init_v3_db, list_settlement_contracts, set_settlement_contract_verification
 from .migration import audit_market_files, migrate_legacy_signals, repair_truth_temporal_mismatches, sync_settlement_contracts
-from .model_dataset import build_model_dataset_audit
+from .model_dataset import build_model_dataset_audit, is_settlement_pending
 from .notifier import FeishuNotifier
 from .qualification import build_data_readiness, persist_data_readiness
 
@@ -205,8 +205,6 @@ def main() -> None:
         }, ensure_ascii=False, indent=2))
     elif args.command == "truth-backfill":
         from collections import Counter
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
 
         from .db import upsert_truth_observation
         from .registry import SETTLEMENT_REGISTRY
@@ -241,17 +239,20 @@ def main() -> None:
         }
         timezones = {city: profile.timezone for city, profile in profiles.items()}
         candidates = []
+        skipped_pending = 0
+        skipped_unknown_city = 0
         for row in rows:
             city = str(row["city"] or "")
             target_date = str(row["target_local_date"] or "")
             if city not in profiles:
+                skipped_unknown_city += 1
                 continue
             if args.start_date and target_date < args.start_date:
                 continue
             if args.end_date and target_date > args.end_date:
                 continue
-            local_today = datetime.now(ZoneInfo(profiles[city].timezone)).strftime("%Y-%m-%d")
-            if target_date >= local_today:
+            if is_settlement_pending(target_date, profiles[city].timezone):
+                skipped_pending += 1
                 continue
             candidates.append((city, target_date))
         candidates = candidates[: max(1, min(int(args.limit or 50), 500))]
@@ -277,6 +278,8 @@ def main() -> None:
         providers = Counter(row.get("provider") or "error" for row in results)
         print(json.dumps({
             "requested": len(candidates),
+            "skipped_pending_settlement": skipped_pending,
+            "skipped_unknown_city": skipped_unknown_city,
             "ok": sum(1 for row in results if row["ok"]),
             "eligible": sum(1 for row in results if row.get("eligible")),
             "providers": dict(providers),
