@@ -82,12 +82,15 @@ def build_model_dataset_audit(
     source_counts: Counter[str] = Counter()
     horizon_counts: Counter[str] = Counter()
     reason_counts: Counter[str] = Counter()
+    training_reason_counts: Counter[str] = Counter()
     leakage_flags: Counter[str] = Counter()
     missing_truth_targets: set[tuple[str, str]] = set()
     missing_forecast_targets: set[tuple[str, str]] = set()
     missing_member_targets: set[tuple[str, str]] = set()
     missing_orderbook_targets: set[tuple[str, str]] = set()
     auto_verified_pending: set[str] = set()
+    mature_auto_verified_pending: set[str] = set()
+    unverified_contract_days = 0
 
     for (city, target_date), city_contracts in sorted(grouped_contracts.items(), key=lambda item: (item[0][1], item[0][0]), reverse=True):
         timezone_name = _first_value(city_contracts, "timezone") or "UTC"
@@ -131,11 +134,18 @@ def build_model_dataset_audit(
         warnings = []
         if manual_verified == 0:
             reasons.append("contract_not_manually_verified")
+            unverified_contract_days += 1
             auto_verified_pending.update(
                 str(contract.get("contract_id") or "")
                 for contract in city_contracts
                 if contract.get("auto_verified_at") and not contract.get("manual_verified_at")
             )
+            if not settlement_pending:
+                mature_auto_verified_pending.update(
+                    str(contract.get("contract_id") or "")
+                    for contract in city_contracts
+                    if contract.get("auto_verified_at") and not contract.get("manual_verified_at")
+                )
         if settlement_pending:
             warnings.append("settlement_pending")
         elif not eligible_truth:
@@ -143,23 +153,29 @@ def build_model_dataset_audit(
             missing_truth_targets.add((city, target_date))
         if not no_leak_runs:
             reasons.append("no_no_leak_forecast_run")
-            missing_forecast_targets.add((city, target_date))
+            if not settlement_pending:
+                missing_forecast_targets.add((city, target_date))
         if member_count == 0:
             reasons.append("forecast_members_missing")
-            missing_member_targets.add((city, target_date))
+            if not settlement_pending:
+                missing_member_targets.add((city, target_date))
         if not CORE_FORECAST_SOURCES.issubset(set(sources)):
             warnings.append("core_source_coverage_incomplete")
         if rejected_runs:
             warnings.append("future_or_undated_forecast_rejected")
         if orderbook_snapshots == 0:
             warnings.append("orderbook_replay_missing")
-            missing_orderbook_targets.add((city, target_date))
+            if not settlement_pending:
+                missing_orderbook_targets.add((city, target_date))
 
         training_eligible = not reasons and not settlement_pending
         baseline_ready = training_eligible and CORE_FORECAST_SOURCES.issubset(set(sources))
         replay_ready = baseline_ready and orderbook_snapshots > 0
         for reason in reasons + warnings:
             reason_counts[reason] += 1
+        if not settlement_pending:
+            for reason in reasons + warnings:
+                training_reason_counts[reason] += 1
         row = {
             "city": city,
             "city_name": _first_value(city_contracts, "city_name") or city,
@@ -219,7 +235,7 @@ def build_model_dataset_audit(
     mature_count = len(sample_rows) - pending_count
     status = "ready" if baseline_count >= required_samples else "blocked"
     next_actions = _build_next_actions(
-        auto_verified_pending=auto_verified_pending,
+        auto_verified_pending=mature_auto_verified_pending,
         missing_truth_targets=missing_truth_targets,
         missing_forecast_targets=missing_forecast_targets,
         missing_member_targets=missing_member_targets,
@@ -246,6 +262,13 @@ def build_model_dataset_audit(
             "baseline_ready_cities": sum(1 for row in city_rows if row["baseline_ready"] > 0),
         },
         "reason_counts": dict(reason_counts),
+        "training_reason_counts": dict(training_reason_counts),
+        "operational_counts": {
+            "unverified_contract_event_days": unverified_contract_days,
+            "auto_verified_unreviewed_contracts": len(auto_verified_pending),
+            "mature_auto_verified_unreviewed_contracts": len(mature_auto_verified_pending),
+            "pending_settlement_samples": pending_count,
+        },
         "leakage_flags": dict(leakage_flags),
         "source_counts": dict(source_counts),
         "horizon_counts": dict(horizon_counts),

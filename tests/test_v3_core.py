@@ -622,9 +622,16 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(audit["summary"]["pending_settlement_samples"], 1)
         self.assertEqual(audit["summary"]["mature_event_days"], 0)
         self.assertNotIn("eligible_truth_missing", audit["reason_counts"])
+        self.assertNotIn("contract_not_manually_verified", audit["training_reason_counts"])
+        self.assertEqual(audit["operational_counts"]["unverified_contract_event_days"], 1)
+        self.assertEqual(audit["operational_counts"]["auto_verified_unreviewed_contracts"], 1)
+        self.assertEqual(audit["operational_counts"]["mature_auto_verified_unreviewed_contracts"], 0)
         self.assertIn("settlement_pending", audit["samples"][0]["warnings"])
         action_keys = {action["key"] for action in audit["next_actions"]}
+        self.assertNotIn("review_auto_verified_contracts", action_keys)
         self.assertNotIn("backfill_official_truth", action_keys)
+        self.assertNotIn("backfill_forecast_members", action_keys)
+        self.assertNotIn("backfill_orderbooks", action_keys)
 
     def test_settlement_pending_helper_uses_local_day_end(self):
         self.assertTrue(

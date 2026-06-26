@@ -25,7 +25,7 @@ export function ModelDatasetPanel({ audit }: { audit?: ModelDatasetAudit | null 
     return <div className="p-3 text-[11px] text-neutral-600">模型样本池尚未生成</div>
   }
   const summary = audit.summary
-  const topReasons = Object.entries(audit.reason_counts ?? {})
+  const topReasons = Object.entries(audit.training_reason_counts ?? audit.reason_counts ?? {})
     .sort((a, b) => b[1] - a[1])
     .slice(0, 4)
   const progress = pct(summary.baseline_ready_samples, audit.required_samples)
@@ -82,6 +82,16 @@ export function ModelDatasetPanel({ audit }: { audit?: ModelDatasetAudit | null 
               {label(reason)} {count}
             </span>
           ))}
+        </div>
+      )}
+
+      {audit.operational_counts && (
+        <div
+          className="grid grid-cols-2 gap-1 border-t border-neutral-800 pt-2 text-center"
+          title="运营 backlog 不等同于 Phase 2 训练阻塞；未来待结算事件会先进入等待池。"
+        >
+          <Metric label="合同 backlog" value={audit.operational_counts.unverified_contract_event_days} />
+          <Metric label="自动可信" value={audit.operational_counts.auto_verified_unreviewed_contracts} />
         </div>
       )}
 

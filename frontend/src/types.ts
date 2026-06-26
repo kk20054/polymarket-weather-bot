@@ -658,6 +658,13 @@ export interface ModelDatasetAudit {
     baseline_ready_cities: number
   }
   reason_counts: Record<string, number>
+  training_reason_counts: Record<string, number>
+  operational_counts: {
+    unverified_contract_event_days: number
+    auto_verified_unreviewed_contracts: number
+    mature_auto_verified_unreviewed_contracts: number
+    pending_settlement_samples: number
+  }
   leakage_flags: Record<string, number>
   source_counts: Record<string, number>
   horizon_counts: Record<string, number>
