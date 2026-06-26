@@ -15,7 +15,11 @@ AUDIT_VERSION = "model-dataset-audit-v1"
 CORE_FORECAST_SOURCES = {"ecmwf", "gfs_ensemble"}
 
 
-def build_model_dataset_audit(path: Path | None = None, min_samples: int | None = None) -> dict[str, Any]:
+def build_model_dataset_audit(
+    path: Path | None = None,
+    min_samples: int | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     """Summarize training/replay sample readiness without using future data.
 
     The unit of analysis is a city/local-date event, not a market snapshot. A
@@ -26,6 +30,7 @@ def build_model_dataset_audit(path: Path | None = None, min_samples: int | None 
 
     init_v3_db(path)
     cfg = load_config()
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     required_samples = int(min_samples or max(30, cfg.min_independent_settlement_days))
     with connect(path) as conn:
         contracts = [dict(row) for row in conn.execute("SELECT * FROM settlement_contracts").fetchall()]
@@ -86,6 +91,8 @@ def build_model_dataset_audit(path: Path | None = None, min_samples: int | None 
 
     for (city, target_date), city_contracts in sorted(grouped_contracts.items(), key=lambda item: (item[0][1], item[0][0]), reverse=True):
         timezone_name = _first_value(city_contracts, "timezone") or "UTC"
+        bounds = _local_day_bounds(target_date, timezone_name)
+        settlement_pending = bool(bounds and bounds[1] >= now)
         truth_rows = truths_by_city_date.get((city, target_date), [])
         eligible_truth = [
             truth for truth in truth_rows
@@ -130,7 +137,9 @@ def build_model_dataset_audit(path: Path | None = None, min_samples: int | None 
                 for contract in city_contracts
                 if contract.get("auto_verified_at") and not contract.get("manual_verified_at")
             )
-        if not eligible_truth:
+        if settlement_pending:
+            warnings.append("settlement_pending")
+        elif not eligible_truth:
             reasons.append("eligible_truth_missing")
             missing_truth_targets.add((city, target_date))
         if not no_leak_runs:
@@ -147,7 +156,7 @@ def build_model_dataset_audit(path: Path | None = None, min_samples: int | None 
             warnings.append("orderbook_replay_missing")
             missing_orderbook_targets.add((city, target_date))
 
-        training_eligible = not reasons
+        training_eligible = not reasons and not settlement_pending
         baseline_ready = training_eligible and CORE_FORECAST_SOURCES.issubset(set(sources))
         replay_ready = baseline_ready and orderbook_snapshots > 0
         for reason in reasons + warnings:
@@ -167,6 +176,7 @@ def build_model_dataset_audit(path: Path | None = None, min_samples: int | None 
             "forecast_members": member_count,
             "sources": sources,
             "orderbook_snapshots": orderbook_snapshots,
+            "settlement_pending": settlement_pending,
             "training_eligible": training_eligible,
             "baseline_ready": baseline_ready,
             "replay_ready": replay_ready,
@@ -206,6 +216,8 @@ def build_model_dataset_audit(path: Path | None = None, min_samples: int | None 
     training_count = sum(1 for row in sample_rows if row["training_eligible"])
     baseline_count = sum(1 for row in sample_rows if row["baseline_ready"])
     replay_count = sum(1 for row in sample_rows if row["replay_ready"])
+    pending_count = sum(1 for row in sample_rows if row["settlement_pending"])
+    mature_count = len(sample_rows) - pending_count
     status = "ready" if baseline_count >= required_samples else "blocked"
     next_actions = _build_next_actions(
         auto_verified_pending=auto_verified_pending,
@@ -224,10 +236,12 @@ def build_model_dataset_audit(path: Path | None = None, min_samples: int | None 
         "required_samples": required_samples,
         "summary": {
             "event_days": len(sample_rows),
+            "mature_event_days": mature_count,
+            "pending_settlement_samples": pending_count,
             "training_eligible_samples": training_count,
             "baseline_ready_samples": baseline_count,
             "replay_ready_samples": replay_count,
-            "blocked_samples": len(sample_rows) - training_count,
+            "blocked_samples": mature_count - training_count,
             "cities": len(city_rows),
             "eligible_cities": sum(1 for row in city_rows if row["training_eligible"] > 0),
             "baseline_ready_cities": sum(1 for row in city_rows if row["baseline_ready"] > 0),

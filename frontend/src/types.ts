@@ -647,6 +647,8 @@ export interface ModelDatasetAudit {
   required_samples: number
   summary: {
     event_days: number
+    mature_event_days: number
+    pending_settlement_samples: number
     training_eligible_samples: number
     baseline_ready_samples: number
     replay_ready_samples: number

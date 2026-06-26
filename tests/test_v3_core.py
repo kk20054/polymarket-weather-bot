@@ -594,6 +594,38 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("contracts-bulk-verify", audit["next_actions"][0]["command"])
         self.assertIn("--apply", audit["next_actions"][0]["apply_command"])
 
+    def test_model_dataset_audit_treats_future_truth_as_pending_not_missing(self):
+        db_path = test_db_path("model_dataset_pending")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-future-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-future",
+                    "question": "Will the highest temperature in NYC be between 80-81°F on June 28?",
+                    "description": "Resolves using Wunderground station KLGA history.",
+                    "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/2026-6-28",
+                    "date": "2026-06-28",
+                }
+            )
+            upsert_market_rule(rule.to_dict())
+            upsert_settlement_contracts([settlement_contract_from_rule(rule)])
+            audit = build_model_dataset_audit(
+                db_path,
+                min_samples=1,
+                now=datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(audit["summary"]["pending_settlement_samples"], 1)
+        self.assertEqual(audit["summary"]["mature_event_days"], 0)
+        self.assertNotIn("eligible_truth_missing", audit["reason_counts"])
+        self.assertIn("settlement_pending", audit["samples"][0]["warnings"])
+        action_keys = {action["key"] for action in audit["next_actions"]}
+        self.assertNotIn("backfill_official_truth", action_keys)
+
     def test_scanner_batch_persistence_records_deterministic_and_ensemble_sources(self):
         db_path = test_db_path("scanner_forecast_store")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))

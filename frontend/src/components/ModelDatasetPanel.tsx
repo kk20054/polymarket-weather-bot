@@ -56,6 +56,10 @@ export function ModelDatasetPanel({ audit }: { audit?: ModelDatasetAudit | null 
         <Metric label="可训练" value={summary.training_eligible_samples} />
         <Metric label="Baseline" value={`${summary.baseline_ready_samples}/${audit.required_samples}`} />
       </div>
+      <div className="grid grid-cols-2 gap-1 text-center">
+        <Metric label="已成熟" value={summary.mature_event_days ?? 0} />
+        <Metric label="待结算" value={summary.pending_settlement_samples ?? 0} />
+      </div>
 
       <div className="space-y-1">
         <div className="flex items-center justify-between text-[10px] text-neutral-500">
