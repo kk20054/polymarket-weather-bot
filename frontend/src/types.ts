@@ -659,6 +659,17 @@ export interface ModelDatasetAudit {
   leakage_flags: Record<string, number>
   source_counts: Record<string, number>
   horizon_counts: Record<string, number>
+  next_actions: Array<{
+    key: string
+    priority: number
+    label: string
+    count: number
+    impact: string
+    command: string
+    apply_command?: string
+    requires_operator: boolean
+    targets: Array<Record<string, string>>
+  }>
   cities: Array<{
     city: string
     city_name: string

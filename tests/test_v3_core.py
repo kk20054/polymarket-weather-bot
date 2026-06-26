@@ -568,6 +568,32 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(audit["leakage_flags"]["forecast_after_target_start"], 1)
         self.assertEqual(audit["samples"][0]["no_leak_forecast_runs"], 2)
 
+    def test_model_dataset_audit_next_actions_prioritize_contract_review(self):
+        db_path = test_db_path("model_dataset_actions")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-action-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-action",
+                    "question": "Will the highest temperature in NYC be between 80-81°F on June 23?",
+                    "description": "Resolves using Wunderground station KLGA history.",
+                    "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/2026-6-23",
+                    "date": "2026-06-23",
+                }
+            )
+            upsert_market_rule(rule.to_dict())
+            upsert_settlement_contracts([settlement_contract_from_rule(rule)])
+            audit = build_model_dataset_audit(db_path, min_samples=1)
+
+        self.assertEqual(audit["next_actions"][0]["key"], "review_auto_verified_contracts")
+        self.assertTrue(audit["next_actions"][0]["requires_operator"])
+        self.assertIn("contracts-bulk-verify", audit["next_actions"][0]["command"])
+        self.assertIn("--apply", audit["next_actions"][0]["apply_command"])
+
     def test_scanner_batch_persistence_records_deterministic_and_ensemble_sources(self):
         db_path = test_db_path("scanner_forecast_store")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))

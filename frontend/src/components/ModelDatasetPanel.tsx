@@ -81,6 +81,27 @@ export function ModelDatasetPanel({ audit }: { audit?: ModelDatasetAudit | null 
         </div>
       )}
 
+      {(audit.next_actions ?? []).length > 0 && (
+        <div className="space-y-1 border-t border-neutral-800 pt-2">
+          <div className="text-[10px] text-neutral-500">下一步补数路线</div>
+          {(audit.next_actions ?? []).slice(0, 3).map(action => (
+            <div
+              key={action.key}
+              className="border border-neutral-800 bg-neutral-950 p-1.5"
+              title={`${action.impact}\n${action.command}${action.apply_command ? `\napply: ${action.apply_command}` : ''}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 truncate text-[10px] text-neutral-200">{action.label}</div>
+                <span className="shrink-0 tabular-nums text-[9px] text-neutral-500">{action.count}</span>
+              </div>
+              <div className="truncate text-[9px] text-neutral-600">
+                {action.requires_operator ? '需要人工确认' : '可由工具补齐'} · {action.command}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-1 text-[10px]">
         {(audit.cities ?? []).slice(0, 4).map(city => (
           <div key={city.city} className="min-w-0 border border-neutral-800 bg-neutral-950 p-1.5" title={city.city_name}>

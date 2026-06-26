@@ -78,6 +78,11 @@ def build_model_dataset_audit(path: Path | None = None, min_samples: int | None 
     horizon_counts: Counter[str] = Counter()
     reason_counts: Counter[str] = Counter()
     leakage_flags: Counter[str] = Counter()
+    missing_truth_targets: set[tuple[str, str]] = set()
+    missing_forecast_targets: set[tuple[str, str]] = set()
+    missing_member_targets: set[tuple[str, str]] = set()
+    missing_orderbook_targets: set[tuple[str, str]] = set()
+    auto_verified_pending: set[str] = set()
 
     for (city, target_date), city_contracts in sorted(grouped_contracts.items(), key=lambda item: (item[0][1], item[0][0]), reverse=True):
         timezone_name = _first_value(city_contracts, "timezone") or "UTC"
@@ -120,18 +125,27 @@ def build_model_dataset_audit(path: Path | None = None, min_samples: int | None 
         warnings = []
         if manual_verified == 0:
             reasons.append("contract_not_manually_verified")
+            auto_verified_pending.update(
+                str(contract.get("contract_id") or "")
+                for contract in city_contracts
+                if contract.get("auto_verified_at") and not contract.get("manual_verified_at")
+            )
         if not eligible_truth:
             reasons.append("eligible_truth_missing")
+            missing_truth_targets.add((city, target_date))
         if not no_leak_runs:
             reasons.append("no_no_leak_forecast_run")
+            missing_forecast_targets.add((city, target_date))
         if member_count == 0:
             reasons.append("forecast_members_missing")
+            missing_member_targets.add((city, target_date))
         if not CORE_FORECAST_SOURCES.issubset(set(sources)):
             warnings.append("core_source_coverage_incomplete")
         if rejected_runs:
             warnings.append("future_or_undated_forecast_rejected")
         if orderbook_snapshots == 0:
             warnings.append("orderbook_replay_missing")
+            missing_orderbook_targets.add((city, target_date))
 
         training_eligible = not reasons
         baseline_ready = training_eligible and CORE_FORECAST_SOURCES.issubset(set(sources))
@@ -193,6 +207,16 @@ def build_model_dataset_audit(path: Path | None = None, min_samples: int | None 
     baseline_count = sum(1 for row in sample_rows if row["baseline_ready"])
     replay_count = sum(1 for row in sample_rows if row["replay_ready"])
     status = "ready" if baseline_count >= required_samples else "blocked"
+    next_actions = _build_next_actions(
+        auto_verified_pending=auto_verified_pending,
+        missing_truth_targets=missing_truth_targets,
+        missing_forecast_targets=missing_forecast_targets,
+        missing_member_targets=missing_member_targets,
+        missing_orderbook_targets=missing_orderbook_targets,
+        reason_counts=reason_counts,
+        baseline_count=baseline_count,
+        required_samples=required_samples,
+    )
     return {
         "audit_version": AUDIT_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -212,9 +236,108 @@ def build_model_dataset_audit(path: Path | None = None, min_samples: int | None 
         "leakage_flags": dict(leakage_flags),
         "source_counts": dict(source_counts),
         "horizon_counts": dict(horizon_counts),
+        "next_actions": next_actions,
         "cities": city_rows,
         "samples": sample_rows[:200],
     }
+
+
+def _build_next_actions(
+    *,
+    auto_verified_pending: set[str],
+    missing_truth_targets: set[tuple[str, str]],
+    missing_forecast_targets: set[tuple[str, str]],
+    missing_member_targets: set[tuple[str, str]],
+    missing_orderbook_targets: set[tuple[str, str]],
+    reason_counts: Counter[str],
+    baseline_count: int,
+    required_samples: int,
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    sample_gap = max(0, required_samples - baseline_count)
+    if auto_verified_pending:
+        actions.append({
+            "key": "review_auto_verified_contracts",
+            "priority": 1,
+            "label": "核验自动可信合同",
+            "count": len(auto_verified_pending),
+            "impact": "解除 Phase 1.5 最大闸门，让已解析可信的事件进入训练候选。",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20",
+            "apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --apply",
+            "requires_operator": True,
+            "targets": sorted(auto_verified_pending)[:20],
+        })
+    if missing_truth_targets:
+        cities = sorted({city for city, _ in missing_truth_targets})
+        actions.append({
+            "key": "backfill_official_truth",
+            "priority": 2,
+            "label": "补官方结算 truth",
+            "count": len(missing_truth_targets),
+            "impact": "补齐模型训练标签；Open-Meteo fallback 不解锁生产训练。",
+            "command": _city_command("truth-backfill", cities),
+            "requires_operator": False,
+            "targets": _target_preview(missing_truth_targets),
+        })
+    if missing_forecast_targets or missing_member_targets:
+        cities = sorted({city for city, _ in (missing_forecast_targets | missing_member_targets)})
+        actions.append({
+            "key": "backfill_forecast_members",
+            "priority": 3,
+            "label": "补 forecast runs / members",
+            "count": max(len(missing_forecast_targets), len(missing_member_targets)),
+            "impact": "让 D+1/D+2 样本具备成员级日最高温分布，后续才能做 MOS/EMOS。",
+            "command": _city_command("forecast-backfill", cities),
+            "requires_operator": False,
+            "targets": _target_preview(missing_forecast_targets | missing_member_targets),
+        })
+    if missing_orderbook_targets:
+        actions.append({
+            "key": "backfill_orderbooks",
+            "priority": 4,
+            "label": "补盘口回放快照",
+            "count": len(missing_orderbook_targets),
+            "impact": "让策略回放使用真实 bid/ask、spread 和深度，而不是只看理论概率。",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli orderbook-backfill --limit 200",
+            "requires_operator": False,
+            "targets": _target_preview(missing_orderbook_targets),
+        })
+    if sample_gap:
+        actions.append({
+            "key": "sample_gate",
+            "priority": 5,
+            "label": "达到 Phase 2 样本门槛",
+            "count": sample_gap,
+            "impact": f"还差 {sample_gap} 个 baseline-ready 事件日，才能开始稳定比较 baseline/MOS。",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli model-dataset-audit --limit 30",
+            "requires_operator": False,
+            "targets": [],
+        })
+    if reason_counts.get("future_or_undated_forecast_rejected"):
+        actions.append({
+            "key": "inspect_forecast_time_rejections",
+            "priority": 6,
+            "label": "检查被拒绝的预测时间轴",
+            "count": int(reason_counts["future_or_undated_forecast_rejected"]),
+            "impact": "确认 forecast run_at/retrieved_at 是否真实，避免训练集偷看未来。",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli model-dataset-audit --limit 30",
+            "requires_operator": False,
+            "targets": [],
+        })
+    return sorted(actions, key=lambda item: int(item["priority"]))
+
+
+def _city_command(command: str, cities: list[str]) -> str:
+    if not cities:
+        return f".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli {command}"
+    return f".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli {command} --cities {','.join(cities[:20])}"
+
+
+def _target_preview(targets: set[tuple[str, str]], limit: int = 20) -> list[dict[str, str]]:
+    return [
+        {"city": city, "target_date": target_date}
+        for city, target_date in sorted(targets, key=lambda item: (item[1], item[0]), reverse=True)[:limit]
+    ]
 
 
 def _forecast_no_leak_check(run: dict[str, Any], target_date: str, timezone_name: str) -> dict[str, Any]:
