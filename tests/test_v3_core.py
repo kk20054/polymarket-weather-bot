@@ -322,6 +322,35 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("settlement_rule_not_manually_verified", blocker_codes)
         self.assertIn("versioned_forecast_runs_missing", blocker_codes)
 
+    def test_data_readiness_operator_action_when_auto_contracts_are_not_mature(self):
+        db_path = test_db_path("data_readiness_future_auto")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-future-auto",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-future-auto",
+                    "question": "Will the highest temperature in NYC be between 80-81掳F on January 1?",
+                    "description": "Resolves using Wunderground station KLGA history.",
+                    "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA",
+                    "date": "2099-01-01",
+                }
+            )
+            upsert_market_rule(rule.to_dict())
+            upsert_settlement_contracts([settlement_contract_from_rule(rule)])
+            readiness = build_data_readiness(db_path)
+        contract_metrics = next(
+            stage["metrics"]
+            for stage in readiness["stages"]
+            if stage["key"] == "settlement_contracts"
+        )
+        self.assertEqual(contract_metrics["auto_verified_contracts"], 1)
+        self.assertEqual(contract_metrics["mature_auto_verified_unreviewed_contracts"], 0)
+        self.assertIn("逐条人工核验", readiness["production_phase"]["operator_action"])
+
     def test_settlement_contract_manual_verification_updates_contract_and_rules(self):
         db_path = test_db_path("contract_verification")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))

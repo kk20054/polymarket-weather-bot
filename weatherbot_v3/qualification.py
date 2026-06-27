@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -158,6 +158,13 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     utc_rules = sum(1 for row in contracts if str(row.get("timezone") or "") == "UTC")
     unverified_rules = sum(1 for row in contracts if not row.get("manual_verified_at"))
     auto_verified_rules = sum(1 for row in contracts if row.get("auto_verified_at"))
+    mature_auto_verified_unreviewed = sum(
+        1
+        for row in contracts
+        if row.get("auto_verified_at")
+        and not row.get("manual_verified_at")
+        and _contract_settlement_mature(row, now)
+    )
     missing_rule_source = sum(
         1 for row in contracts
         if not row.get("resolution_source_text") or not row.get("source_url")
@@ -197,6 +204,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 "market_rules": len(rules),
                 "cities": len(contracts_by_city),
                 "auto_verified_contracts": auto_verified_rules,
+                "mature_auto_verified_unreviewed_contracts": mature_auto_verified_unreviewed,
                 "manual_verified_contracts": len(contracts) - unverified_rules,
                 "registry_version": REGISTRY_VERSION,
                 "timezone_database_available": timezone_database_available,
@@ -326,13 +334,22 @@ def _production_phase(
         }
 
     if "settlement_rule_not_manually_verified" in blocker_codes:
+        contract_stage = next((stage for stage in stages if stage.get("key") == "settlement_contracts"), {})
+        mature_auto_pending = int(
+            ((contract_stage.get("metrics") or {}).get("mature_auto_verified_unreviewed_contracts") or 0)
+        )
+        operator_action = (
+            "优先核验已成熟、自动解析可信的结算合同，清掉实盘数据闸门。"
+            if mature_auto_pending
+            else "成熟自动可信合同已处理完；继续补 Truth/预测/盘口，剩余合同需逐条人工核验。"
+        )
         return {
             "id": "phase1_5",
             "label": "Phase 1.5",
             "name": "合同核验与数据闸门收尾",
             "status": "active",
             "next": "Phase 2：无泄漏概率模型与策略稳定化",
-            "operator_action": "优先核验自动解析可信的结算合同，清掉实盘数据闸门。",
+            "operator_action": operator_action,
             "blocked_keys": blocked_keys,
         }
 
@@ -420,6 +437,18 @@ def _timezone_database_available() -> bool:
         return True
     except ZoneInfoNotFoundError:
         return False
+
+
+def _contract_settlement_mature(contract: dict[str, Any], now: datetime) -> bool:
+    target_date = str(contract.get("target_local_date") or "")
+    timezone_name = str(contract.get("timezone") or "")
+    try:
+        tz = ZoneInfo(timezone_name)
+        local_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+    except (ValueError, ZoneInfoNotFoundError):
+        return False
+    local_end = datetime.combine(local_date, time.max, tzinfo=tz).astimezone(timezone.utc)
+    return local_end < now.astimezone(timezone.utc)
 
 
 def _orderbook_time(value: Any) -> datetime | None:
