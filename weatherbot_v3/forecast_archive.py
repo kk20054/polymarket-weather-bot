@@ -175,6 +175,8 @@ def normalize_archive_record(record: dict[str, Any], strict: bool = True) -> dic
         return _invalid("target_date_missing")
 
     profile = get_city_profile(city)
+    if strict and profile is None:
+        return _invalid("city_not_in_settlement_registry")
     timezone_name = str(record.get("timezone") or (profile.timezone if profile else "") or "UTC")
     bounds = _local_day_bounds(target_date, timezone_name)
     if bounds is None:
@@ -234,9 +236,13 @@ def normalize_archive_record(record: dict[str, Any], strict: bool = True) -> dic
     if std_high is None:
         std_high = _population_std(member_highs)
 
-    station_id = str(record.get("station_id") or (profile.station_id if profile else "") or "")
+    station_id = str(record.get("station_id") or (profile.station_id if profile else "") or "").upper()
     station_name = str(record.get("station_name") or (profile.station_name if profile else "") or "")
     unit = str(record.get("unit") or (profile.unit if profile else "") or "").upper()
+    if strict and profile and station_id and station_id != profile.station_id:
+        return _invalid("station_id_mismatch")
+    if strict and profile and unit and unit != profile.unit:
+        return _invalid("unit_mismatch")
     raw_hash = str(record.get("raw_response_hash") or _stable_hash(record))
     run_key = str(
         record.get("run_key")

@@ -645,6 +645,68 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(summary["errors"][0]["reason"], "run_at_after_target_start")
         self.assertEqual(run_count, 0)
 
+    def test_forecast_archive_rejects_station_mismatch(self):
+        db_path = test_db_path("forecast_archive_station_mismatch")
+        archive_path = TEST_DB_DIR / "forecast-archive-station-mismatch.json"
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        self.addCleanup(lambda: archive_path.unlink(missing_ok=True))
+        archive_path.write_text(json.dumps([
+            {
+                "city": "dallas",
+                "target_date": "2026-06-23",
+                "station_id": "KDFW",
+                "unit": "F",
+                "source": "ecmwf",
+                "provider": "ecmwf_archive",
+                "model": "ecmwf_ifs",
+                "model_version": "archive-test",
+                "run_at": "2026-06-22T12:00:00+00:00",
+                "valid_at": "2026-06-23T18:00:00+00:00",
+                "lead_hours": 30,
+                "members": [{"member_id": "m01", "high_temp": 95.0}],
+            }
+        ]), encoding="utf-8")
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            summary = import_forecast_archive(archive_path, apply=True)
+            with connect(db_path) as conn:
+                run_count = conn.execute("SELECT COUNT(*) FROM forecast_runs").fetchone()[0]
+
+        self.assertEqual(summary["valid"], 0)
+        self.assertEqual(summary["errors"][0]["reason"], "station_id_mismatch")
+        self.assertEqual(run_count, 0)
+
+    def test_forecast_archive_rejects_unit_mismatch(self):
+        db_path = test_db_path("forecast_archive_unit_mismatch")
+        archive_path = TEST_DB_DIR / "forecast-archive-unit-mismatch.json"
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        self.addCleanup(lambda: archive_path.unlink(missing_ok=True))
+        archive_path.write_text(json.dumps([
+            {
+                "city": "paris",
+                "target_date": "2026-06-23",
+                "station_id": "LFPB",
+                "unit": "F",
+                "source": "gfs_ensemble",
+                "provider": "noaa_archive",
+                "model": "gefs",
+                "model_version": "archive-test",
+                "run_at": "2026-06-22T00:00:00+00:00",
+                "valid_at": "2026-06-23T12:00:00+00:00",
+                "lead_hours": 36,
+                "members": [{"member_id": "p01", "high_temp": 80.0}],
+            }
+        ]), encoding="utf-8")
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            summary = import_forecast_archive(archive_path, apply=True)
+            with connect(db_path) as conn:
+                run_count = conn.execute("SELECT COUNT(*) FROM forecast_runs").fetchone()[0]
+
+        self.assertEqual(summary["valid"], 0)
+        self.assertEqual(summary["errors"][0]["reason"], "unit_mismatch")
+        self.assertEqual(run_count, 0)
+
     def test_model_dataset_audit_requires_no_leak_forecasts_and_verified_contract(self):
         db_path = test_db_path("model_dataset_audit")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))

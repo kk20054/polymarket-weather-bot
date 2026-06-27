@@ -72,6 +72,9 @@
 - D+1 / D+2：`run_at` 必须早于目标城市本地结算日开始。
 - D+0：`run_at` 必须早于目标城市本地结算日结束。
 - `valid_at` 必须落在目标城市本地结算日内。
+- `city` 必须存在于本地机场结算 registry。
+- 如果提供 `station_id`，必须匹配 registry。例如 Dallas 使用 `KDAL`，不能用 `KDFW`。
+- 如果提供 `unit`，必须匹配 registry。美国城市多为 `F`，欧洲/亚洲等多为 `C`。
 - 缺 `members` 的记录不导入，因为 Phase 2 需要成员级分布，而不是只要均值。
 
 如果记录来自 Open-Meteo historical/continuous 产品，系统会加 `historical_continuous_product_review_required` 标记；这种数据不能直接当成高置信生产训练样本。
