@@ -158,12 +158,9 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     utc_rules = sum(1 for row in contracts if str(row.get("timezone") or "") == "UTC")
     unverified_rules = sum(1 for row in contracts if not row.get("manual_verified_at"))
     auto_verified_rules = sum(1 for row in contracts if row.get("auto_verified_at"))
-    mature_auto_verified_unreviewed = sum(
-        1
-        for row in contracts
-        if row.get("auto_verified_at")
-        and not row.get("manual_verified_at")
-        and _contract_settlement_mature(row, now)
+    contract_review_queue = _contract_review_queue(contracts, now)
+    mature_auto_verified_unreviewed = int(
+        contract_review_queue["counts"]["mature_auto_verified_unreviewed"]
     )
     missing_rule_source = sum(
         1 for row in contracts
@@ -206,6 +203,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 "auto_verified_contracts": auto_verified_rules,
                 "mature_auto_verified_unreviewed_contracts": mature_auto_verified_unreviewed,
                 "manual_verified_contracts": len(contracts) - unverified_rules,
+                "contract_review_queue": contract_review_queue["counts"],
+                "contract_review_targets": contract_review_queue["targets"],
                 "registry_version": REGISTRY_VERSION,
                 "timezone_database_available": timezone_database_available,
             },
@@ -375,6 +374,52 @@ def _production_phase(
         "operator_action": "数据闸门已过，下一步验证概率模型和 paper trading edge。",
         "blocked_keys": blocked_keys,
     }
+
+
+def _contract_review_queue(
+    contracts: list[dict[str, Any]],
+    now: datetime,
+) -> dict[str, Any]:
+    counts = {
+        "manual_verified": 0,
+        "mature_auto_verified_unreviewed": 0,
+        "future_auto_verified_unreviewed": 0,
+        "manual_review_required_unverified": 0,
+        "source_missing_unverified": 0,
+        "low_confidence_unverified": 0,
+    }
+    targets: dict[str, list[dict[str, str]]] = {key: [] for key in counts}
+    for contract in contracts:
+        if contract.get("manual_verified_at"):
+            counts["manual_verified"] += 1
+            continue
+        if not contract.get("resolution_source_text") or not contract.get("source_url"):
+            counts["source_missing_unverified"] += 1
+            _append_target(targets["source_missing_unverified"], contract)
+        confidence = float(contract.get("parse_confidence") or 0.0)
+        if confidence < 0.8:
+            counts["low_confidence_unverified"] += 1
+            _append_target(targets["low_confidence_unverified"], contract)
+        if contract.get("auto_verified_at"):
+            if _contract_settlement_mature(contract, now):
+                counts["mature_auto_verified_unreviewed"] += 1
+                _append_target(targets["mature_auto_verified_unreviewed"], contract)
+            else:
+                counts["future_auto_verified_unreviewed"] += 1
+                _append_target(targets["future_auto_verified_unreviewed"], contract)
+        else:
+            counts["manual_review_required_unverified"] += 1
+            _append_target(targets["manual_review_required_unverified"], contract)
+    return {
+        "counts": counts,
+        "targets": {key: value for key, value in targets.items() if value},
+    }
+
+
+def _append_target(targets: list[dict[str, str]], contract: dict[str, Any], limit: int = 20) -> None:
+    if len(targets) >= limit:
+        return
+    targets.append(_contract_target(contract))
 
 
 def _build_next_actions(

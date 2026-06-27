@@ -40,6 +40,13 @@ function pct(value?: number | null) {
   return `${Math.round(Number(value) * 100)}%`
 }
 
+function metricRecord(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object') return {}
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, Number(item) || 0])
+  )
+}
+
 export function DataReadinessPanel({
   readiness,
   contracts,
@@ -60,6 +67,8 @@ export function DataReadinessPanel({
   const unverified = contractSummary?.unverified ?? readiness.blockers.find(item => item.code === 'settlement_rule_not_manually_verified')?.count ?? 0
   const visibleContractIds = (contracts?.contracts ?? []).map(contract => contract.contract_id)
   const phase = readiness.production_phase
+  const contractStage = readiness.stages.find(stage => stage.key === 'settlement_contracts')
+  const contractQueue = metricRecord(contractStage?.metrics?.contract_review_queue)
 
   return (
     <div className="space-y-3 p-3 text-[11px]">
@@ -143,6 +152,15 @@ export function DataReadinessPanel({
           <div className="h-full bg-cyan-300" style={{ width: `${Math.max(0, Math.min(progress, 1)) * 100}%` }} />
         </div>
       </div>
+
+      {Object.keys(contractQueue).length > 0 && (
+        <div className="grid grid-cols-4 gap-1 text-center" title="按生产闸门处理顺序拆分合同核验 backlog">
+          <Metric label="成熟自动" value={contractQueue.mature_auto_verified_unreviewed ?? 0} title="已过结算日且自动解析可信，可人工快速确认" />
+          <Metric label="未来自动" value={contractQueue.future_auto_verified_unreviewed ?? 0} title="自动解析可信，但还未过当地结算日" />
+          <Metric label="逐条人工" value={contractQueue.manual_review_required_unverified ?? 0} title="未通过自动可信规则，需要逐条确认" />
+          <Metric label="来源缺失" value={contractQueue.source_missing_unverified ?? 0} title="缺少规则文本或来源 URL，不能直接核验" />
+        </div>
+      )}
 
       {readiness.blockers.length > 0 && (
         <div className="flex flex-wrap gap-1">

@@ -351,6 +351,14 @@ class V3CoreTests(unittest.TestCase):
         )
         self.assertEqual(contract_metrics["auto_verified_contracts"], 1)
         self.assertEqual(contract_metrics["mature_auto_verified_unreviewed_contracts"], 0)
+        self.assertEqual(
+            contract_metrics["contract_review_queue"]["future_auto_verified_unreviewed"],
+            1,
+        )
+        self.assertEqual(
+            contract_metrics["contract_review_queue"]["mature_auto_verified_unreviewed"],
+            0,
+        )
         self.assertIn("逐条人工核验", readiness["production_phase"]["operator_action"])
 
     def test_data_readiness_next_actions_explain_phase1_5_recovery(self):
@@ -375,6 +383,19 @@ class V3CoreTests(unittest.TestCase):
             readiness = build_data_readiness(db_path)
 
         actions = readiness["next_actions"]
+        contract_metrics = next(
+            stage["metrics"]
+            for stage in readiness["stages"]
+            if stage["key"] == "settlement_contracts"
+        )
+        self.assertEqual(
+            contract_metrics["contract_review_queue"]["mature_auto_verified_unreviewed"],
+            1,
+        )
+        self.assertEqual(
+            contract_metrics["contract_review_targets"]["mature_auto_verified_unreviewed"][0]["city"],
+            "nyc",
+        )
         self.assertEqual(actions[0]["key"], "review_mature_auto_contracts")
         self.assertTrue(actions[0]["requires_operator"])
         self.assertIn("contracts-bulk-verify", actions[0]["command"])
