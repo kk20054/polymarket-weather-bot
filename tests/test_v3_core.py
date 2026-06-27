@@ -665,6 +665,51 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("--mature-only", audit["next_actions"][0]["command"])
         self.assertIn("--apply", audit["next_actions"][0]["apply_command"])
 
+    def test_model_dataset_forecast_gap_requires_historical_archive(self):
+        db_path = test_db_path("model_dataset_forecast_archive")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-archive-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-archive",
+                    "question": "Will the highest temperature in NYC be between 80-81掳F on June 23?",
+                    "description": "Resolves using Wunderground station KLGA history.",
+                    "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/2026-6-23",
+                    "date": "2026-06-23",
+                }
+            )
+            upsert_market_rule(rule.to_dict())
+            upsert_settlement_contracts([settlement_contract_from_rule(rule)])
+            set_settlement_contract_verification("nyc-archive", True, reviewer="test", note="station checked")
+            upsert_truth_observation({
+                "city": "nyc",
+                "city_name": "New York City",
+                "target_date": "2026-06-23",
+                "station_id": "KLGA",
+                "station_name": "LaGuardia Airport",
+                "unit": "F",
+                "actual_temp": 81.0,
+                "provider": "nws_station",
+                "source_url": "https://api.weather.gov/stations/KLGA/observations",
+                "observation_count": 24,
+                "source_confidence": 0.95,
+                "calibration_eligible": True,
+                "reason_if_ineligible": "",
+                "is_final": True,
+                "is_preliminary": False,
+                "quality_flags": ["official_station"],
+            })
+            audit = build_model_dataset_audit(db_path, min_samples=1)
+        forecast_action = next(action for action in audit["next_actions"] if action["key"] == "backfill_forecast_members")
+        self.assertTrue(forecast_action["historical_archive_required"])
+        self.assertIn("历史 forecast", forecast_action["label"])
+        self.assertIn("forecast_runs/forecast_members", forecast_action["command"])
+        self.assertNotIn("forecast-backfill", forecast_action["command"])
+
     def test_model_dataset_audit_treats_future_truth_as_pending_not_missing(self):
         db_path = test_db_path("model_dataset_pending")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))

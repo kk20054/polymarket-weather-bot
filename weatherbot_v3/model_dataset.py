@@ -320,12 +320,17 @@ def _build_next_actions(
         actions.append({
             "key": "backfill_forecast_members",
             "priority": 3,
-            "label": "补 forecast runs / members",
+            "label": "导入历史 forecast archive",
             "count": max(len(missing_forecast_targets), len(missing_member_targets)),
-            "impact": "让 D+1/D+2 样本具备成员级日最高温分布，后续才能做 MOS/EMOS。",
-            "command": _city_command("forecast-backfill", cities),
+            "impact": (
+                "这些样本缺的是目标日前真实可见的历史 forecast run/member；"
+                "当前 forecast-backfill 只刷新今日/未来预测，不能补历史训练样本。"
+            ),
+            "command": "准备历史 forecast archive 导入器：按 run_at、valid_at、lead_hours、member_id 写入 forecast_runs/forecast_members",
             "requires_operator": False,
             "targets": _target_preview(missing_forecast_targets | missing_member_targets),
+            "historical_archive_required": True,
+            "affected_cities": cities,
         })
     if missing_orderbook_targets:
         actions.append({
