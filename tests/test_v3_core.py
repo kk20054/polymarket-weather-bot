@@ -489,11 +489,20 @@ class V3CoreTests(unittest.TestCase):
                 source_missing,
             ])
 
-            mature_ids = {row["contract_id"] for row in list_settlement_contracts("mature-auto")["contracts"]}
-            future_ids = {row["contract_id"] for row in list_settlement_contracts("future-auto")["contracts"]}
-            manual_ids = {row["contract_id"] for row in list_settlement_contracts("manual-required")["contracts"]}
-            missing_ids = {row["contract_id"] for row in list_settlement_contracts("source-missing")["contracts"]}
-            low_confidence_ids = {row["contract_id"] for row in list_settlement_contracts("low-confidence")["contracts"]}
+            mature_rows = list_settlement_contracts("mature-auto")["contracts"]
+            future_rows = list_settlement_contracts("future-auto")["contracts"]
+            manual_rows = list_settlement_contracts("manual-required")["contracts"]
+            missing_rows = list_settlement_contracts("source-missing")["contracts"]
+            low_confidence_rows = list_settlement_contracts("low-confidence")["contracts"]
+            mature_ids = {row["contract_id"] for row in mature_rows}
+            future_ids = {row["contract_id"] for row in future_rows}
+            manual_ids = {row["contract_id"] for row in manual_rows}
+            missing_ids = {row["contract_id"] for row in missing_rows}
+            low_confidence_ids = {row["contract_id"] for row in low_confidence_rows}
+            mature_row = next(row for row in mature_rows if row["contract_id"] == "nyc-mature-auto")
+            future_row = next(row for row in future_rows if row["contract_id"] == "nyc-future-auto-status")
+            manual_row = next(row for row in manual_rows if row["contract_id"] == "nyc-manual-required")
+            missing_row = next(row for row in missing_rows if row["contract_id"] == "nyc-source-missing")
 
         self.assertIn("nyc-mature-auto", mature_ids)
         self.assertIn("nyc-future-auto-status", future_ids)
@@ -501,6 +510,14 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("nyc-source-missing", manual_ids)
         self.assertIn("nyc-source-missing", missing_ids)
         self.assertIn("nyc-manual-required", low_confidence_ids)
+        self.assertEqual("mature-auto", mature_row["review_status"])
+        self.assertIn("auto_verified", mature_row["review_tags"])
+        self.assertIn("mature", mature_row["review_tags"])
+        self.assertEqual("future-auto", future_row["review_status"])
+        self.assertIn("pending_settlement", future_row["review_tags"])
+        self.assertEqual("manual-required", manual_row["review_status"])
+        self.assertIn("manual_required", manual_row["review_tags"])
+        self.assertIn("source_missing", missing_row["review_tags"])
 
     def test_bulk_contract_verification_only_applies_auto_verified_contracts(self):
         db_path = test_db_path("bulk_contract_verification")

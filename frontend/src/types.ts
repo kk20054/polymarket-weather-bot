@@ -251,6 +251,8 @@ export interface SettlementContract {
   manual_verified_by?: string | null
   manual_verification_note?: string | null
   verification_evidence?: string[]
+  review_status?: 'verified' | 'mature-auto' | 'future-auto' | 'manual-required'
+  review_tags?: string[]
 }
 
 export interface SettlementContractList {

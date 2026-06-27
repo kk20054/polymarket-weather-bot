@@ -49,6 +49,45 @@ function metricRecord(value: unknown): Record<string, number> {
   )
 }
 
+const REVIEW_STATUS_LABELS: Record<string, string> = {
+  verified: '已核验',
+  'mature-auto': '成熟自动',
+  'future-auto': '未来自动',
+  'manual-required': '逐条人工',
+}
+
+const REVIEW_TAG_LABELS: Record<string, string> = {
+  verified: '已确认',
+  auto_verified: '自动可信',
+  mature: '已成熟',
+  pending_settlement: '待结算',
+  source_missing: '来源缺失',
+  low_confidence: '低置信',
+  manual_required: '人工',
+}
+
+function reviewStatusLabel(status?: string | null) {
+  return status ? REVIEW_STATUS_LABELS[status] ?? status : '待分类'
+}
+
+function reviewTagLabel(tag: string) {
+  return REVIEW_TAG_LABELS[tag] ?? tag
+}
+
+function reviewTagClass(tag: string) {
+  if (tag === 'verified' || tag === 'auto_verified') return 'border-green-500/20 bg-green-500/5 text-green-200'
+  if (tag === 'source_missing' || tag === 'low_confidence') return 'border-red-500/20 bg-red-500/5 text-red-200'
+  if (tag === 'pending_settlement') return 'border-amber-500/20 bg-amber-500/5 text-amber-200'
+  return 'border-neutral-800 text-neutral-500'
+}
+
+function reviewStatusClass(status?: string | null) {
+  if (status === 'verified' || status === 'mature-auto') return 'border-green-500/20 bg-green-500/5 text-green-200'
+  if (status === 'future-auto') return 'border-amber-500/20 bg-amber-500/5 text-amber-200'
+  if (status === 'manual-required') return 'border-red-500/20 bg-red-500/5 text-red-200'
+  return 'border-neutral-800 text-neutral-500'
+}
+
 export function DataReadinessPanel({
   readiness,
   contracts,
@@ -265,6 +304,7 @@ export function DataReadinessPanel({
             ) : contracts?.contracts.map(contract => {
               const expanded = expandedContract === contract.contract_id
               const verifying = verifyingContractId === contract.contract_id
+              const confidence = Math.round(Number(contract.parse_confidence ?? 0) * 100)
               return (
                 <div key={contract.contract_id} className="bg-neutral-950/40">
                   <div className="grid grid-cols-[1fr_auto] gap-2 p-2">
@@ -277,8 +317,16 @@ export function DataReadinessPanel({
                       <div className="truncate text-[11px] text-neutral-100">
                         {contract.city_name} · {contract.target_local_date}
                       </div>
-                      <div className="truncate text-[10px] text-neutral-500">
-                        {contract.station_id} · {contract.station_name}
+                      <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
+                        <span className="truncate text-[10px] text-neutral-500">
+                          {contract.station_id} · {contract.station_name}
+                        </span>
+                        <span className={`shrink-0 border px-1 py-0.5 text-[9px] ${reviewStatusClass(contract.review_status)}`}>
+                          {reviewStatusLabel(contract.review_status)}
+                        </span>
+                        <span className="shrink-0 border border-neutral-800 px-1 py-0.5 text-[9px] text-neutral-500">
+                          置信 {confidence}%
+                        </span>
                       </div>
                     </button>
                     <div className="flex items-start gap-1">
@@ -307,6 +355,15 @@ export function DataReadinessPanel({
                   </div>
                   {expanded && (
                     <div className="space-y-1 border-t border-neutral-900 p-2 text-[10px] text-neutral-400">
+                      {(contract.review_tags ?? []).length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {(contract.review_tags ?? []).map(tag => (
+                            <span key={tag} className={`border px-1 py-0.5 text-[9px] ${reviewTagClass(tag)}`}>
+                              {reviewTagLabel(tag)}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       <div className="grid grid-cols-2 gap-x-3 gap-y-1">
                         <Detail label="时区" value={contract.timezone} />
                         <Detail label="单位" value={contract.unit} />

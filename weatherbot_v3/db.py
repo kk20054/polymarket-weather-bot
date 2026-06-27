@@ -1081,7 +1081,7 @@ def list_settlement_contracts(
         )
     rows_for_status = [row for row in fetched_rows if _contract_matches_list_status(row, status)]
     total = len(rows_for_status)
-    rows = rows_for_status[offset:offset + limit]
+    rows = [_contract_review_status(row) for row in rows_for_status[offset:offset + limit]]
     contracts = int(summary.get("contracts") or 0)
     manual_verified = int(summary.get("manual_verified") or 0)
     auto_verified = int(summary.get("auto_verified") or 0)
@@ -1126,6 +1126,42 @@ def _contract_matches_list_status(contract: dict[str, Any], status: str) -> bool
     if status == "low-confidence":
         return not manual_verified and float(contract.get("parse_confidence") or 0.0) < 0.8
     return True
+
+
+def _contract_review_status(contract: dict[str, Any]) -> dict[str, Any]:
+    manual_verified = bool(contract.get("manual_verified_at"))
+    auto_verified = bool(contract.get("auto_verified_at"))
+    source_missing = not contract.get("resolution_source_text") or not contract.get("source_url")
+    low_confidence = float(contract.get("parse_confidence") or 0.0) < 0.8
+    mature = _contract_is_mature(contract)
+    if manual_verified:
+        review_status = "verified"
+    elif auto_verified and mature:
+        review_status = "mature-auto"
+    elif auto_verified:
+        review_status = "future-auto"
+    else:
+        review_status = "manual-required"
+    tags: list[str] = []
+    if manual_verified:
+        tags.append("verified")
+    if auto_verified:
+        tags.append("auto_verified")
+    if mature:
+        tags.append("mature")
+    else:
+        tags.append("pending_settlement")
+    if source_missing:
+        tags.append("source_missing")
+    if low_confidence:
+        tags.append("low_confidence")
+    if not manual_verified and not auto_verified:
+        tags.append("manual_required")
+    return {
+        **contract,
+        "review_status": review_status,
+        "review_tags": tags,
+    }
 
 
 def set_settlement_contract_verification(
