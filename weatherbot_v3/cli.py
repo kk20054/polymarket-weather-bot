@@ -26,6 +26,7 @@ def main() -> None:
             "data-readiness",
             "model-dataset-audit",
             "forecast-backfill",
+            "forecast-archive-import",
             "orderbook-backfill",
             "contracts-sync",
             "contracts-list",
@@ -44,6 +45,7 @@ def main() -> None:
     parser.add_argument("--contract-id", default="", help="Settlement contract id or event slug")
     parser.add_argument("--reviewer", default="local-operator", help="Manual verifier name")
     parser.add_argument("--note", default="", help="Manual verification note")
+    parser.add_argument("--archive-path", default="", help="Historical forecast archive JSON/JSONL path")
     parser.add_argument("--unverify", action="store_true", help="Clear manual verification instead of setting it")
     parser.add_argument("--apply", action="store_true", help="Apply a bulk write; without it bulk commands are dry-run")
     parser.add_argument("--mature-only", action="store_true", help="Only act on contracts whose local settlement day has ended")
@@ -104,6 +106,19 @@ def main() -> None:
                 None,
             ),
         }, ensure_ascii=False, indent=2))
+    elif args.command == "forecast-archive-import":
+        if not args.archive_path:
+            raise SystemExit("--archive-path is required")
+        from .forecast_archive import import_forecast_archive
+
+        payload = import_forecast_archive(args.archive_path, apply=args.apply)
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        payload["forecast_stage"] = next(
+            (stage for stage in readiness["stages"] if stage["key"] == "forecast_runs"),
+            None,
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "orderbook-backfill":
         from .polymarket import PolymarketDataClient
 

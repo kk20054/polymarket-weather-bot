@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from weatherbot_v3.db import bulk_settlement_contract_verification, connect, ini
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.distribution import build_event_distribution
+from weatherbot_v3.forecast_archive import import_forecast_archive
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
@@ -540,6 +542,107 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(run_count, 1)
         self.assertEqual(member_count, 2)
         self.assertIn("temperature_2m", hourly_json)
+
+    def test_forecast_archive_import_persists_no_leak_members(self):
+        db_path = test_db_path("forecast_archive_import")
+        archive_path = TEST_DB_DIR / "forecast-archive-import.json"
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        self.addCleanup(lambda: archive_path.unlink(missing_ok=True))
+        archive_path.write_text(json.dumps({
+            "runs": [
+                {
+                    "city": "nyc",
+                    "target_date": "2026-06-23",
+                    "source": "ecmwf",
+                    "provider": "ecmwf_archive",
+                    "model": "ecmwf_ifs",
+                    "model_version": "archive-test",
+                    "run_at": "2026-06-22T12:00:00+00:00",
+                    "retrieved_at": "2026-06-22T12:10:00+00:00",
+                    "valid_at": "2026-06-23T18:00:00+00:00",
+                    "lead_hours": 30,
+                    "members": [
+                        {"member_id": "m01", "high_temp": 80.0},
+                        {"member_id": "m02", "high_temp": 82.0},
+                    ],
+                }
+            ]
+        }), encoding="utf-8")
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            summary = import_forecast_archive(archive_path, apply=True)
+            with connect(db_path) as conn:
+                run = conn.execute("SELECT city, source, horizon, mean_high, training_eligible FROM forecast_runs").fetchone()
+                member_count = conn.execute("SELECT COUNT(*) FROM forecast_members").fetchone()[0]
+
+        self.assertEqual(summary["valid"], 1)
+        self.assertEqual(summary["imported"], 1)
+        self.assertEqual(summary["by_city"], {"nyc": 1})
+        self.assertEqual(run["city"], "nyc")
+        self.assertEqual(run["source"], "ecmwf")
+        self.assertEqual(run["horizon"], "d1")
+        self.assertEqual(run["mean_high"], 81.0)
+        self.assertEqual(run["training_eligible"], 1)
+        self.assertEqual(member_count, 2)
+
+    def test_forecast_archive_dry_run_does_not_write(self):
+        db_path = test_db_path("forecast_archive_dry_run")
+        archive_path = TEST_DB_DIR / "forecast-archive-dry-run.jsonl"
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        self.addCleanup(lambda: archive_path.unlink(missing_ok=True))
+        archive_path.write_text(json.dumps({
+            "city": "nyc",
+            "target_date": "2026-06-23",
+            "source": "gfs_ensemble",
+            "provider": "noaa_archive",
+            "model": "gefs",
+            "model_version": "archive-test",
+            "run_at": "2026-06-22T00:00:00+00:00",
+            "valid_at": "2026-06-23T18:00:00+00:00",
+            "lead_hours": 42,
+            "members": [{"member_id": "p01", "high_temp": 79.5}],
+        }) + "\n", encoding="utf-8")
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            summary = import_forecast_archive(archive_path, apply=False)
+            init_v3_db()
+            with connect(db_path) as conn:
+                run_count = conn.execute("SELECT COUNT(*) FROM forecast_runs").fetchone()[0]
+
+        self.assertEqual(summary["valid"], 1)
+        self.assertEqual(summary["imported"], 0)
+        self.assertEqual(run_count, 0)
+
+    def test_forecast_archive_rejects_leaky_d1_run(self):
+        db_path = test_db_path("forecast_archive_leaky")
+        archive_path = TEST_DB_DIR / "forecast-archive-leaky.json"
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        self.addCleanup(lambda: archive_path.unlink(missing_ok=True))
+        archive_path.write_text(json.dumps([
+            {
+                "city": "nyc",
+                "target_date": "2026-06-23",
+                "source": "ecmwf",
+                "provider": "ecmwf_archive",
+                "model": "ecmwf_ifs",
+                "model_version": "archive-test",
+                "run_at": "2026-06-23T05:00:00+00:00",
+                "valid_at": "2026-06-23T18:00:00+00:00",
+                "lead_hours": 30,
+                "members": [{"member_id": "m01", "high_temp": 80.0}],
+            }
+        ]), encoding="utf-8")
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            summary = import_forecast_archive(archive_path, apply=True)
+            with connect(db_path) as conn:
+                run_count = conn.execute("SELECT COUNT(*) FROM forecast_runs").fetchone()[0]
+
+        self.assertEqual(summary["valid"], 0)
+        self.assertEqual(summary["imported"], 0)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(summary["errors"][0]["reason"], "run_at_after_target_start")
+        self.assertEqual(run_count, 0)
 
     def test_model_dataset_audit_requires_no_leak_forecasts_and_verified_contract(self):
         db_path = test_db_path("model_dataset_audit")
