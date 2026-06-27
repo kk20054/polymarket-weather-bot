@@ -326,10 +326,14 @@ def _build_next_actions(
                 "这些样本缺的是目标日前真实可见的历史 forecast run/member；"
                 "当前 forecast-backfill 只刷新今日/未来预测，不能补历史训练样本。"
             ),
-            "command": "准备历史 forecast archive 导入器：按 run_at、valid_at、lead_hours、member_id 写入 forecast_runs/forecast_members",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli forecast-archive-import --archive-path data\\forecast_archive\\historical_forecasts.jsonl",
+            "apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli forecast-archive-import --archive-path data\\forecast_archive\\historical_forecasts.jsonl --apply",
             "requires_operator": False,
             "targets": _target_preview(missing_forecast_targets | missing_member_targets),
             "historical_archive_required": True,
+            "schema_doc": "FORECAST_ARCHIVE_IMPORT_CN.md",
+            "required_fields": ["city", "target_date", "source", "model", "model_version", "run_at", "valid_at", "members"],
+            "leakage_gate": "D+1/D+2 run_at 必须早于目标城市本地结算日开始；D+0 run_at 必须早于目标城市本地结算日结束。",
             "affected_cities": cities,
         })
     if missing_orderbook_targets:

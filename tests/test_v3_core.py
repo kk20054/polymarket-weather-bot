@@ -810,7 +810,12 @@ class V3CoreTests(unittest.TestCase):
         forecast_action = next(action for action in audit["next_actions"] if action["key"] == "backfill_forecast_members")
         self.assertTrue(forecast_action["historical_archive_required"])
         self.assertIn("历史 forecast", forecast_action["label"])
-        self.assertIn("forecast_runs/forecast_members", forecast_action["command"])
+        self.assertIn("forecast-archive-import", forecast_action["command"])
+        self.assertIn("--archive-path", forecast_action["command"])
+        self.assertIn("--apply", forecast_action["apply_command"])
+        self.assertEqual(forecast_action["schema_doc"], "FORECAST_ARCHIVE_IMPORT_CN.md")
+        self.assertIn("run_at", forecast_action["required_fields"])
+        self.assertIn("D+1/D+2", forecast_action["leakage_gate"])
         self.assertNotIn("forecast-backfill", forecast_action["command"])
 
     def test_model_dataset_audit_treats_future_truth_as_pending_not_missing(self):
