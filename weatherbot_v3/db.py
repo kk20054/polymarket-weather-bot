@@ -1147,6 +1147,7 @@ def bulk_settlement_contract_verification(
     reviewer: str = "",
     note: str = "",
     require_auto_verified: bool = True,
+    mature_only: bool = False,
     apply: bool = False,
 ) -> dict[str, Any]:
     init_v3_db()
@@ -1163,8 +1164,9 @@ def bulk_settlement_contract_verification(
         params.extend(contract_ids)
     clause = " AND ".join(where)
     now = utc_now()
+    query_limit = 500 if mature_only and not contract_ids else limit
     with connect() as conn:
-        rows = [
+        candidate_rows = [
             _decode_contract_row(dict(row))
             for row in conn.execute(
                 f"""
@@ -1174,9 +1176,13 @@ def bulk_settlement_contract_verification(
                 ORDER BY target_local_date DESC, city, event_slug
                 LIMIT ?
                 """,
-                [*params, limit],
+                [*params, query_limit],
             ).fetchall()
         ]
+        rows = [
+            row for row in candidate_rows
+            if not mature_only or _contract_is_mature(row)
+        ][:limit]
         selected_ids = [str(row["contract_id"]) for row in rows]
         skipped_requested = [
             item for item in contract_ids
@@ -1219,8 +1225,17 @@ def bulk_settlement_contract_verification(
         "verified": len(rows) if apply else 0,
         "skipped_requested": skipped_requested,
         "require_auto_verified": require_auto_verified,
+        "mature_only": mature_only,
         "contracts": rows,
     }
+
+
+def _contract_is_mature(contract: dict[str, Any]) -> bool:
+    from .model_dataset import is_settlement_pending
+
+    target_date = str(contract.get("target_local_date") or "")
+    timezone_name = str(contract.get("timezone") or "UTC")
+    return bool(target_date) and not is_settlement_pending(target_date, timezone_name)
 
 
 def _decode_contract_row(row: dict[str, Any]) -> dict[str, Any]:

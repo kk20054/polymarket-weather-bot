@@ -122,12 +122,13 @@ export async function verifySettlementContract(contractId: string, verified = tr
   return data
 }
 
-export async function verifySettlementContractsBulk(contractIds: string[], apply = true): Promise<BulkContractVerificationResult> {
+export async function verifySettlementContractsBulk(contractIds: string[], apply = true, matureOnly = false): Promise<BulkContractVerificationResult> {
   const { data } = await api.post<BulkContractVerificationResult>('/contracts/bulk-verification', {
     contract_ids: contractIds,
     limit: contractIds.length,
     reviewer: 'dashboard',
     note: 'dashboard visible batch review',
+    mature_only: matureOnly,
     apply,
   })
   return data

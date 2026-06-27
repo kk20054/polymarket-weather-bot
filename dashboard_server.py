@@ -102,6 +102,7 @@ class BulkContractVerificationRequest(BaseModel):
     limit: int = 5
     reviewer: str = "dashboard"
     note: str | None = None
+    mature_only: bool = False
     apply: bool = False
 
 
@@ -2803,6 +2804,7 @@ async def verify_contracts_bulk(request: BulkContractVerificationRequest):
         reviewer=request.reviewer,
         note=request.note or "dashboard bulk review",
         require_auto_verified=True,
+        mature_only=request.mature_only,
         apply=request.apply,
     )
     readiness = build_data_readiness()

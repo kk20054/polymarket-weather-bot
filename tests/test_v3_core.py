@@ -417,6 +417,47 @@ class V3CoreTests(unittest.TestCase):
         self.assertIsNotNone(strong["manual_verified_at"])
         self.assertIsNone(weak["manual_verified_at"])
 
+    def test_bulk_contract_verification_mature_only_skips_pending_contracts(self):
+        db_path = test_db_path("bulk_contract_mature_only")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            mature_rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-mature-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-mature",
+                    "question": "Will the highest temperature in NYC be between 80-81°F on June 23?",
+                    "description": "Resolves using Wunderground station KLGA history.",
+                    "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/2026-6-23",
+                    "date": "2026-06-23",
+                }
+            )
+            pending_rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-pending-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-pending",
+                    "question": "Will the highest temperature in NYC be between 80-81°F on June 28?",
+                    "description": "Resolves using Wunderground station KLGA history.",
+                    "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/2026-6-28",
+                    "date": "2026-06-28",
+                }
+            )
+            upsert_market_rules([mature_rule.to_dict(), pending_rule.to_dict()])
+            upsert_settlement_contracts([
+                settlement_contract_from_rule(mature_rule),
+                settlement_contract_from_rule(pending_rule),
+            ])
+            result = bulk_settlement_contract_verification(limit=10, mature_only=True, apply=False)
+
+        self.assertTrue(result["mature_only"])
+        self.assertEqual(result["selected"], 1)
+        self.assertEqual(result["contracts"][0]["contract_id"], "nyc-mature")
+
     def test_forecast_run_store_deduplicates_response_and_keeps_hourly_members(self):
         db_path = test_db_path("forecast_store")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -592,6 +633,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(audit["next_actions"][0]["key"], "review_auto_verified_contracts")
         self.assertTrue(audit["next_actions"][0]["requires_operator"])
         self.assertIn("contracts-bulk-verify", audit["next_actions"][0]["command"])
+        self.assertIn("--mature-only", audit["next_actions"][0]["command"])
         self.assertIn("--apply", audit["next_actions"][0]["apply_command"])
 
     def test_model_dataset_audit_treats_future_truth_as_pending_not_missing(self):

@@ -298,8 +298,8 @@ def _build_next_actions(
             "label": "核验自动可信合同",
             "count": len(auto_verified_pending),
             "impact": "解除 Phase 1.5 最大闸门，让已解析可信的事件进入训练候选。",
-            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20",
-            "apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --apply",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --mature-only",
+            "apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --mature-only --apply",
             "requires_operator": True,
             "targets": sorted(auto_verified_pending)[:20],
         })

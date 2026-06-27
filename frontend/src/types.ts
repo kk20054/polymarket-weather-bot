@@ -263,6 +263,7 @@ export interface BulkContractVerificationResult {
   verified: number
   skipped_requested: string[]
   require_auto_verified: boolean
+  mature_only: boolean
   contracts: SettlementContract[]
 }
 

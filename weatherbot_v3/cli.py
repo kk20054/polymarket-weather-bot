@@ -46,6 +46,7 @@ def main() -> None:
     parser.add_argument("--note", default="", help="Manual verification note")
     parser.add_argument("--unverify", action="store_true", help="Clear manual verification instead of setting it")
     parser.add_argument("--apply", action="store_true", help="Apply a bulk write; without it bulk commands are dry-run")
+    parser.add_argument("--mature-only", action="store_true", help="Only act on contracts whose local settlement day has ended")
     args = parser.parse_args()
 
     if args.command == "init-db":
@@ -192,6 +193,7 @@ def main() -> None:
             reviewer=args.reviewer,
             note=args.note or "bulk review from CLI",
             require_auto_verified=True,
+            mature_only=args.mature_only,
             apply=args.apply,
         )
         readiness = build_data_readiness()
