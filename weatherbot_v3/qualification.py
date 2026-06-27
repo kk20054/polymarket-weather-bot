@@ -289,7 +289,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         if reason["count"] > 0
     ]
     phase = _production_phase(stages, blockers, len(contracts), len(rules))
-    next_actions = _build_next_actions(stages, city_rows)
+    next_actions = _build_next_actions(stages, city_rows, contracts, now)
     return {
         "audit_version": AUDIT_VERSION,
         "generated_at": now.isoformat(),
@@ -380,6 +380,8 @@ def _production_phase(
 def _build_next_actions(
     stages: list[dict[str, Any]],
     city_rows: list[dict[str, Any]],
+    contracts: list[dict[str, Any]],
+    now: datetime,
 ) -> list[dict[str, Any]]:
     stage_by_key = {str(stage.get("key")): stage for stage in stages}
     reason_counts = {
@@ -392,6 +394,13 @@ def _build_next_actions(
     contract_metrics = stage_by_key.get("settlement_contracts", {}).get("metrics") or {}
     mature_auto_pending = int(contract_metrics.get("mature_auto_verified_unreviewed_contracts") or 0)
     unverified_contracts = int(reason_counts.get("settlement_rule_not_manually_verified") or 0)
+    mature_auto_targets = [
+        _contract_target(contract)
+        for contract in contracts
+        if contract.get("auto_verified_at")
+        and not contract.get("manual_verified_at")
+        and _contract_settlement_mature(contract, now)
+    ][:20]
     if mature_auto_pending:
         actions.append({
             "key": "review_mature_auto_contracts",
@@ -402,7 +411,7 @@ def _build_next_actions(
             "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --mature-only",
             "apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --mature-only --apply",
             "requires_operator": True,
-            "targets": [],
+            "targets": mature_auto_targets,
         })
     elif unverified_contracts:
         actions.append({
@@ -484,6 +493,18 @@ def _build_next_actions(
             "targets": [],
         })
     return sorted(actions, key=lambda item: int(item["priority"]))
+
+
+def _contract_target(contract: dict[str, Any]) -> dict[str, str]:
+    return {
+        "contract_id": str(contract.get("contract_id") or ""),
+        "event_slug": str(contract.get("event_slug") or ""),
+        "city": str(contract.get("city") or ""),
+        "city_name": str(contract.get("city_name") or contract.get("city") or ""),
+        "target_date": str(contract.get("target_local_date") or ""),
+        "station_id": str(contract.get("station_id") or ""),
+        "source_url": str(contract.get("source_url") or ""),
+    }
 
 
 def _city_targets(

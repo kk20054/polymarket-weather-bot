@@ -177,6 +177,11 @@ export function DataReadinessPanel({
               <div className="truncate text-[9px] text-neutral-600">
                 {action.requires_operator ? '需人工确认' : '工具可执行'} · {action.command}
               </div>
+              {action.targets?.[0] && (
+                <div className="truncate text-[9px] text-neutral-500">
+                  目标：{action.targets[0].city_name || action.targets[0].city} · {action.targets[0].target_date || action.targets[0].target_local_date} · {action.targets[0].station_id}
+                </div>
+              )}
             </div>
           ))}
         </div>

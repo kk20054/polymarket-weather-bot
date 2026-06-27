@@ -379,6 +379,9 @@ class V3CoreTests(unittest.TestCase):
         self.assertTrue(actions[0]["requires_operator"])
         self.assertIn("contracts-bulk-verify", actions[0]["command"])
         self.assertIn("--apply", actions[0]["apply_command"])
+        self.assertEqual(actions[0]["targets"][0]["city"], "nyc")
+        self.assertEqual(actions[0]["targets"][0]["target_date"], "2026-06-23")
+        self.assertEqual(actions[0]["targets"][0]["station_id"], "KLGA")
         action_keys = {action["key"] for action in actions}
         self.assertIn("refresh_forecast_runs", action_keys)
         self.assertIn("refresh_clob_orderbooks", action_keys)
