@@ -27,6 +27,7 @@ def main() -> None:
             "model-dataset-audit",
             "forecast-backfill",
             "forecast-archive-import",
+            "forecast-archive-manifest",
             "orderbook-backfill",
             "contracts-sync",
             "contracts-list",
@@ -46,6 +47,8 @@ def main() -> None:
     parser.add_argument("--reviewer", default="local-operator", help="Manual verifier name")
     parser.add_argument("--note", default="", help="Manual verification note")
     parser.add_argument("--archive-path", default="", help="Historical forecast archive JSON/JSONL path")
+    parser.add_argument("--output-path", default="", help="Output path for generated JSONL/manifest files")
+    parser.add_argument("--sources", default="ecmwf,gfs_ensemble", help="Comma-separated forecast archive sources")
     parser.add_argument("--unverify", action="store_true", help="Clear manual verification instead of setting it")
     parser.add_argument("--apply", action="store_true", help="Apply a bulk write; without it bulk commands are dry-run")
     parser.add_argument("--mature-only", action="store_true", help="Only act on contracts whose local settlement day has ended")
@@ -118,6 +121,21 @@ def main() -> None:
             (stage for stage in readiness["stages"] if stage["key"] == "forecast_runs"),
             None,
         )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.command == "forecast-archive-manifest":
+        from .forecast_archive import build_forecast_archive_manifest, write_forecast_archive_manifest
+
+        sources = [source.strip() for source in args.sources.split(",") if source.strip()]
+        audit = build_model_dataset_audit(min_samples=args.limit)
+        manifest = build_forecast_archive_manifest(audit, sources=sources)
+        payload = {
+            key: value
+            for key, value in manifest.items()
+            if key != "jsonl"
+        }
+        if args.output_path:
+            write_forecast_archive_manifest(manifest, args.output_path)
+            payload["output_path"] = args.output_path
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "orderbook-backfill":
         from .polymarket import PolymarketDataClient

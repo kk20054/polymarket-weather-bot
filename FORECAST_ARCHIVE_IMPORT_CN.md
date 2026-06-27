@@ -4,6 +4,14 @@
 
 ## 运行方式
 
+先生成待补 archive 清单：
+
+```powershell
+.\.venv\Scripts\python.exe -m weatherbot_v3.cli forecast-archive-manifest --output-path data\forecast_archive\historical_forecasts.template.jsonl
+```
+
+这个文件是模板，不是可直接导入的真实数据。需要用真实 ECMWF/GFS/HRRR 历史模型运行结果补齐 `run_at`、`valid_at`、`lead_hours`、`model_version` 和 `members` 后，再作为正式 archive 导入。
+
 先 dry-run：
 
 ```powershell

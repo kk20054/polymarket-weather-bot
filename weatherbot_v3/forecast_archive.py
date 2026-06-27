@@ -14,6 +14,64 @@ from .registry import get_city_profile
 
 
 TEMPERATURE_KEYS = ("high_temp", "temperature_2m", "temperature", "temp", "value")
+DEFAULT_ARCHIVE_SOURCES = ("ecmwf", "gfs_ensemble")
+
+
+def build_forecast_archive_manifest(
+    audit: dict[str, Any],
+    sources: list[str] | tuple[str, ...] | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Build a JSONL-ready template for missing historical forecast archives."""
+    requested_sources = tuple(source.strip().lower() for source in (sources or DEFAULT_ARCHIVE_SOURCES) if source)
+    records: list[dict[str, Any]] = []
+    for sample in audit.get("samples", []):
+        if sample.get("settlement_pending"):
+            continue
+        reasons = set(sample.get("reasons") or [])
+        warnings = set(sample.get("warnings") or [])
+        relevant = {
+            "no_no_leak_forecast_run",
+            "forecast_members_missing",
+            "core_source_coverage_incomplete",
+        }
+        if not ((reasons | warnings) & relevant):
+            continue
+
+        existing_sources = {str(source).strip().lower() for source in sample.get("sources") or [] if source}
+        if not existing_sources or "no_no_leak_forecast_run" in reasons:
+            missing_sources = set(requested_sources)
+        elif "core_source_coverage_incomplete" in warnings:
+            missing_sources = set(requested_sources) - existing_sources
+        elif "forecast_members_missing" in reasons:
+            missing_sources = existing_sources & set(requested_sources)
+        else:
+            missing_sources = set(requested_sources)
+
+        for source in sorted(missing_sources):
+            if limit is not None and len(records) >= limit:
+                break
+            records.append(_manifest_record(sample, source, reasons, warnings))
+        if limit is not None and len(records) >= limit:
+            break
+
+    by_city = Counter(record["city"] for record in records)
+    by_source = Counter(record["source"] for record in records)
+    return {
+        "manifest_version": "forecast-archive-manifest-v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "record_count": len(records),
+        "by_city": dict(sorted(by_city.items())),
+        "by_source": dict(sorted(by_source.items())),
+        "records": records,
+        "jsonl": "\n".join(json.dumps(record, ensure_ascii=False, sort_keys=True) for record in records),
+    }
+
+
+def write_forecast_archive_manifest(manifest: dict[str, Any], path: str | Path) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(str(manifest.get("jsonl") or "") + ("\n" if manifest.get("records") else ""), encoding="utf-8")
 
 
 def import_forecast_archive(path: str | Path, apply: bool = False, strict: bool = True) -> dict[str, Any]:
@@ -63,6 +121,46 @@ def import_forecast_archive(path: str | Path, apply: bool = False, strict: bool 
     summary["by_city"] = dict(sorted(city_counts.items()))
     summary["by_source"] = dict(sorted(source_counts.items()))
     return summary
+
+
+def _manifest_record(sample: dict[str, Any], source: str, reasons: set[str], warnings: set[str]) -> dict[str, Any]:
+    city = str(sample.get("city") or "").strip().lower()
+    profile = get_city_profile(city)
+    timezone_name = str(sample.get("timezone") or (profile.timezone if profile else "") or "UTC")
+    return {
+        "city": city,
+        "city_name": sample.get("city_name") or (profile.city_name if profile else city),
+        "target_date": sample.get("target_date"),
+        "timezone": timezone_name,
+        "station_id": profile.station_id if profile else "",
+        "station_name": profile.station_name if profile else "",
+        "unit": profile.unit if profile else "",
+        "source": source,
+        "provider": f"{source}_archive",
+        "model": _default_model_for_source(source),
+        "model_version": "<fill real archive model version>",
+        "run_at": "<fill ISO time visible before target local day boundary>",
+        "retrieved_at": "<fill ISO retrieval time>",
+        "valid_at": "<fill ISO forecast time inside target local day>",
+        "lead_hours": "<fill numeric lead hours>",
+        "members": [
+            {
+                "member_id": "<fill member id>",
+                "high_temp": "<fill member daily high in settlement unit>",
+                "hourly": [],
+            }
+        ],
+        "archive_gap_reasons": sorted(reasons | warnings),
+        "no_leak_rule": "D+1/D+2 run_at < target local day start; D+0 run_at < target local day end",
+    }
+
+
+def _default_model_for_source(source: str) -> str:
+    return {
+        "ecmwf": "ecmwf_ifs",
+        "gfs_ensemble": "gefs",
+        "hrrr": "hrrr",
+    }.get(source, source)
 
 
 def normalize_archive_record(record: dict[str, Any], strict: bool = True) -> dict[str, Any]:
@@ -165,7 +263,7 @@ def normalize_archive_record(record: dict[str, Any], strict: bool = True) -> dic
         "provider": provider or source or "unknown",
         "model": model or source or "unknown",
         "model_version": model_version or "unknown",
-        "run_type": str(record.get("run_type") or "historical_archive"),
+        "run_type": str(record.get("run_type") or "forecast"),
         "run_at": run_at.isoformat(),
         "retrieved_at": (retrieved_at or run_at).isoformat(),
         "valid_at": valid_at.isoformat(),

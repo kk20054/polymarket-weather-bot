@@ -10,7 +10,7 @@ from weatherbot_v3.db import bulk_settlement_contract_verification, connect, ini
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.distribution import build_event_distribution
-from weatherbot_v3.forecast_archive import import_forecast_archive
+from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
@@ -572,7 +572,7 @@ class V3CoreTests(unittest.TestCase):
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
             summary = import_forecast_archive(archive_path, apply=True)
             with connect(db_path) as conn:
-                run = conn.execute("SELECT city, source, horizon, mean_high, training_eligible FROM forecast_runs").fetchone()
+                run = conn.execute("SELECT city, source, run_type, horizon, mean_high, training_eligible FROM forecast_runs").fetchone()
                 member_count = conn.execute("SELECT COUNT(*) FROM forecast_members").fetchone()[0]
 
         self.assertEqual(summary["valid"], 1)
@@ -580,6 +580,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(summary["by_city"], {"nyc": 1})
         self.assertEqual(run["city"], "nyc")
         self.assertEqual(run["source"], "ecmwf")
+        self.assertEqual(run["run_type"], "forecast")
         self.assertEqual(run["horizon"], "d1")
         self.assertEqual(run["mean_high"], 81.0)
         self.assertEqual(run["training_eligible"], 1)
@@ -817,6 +818,55 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("run_at", forecast_action["required_fields"])
         self.assertIn("D+1/D+2", forecast_action["leakage_gate"])
         self.assertNotIn("forecast-backfill", forecast_action["command"])
+
+    def test_forecast_archive_manifest_templates_missing_sources(self):
+        db_path = test_db_path("forecast_archive_manifest")
+        manifest_path = TEST_DB_DIR / "forecast-archive-manifest.jsonl"
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        self.addCleanup(lambda: manifest_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-manifest-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-manifest",
+                    "question": "Will the highest temperature in NYC be between 80-81°F on June 23?",
+                    "description": "Resolves using Wunderground station KLGA history.",
+                    "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/2026-6-23",
+                    "date": "2026-06-23",
+                }
+            )
+            upsert_market_rule(rule.to_dict())
+            upsert_settlement_contracts([settlement_contract_from_rule(rule)])
+            set_settlement_contract_verification("nyc-manifest", True, reviewer="test", note="station checked")
+            upsert_truth_observation({
+                "city": "nyc",
+                "city_name": "New York City",
+                "target_date": "2026-06-23",
+                "station_id": "KLGA",
+                "station_name": "LaGuardia Airport",
+                "unit": "F",
+                "actual_temp": 81.0,
+                "provider": "nws_station",
+                "source_url": "https://api.weather.gov/stations/KLGA/observations",
+                "observation_count": 24,
+                "source_confidence": 0.95,
+                "calibration_eligible": True,
+                "reason_if_ineligible": "",
+            })
+            audit = build_model_dataset_audit(db_path, min_samples=1)
+            manifest = build_forecast_archive_manifest(audit)
+            write_forecast_archive_manifest(manifest, manifest_path)
+
+        self.assertEqual(manifest["record_count"], 2)
+        self.assertEqual(manifest["by_source"], {"ecmwf": 1, "gfs_ensemble": 1})
+        self.assertEqual({record["station_id"] for record in manifest["records"]}, {"KLGA"})
+        self.assertTrue(manifest_path.exists())
+        text = manifest_path.read_text(encoding="utf-8")
+        self.assertIn("run_at", text)
+        self.assertIn("no_leak_rule", text)
 
     def test_model_dataset_audit_treats_future_truth_as_pending_not_missing(self):
         db_path = test_db_path("model_dataset_pending")
