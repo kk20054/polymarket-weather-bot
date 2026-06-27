@@ -436,6 +436,13 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(after["summary"]["manual_verified"], 1)
         self.assertEqual(after["summary"]["unverified"], 0)
         self.assertEqual(verified["manual_verified_by"], "test")
+        self.assertEqual(verified["manual_verification_note"], "station checked")
+        self.assertEqual(verified["manual_verification_snapshot"]["snapshot_version"], "manual-contract-review-v1")
+        self.assertEqual(verified["manual_verification_snapshot"]["reviewer"], "test")
+        self.assertEqual(verified["manual_verification_snapshot"]["note"], "station checked")
+        self.assertEqual(verified["manual_verification_snapshot"]["review_status_before"], "manual-required")
+        self.assertIn("manual_required", verified["manual_verification_snapshot"]["review_tags_before"])
+        self.assertIn("event_slug_present", verified["manual_verification_snapshot"]["verification_evidence"])
         self.assertIsNotNone(rule_row["manual_verified_at"])
 
     def test_contract_list_supports_review_queue_statuses(self):

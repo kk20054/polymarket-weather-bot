@@ -424,7 +424,8 @@ function App() {
     },
   })
   const verifyContractMutation = useMutation({
-    mutationFn: (contractId: string) => verifySettlementContract(contractId, true, 'dashboard manual review'),
+    mutationFn: ({ contractId, note }: { contractId: string; note: string }) =>
+      verifySettlementContract(contractId, true, note || 'dashboard manual review'),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
@@ -595,9 +596,9 @@ function App() {
               contracts={contractsQuery.data}
               contractStatus={contractStatus}
               onContractStatus={setContractStatus}
-              verifyingContractId={verifyContractMutation.variables}
+              verifyingContractId={verifyContractMutation.variables?.contractId}
               bulkVerifying={bulkVerifyContractMutation.isPending}
-              onVerifyContract={(contractId) => verifyContractMutation.mutate(contractId)}
+              onVerifyContract={(contractId, note) => verifyContractMutation.mutate({ contractId, note })}
               onVerifyVisibleContracts={(contractIds) => bulkVerifyContractMutation.mutate(contractIds)}
             />
           </div>

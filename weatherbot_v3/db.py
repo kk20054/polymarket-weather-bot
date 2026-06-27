@@ -285,6 +285,7 @@ def init_v3_db(path: Path | None = None) -> None:
                 manual_verified_at TEXT,
                 manual_verified_by TEXT,
                 manual_verification_note TEXT,
+                manual_verification_snapshot TEXT,
                 verification_evidence TEXT,
                 raw_json TEXT,
                 updated_at TEXT NOT NULL
@@ -422,6 +423,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         "settlement_contracts": {
             "manual_verified_by": "TEXT",
             "manual_verification_note": "TEXT",
+            "manual_verification_snapshot": "TEXT",
         },
         "truth_observations": {
             "truth_version": "TEXT",
@@ -974,6 +976,11 @@ def upsert_settlement_contracts(contracts: list[dict[str, Any]]) -> None:
             "verification_evidence": dump_json(contract.get("verification_evidence", [])),
             "manual_verified_by": contract.get("manual_verified_by"),
             "manual_verification_note": contract.get("manual_verification_note"),
+            "manual_verification_snapshot": (
+                dump_json(contract.get("manual_verification_snapshot"))
+                if contract.get("manual_verification_snapshot") is not None
+                else None
+            ),
             "raw_json": dump_json(contract),
             "updated_at": now,
         })
@@ -987,7 +994,7 @@ def upsert_settlement_contracts(contracts: list[dict[str, Any]]) -> None:
                 truth_provider_priority, rule_version, registry_version,
                 parse_confidence, confidence_reason, auto_verified_at,
                 manual_verified_at, manual_verified_by, manual_verification_note,
-                verification_evidence, raw_json, updated_at
+                manual_verification_snapshot, verification_evidence, raw_json, updated_at
             ) VALUES (
                 :contract_id, :event_slug, :city, :city_name, :target_local_date,
                 :station_id, :station_name, :timezone, :unit, :metric, :rounding_rule,
@@ -995,7 +1002,7 @@ def upsert_settlement_contracts(contracts: list[dict[str, Any]]) -> None:
                 :truth_provider_priority, :rule_version, :registry_version,
                 :parse_confidence, :confidence_reason, :auto_verified_at,
                 :manual_verified_at, :manual_verified_by, :manual_verification_note,
-                :verification_evidence, :raw_json, :updated_at
+                :manual_verification_snapshot, :verification_evidence, :raw_json, :updated_at
             )
             ON CONFLICT(contract_id) DO UPDATE SET
                 city=excluded.city,
@@ -1019,6 +1026,7 @@ def upsert_settlement_contracts(contracts: list[dict[str, Any]]) -> None:
                 manual_verified_at=COALESCE(excluded.manual_verified_at, settlement_contracts.manual_verified_at),
                 manual_verified_by=COALESCE(excluded.manual_verified_by, settlement_contracts.manual_verified_by),
                 manual_verification_note=COALESCE(excluded.manual_verification_note, settlement_contracts.manual_verification_note),
+                manual_verification_snapshot=COALESCE(excluded.manual_verification_snapshot, settlement_contracts.manual_verification_snapshot),
                 verification_evidence=excluded.verification_evidence,
                 raw_json=excluded.raw_json,
                 updated_at=excluded.updated_at
@@ -1164,6 +1172,39 @@ def _contract_review_status(contract: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _manual_verification_snapshot(
+    contract: dict[str, Any],
+    verified: bool,
+    reviewer: str,
+    note: str,
+    reviewed_at: str,
+) -> dict[str, Any]:
+    reviewed_contract = _contract_review_status(dict(contract))
+    return {
+        "snapshot_version": "manual-contract-review-v1",
+        "reviewed_at": reviewed_at,
+        "verified": bool(verified),
+        "reviewer": str(reviewer or ""),
+        "note": str(note or ""),
+        "contract_id": str(reviewed_contract.get("contract_id") or ""),
+        "event_slug": str(reviewed_contract.get("event_slug") or ""),
+        "city": str(reviewed_contract.get("city") or ""),
+        "city_name": str(reviewed_contract.get("city_name") or ""),
+        "target_local_date": str(reviewed_contract.get("target_local_date") or ""),
+        "station_id": str(reviewed_contract.get("station_id") or ""),
+        "station_name": str(reviewed_contract.get("station_name") or ""),
+        "timezone": str(reviewed_contract.get("timezone") or ""),
+        "unit": str(reviewed_contract.get("unit") or ""),
+        "source_url": str(reviewed_contract.get("source_url") or ""),
+        "parse_confidence": float(reviewed_contract.get("parse_confidence") or 0.0),
+        "confidence_reason": str(reviewed_contract.get("confidence_reason") or ""),
+        "review_status_before": str(reviewed_contract.get("review_status") or ""),
+        "review_tags_before": list(reviewed_contract.get("review_tags") or []),
+        "verification_evidence": list(reviewed_contract.get("verification_evidence") or []),
+        "resolution_source_text": str(reviewed_contract.get("resolution_source_text") or ""),
+    }
+
+
 def set_settlement_contract_verification(
     contract_id: str,
     verified: bool,
@@ -1182,18 +1223,21 @@ def set_settlement_contract_verification(
         ).fetchone()
         if not row:
             raise KeyError(contract_id)
-        actual_id = str(row["contract_id"] or contract_id)
+        contract_row = _decode_contract_row(dict(row))
+        actual_id = str(contract_row["contract_id"] or contract_id)
         verified_at = now if verified else None
+        snapshot = _manual_verification_snapshot(contract_row, verified, reviewer, note, now)
         conn.execute(
             """
             UPDATE settlement_contracts
             SET manual_verified_at = ?,
                 manual_verified_by = ?,
                 manual_verification_note = ?,
+                manual_verification_snapshot = ?,
                 updated_at = ?
             WHERE contract_id = ?
             """,
-            (verified_at, reviewer, note, now, actual_id),
+            (verified_at, reviewer, note, dump_json(snapshot), now, actual_id),
         )
         conn.execute(
             """
@@ -1201,10 +1245,10 @@ def set_settlement_contract_verification(
             SET manual_verified_at = ?
             WHERE contract_id = ? OR event_slug = ?
             """,
-            (verified_at, actual_id, str(row["event_slug"] or "")),
+            (verified_at, actual_id, str(contract_row["event_slug"] or "")),
         )
         updated = conn.execute("SELECT * FROM settlement_contracts WHERE contract_id = ?", (actual_id,)).fetchone()
-    return _decode_contract_row(dict(updated))
+    return _contract_review_status(_decode_contract_row(dict(updated)))
 
 
 def bulk_settlement_contract_verification(
@@ -1256,16 +1300,28 @@ def bulk_settlement_contract_verification(
         ]
         if apply and selected_ids:
             placeholders = ",".join("?" for _ in selected_ids)
-            conn.execute(
-                f"""
+            updates = [
+                (
+                    now,
+                    reviewer,
+                    note,
+                    dump_json(_manual_verification_snapshot(row, True, reviewer, note, now)),
+                    now,
+                    str(row["contract_id"]),
+                )
+                for row in rows
+            ]
+            conn.executemany(
+                """
                 UPDATE settlement_contracts
                 SET manual_verified_at = ?,
                     manual_verified_by = ?,
                     manual_verification_note = ?,
+                    manual_verification_snapshot = ?,
                     updated_at = ?
-                WHERE contract_id IN ({placeholders})
+                WHERE contract_id = ?
                 """,
-                [now, reviewer, note, now, *selected_ids],
+                updates,
             )
             conn.execute(
                 f"""
@@ -1292,7 +1348,7 @@ def bulk_settlement_contract_verification(
         "skipped_requested": skipped_requested,
         "require_auto_verified": require_auto_verified,
         "mature_only": mature_only,
-        "contracts": rows,
+        "contracts": [_contract_review_status(row) for row in rows],
     }
 
 
@@ -1305,13 +1361,13 @@ def _contract_is_mature(contract: dict[str, Any]) -> bool:
 
 
 def _decode_contract_row(row: dict[str, Any]) -> dict[str, Any]:
-    for key in ("truth_provider_priority", "verification_evidence"):
+    for key in ("truth_provider_priority", "verification_evidence", "manual_verification_snapshot"):
         value = row.get(key)
         if isinstance(value, str):
             try:
                 row[key] = json.loads(value)
             except Exception:
-                row[key] = []
+                row[key] = {} if key == "manual_verification_snapshot" else []
     return row
 
 

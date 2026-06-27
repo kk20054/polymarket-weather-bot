@@ -9,7 +9,7 @@ interface Props {
   onContractStatus?: (status: string) => void
   verifyingContractId?: string
   bulkVerifying?: boolean
-  onVerifyContract?: (contractId: string) => void
+  onVerifyContract?: (contractId: string, note: string) => void
   onVerifyVisibleContracts?: (contractIds: string[]) => void
 }
 
@@ -100,6 +100,7 @@ export function DataReadinessPanel({
 }: Props) {
   const [openContracts, setOpenContracts] = useState(true)
   const [expandedContract, setExpandedContract] = useState<string | null>(null)
+  const [reviewNote, setReviewNote] = useState('station/date/unit/source checked')
 
   if (!readiness) {
     return <div className="p-3 text-[11px] text-neutral-600">数据资格尚未生成</div>
@@ -296,6 +297,13 @@ export function DataReadinessPanel({
             {bulkVerifying ? '写入中' : '确认成熟'}
           </button>
         </div>
+        <input
+          value={reviewNote}
+          onChange={event => setReviewNote(event.target.value)}
+          className="mt-2 w-full border border-neutral-800 bg-black px-2 py-1 text-[10px] text-neutral-300 outline-none focus:border-cyan-500/50"
+          placeholder="人工核验备注"
+          aria-label="人工核验备注"
+        />
 
         {openContracts && (
           <div className="mt-2 divide-y divide-neutral-900 border border-neutral-900">
@@ -344,7 +352,7 @@ export function DataReadinessPanel({
                       <button
                         type="button"
                         disabled={!onVerifyContract || verifying}
-                        onClick={() => onVerifyContract?.(contract.contract_id)}
+                        onClick={() => onVerifyContract?.(contract.contract_id, reviewNote)}
                         className="inline-flex items-center gap-1 border border-cyan-500/30 px-1.5 py-1 text-[9px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"
                         title="确认该事件的站点、日期、单位和来源 URL 与规则一致"
                       >

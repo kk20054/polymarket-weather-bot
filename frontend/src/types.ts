@@ -250,6 +250,7 @@ export interface SettlementContract {
   manual_verified_at?: string | null
   manual_verified_by?: string | null
   manual_verification_note?: string | null
+  manual_verification_snapshot?: Record<string, unknown> | null
   verification_evidence?: string[]
   review_status?: 'verified' | 'mature-auto' | 'future-auto' | 'manual-required'
   review_tags?: string[]
