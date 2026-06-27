@@ -176,9 +176,9 @@ export function DataReadinessPanel({
             disabled={!onVerifyVisibleContracts || visibleContractIds.length === 0 || bulkVerifying}
             onClick={() => onVerifyVisibleContracts?.(visibleContractIds)}
             className="shrink-0 border border-cyan-500/30 px-1.5 py-1 text-[9px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"
-            title="批量确认当前列表中后端已自动校验通过的合同"
+            title="只确认已过当地结算日、且后端自动校验通过的合同；未来待结算合同会被跳过"
           >
-            {bulkVerifying ? '批量写入中' : '批量确认'}
+            {bulkVerifying ? '写入中' : '确认成熟'}
           </button>
         </div>
 

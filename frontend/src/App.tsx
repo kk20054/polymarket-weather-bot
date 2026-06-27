@@ -424,7 +424,7 @@ function App() {
     },
   })
   const bulkVerifyContractMutation = useMutation({
-    mutationFn: (contractIds: string[]) => verifySettlementContractsBulk(contractIds, true),
+    mutationFn: (contractIds: string[]) => verifySettlementContractsBulk(contractIds, true, true),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
