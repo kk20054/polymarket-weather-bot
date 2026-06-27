@@ -14,6 +14,7 @@ import {
 import {
   backfillWeatherHistory,
   fetchDashboard,
+  fetchForecastArchiveManifest,
   fetchSettlementContracts,
   fetchTemperatureFit,
   placeLiveOrder,
@@ -392,6 +393,11 @@ function App() {
     queryFn: () => fetchSettlementContracts('unverified', 5),
     refetchInterval: 120000,
   })
+  const forecastArchiveManifestQuery = useQuery({
+    queryKey: ['forecast-archive-manifest'],
+    queryFn: fetchForecastArchiveManifest,
+    refetchInterval: 120000,
+  })
 
   const startMutation = useMutation({
     mutationFn: startBot,
@@ -455,6 +461,7 @@ function App() {
   const truthHealth = data?.truth_health ?? null
   const dataReadiness = data?.data_readiness ?? null
   const modelDatasetAudit = data?.model_dataset_audit ?? null
+  const forecastArchiveManifest = forecastArchiveManifestQuery.data ?? null
   const actionable = signals.filter(signal => signal.actionable).length
   const liveAvailable = Boolean(stats.strategy_live_ready && data?.v3?.config?.live_trading)
   const autoSimulation = stats.auto_simulation ?? {
@@ -646,7 +653,7 @@ function App() {
           </div>
 
           <div className="border border-neutral-800 bg-black">
-            <ModelDatasetPanel audit={modelDatasetAudit} />
+            <ModelDatasetPanel audit={modelDatasetAudit} archiveManifest={forecastArchiveManifest} />
           </div>
 
           <div className="border border-neutral-800 bg-black p-3">

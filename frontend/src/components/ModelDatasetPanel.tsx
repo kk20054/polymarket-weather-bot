@@ -1,5 +1,5 @@
 import { BrainCircuit, ShieldAlert } from 'lucide-react'
-import type { ModelDatasetAudit } from '../types'
+import type { ForecastArchiveManifest, ModelDatasetAudit } from '../types'
 
 const REASON_LABELS: Record<string, string> = {
   contract_not_manually_verified: '合同未核验',
@@ -20,7 +20,13 @@ function label(key: string) {
   return REASON_LABELS[key] ?? key
 }
 
-export function ModelDatasetPanel({ audit }: { audit?: ModelDatasetAudit | null }) {
+export function ModelDatasetPanel({
+  audit,
+  archiveManifest,
+}: {
+  audit?: ModelDatasetAudit | null
+  archiveManifest?: ForecastArchiveManifest | null
+}) {
   if (!audit) {
     return <div className="p-3 text-[11px] text-neutral-600">模型样本池尚未生成</div>
   }
@@ -29,6 +35,8 @@ export function ModelDatasetPanel({ audit }: { audit?: ModelDatasetAudit | null 
     .sort((a, b) => b[1] - a[1])
     .slice(0, 4)
   const progress = pct(summary.baseline_ready_samples, audit.required_samples)
+  const archiveSources = Object.entries(archiveManifest?.by_source ?? {}).sort((a, b) => b[1] - a[1])
+  const archiveCities = Object.entries(archiveManifest?.by_city ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 4)
 
   return (
     <div className="space-y-3 p-3 text-[11px]">
@@ -82,6 +90,47 @@ export function ModelDatasetPanel({ audit }: { audit?: ModelDatasetAudit | null 
               {label(reason)} {count}
             </span>
           ))}
+        </div>
+      )}
+
+      {archiveManifest && archiveManifest.record_count > 0 && (
+        <div className="space-y-2 border-t border-neutral-800 pt-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[10px] text-neutral-500">Archive 缺口</div>
+            <div
+              className="tabular-nums text-[10px] text-amber-300"
+              title={`${archiveManifest.template_command}\n${archiveManifest.import_dry_run_command}`}
+            >
+              {archiveManifest.record_count} 条
+            </div>
+          </div>
+          {archiveSources.length > 0 && (
+            <div className="space-y-1">
+              {archiveSources.map(([source, count]) => {
+                const width = Math.min(100, Math.round((count / Math.max(1, archiveManifest.record_count)) * 100))
+                return (
+                  <div key={source} className="space-y-0.5">
+                    <div className="flex items-center justify-between text-[9px]">
+                      <span className="truncate text-neutral-500">{source.toUpperCase()}</span>
+                      <span className="tabular-nums text-neutral-400">{count}</span>
+                    </div>
+                    <div className="h-1 overflow-hidden bg-neutral-900">
+                      <div className="h-full bg-amber-300" style={{ width: `${width}%` }} />
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {archiveCities.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {archiveCities.map(([city, count]) => (
+                <span key={city} className="border border-neutral-800 bg-neutral-950 px-1.5 py-0.5 text-[9px] text-neutral-400">
+                  {city} <span className="tabular-nums text-neutral-500">{count}</span>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

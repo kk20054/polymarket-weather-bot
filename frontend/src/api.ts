@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList } from './types'
+import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -103,6 +103,13 @@ export async function settleTradesApi(): Promise<{ ok: boolean; checked: number;
 
 export async function fetchTemperatureFit(): Promise<TemperatureFitData> {
   const { data } = await api.get<TemperatureFitData>('/temperature-fit')
+  return data
+}
+
+export async function fetchForecastArchiveManifest(): Promise<ForecastArchiveManifest> {
+  const { data } = await api.get<ForecastArchiveManifest>('/forecast-archive/manifest', {
+    params: { limit: 80 },
+  })
   return data
 }
 

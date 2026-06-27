@@ -694,6 +694,36 @@ export interface ModelDatasetAudit {
   }>
 }
 
+export interface ForecastArchiveManifest {
+  manifest_version: string
+  generated_at: string
+  record_count: number
+  by_city: Record<string, number>
+  by_source: Record<string, number>
+  records: Array<{
+    city: string
+    city_name?: string
+    target_date?: string
+    timezone?: string
+    station_id?: string
+    station_name?: string
+    unit?: string
+    source: string
+    provider?: string
+    model?: string
+    model_version?: string
+    archive_gap_reasons?: string[]
+    no_leak_rule?: string
+  }>
+  sources: string[]
+  schema_doc: string
+  template_command: string
+  import_dry_run_command: string
+  import_apply_command: string
+  audit_summary?: ModelDatasetAudit['summary']
+  reason_counts?: Record<string, number>
+}
+
 export interface DashboardData {
   stats: BotStats
   v3?: V3Summary
