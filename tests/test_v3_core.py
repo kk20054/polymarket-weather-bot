@@ -17,7 +17,7 @@ from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from dashboard_server import AutoSimulationUpdate, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, update_auto_simulation
+from dashboard_server import AutoSimulationUpdate, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timezone
 
@@ -867,6 +867,36 @@ class V3CoreTests(unittest.TestCase):
         text = manifest_path.read_text(encoding="utf-8")
         self.assertIn("run_at", text)
         self.assertIn("no_leak_rule", text)
+
+    def test_forecast_archive_manifest_payload_is_dashboard_ready(self):
+        audit = {
+            "summary": {"baseline_ready_samples": 0},
+            "reason_counts": {"no_no_leak_forecast_run": 1},
+            "samples": [
+                {
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "target_date": "2026-06-23",
+                    "timezone": "America/New_York",
+                    "settlement_pending": False,
+                    "sources": [],
+                    "reasons": ["no_no_leak_forecast_run", "forecast_members_missing"],
+                    "warnings": ["core_source_coverage_incomplete"],
+                }
+            ],
+        }
+        with patch("dashboard_server.build_model_dataset_audit", return_value=audit):
+            payload = _forecast_archive_manifest_payload(limit=10, sources=["ecmwf"], include_jsonl=False)
+            payload_with_jsonl = _forecast_archive_manifest_payload(limit=10, sources=["ecmwf"], include_jsonl=True)
+
+        self.assertEqual(payload["record_count"], 1)
+        self.assertEqual(payload["by_source"], {"ecmwf": 1})
+        self.assertEqual(payload["records"][0]["station_id"], "KLGA")
+        self.assertEqual(payload["schema_doc"], "FORECAST_ARCHIVE_IMPORT_CN.md")
+        self.assertIn("forecast-archive-manifest", payload["template_command"])
+        self.assertIn("forecast-archive-import", payload["import_dry_run_command"])
+        self.assertNotIn("jsonl", payload)
+        self.assertIn('"city": "nyc"', payload_with_jsonl["jsonl"])
 
     def test_model_dataset_audit_treats_future_truth_as_pending_not_missing(self):
         db_path = test_db_path("model_dataset_pending")

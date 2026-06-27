@@ -38,6 +38,7 @@ from weatherbot_v3.db import insert_event_distribution, latest_event_distributio
 from weatherbot_v3.db import bulk_settlement_contract_verification, list_settlement_contracts, set_settlement_contract_verification, truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
+from weatherbot_v3.forecast_archive import build_forecast_archive_manifest
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
 from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.model_dataset import build_model_dataset_audit
@@ -358,6 +359,38 @@ def _build_truth_health(markets):
 
 def _truth_city_lookup(truth_health):
     return {row.get("city"): row for row in truth_health.get("cities", [])}
+
+
+def _forecast_archive_manifest_payload(limit=200, sources=None, include_jsonl=False):
+    try:
+        limit = max(1, min(int(limit or 200), 1000))
+    except Exception:
+        limit = 200
+    source_list = [
+        str(source).strip()
+        for source in (sources or ["ecmwf", "gfs_ensemble"])
+        if str(source).strip()
+    ]
+    audit = build_model_dataset_audit()
+    manifest = build_forecast_archive_manifest(audit, sources=source_list, limit=limit)
+    payload = {
+        "manifest_version": manifest["manifest_version"],
+        "generated_at": manifest["generated_at"],
+        "record_count": manifest["record_count"],
+        "by_city": manifest["by_city"],
+        "by_source": manifest["by_source"],
+        "records": manifest["records"],
+        "sources": source_list,
+        "schema_doc": "FORECAST_ARCHIVE_IMPORT_CN.md",
+        "template_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli forecast-archive-manifest --output-path data\\forecast_archive\\historical_forecasts.template.jsonl",
+        "import_dry_run_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli forecast-archive-import --archive-path data\\forecast_archive\\historical_forecasts.jsonl",
+        "import_apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli forecast-archive-import --archive-path data\\forecast_archive\\historical_forecasts.jsonl --apply",
+        "audit_summary": audit.get("summary", {}),
+        "reason_counts": audit.get("reason_counts", {}),
+    }
+    if include_jsonl:
+        payload["jsonl"] = manifest["jsonl"]
+    return payload
 
 
 def _sync_v4_market_rules(markets):
@@ -2750,6 +2783,12 @@ async def backtest_policies():
 @app.get("/api/model-dataset/audit")
 async def model_dataset_audit():
     return build_model_dataset_audit()
+
+
+@app.get("/api/forecast-archive/manifest")
+async def forecast_archive_manifest(limit: int = 200, sources: str = "ecmwf,gfs_ensemble", include_jsonl: bool = False):
+    source_list = [source.strip() for source in sources.split(",") if source.strip()]
+    return _forecast_archive_manifest_payload(limit=limit, sources=source_list, include_jsonl=include_jsonl)
 
 
 @app.get("/api/temperature-fit")
