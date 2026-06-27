@@ -5,6 +5,8 @@ import type { DataReadiness, SettlementContractList } from '../types'
 interface Props {
   readiness?: DataReadiness | null
   contracts?: SettlementContractList | null
+  contractStatus?: string
+  onContractStatus?: (status: string) => void
   verifyingContractId?: string
   bulkVerifying?: boolean
   onVerifyContract?: (contractId: string) => void
@@ -50,6 +52,8 @@ function metricRecord(value: unknown): Record<string, number> {
 export function DataReadinessPanel({
   readiness,
   contracts,
+  contractStatus = 'mature-auto',
+  onContractStatus,
   verifyingContractId,
   bulkVerifying = false,
   onVerifyContract,
@@ -69,6 +73,14 @@ export function DataReadinessPanel({
   const phase = readiness.production_phase
   const contractStage = readiness.stages.find(stage => stage.key === 'settlement_contracts')
   const contractQueue = metricRecord(contractStage?.metrics?.contract_review_queue)
+  const canBulkVerifyVisible = contractStatus === 'mature-auto'
+  const queueOptions = [
+    ['mature-auto', '成熟自动', contractQueue.mature_auto_verified_unreviewed ?? 0],
+    ['future-auto', '未来自动', contractQueue.future_auto_verified_unreviewed ?? 0],
+    ['manual-required', '逐条人工', contractQueue.manual_review_required_unverified ?? 0],
+    ['source-missing', '来源缺失', contractQueue.source_missing_unverified ?? 0],
+    ['low-confidence', '低置信', contractQueue.low_confidence_unverified ?? 0],
+  ] as const
 
   return (
     <div className="space-y-3 p-3 text-[11px]">
@@ -206,6 +218,23 @@ export function DataReadinessPanel({
       )}
 
       <div className="border-t border-neutral-800 pt-2">
+        <div className="mb-2 flex flex-wrap gap-1">
+          {queueOptions.map(([status, label, count]) => (
+            <button
+              key={status}
+              type="button"
+              onClick={() => onContractStatus?.(status)}
+              className={`border px-1.5 py-0.5 text-[9px] ${
+                contractStatus === status
+                  ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200'
+                  : 'border-neutral-800 text-neutral-500 hover:border-neutral-700 hover:text-neutral-300'
+              }`}
+              title={`${label}: ${count}`}
+            >
+              {label} <span className="tabular-nums">{count}</span>
+            </button>
+          ))}
+        </div>
         <div className="flex items-center justify-between gap-2">
           <button
             type="button"
@@ -220,7 +249,7 @@ export function DataReadinessPanel({
           </button>
           <button
             type="button"
-            disabled={!onVerifyVisibleContracts || visibleContractIds.length === 0 || bulkVerifying}
+            disabled={!canBulkVerifyVisible || !onVerifyVisibleContracts || visibleContractIds.length === 0 || bulkVerifying}
             onClick={() => onVerifyVisibleContracts?.(visibleContractIds)}
             className="shrink-0 border border-cyan-500/30 px-1.5 py-1 text-[9px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"
             title="只确认已过当地结算日、且后端自动校验通过的合同；未来待结算合同会被跳过"

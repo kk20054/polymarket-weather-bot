@@ -1034,6 +1034,7 @@ def list_settlement_contracts(
     offset: int = 0,
 ) -> dict[str, Any]:
     init_v3_db()
+    status = str(status or "all")
     where = []
     params: list[Any] = []
     if status == "verified":
@@ -1042,6 +1043,8 @@ def list_settlement_contracts(
         where.append("(manual_verified_at IS NULL OR manual_verified_at = '')")
     elif status == "auto":
         where.append("auto_verified_at IS NOT NULL AND auto_verified_at != ''")
+    elif status in {"mature-auto", "future-auto", "manual-required", "source-missing", "low-confidence"}:
+        where.append("(manual_verified_at IS NULL OR manual_verified_at = '')")
     if city:
         where.append("city = ?")
         params.append(city)
@@ -1049,8 +1052,7 @@ def list_settlement_contracts(
     limit = max(1, min(int(limit or 50), 200))
     offset = max(0, int(offset or 0))
     with connect() as conn:
-        total = int(conn.execute(f"SELECT COUNT(*) FROM settlement_contracts {clause}", params).fetchone()[0])
-        rows = [
+        fetched_rows = [
             _decode_contract_row(dict(row))
             for row in conn.execute(
                 f"""
@@ -1062,9 +1064,8 @@ def list_settlement_contracts(
                     target_local_date DESC,
                     city,
                     event_slug
-                LIMIT ? OFFSET ?
                 """,
-                [*params, limit, offset],
+                params,
             ).fetchall()
         ]
         summary = dict(
@@ -1078,6 +1079,9 @@ def list_settlement_contracts(
                 """
             ).fetchone()
         )
+    rows_for_status = [row for row in fetched_rows if _contract_matches_list_status(row, status)]
+    total = len(rows_for_status)
+    rows = rows_for_status[offset:offset + limit]
     contracts = int(summary.get("contracts") or 0)
     manual_verified = int(summary.get("manual_verified") or 0)
     auto_verified = int(summary.get("auto_verified") or 0)
@@ -1095,7 +1099,33 @@ def list_settlement_contracts(
             "manual_progress": round((manual_verified / contracts) if contracts else 0.0, 4),
         },
         "contracts": rows,
-    }
+}
+
+
+def _contract_matches_list_status(contract: dict[str, Any], status: str) -> bool:
+    manual_verified = bool(contract.get("manual_verified_at"))
+    auto_verified = bool(contract.get("auto_verified_at"))
+    if status in {"all", ""}:
+        return True
+    if status == "verified":
+        return manual_verified
+    if status == "unverified":
+        return not manual_verified
+    if status == "auto":
+        return auto_verified
+    if status == "mature-auto":
+        return auto_verified and not manual_verified and _contract_is_mature(contract)
+    if status == "future-auto":
+        return auto_verified and not manual_verified and not _contract_is_mature(contract)
+    if status == "manual-required":
+        return not manual_verified and not auto_verified
+    if status == "source-missing":
+        return not manual_verified and (
+            not contract.get("resolution_source_text") or not contract.get("source_url")
+        )
+    if status == "low-confidence":
+        return not manual_verified and float(contract.get("parse_confidence") or 0.0) < 0.8
+    return True
 
 
 def set_settlement_contract_verification(

@@ -372,6 +372,7 @@ function App() {
   const [activityView, setActivityView] = useState<'signals' | 'trades'>('signals')
   const [simBalance, setSimBalance] = useState('40')
   const [clearMarks, setClearMarks] = useState(false)
+  const [contractStatus, setContractStatus] = useState('mature-auto')
   const balanceInitRef = useRef(false)
 
   const { data, isLoading, error, refetch } = useQuery({
@@ -389,8 +390,8 @@ function App() {
   })
 
   const contractsQuery = useQuery({
-    queryKey: ['settlement-contracts', 'unverified'],
-    queryFn: () => fetchSettlementContracts('unverified', 5),
+    queryKey: ['settlement-contracts', contractStatus],
+    queryFn: () => fetchSettlementContracts(contractStatus, 12),
     refetchInterval: 120000,
   })
   const forecastArchiveManifestQuery = useQuery({
@@ -592,6 +593,8 @@ function App() {
             <DataReadinessPanel
               readiness={dataReadiness}
               contracts={contractsQuery.data}
+              contractStatus={contractStatus}
+              onContractStatus={setContractStatus}
               verifyingContractId={verifyContractMutation.variables}
               bulkVerifying={bulkVerifyContractMutation.isPending}
               onVerifyContract={(contractId) => verifyContractMutation.mutate(contractId)}

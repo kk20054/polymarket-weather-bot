@@ -42,7 +42,11 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=50, help="Maximum recent signal markets to refresh")
     parser.add_argument("--start-date", default="", help="Inclusive local target date filter")
     parser.add_argument("--end-date", default="", help="Inclusive local target date filter")
-    parser.add_argument("--status", default="unverified", help="Contract status filter: all, unverified, verified, auto")
+    parser.add_argument(
+        "--status",
+        default="unverified",
+        help="Contract status filter: all, unverified, verified, auto, mature-auto, future-auto, manual-required, source-missing, low-confidence",
+    )
     parser.add_argument("--contract-id", default="", help="Settlement contract id or event slug")
     parser.add_argument("--reviewer", default="local-operator", help="Manual verifier name")
     parser.add_argument("--note", default="", help="Manual verification note")

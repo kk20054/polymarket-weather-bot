@@ -438,6 +438,70 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(verified["manual_verified_by"], "test")
         self.assertIsNotNone(rule_row["manual_verified_at"])
 
+    def test_contract_list_supports_review_queue_statuses(self):
+        db_path = test_db_path("contract_review_statuses")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            mature_auto = infer_settlement_rule({
+                "market_id": "nyc-mature-auto-1",
+                "city": "nyc",
+                "city_name": "New York City",
+                "unit": "F",
+                "event_url": "https://polymarket.com/event/nyc-mature-auto",
+                "question": "Will the highest temperature in NYC be between 80-81°F on June 23?",
+                "description": "Resolves using Wunderground station KLGA history.",
+                "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/2026-6-23",
+                "date": "2026-06-23",
+            })
+            future_auto = infer_settlement_rule({
+                "market_id": "nyc-future-auto-status-1",
+                "city": "nyc",
+                "city_name": "New York City",
+                "unit": "F",
+                "event_url": "https://polymarket.com/event/nyc-future-auto-status",
+                "question": "Will the highest temperature in NYC be between 80-81°F on January 1?",
+                "description": "Resolves using Wunderground station KLGA history.",
+                "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA",
+                "date": "2099-01-01",
+            })
+            manual_required = infer_settlement_rule({
+                "market_id": "nyc-manual-required-1",
+                "city": "nyc",
+                "city_name": "New York City",
+                "unit": "F",
+                "event_url": "https://polymarket.com/event/nyc-manual-required",
+                "question": "Will the highest temperature in NYC be between 82-83°F on June 24?",
+                "description": "Resolves using weather history.",
+                "date": "2026-06-24",
+            })
+            source_missing = settlement_contract_from_rule(manual_required)
+            source_missing = {
+                **source_missing,
+                "contract_id": "nyc-source-missing",
+                "event_slug": "nyc-source-missing",
+                "source_url": "",
+                "resolution_source_text": "",
+            }
+            upsert_settlement_contracts([
+                settlement_contract_from_rule(mature_auto),
+                settlement_contract_from_rule(future_auto),
+                settlement_contract_from_rule(manual_required),
+                source_missing,
+            ])
+
+            mature_ids = {row["contract_id"] for row in list_settlement_contracts("mature-auto")["contracts"]}
+            future_ids = {row["contract_id"] for row in list_settlement_contracts("future-auto")["contracts"]}
+            manual_ids = {row["contract_id"] for row in list_settlement_contracts("manual-required")["contracts"]}
+            missing_ids = {row["contract_id"] for row in list_settlement_contracts("source-missing")["contracts"]}
+            low_confidence_ids = {row["contract_id"] for row in list_settlement_contracts("low-confidence")["contracts"]}
+
+        self.assertIn("nyc-mature-auto", mature_ids)
+        self.assertIn("nyc-future-auto-status", future_ids)
+        self.assertIn("nyc-manual-required", manual_ids)
+        self.assertIn("nyc-source-missing", manual_ids)
+        self.assertIn("nyc-source-missing", missing_ids)
+        self.assertIn("nyc-manual-required", low_confidence_ids)
+
     def test_bulk_contract_verification_only_applies_auto_verified_contracts(self):
         db_path = test_db_path("bulk_contract_verification")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
