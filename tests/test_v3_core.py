@@ -353,6 +353,38 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(contract_metrics["mature_auto_verified_unreviewed_contracts"], 0)
         self.assertIn("逐条人工核验", readiness["production_phase"]["operator_action"])
 
+    def test_data_readiness_next_actions_explain_phase1_5_recovery(self):
+        db_path = test_db_path("data_readiness_actions")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-action-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-action",
+                    "question": "Will the highest temperature in NYC be between 80-81°F on June 23?",
+                    "description": "Resolves using Wunderground station KLGA history.",
+                    "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/2026-6-23",
+                    "date": "2026-06-23",
+                }
+            )
+            upsert_market_rule(rule.to_dict())
+            upsert_settlement_contracts([settlement_contract_from_rule(rule)])
+            readiness = build_data_readiness(db_path)
+
+        actions = readiness["next_actions"]
+        self.assertEqual(actions[0]["key"], "review_mature_auto_contracts")
+        self.assertTrue(actions[0]["requires_operator"])
+        self.assertIn("contracts-bulk-verify", actions[0]["command"])
+        self.assertIn("--apply", actions[0]["apply_command"])
+        action_keys = {action["key"] for action in actions}
+        self.assertIn("refresh_forecast_runs", action_keys)
+        self.assertIn("refresh_clob_orderbooks", action_keys)
+        self.assertIn("backfill_official_truth", action_keys)
+        self.assertEqual(actions[-1]["key"], "rerun_data_readiness")
+
     def test_settlement_contract_manual_verification_updates_contract_and_rules(self):
         db_path = test_db_path("contract_verification")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))

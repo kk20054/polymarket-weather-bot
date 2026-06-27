@@ -158,6 +158,30 @@ export function DataReadinessPanel({
         </div>
       )}
 
+      {(readiness.next_actions ?? []).length > 0 && (
+        <div className="space-y-1 border border-neutral-800 bg-neutral-950 p-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[10px] text-neutral-400">修复路线</div>
+            <span className="text-[9px] text-neutral-600">按顺序处理</span>
+          </div>
+          {(readiness.next_actions ?? []).slice(0, 3).map(action => (
+            <div
+              key={action.key}
+              className="border border-neutral-900 bg-black/40 p-1.5"
+              title={`${action.impact}\n${action.command}${action.apply_command ? `\napply: ${action.apply_command}` : ''}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 truncate text-[10px] text-neutral-200">{action.label}</div>
+                <span className="shrink-0 tabular-nums text-[9px] text-neutral-500">{action.count}</span>
+              </div>
+              <div className="truncate text-[9px] text-neutral-600">
+                {action.requires_operator ? '需人工确认' : '工具可执行'} · {action.command}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="border-t border-neutral-800 pt-2">
         <div className="flex items-center justify-between gap-2">
           <button

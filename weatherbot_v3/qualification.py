@@ -289,6 +289,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         if reason["count"] > 0
     ]
     phase = _production_phase(stages, blockers, len(contracts), len(rules))
+    next_actions = _build_next_actions(stages, city_rows)
     return {
         "audit_version": AUDIT_VERSION,
         "generated_at": now.isoformat(),
@@ -298,6 +299,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         "production_phase": phase,
         "stages": stages,
         "blockers": blockers,
+        "next_actions": next_actions,
         "cities": city_rows,
         "summary": {
             "registered_cities": len(SETTLEMENT_REGISTRY),
@@ -373,6 +375,132 @@ def _production_phase(
         "operator_action": "数据闸门已过，下一步验证概率模型和 paper trading edge。",
         "blocked_keys": blocked_keys,
     }
+
+
+def _build_next_actions(
+    stages: list[dict[str, Any]],
+    city_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    stage_by_key = {str(stage.get("key")): stage for stage in stages}
+    reason_counts = {
+        str(reason.get("code")): int(reason.get("count") or 0)
+        for stage in stages
+        for reason in stage.get("reasons", [])
+    }
+    actions: list[dict[str, Any]] = []
+
+    contract_metrics = stage_by_key.get("settlement_contracts", {}).get("metrics") or {}
+    mature_auto_pending = int(contract_metrics.get("mature_auto_verified_unreviewed_contracts") or 0)
+    unverified_contracts = int(reason_counts.get("settlement_rule_not_manually_verified") or 0)
+    if mature_auto_pending:
+        actions.append({
+            "key": "review_mature_auto_contracts",
+            "priority": 1,
+            "label": "核验成熟自动合同",
+            "count": mature_auto_pending,
+            "impact": "先处理已经过结算日、且自动解析可信的合同，最快解除 Phase 1.5 的人工核验闸门。",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --mature-only",
+            "apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --mature-only --apply",
+            "requires_operator": True,
+            "targets": [],
+        })
+    elif unverified_contracts:
+        actions.append({
+            "key": "inspect_unverified_contracts",
+            "priority": 2,
+            "label": "逐条核验剩余合同",
+            "count": unverified_contracts,
+            "impact": "自动成熟合同已处理完，剩余合同需要人工确认站点、日期、单位和来源 URL。",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-list --status unverified --limit 20",
+            "requires_operator": True,
+            "targets": _city_targets(city_rows, {"settlement_rule_not_manually_verified"}),
+        })
+
+    forecast_gap = int(reason_counts.get("forecast_city_coverage_incomplete") or 0)
+    if forecast_gap:
+        forecast_targets = _city_targets(
+            city_rows,
+            {"versioned_forecast_runs_missing", "forecast_runs_stale"},
+        )
+        cities = ",".join(target["city"] for target in forecast_targets[:20])
+        command = ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli forecast-backfill --days 4"
+        if cities:
+            command = f"{command} --cities {cities}"
+        actions.append({
+            "key": "refresh_forecast_runs",
+            "priority": 3,
+            "label": "刷新预测运行档案",
+            "count": forecast_gap,
+            "impact": "补齐每个城市的新鲜 ECMWF/GFS 预测运行；历史训练样本仍需 forecast archive 单独导入。",
+            "command": command,
+            "requires_operator": False,
+            "targets": forecast_targets,
+        })
+
+    orderbook_gap = max(
+        int(reason_counts.get("orderbook_snapshots_missing") or 0),
+        int(reason_counts.get("all_orderbooks_stale") or 0),
+        int(reason_counts.get("fresh_clob_depth_missing") or 0),
+    )
+    if orderbook_gap:
+        actions.append({
+            "key": "refresh_clob_orderbooks",
+            "priority": 4,
+            "label": "刷新 CLOB 盘口",
+            "count": orderbook_gap,
+            "impact": "拉取真实 bid/ask、spread、tick、orderMinSize 和深度，避免模拟成交继续基于过期盘口。",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli orderbook-backfill --limit 200",
+            "requires_operator": False,
+            "targets": [],
+        })
+
+    truth_gap = int(reason_counts.get("independent_truth_days_below_min") or 0)
+    if truth_gap:
+        truth_targets = _city_targets(city_rows, {"independent_truth_days_below_min"})
+        cities = ",".join(target["city"] for target in truth_targets[:20])
+        command = ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli truth-backfill --limit 200"
+        if cities:
+            command = f"{command} --cities {cities}"
+        actions.append({
+            "key": "backfill_official_truth",
+            "priority": 5,
+            "label": "补官方 Truth",
+            "count": truth_gap,
+            "impact": "补机场/官方站点结算 truth；Open-Meteo fallback 不解锁生产训练或实盘。",
+            "command": command,
+            "requires_operator": False,
+            "targets": truth_targets,
+        })
+
+    if actions:
+        actions.append({
+            "key": "rerun_data_readiness",
+            "priority": 99,
+            "label": "复查数据资格",
+            "count": 1,
+            "impact": "每轮补数或核验后重新生成审计，确认 blocker 是否真的减少。",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli data-readiness",
+            "requires_operator": False,
+            "targets": [],
+        })
+    return sorted(actions, key=lambda item: int(item["priority"]))
+
+
+def _city_targets(
+    city_rows: list[dict[str, Any]],
+    reason_codes: set[str],
+    limit: int = 20,
+) -> list[dict[str, str]]:
+    targets = []
+    for row in city_rows:
+        reasons = {str(reason) for reason in row.get("reasons", [])}
+        if reasons & reason_codes:
+            targets.append({
+                "city": str(row.get("city") or ""),
+                "city_name": str(row.get("city_name") or row.get("city") or ""),
+                "station_id": str(row.get("station_id") or ""),
+            })
+    return targets[:limit]
 
 
 def persist_data_readiness(payload: dict[str, Any], path: Path | None = None) -> None:

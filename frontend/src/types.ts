@@ -169,6 +169,18 @@ export interface DataReadinessStage {
   metrics: Record<string, unknown>
 }
 
+export interface DataReadinessAction {
+  key: string
+  priority: number
+  label: string
+  count: number
+  impact: string
+  command: string
+  apply_command?: string
+  requires_operator: boolean
+  targets: Array<Record<string, string>>
+}
+
 export interface DataReadiness {
   audit_version: string
   generated_at: string
@@ -186,6 +198,7 @@ export interface DataReadiness {
   }
   stages: DataReadinessStage[]
   blockers: DataReadinessReason[]
+  next_actions?: DataReadinessAction[]
   cities: Array<{
     city: string
     city_name: string
