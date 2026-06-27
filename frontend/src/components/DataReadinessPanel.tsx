@@ -10,7 +10,7 @@ interface Props {
   verifyingContractId?: string
   bulkVerifying?: boolean
   onVerifyContract?: (contractId: string, note: string) => void
-  onVerifyVisibleContracts?: (contractIds: string[]) => void
+  onVerifyVisibleContracts?: (contractIds: string[], note: string) => void
 }
 
 const REASON_LABELS: Record<string, string> = {
@@ -114,6 +114,7 @@ export function DataReadinessPanel({
   const contractStage = readiness.stages.find(stage => stage.key === 'settlement_contracts')
   const contractQueue = metricRecord(contractStage?.metrics?.contract_review_queue)
   const canBulkVerifyVisible = contractStatus === 'mature-auto'
+  const reviewNoteReady = reviewNote.trim().length > 0
   const queueOptions = [
     ['mature-auto', '成熟自动', contractQueue.mature_auto_verified_unreviewed ?? 0],
     ['future-auto', '未来自动', contractQueue.future_auto_verified_unreviewed ?? 0],
@@ -289,8 +290,8 @@ export function DataReadinessPanel({
           </button>
           <button
             type="button"
-            disabled={!canBulkVerifyVisible || !onVerifyVisibleContracts || visibleContractIds.length === 0 || bulkVerifying}
-            onClick={() => onVerifyVisibleContracts?.(visibleContractIds)}
+            disabled={!canBulkVerifyVisible || !onVerifyVisibleContracts || visibleContractIds.length === 0 || bulkVerifying || !reviewNoteReady}
+            onClick={() => onVerifyVisibleContracts?.(visibleContractIds, reviewNote.trim())}
             className="shrink-0 border border-cyan-500/30 px-1.5 py-1 text-[9px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"
             title="只确认已过当地结算日、且后端自动校验通过的合同；未来待结算合同会被跳过"
           >
@@ -313,6 +314,8 @@ export function DataReadinessPanel({
               const expanded = expandedContract === contract.contract_id
               const verifying = verifyingContractId === contract.contract_id
               const confidence = Math.round(Number(contract.parse_confidence ?? 0) * 100)
+              const noteReady = reviewNote.trim().length > 0
+              const canVerifyContract = Boolean(onVerifyContract) && expanded && noteReady && !verifying
               return (
                 <div key={contract.contract_id} className="bg-neutral-950/40">
                   <div className="grid grid-cols-[1fr_auto] gap-2 p-2">
@@ -351,13 +354,19 @@ export function DataReadinessPanel({
                       )}
                       <button
                         type="button"
-                        disabled={!onVerifyContract || verifying}
-                        onClick={() => onVerifyContract?.(contract.contract_id, reviewNote)}
+                        disabled={!onVerifyContract || verifying || (expanded && !noteReady)}
+                        onClick={() => {
+                          if (!expanded) {
+                            setExpandedContract(contract.contract_id)
+                            return
+                          }
+                          if (canVerifyContract) onVerifyContract?.(contract.contract_id, reviewNote.trim())
+                        }}
                         className="inline-flex items-center gap-1 border border-cyan-500/30 px-1.5 py-1 text-[9px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"
                         title="确认该事件的站点、日期、单位和来源 URL 与规则一致"
                       >
                         <ClipboardCheck className="h-3 w-3" />
-                        {verifying ? '写入中' : '确认'}
+                        {!expanded ? '查看' : verifying ? '写入中' : '确认'}
                       </button>
                     </div>
                   </div>
@@ -373,6 +382,8 @@ export function DataReadinessPanel({
                         </div>
                       )}
                       <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                        <Detail label="站点" value={contract.station_id} />
+                        <Detail label="日期" value={contract.target_local_date} />
                         <Detail label="时区" value={contract.timezone} />
                         <Detail label="单位" value={contract.unit} />
                         <Detail label="边界" value={contract.bucket_boundary} />

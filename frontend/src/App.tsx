@@ -432,7 +432,8 @@ function App() {
     },
   })
   const bulkVerifyContractMutation = useMutation({
-    mutationFn: (contractIds: string[]) => verifySettlementContractsBulk(contractIds, true, true),
+    mutationFn: ({ contractIds, note }: { contractIds: string[]; note: string }) =>
+      verifySettlementContractsBulk(contractIds, true, true, note || 'dashboard visible batch review'),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
@@ -599,7 +600,7 @@ function App() {
               verifyingContractId={verifyContractMutation.variables?.contractId}
               bulkVerifying={bulkVerifyContractMutation.isPending}
               onVerifyContract={(contractId, note) => verifyContractMutation.mutate({ contractId, note })}
-              onVerifyVisibleContracts={(contractIds) => bulkVerifyContractMutation.mutate(contractIds)}
+              onVerifyVisibleContracts={(contractIds, note) => bulkVerifyContractMutation.mutate({ contractIds, note })}
             />
           </div>
 
