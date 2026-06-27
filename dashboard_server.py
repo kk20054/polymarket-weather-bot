@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,13 +35,17 @@ from weatherbot_v3.config import load_config as load_v3_config
 from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
 from weatherbot_v3.db import init_v3_db
 from weatherbot_v3.db import insert_event_distribution, latest_event_distribution, latest_signal_decision
-from weatherbot_v3.db import truth_coverage_summary, upsert_market_rules, upsert_signal_decision, upsert_truth_observation
+from weatherbot_v3.db import bulk_settlement_contract_verification, list_settlement_contracts, set_settlement_contract_verification, truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
+from weatherbot_v3.forecast_archive import build_forecast_archive_manifest
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
 from weatherbot_v3.migration import migrate_legacy_signals
+from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.notifier import FeishuNotifier
-from weatherbot_v3.truth import infer_settlement_rule
+from weatherbot_v3.polymarket import PolymarketDataClient
+from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
+from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_rule
 
 
 ROOT = Path(__file__).resolve().parent
@@ -86,6 +90,21 @@ class SimulationReset(BaseModel):
 class AutoSimulationUpdate(BaseModel):
     enabled: bool
     interval_seconds: int = 300
+
+
+class ContractVerificationRequest(BaseModel):
+    verified: bool = True
+    reviewer: str = "local-operator"
+    note: str | None = None
+
+
+class BulkContractVerificationRequest(BaseModel):
+    contract_ids: list[str] | None = None
+    limit: int = 5
+    reviewer: str = "dashboard"
+    note: str | None = None
+    mature_only: bool = False
+    apply: bool = False
 
 
 class LiveOrderUpdate(BaseModel):
@@ -312,11 +331,6 @@ def _market_calibration_eligible(market):
 
 
 def _build_truth_health(markets):
-    by_city = {}
-    total = 0
-    eligible = 0
-    open_meteo = 0
-    legacy = 0
     for market in markets:
         obs = _market_truth_observation(market)
         if not obs:
@@ -325,69 +339,58 @@ def _build_truth_health(markets):
             upsert_truth_observation(obs)
         except Exception:
             pass
-        total += 1
-        if obs["calibration_eligible"]:
-            eligible += 1
-        if obs["provider"] == "open_meteo_archive":
-            open_meteo += 1
-        if obs["provider"] == "legacy_unknown":
-            legacy += 1
-        city = obs["city"]
-        item = by_city.setdefault(
-            city,
-            {
-                "city": city,
-                "city_name": obs["city_name"],
-                "station_id": obs["station_id"],
-                "total_observations": 0,
-                "eligible_observations": 0,
-                "open_meteo_fallbacks": 0,
-                "legacy_unknown": 0,
-                "latest_provider": "",
-                "latest_date": "",
-                "latest_confidence": 0.0,
-                "status": "blocked",
-                "reasons": [],
-            },
-        )
-        item["total_observations"] += 1
-        if obs["calibration_eligible"]:
-            item["eligible_observations"] += 1
-        if obs["provider"] == "open_meteo_archive":
-            item["open_meteo_fallbacks"] += 1
-        if obs["provider"] == "legacy_unknown":
-            item["legacy_unknown"] += 1
-        if not item["latest_date"] or obs["target_date"] > item["latest_date"]:
-            item["latest_date"] = obs["target_date"]
-            item["latest_provider"] = obs["provider"]
-            item["latest_confidence"] = obs["source_confidence"]
 
+    summary = truth_coverage_summary()
     cfg = load_v3_config()
-    for item in by_city.values():
+    for item in summary.get("cities", []):
         reasons = []
+        cautions = []
         if item["eligible_observations"] < cfg.min_independent_settlement_days:
             reasons.append("truth_independent_days_low")
         if item["open_meteo_fallbacks"]:
-            reasons.append("open_meteo_truth_fallback_present")
+            cautions.append("open_meteo_truth_fallback_present")
         if item["legacy_unknown"]:
-            reasons.append("legacy_truth_unknown")
+            cautions.append("legacy_truth_unknown_excluded")
         item["status"] = "eligible" if not reasons else "blocked"
         item["reasons"] = reasons
-
-    cities = sorted(by_city.values(), key=lambda row: (row["eligible_observations"], row["total_observations"]), reverse=True)
-    return {
-        "total_observations": total,
-        "eligible_observations": eligible,
-        "coverage_rate": round((eligible / total) if total else 0.0, 4),
-        "open_meteo_fallbacks": open_meteo,
-        "open_meteo_fallback_rate": round((open_meteo / total) if total else 0.0, 4),
-        "legacy_unknown": legacy,
-        "cities": cities,
-    }
+        item["cautions"] = cautions
+    return summary
 
 
 def _truth_city_lookup(truth_health):
     return {row.get("city"): row for row in truth_health.get("cities", [])}
+
+
+def _forecast_archive_manifest_payload(limit=200, sources=None, include_jsonl=False):
+    try:
+        limit = max(1, min(int(limit or 200), 1000))
+    except Exception:
+        limit = 200
+    source_list = [
+        str(source).strip()
+        for source in (sources or ["ecmwf", "gfs_ensemble"])
+        if str(source).strip()
+    ]
+    audit = build_model_dataset_audit()
+    manifest = build_forecast_archive_manifest(audit, sources=source_list, limit=limit)
+    payload = {
+        "manifest_version": manifest["manifest_version"],
+        "generated_at": manifest["generated_at"],
+        "record_count": manifest["record_count"],
+        "by_city": manifest["by_city"],
+        "by_source": manifest["by_source"],
+        "records": manifest["records"],
+        "sources": source_list,
+        "schema_doc": "FORECAST_ARCHIVE_IMPORT_CN.md",
+        "template_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli forecast-archive-manifest --output-path data\\forecast_archive\\historical_forecasts.template.jsonl",
+        "import_dry_run_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli forecast-archive-import --archive-path data\\forecast_archive\\historical_forecasts.jsonl",
+        "import_apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli forecast-archive-import --archive-path data\\forecast_archive\\historical_forecasts.jsonl --apply",
+        "audit_summary": audit.get("summary", {}),
+        "reason_counts": audit.get("reason_counts", {}),
+    }
+    if include_jsonl:
+        payload["jsonl"] = manifest["jsonl"]
+    return payload
 
 
 def _sync_v4_market_rules(markets):
@@ -401,6 +404,7 @@ def _sync_v4_market_rules(markets):
     if signature == _market_rule_sync_signature:
         return
     rules = []
+    contracts = {}
     for market in markets:
         outcomes = market.get("all_outcomes") or []
         for outcome in outcomes:
@@ -413,9 +417,13 @@ def _sync_v4_market_rules(markets):
             try:
                 rule = infer_settlement_rule(payload).to_dict()
                 rules.append(rule)
+                contract = settlement_contract_from_rule(rule)
+                if contract.get("event_slug"):
+                    contracts[str(contract["event_slug"])] = contract
             except Exception:
                 continue
     upsert_market_rules(rules)
+    upsert_settlement_contracts(list(contracts.values()))
     _market_rule_sync_signature = signature
 
 
@@ -494,12 +502,18 @@ def _market_path_for_signal(signal):
     return MARKETS_DIR / f"{city}_{date}.json"
 
 
-def _position_from_signal(signal, amount, opened_at):
+def _position_from_signal(signal, amount, opened_at, execution=None):
     raw = _read_json_from_text(signal.get("raw_json"), {})
+    execution = execution or {}
     low, high = _bucket_bounds(signal)
-    entry_price = float(signal.get("limit_price") or raw.get("entry_price") or 0)
+    entry_price = float(
+        execution.get("average_fill_price")
+        or signal.get("limit_price")
+        or raw.get("entry_price")
+        or 0
+    )
     bid_price = float(signal.get("bid_price") or raw.get("bid_at_entry") or entry_price)
-    shares = round(amount / entry_price, 2) if entry_price > 0 else 0
+    shares = float(execution.get("shares") or (round(amount / entry_price, 2) if entry_price > 0 else 0))
     return {
         "market_id": signal.get("market_id") or raw.get("market_id"),
         "event_url": signal.get("event_url") or raw.get("event_url"),
@@ -513,6 +527,11 @@ def _position_from_signal(signal, amount, opened_at):
         "spread": signal.get("spread") if signal.get("spread") is not None else raw.get("spread"),
         "shares": shares,
         "cost": round(amount, 2),
+        "requested_cost": execution.get("fill", {}).get("filled_amount", amount)
+        + execution.get("fill", {}).get("remaining_amount", 0),
+        "unfilled_amount": execution.get("fill", {}).get("remaining_amount", 0),
+        "fill_status": execution.get("status") or "legacy_fill",
+        "fill_levels": execution.get("fill", {}).get("fills", []),
         "p": signal.get("probability") if signal.get("probability") is not None else raw.get("p"),
         "ev": signal.get("ev") if signal.get("ev") is not None else raw.get("ev"),
         "kelly": signal.get("kelly") if signal.get("kelly") is not None else raw.get("kelly"),
@@ -530,7 +549,7 @@ def _position_from_signal(signal, amount, opened_at):
     }
 
 
-def _open_paper_position(signal, amount, simulation_start, opened_at):
+def _open_paper_position(signal, amount, simulation_start, opened_at, execution=None):
     path = _market_path_for_signal(signal)
     if not path or amount <= 0:
         return False
@@ -551,7 +570,7 @@ def _open_paper_position(signal, amount, simulation_start, opened_at):
         history.append(archived)
         market["position_history"] = history
 
-    market["position"] = _position_from_signal(signal, amount, opened_at)
+    market["position"] = _position_from_signal(signal, amount, opened_at, execution)
     market["status"] = "open"
     market["pnl"] = None
     market["resolved_outcome"] = None
@@ -2239,6 +2258,7 @@ def build_dashboard_payload():
     weather_forecasts_by_city = {}
     weather_city_series = _build_weather_city_series(markets)
     truth_health = _build_truth_health(markets)
+    data_readiness = build_data_readiness()
     truth_by_city = _truth_city_lookup(truth_health)
     temperature_fit = _build_temperature_fit(markets)
     fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
@@ -2571,15 +2591,18 @@ def build_dashboard_payload():
         "brier_score": (sum(brier_values) / len(brier_values)) if brier_values else 0,
     }
     backtest_summary = _build_backtest_summary(markets)
+    model_dataset_audit = build_model_dataset_audit()
     strategy_readiness = backtest_summary.get("strategy_readiness") or {}
     cfg = load_v3_config()
     readiness_reasons = list(strategy_readiness.get("reasons") or [])
     if truth_health.get("eligible_observations", 0) < cfg.min_independent_settlement_days:
         readiness_reasons.append("truth_observations_below_min")
-    if truth_health.get("open_meteo_fallback_rate", 0) > 0:
-        readiness_reasons.append("open_meteo_truth_fallback_present")
-    if truth_health.get("legacy_unknown", 0) > 0:
-        readiness_reasons.append("legacy_truth_unknown")
+    if not data_readiness.get("live_allowed"):
+        readiness_reasons.extend(
+            str(reason.get("code") or "")
+            for reason in data_readiness.get("blockers", [])
+            if reason.get("code")
+        )
     if readiness_reasons:
         strategy_readiness = {
             **strategy_readiness,
@@ -2633,6 +2656,8 @@ def build_dashboard_payload():
     return {
         "stats": stats,
         "v3": v3_dashboard_summary(),
+        "data_readiness": data_readiness,
+        "model_dataset_audit": model_dataset_audit,
         "truth_health": truth_health,
         "btc_price": None,
         "microstructure": None,
@@ -2666,6 +2691,8 @@ async def _auto_simulation_loop():
                         "spent": result.get("spent", 0),
                         "skipped": result.get("skipped", 0),
                         "remaining": result.get("remaining", 0),
+                        "orderbooks_refreshed": result.get("orderbooks_refreshed", 0),
+                        "orderbook_refresh_failed": result.get("orderbook_refresh_failed", 0),
                     },
                     last_error=None,
                 )
@@ -2707,6 +2734,7 @@ async def startup():
     init_db()
     init_v3_db()
     migrate_legacy_signals(500)
+    persist_data_readiness(build_data_readiness())
     _cleanup_stale_bot_process()
     _ensure_auto_simulation_task()
     log_event("info", "Dashboard started")
@@ -2752,6 +2780,17 @@ async def backtest_policies():
     }
 
 
+@app.get("/api/model-dataset/audit")
+async def model_dataset_audit():
+    return build_model_dataset_audit()
+
+
+@app.get("/api/forecast-archive/manifest")
+async def forecast_archive_manifest(limit: int = 200, sources: str = "ecmwf,gfs_ensemble", include_jsonl: bool = False):
+    source_list = [source.strip() for source in sources.split(",") if source.strip()]
+    return _forecast_archive_manifest_payload(limit=limit, sources=source_list, include_jsonl=include_jsonl)
+
+
 @app.get("/api/temperature-fit")
 async def temperature_fit():
     return _build_temperature_fit(load_markets())
@@ -2764,6 +2803,52 @@ async def truth_coverage():
         "local": _build_truth_health(markets),
         "db": truth_coverage_summary(),
     }
+
+
+@app.get("/api/data-readiness")
+async def data_readiness():
+    payload = build_data_readiness()
+    persist_data_readiness(payload)
+    return payload
+
+
+@app.get("/api/contracts")
+async def contracts(status: str = "unverified", city: str = "", limit: int = 25, offset: int = 0):
+    return list_settlement_contracts(status=status, city=city, limit=limit, offset=offset)
+
+
+@app.post("/api/contracts/{contract_id}/verification")
+async def verify_contract(contract_id: str, request: ContractVerificationRequest):
+    try:
+        contract = set_settlement_contract_verification(
+            contract_id,
+            verified=request.verified,
+            reviewer=request.reviewer,
+            note=request.note or "",
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="contract_not_found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    return {"ok": True, "contract": contract, "data_readiness": readiness}
+
+
+@app.post("/api/contracts/bulk-verification")
+async def verify_contracts_bulk(request: BulkContractVerificationRequest):
+    result = bulk_settlement_contract_verification(
+        contract_ids=request.contract_ids,
+        limit=request.limit,
+        reviewer=request.reviewer,
+        note=request.note or "dashboard bulk review",
+        require_auto_verified=True,
+        mature_only=request.mature_only,
+        apply=request.apply,
+    )
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    return {"ok": True, **result, "data_readiness": readiness}
 
 
 @app.post("/api/weather/backfill-history")
@@ -2973,6 +3058,11 @@ def _bulk_simulate_signals_once(log_when_idle=True):
     state = _read_json(DATA_DIR / "state.json", {})
     simulation_start = _parse_iso(state.get("simulation_started_at"))
     opened_at = datetime.now(timezone.utc).isoformat()
+    current_signals = [
+        s for s in list_signals(500)
+        if (s.get("date") or "") >= today and not _is_dashboard_position_import(s)
+    ]
+    quote_refresh = _refresh_signal_orderbooks(current_signals)
     dashboard = build_dashboard_payload()
     remaining = max(
         0.0,
@@ -2983,10 +3073,6 @@ def _bulk_simulate_signals_once(log_when_idle=True):
         for s in dashboard.get("weather_signals", [])
         if s.get("id") is not None
     }
-    current_signals = [
-        s for s in list_signals(500)
-        if (s.get("date") or "") >= today and not _is_dashboard_position_import(s)
-    ]
 
     def skip(signal, reason):
         skipped.append({
@@ -3035,13 +3121,22 @@ def _bulk_simulate_signals_once(log_when_idle=True):
             update_signal_status(signal["id"], "skipped", f"v3 paper rejected: {result.reason}", amount)
             skip(signal, f"paper_rejected:{result.reason or 'unknown'}")
             continue
-        if not _open_paper_position(signal, amount, simulation_start, opened_at):
+        filled_amount = float(result.payload.get("amount") or 0)
+        if filled_amount <= 0:
+            skip(signal, "paper_fill_zero")
+            continue
+        if not _open_paper_position(signal, filled_amount, simulation_start, opened_at, result.payload):
             skip(signal, "position_write_failed")
             continue
-        update_signal_status(signal["id"], "simulated", f"Bulk paper amount ${amount:.2f}", amount)
+        update_signal_status(
+            signal["id"],
+            "simulated",
+            f"Bulk paper {result.status} ${filled_amount:.2f}",
+            filled_amount,
+        )
         count += 1
-        spent += amount
-        remaining -= amount
+        spent += filled_amount
+        remaining -= filled_amount
     if spent > 0:
         state["balance"] = round(max(0.0, remaining), 2)
         state["total_trades"] = int(state.get("total_trades", 0) or 0) + count
@@ -3062,10 +3157,40 @@ def _bulk_simulate_signals_once(log_when_idle=True):
         "skipped": len(skipped),
         "reason_counts": reason_counts,
         "examples": skipped[:10],
+        "orderbooks_refreshed": quote_refresh["refreshed"],
+        "orderbook_refresh_failed": quote_refresh["failed"],
     }
     if count or log_when_idle:
         log_event("success" if count else "warning", message, payload)
     return {"ok": True, **payload}
+
+
+def _refresh_signal_orderbooks(signals, limit=50):
+    market_ids = []
+    seen = set()
+    for signal in signals:
+        market_id = str(signal.get("market_id") or "")
+        if not market_id or market_id in seen:
+            continue
+        market_ids.append(market_id)
+        seen.add(market_id)
+        if len(market_ids) >= limit:
+            break
+    if not market_ids:
+        return {"requested": 0, "refreshed": 0, "failed": 0}
+    client = PolymarketDataClient()
+    refreshed = 0
+    failed = 0
+    for market_id in market_ids:
+        try:
+            quote = client.quote(market_id)
+            if quote.book_source == "clob":
+                refreshed += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    return {"requested": len(market_ids), "refreshed": refreshed, "failed": failed}
 
 
 @app.post("/api/signals/bulk-simulate")
@@ -3117,8 +3242,16 @@ async def signal_status(signal_id: int, update: StatusUpdate):
             log_event("warning", f"Signal {signal_id} v3 paper rejected: {result.reason}", result.payload)
             return {"ok": False, "error": result.reason or "paper_rejected"}
         opened_at = datetime.now(timezone.utc).isoformat()
-        if _open_paper_position(signal, amount, _parse_iso(state.get("simulation_started_at")), opened_at):
-            state["balance"] = round(cash - amount, 2)
+        filled_amount = float(result.payload.get("amount") or 0)
+        if _open_paper_position(
+            signal,
+            filled_amount,
+            _parse_iso(state.get("simulation_started_at")),
+            opened_at,
+            result.payload,
+        ):
+            amount = filled_amount
+            state["balance"] = round(cash - filled_amount, 2)
             state["total_trades"] = int(state.get("total_trades", 0) or 0) + 1
             _write_json(DATA_DIR / "state.json", state)
     if amount is not None:

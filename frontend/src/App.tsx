@@ -14,6 +14,8 @@ import {
 import {
   backfillWeatherHistory,
   fetchDashboard,
+  fetchForecastArchiveManifest,
+  fetchSettlementContracts,
   fetchTemperatureFit,
   placeLiveOrder,
   resetSimulation,
@@ -22,15 +24,19 @@ import {
   startBot,
   stopBot,
   updateSignalStatus,
+  verifySettlementContract,
+  verifySettlementContractsBulk,
 } from './api'
 import { EquityChart } from './components/EquityChart'
+import { DataReadinessPanel } from './components/DataReadinessPanel'
 import { SignalsTable } from './components/SignalsTable'
 import { StatsCards } from './components/StatsCards'
 import { TemperatureFitPage } from './components/TemperatureFitPage'
 import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
-import type { AutoSimulationStatus, BotStats } from './types'
+import { ModelDatasetPanel } from './components/ModelDatasetPanel'
+import type { AutoSimulationStatus, BotStats, DataReadiness } from './types'
 
 const GlobeView = lazy(() => import('./components/GlobeView').then(module => ({ default: module.GlobeView })))
 type TradeMode = 'paper' | 'live'
@@ -86,19 +92,36 @@ function reasonLabel(reason: string) {
     roi_negative: 'ROI 为负',
     win_rate_low: '胜率偏低',
     strategy_not_ready: '策略尚未达标',
+    resolved_sample_below_30: '已结算样本 < 30',
+    allowed_sample_below_20: '允许组样本 < 20',
+    allowed_group_pnl_negative: '允许组 PnL 为负',
+    allowed_group_roi_negative: '允许组 ROI 为负',
+    allowed_win_rate_low: '允许组胜率偏低',
+    settlement_rule_not_manually_verified: '结算规则未核验',
+    settlement_contracts_missing: '事件级合同缺失',
+    timezone_mismatch: '规则时区不一致',
+    independent_truth_days_below_min: '独立 Truth 日不足',
+    all_orderbooks_stale: '盘口快照已过期',
+    fresh_clob_depth_missing: 'CLOB 深度缺失',
   }
   return map[reason] ?? reason
 }
 
-function ReadinessBanner({ stats }: { stats: BotStats }) {
+function ReadinessBanner({ stats, readiness }: { stats: BotStats; readiness?: DataReadiness | null }) {
   const ready = Boolean(stats.strategy_live_ready)
   const reasons = stats.strategy_readiness_reasons ?? []
+  const phase = readiness?.production_phase
   return (
     <div className={`border px-3 py-2 ${ready ? 'border-green-500/30 bg-green-500/10' : 'border-amber-500/30 bg-amber-500/10'}`}>
       <div className="flex items-center gap-2">
         {ready ? <CheckCircle2 className="h-4 w-4 text-green-300" /> : <ShieldAlert className="h-4 w-4 text-amber-300" />}
-        <div className="text-sm font-medium text-neutral-100">
-          {ready ? '实盘门槛已通过，但仍建议从 $1-$2 canary 开始' : '当前只允许模拟观察，实盘按钮已锁定'}
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-neutral-100">
+            {phase ? `${phase.label}：${phase.name}` : ready ? '实盘门槛已通过，但仍建议从 $1-$2 canary 开始' : '当前只允许模拟观察，实盘按钮已锁定'}
+          </div>
+          <div className="truncate text-[10px] text-neutral-500">
+            {ready ? '实盘门槛已通过，但仍建议从 $1-$2 canary 开始。' : phase?.operator_action ?? '当前只允许模拟观察，实盘按钮已锁定。'}
+          </div>
         </div>
       </div>
       {!ready && (
@@ -322,7 +345,14 @@ function SimulationCard({
         <div className="mt-3 border border-neutral-800 p-2 text-[11px] leading-relaxed text-neutral-400">
           <div className="mb-1 text-neutral-200">最近一次自动检查 · {timeText(autoSimulation.last_run)}</div>
           {lastResult && (
-            <div>买入 {lastResult.count} 笔，跳过 {lastResult.skipped} 笔，花费 {money(lastResult.spent)}，剩余 {money(lastResult.remaining)}</div>
+            <div>
+              买入 {lastResult.count} 笔，跳过 {lastResult.skipped} 笔，花费 {money(lastResult.spent)}，剩余 {money(lastResult.remaining)}
+              {lastResult.orderbooks_refreshed !== undefined && (
+                <span title={`盘口刷新失败 ${lastResult.orderbook_refresh_failed ?? 0} 个`}>
+                  {' '}· 盘口 {lastResult.orderbooks_refreshed}
+                </span>
+              )}
+            </div>
           )}
           {autoSimulation.last_error && <div className="text-red-300">{autoSimulation.last_error}</div>}
         </div>
@@ -342,6 +372,7 @@ function App() {
   const [activityView, setActivityView] = useState<'signals' | 'trades'>('signals')
   const [simBalance, setSimBalance] = useState('40')
   const [clearMarks, setClearMarks] = useState(false)
+  const [contractStatus, setContractStatus] = useState('mature-auto')
   const balanceInitRef = useRef(false)
 
   const { data, isLoading, error, refetch } = useQuery({
@@ -356,6 +387,17 @@ function App() {
     queryFn: fetchTemperatureFit,
     enabled: view === 'temperature-fit',
     refetchInterval: view === 'temperature-fit' ? 30000 : false,
+  })
+
+  const contractsQuery = useQuery({
+    queryKey: ['settlement-contracts', contractStatus],
+    queryFn: () => fetchSettlementContracts(contractStatus, 12),
+    refetchInterval: 120000,
+  })
+  const forecastArchiveManifestQuery = useQuery({
+    queryKey: ['forecast-archive-manifest'],
+    queryFn: fetchForecastArchiveManifest,
+    refetchInterval: 120000,
   })
 
   const startMutation = useMutation({
@@ -378,6 +420,22 @@ function App() {
   const autoSimulationMutation = useMutation({
     mutationFn: (enabled: boolean) => setAutoSimulation(enabled, 300),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    },
+  })
+  const verifyContractMutation = useMutation({
+    mutationFn: ({ contractId, note }: { contractId: string; note: string }) =>
+      verifySettlementContract(contractId, true, note || 'dashboard manual review'),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    },
+  })
+  const bulkVerifyContractMutation = useMutation({
+    mutationFn: ({ contractIds, note }: { contractIds: string[]; note: string }) =>
+      verifySettlementContractsBulk(contractIds, true, true, note || 'dashboard visible batch review'),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     },
   })
@@ -404,6 +462,9 @@ function App() {
   const trades = data?.recent_trades ?? []
   const equityCurve = data?.equity_curve ?? []
   const truthHealth = data?.truth_health ?? null
+  const dataReadiness = data?.data_readiness ?? null
+  const modelDatasetAudit = data?.model_dataset_audit ?? null
+  const forecastArchiveManifest = forecastArchiveManifestQuery.data ?? null
   const actionable = signals.filter(signal => signal.actionable).length
   const liveAvailable = Boolean(stats.strategy_live_ready && data?.v3?.config?.live_trading)
   const autoSimulation = stats.auto_simulation ?? {
@@ -528,7 +589,20 @@ function App() {
 
           <TradeModeSwitch mode={tradeMode} liveAvailable={liveAvailable} onMode={setTradeMode} />
 
-          <ReadinessBanner stats={stats} />
+          <ReadinessBanner stats={stats} readiness={dataReadiness} />
+
+          <div className="border border-neutral-800 bg-black">
+            <DataReadinessPanel
+              readiness={dataReadiness}
+              contracts={contractsQuery.data}
+              contractStatus={contractStatus}
+              onContractStatus={setContractStatus}
+              verifyingContractId={verifyContractMutation.variables?.contractId}
+              bulkVerifying={bulkVerifyContractMutation.isPending}
+              onVerifyContract={(contractId, note) => verifyContractMutation.mutate({ contractId, note })}
+              onVerifyVisibleContracts={(contractIds, note) => bulkVerifyContractMutation.mutate({ contractIds, note })}
+            />
+          </div>
 
           <div>
             <SimulationCard
@@ -581,6 +655,10 @@ function App() {
             >
               打开温度拟合
             </button>
+          </div>
+
+          <div className="border border-neutral-800 bg-black">
+            <ModelDatasetPanel audit={modelDatasetAudit} archiveManifest={forecastArchiveManifest} />
           </div>
 
           <div className="border border-neutral-800 bg-black p-3">

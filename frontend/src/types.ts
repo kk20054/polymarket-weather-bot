@@ -125,6 +125,8 @@ export interface AutoSimulationStatus {
     spent: number
     skipped: number
     remaining: number
+    orderbooks_refreshed?: number
+    orderbook_refresh_failed?: number
   } | null
   last_error?: string | null
 }
@@ -152,6 +154,133 @@ export interface TruthHealth {
   open_meteo_fallback_rate: number
   legacy_unknown?: number
   cities: TruthCityHealth[]
+}
+
+export interface DataReadinessReason {
+  code: string
+  count: number
+}
+
+export interface DataReadinessStage {
+  key: string
+  label: string
+  status: 'ready' | 'blocked'
+  reasons: DataReadinessReason[]
+  metrics: Record<string, unknown>
+}
+
+export interface DataReadinessAction {
+  key: string
+  priority: number
+  label: string
+  count: number
+  impact: string
+  command: string
+  apply_command?: string
+  requires_operator: boolean
+  targets: Array<Record<string, string>>
+}
+
+export interface DataReadiness {
+  audit_version: string
+  generated_at: string
+  status: 'ready' | 'blocked'
+  score: number
+  live_allowed: boolean
+  production_phase?: {
+    id: string
+    label: string
+    name: string
+    status: 'active' | 'ready_for_next'
+    next: string
+    operator_action: string
+    blocked_keys: string[]
+  }
+  stages: DataReadinessStage[]
+  blockers: DataReadinessReason[]
+  next_actions?: DataReadinessAction[]
+  cities: Array<{
+    city: string
+    city_name: string
+    station_id: string
+    station_name: string
+    timezone: string
+    unit: string
+    market_rules: number
+    verified_rules: number
+    truth_days: number
+    eligible_truth_days: number
+    forecast_runs: number
+    status: 'eligible' | 'blocked'
+    reasons: string[]
+  }>
+  summary: {
+    registered_cities: number
+    eligible_cities: number
+    market_rules: number
+    settlement_contracts?: number
+    eligible_truth_days: number
+    forecast_runs: number
+    forecast_members: number
+    orderbook_snapshots: number
+  }
+}
+
+export interface SettlementContract {
+  contract_id: string
+  event_slug: string
+  city: string
+  city_name: string
+  target_local_date: string
+  station_id: string
+  station_name: string
+  timezone: string
+  unit: string
+  metric: string
+  rounding_rule: string
+  bucket_boundary: string
+  resolution_source_text?: string | null
+  source_url?: string | null
+  truth_provider_priority?: string[]
+  rule_version?: string | null
+  registry_version?: string | null
+  parse_confidence?: number | null
+  confidence_reason?: string | null
+  auto_verified_at?: string | null
+  manual_verified_at?: string | null
+  manual_verified_by?: string | null
+  manual_verification_note?: string | null
+  manual_verification_snapshot?: Record<string, unknown> | null
+  verification_evidence?: string[]
+  review_status?: 'verified' | 'mature-auto' | 'future-auto' | 'manual-required'
+  review_tags?: string[]
+}
+
+export interface SettlementContractList {
+  status: string
+  city: string
+  limit: number
+  offset: number
+  total: number
+  summary: {
+    contracts: number
+    manual_verified: number
+    unverified: number
+    auto_verified: number
+    manual_progress: number
+  }
+  contracts: SettlementContract[]
+}
+
+export interface BulkContractVerificationResult {
+  ok: boolean
+  applied: boolean
+  selected: number
+  verified: number
+  skipped_requested: string[]
+  require_auto_verified: boolean
+  mature_only: boolean
+  contracts: SettlementContract[]
 }
 
 export interface DistributionItem {
@@ -528,9 +657,94 @@ export interface BulkSimulateResult {
   examples: BulkSimulateSkipExample[]
 }
 
+export interface ModelDatasetAudit {
+  audit_version: string
+  generated_at: string
+  status: 'ready' | 'blocked'
+  required_samples: number
+  summary: {
+    event_days: number
+    mature_event_days: number
+    pending_settlement_samples: number
+    training_eligible_samples: number
+    baseline_ready_samples: number
+    replay_ready_samples: number
+    blocked_samples: number
+    cities: number
+    eligible_cities: number
+    baseline_ready_cities: number
+  }
+  reason_counts: Record<string, number>
+  training_reason_counts: Record<string, number>
+  operational_counts: {
+    unverified_contract_event_days: number
+    auto_verified_unreviewed_contracts: number
+    mature_auto_verified_unreviewed_contracts: number
+    pending_settlement_samples: number
+  }
+  leakage_flags: Record<string, number>
+  source_counts: Record<string, number>
+  horizon_counts: Record<string, number>
+  next_actions: Array<{
+    key: string
+    priority: number
+    label: string
+    count: number
+    impact: string
+    command: string
+    apply_command?: string
+    requires_operator: boolean
+    targets: Array<Record<string, string>>
+  }>
+  cities: Array<{
+    city: string
+    city_name: string
+    samples: number
+    training_eligible: number
+    baseline_ready: number
+    replay_ready: number
+    eligible_truth: number
+    no_leak_forecast_runs: number
+    warnings: Record<string, number>
+    reasons: Record<string, number>
+  }>
+}
+
+export interface ForecastArchiveManifest {
+  manifest_version: string
+  generated_at: string
+  record_count: number
+  by_city: Record<string, number>
+  by_source: Record<string, number>
+  records: Array<{
+    city: string
+    city_name?: string
+    target_date?: string
+    timezone?: string
+    station_id?: string
+    station_name?: string
+    unit?: string
+    source: string
+    provider?: string
+    model?: string
+    model_version?: string
+    archive_gap_reasons?: string[]
+    no_leak_rule?: string
+  }>
+  sources: string[]
+  schema_doc: string
+  template_command: string
+  import_dry_run_command: string
+  import_apply_command: string
+  audit_summary?: ModelDatasetAudit['summary']
+  reason_counts?: Record<string, number>
+}
+
 export interface DashboardData {
   stats: BotStats
   v3?: V3Summary
+  data_readiness?: DataReadiness
+  model_dataset_audit?: ModelDatasetAudit
   truth_health?: TruthHealth
   btc_price: BtcPrice | null
   microstructure: Microstructure | null
