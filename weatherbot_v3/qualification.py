@@ -454,7 +454,7 @@ def _build_next_actions(
             "count": mature_auto_pending,
             "impact": "先处理已经过结算日、且自动解析可信的合同，最快解除 Phase 1.5 的人工核验闸门。",
             "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --mature-only",
-            "apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --mature-only --apply",
+            "apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --mature-only --apply --note \"auto-verified mature contract reviewed from readiness queue\"",
             "requires_operator": True,
             "targets": mature_auto_targets,
         })

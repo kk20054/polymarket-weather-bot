@@ -299,7 +299,7 @@ def _build_next_actions(
             "count": len(auto_verified_pending),
             "impact": "解除 Phase 1.5 最大闸门，让已解析可信的事件进入训练候选。",
             "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --mature-only",
-            "apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --mature-only --apply",
+            "apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-bulk-verify --limit 20 --mature-only --apply --note \"auto-verified mature contract reviewed from model dataset audit\"",
             "requires_operator": True,
             "targets": sorted(auto_verified_pending)[:20],
         })

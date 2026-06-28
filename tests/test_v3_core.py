@@ -400,6 +400,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertTrue(actions[0]["requires_operator"])
         self.assertIn("contracts-bulk-verify", actions[0]["command"])
         self.assertIn("--apply", actions[0]["apply_command"])
+        self.assertIn("--note", actions[0]["apply_command"])
+        self.assertIn("readiness queue", actions[0]["apply_command"])
         self.assertEqual(actions[0]["targets"][0]["city"], "nyc")
         self.assertEqual(actions[0]["targets"][0]["target_date"], "2026-06-23")
         self.assertEqual(actions[0]["targets"][0]["station_id"], "KLGA")
@@ -999,6 +1001,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("contracts-bulk-verify", audit["next_actions"][0]["command"])
         self.assertIn("--mature-only", audit["next_actions"][0]["command"])
         self.assertIn("--apply", audit["next_actions"][0]["apply_command"])
+        self.assertIn("--note", audit["next_actions"][0]["apply_command"])
+        self.assertIn("model dataset audit", audit["next_actions"][0]["apply_command"])
 
     def test_model_dataset_forecast_gap_requires_historical_archive(self):
         db_path = test_db_path("model_dataset_forecast_archive")
