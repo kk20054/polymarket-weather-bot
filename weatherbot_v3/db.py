@@ -1215,6 +1215,10 @@ def set_settlement_contract_verification(
     contract_id = str(contract_id or "").strip()
     if not contract_id:
         raise ValueError("contract_id is required")
+    note = str(note or "").strip()
+    reviewer = str(reviewer or "").strip()
+    if verified and not note:
+        raise ValueError("manual verification note is required")
     now = utc_now()
     with connect() as conn:
         row = conn.execute(
@@ -1262,6 +1266,10 @@ def bulk_settlement_contract_verification(
 ) -> dict[str, Any]:
     init_v3_db()
     limit = max(1, min(int(limit or 5), 50))
+    note = str(note or "").strip()
+    reviewer = str(reviewer or "").strip()
+    if apply and not note:
+        raise ValueError("manual verification note is required")
     contract_ids = [str(item).strip() for item in (contract_ids or []) if str(item).strip()]
     where = ["(manual_verified_at IS NULL OR manual_verified_at = '')"]
     params: list[Any] = []

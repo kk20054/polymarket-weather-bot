@@ -120,7 +120,7 @@ export async function fetchSettlementContracts(status = 'unverified', limit = 12
   return data
 }
 
-export async function verifySettlementContract(contractId: string, verified = true, note = ''): Promise<{ ok: boolean }> {
+export async function verifySettlementContract(contractId: string, verified = true, note = 'dashboard manual review'): Promise<{ ok: boolean }> {
   const { data } = await api.post(`/contracts/${encodeURIComponent(contractId)}/verification`, {
     verified,
     reviewer: 'dashboard',

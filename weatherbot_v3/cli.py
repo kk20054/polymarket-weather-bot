@@ -206,6 +206,8 @@ def main() -> None:
     elif args.command == "contracts-verify":
         if not args.contract_id:
             raise SystemExit("--contract-id is required")
+        if not args.unverify and not str(args.note or "").strip():
+            raise SystemExit("--note is required when manually verifying a contract")
         contract = set_settlement_contract_verification(
             args.contract_id,
             verified=not args.unverify,

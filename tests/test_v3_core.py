@@ -445,6 +445,31 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("event_slug_present", verified["manual_verification_snapshot"]["verification_evidence"])
         self.assertIsNotNone(rule_row["manual_verified_at"])
 
+    def test_settlement_contract_manual_verification_requires_note(self):
+        db_path = test_db_path("contract_verification_requires_note")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            rule = infer_settlement_rule(
+                {
+                    "market_id": "nyc-note-required-1",
+                    "city": "nyc",
+                    "city_name": "New York City",
+                    "unit": "F",
+                    "event_url": "https://polymarket.com/event/nyc-note-required",
+                    "question": "Will the highest temperature in NYC be between 80-81掳F on June 23?",
+                    "description": "Resolves according to Wunderground station history.",
+                    "date": "2026-06-23",
+                }
+            )
+            upsert_settlement_contracts([settlement_contract_from_rule(rule)])
+            with self.assertRaisesRegex(ValueError, "manual verification note is required"):
+                set_settlement_contract_verification("nyc-note-required", True, reviewer="test", note=" ")
+            with self.assertRaisesRegex(ValueError, "manual verification note is required"):
+                bulk_settlement_contract_verification(["nyc-note-required"], reviewer="test", note="", apply=True)
+            dry_run = bulk_settlement_contract_verification(["nyc-note-required"], reviewer="test", note="", apply=False)
+
+        self.assertFalse(dry_run["applied"])
+
     def test_contract_list_supports_review_queue_statuses(self):
         db_path = test_db_path("contract_review_statuses")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
