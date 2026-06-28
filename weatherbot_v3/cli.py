@@ -4,12 +4,69 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 from .db import bulk_settlement_contract_verification, connect, dashboard_summary, init_v3_db, list_settlement_contracts, set_settlement_contract_verification
 from .migration import audit_market_files, migrate_legacy_signals, repair_truth_temporal_mismatches, sync_settlement_contracts
 from .model_dataset import build_model_dataset_audit, is_settlement_pending
 from .notifier import FeishuNotifier
 from .qualification import build_data_readiness, persist_data_readiness
+
+
+ORDERBOOK_TERMINAL_SIGNAL_STATUSES = (
+    "closed",
+    "settled",
+    "resolved",
+    "expired",
+    "lost",
+    "won",
+    "cancelled",
+    "canceled",
+)
+
+
+def default_orderbook_start_date(now_utc: datetime | None = None) -> str:
+    now = now_utc or datetime.now(timezone.utc)
+    return (now.date() - timedelta(days=1)).isoformat()
+
+
+def select_orderbook_backfill_markets(
+    conn,
+    *,
+    limit: int,
+    start_date: str,
+    end_date: str = "",
+):
+    bounded_limit = max(1, min(int(limit or 50), 500))
+    placeholders = ",".join("?" for _ in ORDERBOOK_TERMINAL_SIGNAL_STATUSES)
+    params = [
+        start_date,
+        end_date,
+        end_date,
+        *ORDERBOOK_TERMINAL_SIGNAL_STATUSES,
+        bounded_limit,
+    ]
+    return conn.execute(
+        f"""
+        SELECT
+            market_id,
+            MAX(id) AS latest_id,
+            MAX(target_date) AS latest_target_date,
+            COUNT(*) AS signal_count
+        FROM signals
+        WHERE market_id IS NOT NULL
+          AND market_id != ''
+          AND target_date IS NOT NULL
+          AND target_date != ''
+          AND target_date >= ?
+          AND (? = '' OR target_date <= ?)
+          AND LOWER(COALESCE(status, '')) NOT IN ({placeholders})
+        GROUP BY market_id
+        ORDER BY latest_target_date DESC, latest_id DESC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
 
 
 def main() -> None:
@@ -39,7 +96,7 @@ def main() -> None:
     )
     parser.add_argument("--cities", default="", help="Comma-separated city keys; empty means all cities")
     parser.add_argument("--days", type=int, default=4, help="Local forecast days to persist (1-7)")
-    parser.add_argument("--limit", type=int, default=50, help="Maximum recent signal markets to refresh")
+    parser.add_argument("--limit", type=int, default=50, help="Maximum current/future signal markets to refresh")
     parser.add_argument("--start-date", default="", help="Inclusive local target date filter")
     parser.add_argument("--end-date", default="", help="Inclusive local target date filter")
     parser.add_argument(
@@ -145,26 +202,27 @@ def main() -> None:
         from .polymarket import PolymarketDataClient
 
         limit = max(1, min(int(args.limit or 50), 500))
+        start_date = args.start_date or default_orderbook_start_date()
+        end_date = args.end_date or ""
         with connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT market_id, MAX(id) latest_id
-                FROM signals
-                WHERE market_id IS NOT NULL AND market_id != ''
-                GROUP BY market_id
-                ORDER BY latest_id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            rows = select_orderbook_backfill_markets(
+                conn,
+                limit=limit,
+                start_date=start_date,
+                end_date=end_date,
+            )
         client = PolymarketDataClient()
         results = []
         for row in rows:
             market_id = str(row["market_id"])
+            target_date = str(row["latest_target_date"] or "")
+            signal_count = int(row["signal_count"] or 0)
             try:
                 quote = client.quote(market_id)
                 results.append({
                     "market_id": market_id,
+                    "target_date": target_date,
+                    "signal_count": signal_count,
                     "ok": quote.book_source == "clob",
                     "source": quote.book_source,
                     "best_bid": quote.best_bid,
@@ -175,11 +233,20 @@ def main() -> None:
                     "age_seconds": quote.quote_age_seconds,
                 })
             except Exception as exc:
-                results.append({"market_id": market_id, "ok": False, "error": str(exc)})
+                results.append({
+                    "market_id": market_id,
+                    "target_date": target_date,
+                    "signal_count": signal_count,
+                    "ok": False,
+                    "error": str(exc),
+                })
             time.sleep(0.05)
         readiness = build_data_readiness()
         persist_data_readiness(readiness)
         print(json.dumps({
+            "selection_mode": "current_or_future_signal_markets",
+            "start_date": start_date,
+            "end_date": end_date or None,
             "requested": len(rows),
             "ok": sum(1 for row in results if row["ok"]),
             "failed": sum(1 for row in results if not row["ok"]),

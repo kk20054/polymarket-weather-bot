@@ -17,6 +17,7 @@ from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
+from weatherbot_v3.cli import default_orderbook_start_date, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timezone
@@ -193,6 +194,38 @@ class V3CoreTests(unittest.TestCase):
             ])
         self.assertEqual(result, {"requested": 2, "refreshed": 1, "failed": 1})
         self.assertEqual(client_cls.return_value.quote.call_count, 2)
+
+    def test_orderbook_backfill_selects_current_unresolved_markets(self):
+        db_path = test_db_path("orderbook_selection")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        init_v3_db(db_path)
+        now = "2026-06-26T00:00:00+00:00"
+        rows = [
+            ("old", "old-market", "2026-06-20", "signal"),
+            ("future", "future-market", "2026-06-28", "signal"),
+            ("recent", "recent-market", "2026-06-27", "open"),
+            ("closed", "closed-market", "2026-06-29", "closed"),
+            ("empty-date", "empty-date-market", "", "signal"),
+        ]
+        with connect(db_path) as conn:
+            conn.executemany(
+                """
+                INSERT INTO signals (
+                    signal_key, market_id, target_date, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [(key, market_id, target_date, status, now, now) for key, market_id, target_date, status in rows],
+            )
+            selected = select_orderbook_backfill_markets(
+                conn,
+                limit=10,
+                start_date="2026-06-27",
+            )
+        self.assertEqual([row["market_id"] for row in selected], ["future-market", "recent-market"])
+
+    def test_orderbook_backfill_default_start_keeps_global_settlement_window(self):
+        now = datetime(2026, 6, 28, 0, 30, tzinfo=timezone.utc)
+        self.assertEqual(default_orderbook_start_date(now), "2026-06-27")
 
     def test_ai_disabled_default_allows_quant_flow(self):
         db_path = test_db_path("ai_disabled")
