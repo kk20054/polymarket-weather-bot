@@ -238,6 +238,8 @@ export interface ProductionRefreshStage {
 export interface ProductionRefreshResult {
   refresh_version: string
   ok: boolean
+  running?: boolean
+  message?: string
   failed_stages: string[]
   scan_signals: boolean
   stages: ProductionRefreshStage[]
@@ -258,6 +260,15 @@ export interface ProductionRefreshResult {
     blocked_keys?: string[]
     next_actions?: DataReadinessAction[]
   }
+  history?: Array<{
+    requested_at?: string
+    ok: boolean
+    failed_stages: string[]
+    stage_count: number
+    ok_stage_count: number
+    blocked_keys: string[]
+    scan_signals: boolean
+  }>
 }
 
 export interface SettlementContract {

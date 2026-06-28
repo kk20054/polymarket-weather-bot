@@ -18,7 +18,7 @@ from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import default_orderbook_start_date, run_production_refresh, select_orderbook_backfill_markets
-from dashboard_server import AutoSimulationUpdate, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, production_refresh, update_auto_simulation
+from dashboard_server import AutoSimulationUpdate, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timezone
 
@@ -304,11 +304,41 @@ class V3CoreTests(unittest.TestCase):
         saved = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(saved["refresh_version"], "production-refresh-v1")
         self.assertEqual(saved["request"]["limit"], 2)
+        self.assertEqual(len(saved["history"]), 1)
+        self.assertEqual(saved["history"][0]["ok_stage_count"], 1)
         refresh.assert_called_once()
         _, kwargs = refresh.call_args
         self.assertEqual(kwargs["cities"], "shanghai")
         self.assertFalse(kwargs["scan_signals"])
         log_event.assert_called_once()
+
+    def test_dashboard_production_refresh_rejects_concurrent_run(self):
+        state_path = TEST_DB_DIR / "production-refresh-running.json"
+        state_path.unlink(missing_ok=True)
+        self.addCleanup(lambda: state_path.unlink(missing_ok=True))
+        state_path.write_text(json.dumps({
+            "refresh_version": "production-refresh-v1",
+            "ok": True,
+            "failed_stages": [],
+            "history": [],
+        }), encoding="utf-8")
+
+        async def run_locked():
+            await production_refresh_lock.acquire()
+            try:
+                with (
+                    patch("dashboard_server.PRODUCTION_REFRESH_PATH", state_path),
+                    patch("dashboard_server.run_production_refresh") as refresh,
+                ):
+                    result = await production_refresh(ProductionRefreshRequest())
+                refresh.assert_not_called()
+                return result
+            finally:
+                production_refresh_lock.release()
+
+        result = asyncio.run(run_locked())
+        self.assertTrue(result["running"])
+        self.assertIn("already_running", result["failed_stages"])
 
     def test_ai_disabled_default_allows_quant_flow(self):
         db_path = test_db_path("ai_disabled")

@@ -60,6 +60,7 @@ PRODUCTION_REFRESH_PATH = DATA_DIR / "production-refresh.json"
 bot_process: subprocess.Popen | None = None
 auto_simulation_task: asyncio.Task | None = None
 bulk_simulation_lock = asyncio.Lock()
+production_refresh_lock = asyncio.Lock()
 _market_rule_sync_signature: tuple[tuple[str, float], ...] | None = None
 
 app = FastAPI(title="WeatherBot Dashboard", version="1.0")
@@ -138,6 +139,30 @@ def _read_json(path, fallback):
 def _write_json(path, payload):
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _production_refresh_summary(payload):
+    stages = payload.get("stages") or []
+    return {
+        "requested_at": payload.get("requested_at"),
+        "ok": bool(payload.get("ok")),
+        "failed_stages": list(payload.get("failed_stages") or []),
+        "stage_count": len(stages),
+        "ok_stage_count": sum(1 for stage in stages if stage.get("ok")),
+        "blocked_keys": list(((payload.get("readiness") or {}).get("blocked_keys") or [])),
+        "scan_signals": bool(payload.get("scan_signals")),
+    }
+
+
+def _save_production_refresh_result(payload):
+    previous = _read_json(PRODUCTION_REFRESH_PATH, None) or {}
+    history = list(previous.get("history") or [])
+    current_summary = _production_refresh_summary(payload)
+    if current_summary.get("requested_at"):
+        history = [current_summary, *history]
+    payload["history"] = history[:7]
+    _write_json(PRODUCTION_REFRESH_PATH, payload)
+    return payload
 
 
 def _auto_simulation_state():
@@ -2826,37 +2851,48 @@ async def data_readiness():
 
 @app.post("/api/production-refresh")
 async def production_refresh(request: ProductionRefreshRequest):
+    if production_refresh_lock.locked():
+        current = _read_json(PRODUCTION_REFRESH_PATH, {}) or {}
+        return {
+            **current,
+            "ok": False,
+            "running": True,
+            "failed_stages": list(dict.fromkeys([*(current.get("failed_stages") or []), "already_running"])),
+            "message": "production-refresh is already running",
+        }
     cities = ",".join(item.strip() for item in (request.cities or []) if item.strip())
-    payload = await asyncio.to_thread(
-        run_production_refresh,
-        cities=cities,
-        days=max(1, min(int(request.days or 1), 7)),
-        limit=max(1, min(int(request.limit or 20), 500)),
-        start_date=request.start_date or "",
-        end_date=request.end_date or "",
-        scan_signals=not request.skip_signal_scan,
-    )
-    saved = {
-        **payload,
-        "requested_at": datetime.now(timezone.utc).isoformat(),
-        "request": {
-            "cities": request.cities or [],
-            "days": request.days,
-            "limit": request.limit,
-            "start_date": request.start_date,
-            "end_date": request.end_date,
-            "skip_signal_scan": request.skip_signal_scan,
-        },
-    }
-    _write_json(PRODUCTION_REFRESH_PATH, saved)
-    log_event(
-        "success" if saved.get("ok") else "warning",
-        "production-refresh completed" if saved.get("ok") else "production-refresh finished with failed stages",
-        {
-            "failed_stages": saved.get("failed_stages", []),
-            "readiness": saved.get("readiness", {}),
-        },
-    )
+    async with production_refresh_lock:
+        payload = await asyncio.to_thread(
+            run_production_refresh,
+            cities=cities,
+            days=max(1, min(int(request.days or 1), 7)),
+            limit=max(1, min(int(request.limit or 20), 500)),
+            start_date=request.start_date or "",
+            end_date=request.end_date or "",
+            scan_signals=not request.skip_signal_scan,
+        )
+        saved = {
+            **payload,
+            "running": False,
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "request": {
+                "cities": request.cities or [],
+                "days": request.days,
+                "limit": request.limit,
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "skip_signal_scan": request.skip_signal_scan,
+            },
+        }
+        saved = _save_production_refresh_result(saved)
+        log_event(
+            "success" if saved.get("ok") else "warning",
+            "production-refresh completed" if saved.get("ok") else "production-refresh finished with failed stages",
+            {
+                "failed_stages": saved.get("failed_stages", []),
+                "readiness": saved.get("readiness", {}),
+            },
+        )
     return saved
 
 

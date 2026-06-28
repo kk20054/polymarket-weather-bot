@@ -150,6 +150,7 @@ export function DataReadinessPanel({
   const refreshOkStages = refreshStages.filter(stage => stage.ok).length
   const refreshFailedStages = refreshStages.filter(stage => !stage.ok)
   const refreshBlockedKeys = productionRefresh?.readiness?.blocked_keys ?? phase?.blocked_keys ?? []
+  const refreshHistory = productionRefresh?.history ?? []
   const queueOptions = [
     ['mature-auto', '成熟自动', contractQueue.mature_auto_verified_unreviewed ?? 0],
     ['future-auto', '未来自动', contractQueue.future_auto_verified_unreviewed ?? 0],
@@ -218,6 +219,11 @@ export function DataReadinessPanel({
               }`}>
                 {productionRefresh?.ok ? '最近成功' : productionRefresh ? '需查看' : '未运行'}
               </span>
+              {(productionRefreshing || productionRefresh?.running) && (
+                <span className="border border-cyan-500/20 bg-cyan-500/5 px-1.5 py-0.5 text-[9px] text-cyan-200">
+                  运行中
+                </span>
+              )}
             </div>
             <div className="mt-0.5 truncate text-[9px] text-neutral-600">
               {shortTime(productionRefresh?.requested_at)} · {refreshOkStages}/{refreshStages.length || 5} 阶段
@@ -225,7 +231,7 @@ export function DataReadinessPanel({
           </div>
           <button
             type="button"
-            disabled={!onProductionRefresh || productionRefreshing}
+            disabled={!onProductionRefresh || productionRefreshing || Boolean(productionRefresh?.running)}
             onClick={() => onProductionRefresh?.()}
             className="inline-flex shrink-0 items-center gap-1 border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"
             title="安全刷新：同步合同、刷新预测、迁移信号、刷新当前盘口；默认不运行旧扫描器"
@@ -264,6 +270,30 @@ export function DataReadinessPanel({
                   <span key={key} className="border border-amber-500/20 bg-amber-500/5 px-1.5 py-0.5 text-[9px] text-amber-200">
                     {key}
                   </span>
+                ))}
+              </div>
+            )}
+            {refreshHistory.length > 0 && (
+              <div className="grid grid-cols-3 gap-1 pt-1" title="最近 3 次生产刷新">
+                {refreshHistory.slice(0, 3).map((item, index) => (
+                  <div
+                    key={`${item.requested_at || index}-${index}`}
+                    className={`border px-1.5 py-1 ${
+                      item.ok
+                        ? 'border-green-500/15 bg-green-500/5'
+                        : 'border-amber-500/15 bg-amber-500/5'
+                    }`}
+                  >
+                    <div className={`truncate text-[9px] ${item.ok ? 'text-green-200' : 'text-amber-200'}`}>
+                      {item.ok ? 'OK' : 'BLOCK'}
+                    </div>
+                    <div className="truncate text-[9px] text-neutral-600">
+                      {shortTime(item.requested_at)}
+                    </div>
+                    <div className="truncate tabular-nums text-[9px] text-neutral-500">
+                      {item.ok_stage_count}/{item.stage_count}
+                    </div>
+                  </div>
                 ))}
               </div>
             )}
