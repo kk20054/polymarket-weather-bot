@@ -38,6 +38,7 @@ WeatherBot v6 的目标不是承诺稳定赚钱，而是建立一个能够持续
 
 - `dashboard_server` 启动后必须先快速返回看板缓存/最近状态。
 - 后台数据刷新默认关闭；打开后端只启动 API 和看板缓存，不主动抓天气源。
+- 启动维护任务默认关闭；旧信号迁移、data readiness 重算和 dashboard 重缓存不得阻塞服务监听。
 - 看板顶部提供“手动抓取”按钮，人工触发受控数据基座刷新：合约同步、预测快照、CLOB 盘口。
 - 如果以后需要定时自动刷新，必须显式设置 `WEATHERBOT_AUTO_REFRESH=true`，默认 30 分钟一次，且不启动旧版 `weatherbet.py` 无限循环，也不默认跑 legacy signal scan。
 - 如果需要重新开启旧信号扫描，必须显式设置 `WEATHERBOT_AUTO_REFRESH_SIGNAL_SCAN=true` 或人工触发对应任务，并在看板日志里显示。

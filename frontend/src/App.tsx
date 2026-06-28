@@ -495,6 +495,7 @@ function App() {
   const forecastArchiveManifest = forecastArchiveManifestQuery.data ?? null
   const actionable = signals.filter(signal => signal.actionable).length
   const liveAvailable = Boolean(stats.strategy_live_ready && data?.v3?.config?.live_trading)
+  const needsManualRefresh = data?._meta?.reason === 'manual_refresh_required'
   const autoSimulation = stats.auto_simulation ?? {
     enabled: false,
     interval_seconds: 300,
@@ -669,7 +670,7 @@ function App() {
         </button>
       </header>
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[260px_minmax(640px,1fr)_420px] xl:overflow-hidden">
+      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[240px_minmax(520px,1fr)_360px] xl:overflow-hidden">
         <aside className="order-1 space-y-3 border-b border-neutral-800 bg-neutral-950/40 p-3 xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
           {recommendedCity && (
             <a
@@ -703,6 +704,11 @@ function App() {
               <span className="border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">{cityOptions.length}</span>
             </div>
             <div className="space-y-1">
+              {cityOptions.length === 0 && (
+                <div className="border border-neutral-800 bg-black/40 p-3 text-[11px] leading-relaxed text-neutral-500">
+                  暂无城市快照。点击顶部“手动抓取”后，这里会按城市列出预报、站点和信号数量。
+                </div>
+              )}
               {cityOptions.map(city => (
                 <a
                   key={city.key}
@@ -739,6 +745,11 @@ function App() {
         </aside>
 
         <section className="order-2 min-h-0 overflow-y-auto xl:overflow-hidden">
+          {needsManualRefresh && (
+            <div className="border-b border-cyan-500/20 bg-cyan-500/10 px-6 py-3 text-[12px] text-cyan-100">
+              后端已连接，当前处于轻量启动状态。点击右上角“手动抓取”后，会同步合约、预测和盘口，并刷新城市证据页。
+            </div>
+          )}
           {recommendedCity && (
             <a
               href={`?city=${cityPageSlug(recommendedCity)}`}

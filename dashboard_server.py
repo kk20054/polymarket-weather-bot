@@ -75,6 +75,8 @@ AUTO_REFRESH_SIGNAL_SCAN = os.getenv("WEATHERBOT_AUTO_REFRESH_SIGNAL_SCAN", "fal
 dashboard_payload_cache: dict | None = None
 dashboard_payload_cache_at: datetime | None = None
 DASHBOARD_CACHE_TTL_SECONDS = int(os.getenv("WEATHERBOT_DASHBOARD_CACHE_TTL", "20") or "20")
+DASHBOARD_AUTO_BUILD = os.getenv("WEATHERBOT_DASHBOARD_AUTO_BUILD", "false").strip().lower() not in {"0", "false", "no", "off"}
+STARTUP_MAINTENANCE = os.getenv("WEATHERBOT_STARTUP_MAINTENANCE", "false").strip().lower() not in {"0", "false", "no", "off"}
 
 app = FastAPI(title="WeatherBot Dashboard", version="1.0")
 app.add_middleware(
@@ -2942,15 +2944,19 @@ async def _stop_auto_simulation_task():
 async def startup():
     init_db()
     init_v3_db()
-    migrate_legacy_signals(500)
-    persist_data_readiness(build_data_readiness())
+    if STARTUP_MAINTENANCE:
+        migrate_legacy_signals(500)
+        persist_data_readiness(build_data_readiness())
     _cleanup_stale_bot_process()
     if AUTO_START_SCANNER:
         try:
             _start_bot_process("dashboard startup")
         except Exception as exc:
             log_event("error", f"Scanner auto-start failed: {exc}")
-    _ensure_dashboard_refresh(force=True)
+    global dashboard_payload_cache
+    dashboard_payload_cache = _minimal_dashboard_payload("manual_refresh_required")
+    if DASHBOARD_AUTO_BUILD:
+        _ensure_dashboard_refresh(force=True)
     _ensure_auto_refresh_task()
     _ensure_auto_simulation_task()
     log_event("info", "Dashboard started", {
@@ -2959,6 +2965,8 @@ async def startup():
         "auto_refresh_interval_seconds": AUTO_REFRESH_INTERVAL_SECONDS,
         "auto_refresh_signal_scan": AUTO_REFRESH_SIGNAL_SCAN,
         "legacy_scanner_auto_start": AUTO_START_SCANNER,
+        "dashboard_auto_build": DASHBOARD_AUTO_BUILD,
+        "startup_maintenance": STARTUP_MAINTENANCE,
     })
 
 
@@ -2977,7 +2985,8 @@ async def index():
 
 @app.get("/api/dashboard")
 async def dashboard():
-    _ensure_dashboard_refresh()
+    if DASHBOARD_AUTO_BUILD:
+        _ensure_dashboard_refresh()
     if dashboard_payload_cache is not None:
         return dashboard_payload_cache
     return _minimal_dashboard_payload()
@@ -3084,6 +3093,7 @@ async def production_refresh(request: ProductionRefreshRequest):
                 "readiness": saved.get("readiness", {}),
             },
         )
+        await _refresh_dashboard_cache_once()
     return saved
 
 

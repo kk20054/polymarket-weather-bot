@@ -105,7 +105,7 @@ export function SignalsTable({
     return (
       <div className="flex h-full flex-col items-center justify-center gap-1 p-6 text-center text-neutral-600">
         <div className="text-sm text-neutral-400">暂无天气信号</div>
-        <div className="text-[11px]">启动扫描器后，符合日期和盘口条件的信号会出现在这里。</div>
+        <div className="text-[11px]">点击“手动抓取”后，符合日期、盘口和风控条件的信号会出现在这里。</div>
       </div>
     )
   }

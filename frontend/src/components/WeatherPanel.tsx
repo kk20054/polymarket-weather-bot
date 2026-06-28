@@ -263,7 +263,7 @@ export function WeatherPanel({
   if (forecasts.length === 0 && citySeries.length === 0 && signals.length === 0) {
     return (
       <div className="flex h-full items-center justify-center p-4 text-center text-[11px] leading-relaxed text-neutral-600">
-        暂无天气快照。请先启动扫描器，或等待下一轮 forecast/orderbook 写入本地数据库。
+        暂无天气快照。点击顶部“手动抓取”，系统会同步预测、METAR、历史观测和盘口快照。
       </div>
     )
   }
@@ -401,7 +401,7 @@ export function WeatherPanel({
           </div>
         ) : (
           <div className="flex h-full min-h-[180px] items-center justify-center p-4 text-center text-neutral-600">
-            该城市还没有历史或预测曲线。先补历史数据，再启动扫描器获取预测线。
+            该城市还没有历史或预测曲线。点击“手动抓取”同步预测和观测后，这里会显示最高温趋势。
           </div>
           )
         ) : activeTab === 'forecast' ? (

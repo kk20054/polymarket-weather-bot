@@ -804,6 +804,11 @@ export interface DashboardData {
   weather_forecasts: WeatherForecast[]
   weather_city_series?: WeatherCitySeries[]
   events?: DashboardEvent[]
+  _meta?: {
+    cache?: string
+    reason?: string
+    generated_at?: string
+  }
 }
 
 export interface DashboardEvent {
