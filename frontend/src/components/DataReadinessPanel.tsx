@@ -1,6 +1,20 @@
 import { useState } from 'react'
-import { CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, Database, ExternalLink, RefreshCw, ShieldAlert } from 'lucide-react'
-import type { DataReadiness, ProductionRefreshResult, SettlementContractList } from '../types'
+import {
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  ClipboardCheck,
+  Database,
+  ExternalLink,
+  RefreshCw,
+  ShieldAlert,
+} from 'lucide-react'
+import type {
+  DataReadiness,
+  DataReadinessStage,
+  ProductionRefreshResult,
+  SettlementContractList,
+} from '../types'
 
 interface Props {
   readiness?: DataReadiness | null
@@ -20,10 +34,10 @@ const REASON_LABELS: Record<string, string> = {
   settlement_rule_not_manually_verified: '合同待人工核验',
   settlement_contracts_missing: '事件合同缺失',
   timezone_mismatch: '时区不一致',
-  resolution_source_missing: '来源缺失',
+  resolution_source_missing: '结算来源缺失',
   timezone_database_unavailable: '时区库不可用',
-  independent_truth_days_below_min: 'Truth 样本不足',
-  legacy_truth_unknown: '旧来源未知',
+  independent_truth_days_below_min: '独立 truth 日不足',
+  legacy_truth_unknown: '旧数据来源未知',
   open_meteo_fallback_present: '含低置信 fallback',
   versioned_forecast_runs_missing: '预测档案缺失',
   forecast_members_missing: '成员预测缺失',
@@ -37,20 +51,11 @@ const REASON_LABELS: Record<string, string> = {
   fresh_clob_depth_below_min: 'CLOB 深度不足',
 }
 
-function reasonLabel(code: string) {
-  return REASON_LABELS[code] ?? code
-}
-
-function pct(value?: number | null) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return '0%'
-  return `${Math.round(Number(value) * 100)}%`
-}
-
-function metricRecord(value: unknown): Record<string, number> {
-  if (!value || typeof value !== 'object') return {}
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, Number(item) || 0])
-  )
+const STAGE_LABELS: Record<string, string> = {
+  settlement_contracts: '合同规则',
+  truth: '结算 truth',
+  forecast_runs: '预测档案',
+  orderbooks: '真实盘口',
 }
 
 const REVIEW_STATUS_LABELS: Record<string, string> = {
@@ -68,6 +73,34 @@ const REVIEW_TAG_LABELS: Record<string, string> = {
   source_missing: '来源缺失',
   low_confidence: '低置信',
   manual_required: '人工',
+}
+
+const REFRESH_STAGE_LABELS: Record<string, string> = {
+  contracts_sync: '合同',
+  forecast_backfill: '预测',
+  signal_scan: '信号',
+  signal_migration: '迁移',
+  orderbook_backfill: '盘口',
+}
+
+function reasonLabel(code: string) {
+  return REASON_LABELS[code] ?? code
+}
+
+function stageLabel(stage: DataReadinessStage) {
+  return STAGE_LABELS[stage.key] ?? stage.label ?? stage.key
+}
+
+function pct(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '0%'
+  return `${Math.round(Number(value) * 100)}%`
+}
+
+function metricRecord(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object') return {}
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, Number(item) || 0])
+  )
 }
 
 function reviewStatusLabel(status?: string | null) {
@@ -92,14 +125,6 @@ function reviewStatusClass(status?: string | null) {
   return 'border-neutral-800 text-neutral-500'
 }
 
-const REFRESH_STAGE_LABELS: Record<string, string> = {
-  contracts_sync: '合同',
-  forecast_backfill: '预测',
-  signal_scan: '信号',
-  signal_migration: '迁移',
-  orderbook_backfill: '盘口',
-}
-
 function refreshStageLabel(name: string) {
   return REFRESH_STAGE_LABELS[name] ?? name
 }
@@ -108,12 +133,18 @@ function shortTime(value?: string | null) {
   if (!value) return '尚未运行'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString(undefined, {
+  return date.toLocaleString('zh-CN', {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    hour12: false,
   })
+}
+
+function commandText(action?: { command?: string; apply_command?: string }) {
+  if (!action) return ''
+  return [action.command, action.apply_command ? `apply: ${action.apply_command}` : ''].filter(Boolean).join('\n')
 }
 
 export function DataReadinessPanel({
@@ -166,7 +197,7 @@ export function DataReadinessPanel({
           <Database className="h-4 w-4 shrink-0 text-cyan-300" />
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-1.5">
-              <div className="text-sm text-neutral-100">数据资格</div>
+              <div className="text-sm text-neutral-100">数据闸门</div>
               {phase && (
                 <span className="shrink-0 border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[9px] text-cyan-200">
                   {phase.label}
@@ -174,7 +205,7 @@ export function DataReadinessPanel({
               )}
             </div>
             <div className="truncate text-[10px] text-neutral-500">
-              {phase?.name ?? (readiness.live_allowed ? '实盘门禁已通过' : `实盘仍锁定，剩余 ${readiness.blockers.length} 类阻塞`)}
+              {phase?.name ?? (readiness.live_allowed ? '实盘闸门已通过' : `实盘仍锁定，剩余 ${readiness.blockers.length} 类阻塞`)}
             </div>
           </div>
         </div>
@@ -183,7 +214,7 @@ export function DataReadinessPanel({
             ? 'border-green-500/30 bg-green-500/10 text-green-300'
             : 'border-red-500/30 bg-red-500/10 text-red-300'
         }`}>
-          {readiness.live_allowed ? '可实盘' : '已锁定'}
+          {readiness.live_allowed ? '可实盘' : '锁定'}
         </span>
       </div>
 
@@ -192,14 +223,14 @@ export function DataReadinessPanel({
           <div className="flex items-center justify-between gap-2">
             <div className="min-w-0">
               <div className="truncate text-[10px] text-neutral-300">{phase.operator_action}</div>
-              <div className="truncate text-[9px] text-neutral-600">下一步：{phase.next}</div>
+              <div className="truncate text-[9px] text-neutral-600">下一阶段：{phase.next}</div>
             </div>
             <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${
               phase.status === 'ready_for_next'
                 ? 'border-green-500/30 text-green-300'
                 : 'border-amber-500/30 text-amber-300'
             }`}>
-              {phase.status === 'ready_for_next' ? '可进入下一阶段' : '进行中'}
+              {phase.status === 'ready_for_next' ? '可进入下阶段' : '进行中'}
             </span>
           </div>
         </div>
@@ -234,12 +265,13 @@ export function DataReadinessPanel({
             disabled={!onProductionRefresh || productionRefreshing || Boolean(productionRefresh?.running)}
             onClick={() => onProductionRefresh?.()}
             className="inline-flex shrink-0 items-center gap-1 border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"
-            title="安全刷新：同步合同、刷新预测、迁移信号、刷新当前盘口；默认不运行旧扫描器"
+            title="安全刷新：同步合同、刷新预测、迁移信号、刷新当前盘口；默认不运行旧扫描器。"
           >
             <RefreshCw className={`h-3 w-3 ${productionRefreshing ? 'animate-spin' : ''}`} />
             安全刷新
           </button>
         </div>
+
         {productionRefresh && (
           <div className="mt-2 space-y-1">
             <div className="flex flex-wrap gap-1">
@@ -259,6 +291,7 @@ export function DataReadinessPanel({
                 </span>
               ))}
             </div>
+
             {(refreshFailedStages.length > 0 || refreshBlockedKeys.length > 0) && (
               <div className="flex flex-wrap gap-1">
                 {refreshFailedStages.map(stage => (
@@ -268,11 +301,12 @@ export function DataReadinessPanel({
                 ))}
                 {refreshBlockedKeys.map(key => (
                   <span key={key} className="border border-amber-500/20 bg-amber-500/5 px-1.5 py-0.5 text-[9px] text-amber-200">
-                    {key}
+                    {stageLabel({ key, label: key, status: 'blocked', reasons: [], metrics: {} })}
                   </span>
                 ))}
               </div>
             )}
+
             {refreshHistory.length > 0 && (
               <div className="grid grid-cols-3 gap-1 pt-1" title="最近 3 次生产刷新">
                 {refreshHistory.slice(0, 3).map((item, index) => (
@@ -287,9 +321,7 @@ export function DataReadinessPanel({
                     <div className={`truncate text-[9px] ${item.ok ? 'text-green-200' : 'text-amber-200'}`}>
                       {item.ok ? 'OK' : 'BLOCK'}
                     </div>
-                    <div className="truncate text-[9px] text-neutral-600">
-                      {shortTime(item.requested_at)}
-                    </div>
+                    <div className="truncate text-[9px] text-neutral-600">{shortTime(item.requested_at)}</div>
                     <div className="truncate tabular-nums text-[9px] text-neutral-500">
                       {item.ok_stage_count}/{item.stage_count}
                     </div>
@@ -312,9 +344,9 @@ export function DataReadinessPanel({
               {stage.status === 'ready'
                 ? <CheckCircle2 className="h-3 w-3 shrink-0 text-green-300" />
                 : <ShieldAlert className="h-3 w-3 shrink-0 text-red-300" />}
-              <span className="truncate text-[9px] text-neutral-400">{stage.label}</span>
+              <span className="truncate text-[9px] text-neutral-400">{stageLabel(stage)}</span>
             </div>
-            <div className={`text-[9px] ${stage.status === 'ready' ? 'text-green-300' : 'text-red-300'}`}>
+            <div className={`truncate text-[9px] ${stage.status === 'ready' ? 'text-green-300' : 'text-red-300'}`}>
               {stage.status === 'ready' ? '可用' : stage.reasons.map(reason => reasonLabel(reason.code)).slice(0, 1).join('')}
             </div>
           </div>
@@ -371,7 +403,7 @@ export function DataReadinessPanel({
             <div
               key={action.key}
               className="border border-neutral-900 bg-black/40 p-1.5"
-              title={`${action.impact}\n${action.command}${action.apply_command ? `\napply: ${action.apply_command}` : ''}`}
+              title={`${action.impact}\n${commandText(action)}`}
             >
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0 truncate text-[10px] text-neutral-200">{action.label}</div>
@@ -408,6 +440,7 @@ export function DataReadinessPanel({
             </button>
           ))}
         </div>
+
         <div className="flex items-center justify-between gap-2">
           <button
             type="button"
@@ -425,11 +458,12 @@ export function DataReadinessPanel({
             disabled={!canBulkVerifyVisible || !onVerifyVisibleContracts || visibleContractIds.length === 0 || bulkVerifying || !reviewNoteReady}
             onClick={() => onVerifyVisibleContracts?.(visibleContractIds, reviewNote.trim())}
             className="shrink-0 border border-cyan-500/30 px-1.5 py-1 text-[9px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"
-            title="只确认已过当地结算日、且后端自动校验通过的合同；未来待结算合同会被跳过"
+            title="只确认已过当地结算日、且后端自动校验通过的合同；未来待结算合同会被跳过。"
           >
             {bulkVerifying ? '写入中' : '确认成熟'}
           </button>
         </div>
+
         <input
           value={reviewNote}
           onChange={event => setReviewNote(event.target.value)}
@@ -495,13 +529,14 @@ export function DataReadinessPanel({
                           if (canVerifyContract) onVerifyContract?.(contract.contract_id, reviewNote.trim())
                         }}
                         className="inline-flex items-center gap-1 border border-cyan-500/30 px-1.5 py-1 text-[9px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"
-                        title="确认该事件的站点、日期、单位和来源 URL 与规则一致"
+                        title="确认该事件的站点、日期、单位和来源 URL 与规则一致。"
                       >
                         <ClipboardCheck className="h-3 w-3" />
                         {!expanded ? '查看' : verifying ? '写入中' : '确认'}
                       </button>
                     </div>
                   </div>
+
                   {expanded && (
                     <div className="space-y-1 border-t border-neutral-900 p-2 text-[10px] text-neutral-400">
                       {(contract.review_tags ?? []).length > 0 && (
