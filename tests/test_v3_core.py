@@ -411,6 +411,44 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("backfill_official_truth", action_keys)
         self.assertEqual(actions[-1]["key"], "rerun_data_readiness")
 
+    def test_data_readiness_requires_minimum_fresh_clob_depth(self):
+        db_path = test_db_path("data_readiness_clob_min")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        now = datetime.now(timezone.utc).isoformat()
+        with patch.dict(os.environ, {
+            "V3_DB_PATH": str(db_path),
+            "MIN_FRESH_CLOB_ORDERBOOKS": "5",
+        }, clear=False):
+            for index in range(4):
+                insert_orderbook(f"market-{index}", {
+                    "snapshot_key": f"market-{index}:fresh",
+                    "snapshot_type": "clob",
+                    "quote_timestamp": now,
+                    "bids": [{"price": "0.40", "size": "10"}],
+                    "asks": [{"price": "0.42", "size": "10"}],
+                })
+            readiness = build_data_readiness(db_path)
+            orderbook_stage = next(stage for stage in readiness["stages"] if stage["key"] == "orderbooks")
+            insert_orderbook("market-4", {
+                "snapshot_key": "market-4:fresh",
+                "snapshot_type": "clob",
+                "quote_timestamp": now,
+                "bids": [{"price": "0.40", "size": "10"}],
+                "asks": [{"price": "0.42", "size": "10"}],
+            })
+            ready = build_data_readiness(db_path)
+            ready_orderbook_stage = next(stage for stage in ready["stages"] if stage["key"] == "orderbooks")
+
+        self.assertEqual(orderbook_stage["status"], "blocked")
+        self.assertEqual(orderbook_stage["metrics"]["fresh_clob_snapshots"], 4)
+        self.assertEqual(orderbook_stage["metrics"]["minimum_fresh_clob_snapshots"], 5)
+        self.assertEqual(orderbook_stage["metrics"]["fresh_clob_snapshot_gap"], 1)
+        self.assertIn(
+            {"code": "fresh_clob_depth_below_min", "count": 1},
+            orderbook_stage["reasons"],
+        )
+        self.assertEqual(ready_orderbook_stage["status"], "ready")
+
     def test_settlement_contract_manual_verification_updates_contract_and_rules(self):
         db_path = test_db_path("contract_verification")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))

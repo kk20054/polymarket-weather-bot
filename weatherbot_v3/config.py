@@ -68,6 +68,7 @@ class V3Config:
     min_price: float
     max_slippage: float
     orderbook_max_age_minutes: float
+    min_fresh_clob_orderbooks: int
     forecast_max_age_minutes: float
     default_order_min_size: float
     default_tick_size: float
@@ -107,6 +108,7 @@ def load_config() -> V3Config:
         min_price=_float(get("MIN_PRICE", file_cfg.get("min_price", 0.03)), 0.03),
         max_slippage=_float(get("MAX_SLIPPAGE", file_cfg.get("max_slippage", 0.03)), 0.03),
         orderbook_max_age_minutes=_float(get("ORDERBOOK_MAX_AGE_MINUTES", 10.0), 10.0),
+        min_fresh_clob_orderbooks=_int(get("MIN_FRESH_CLOB_ORDERBOOKS", 5), 5),
         forecast_max_age_minutes=_float(get("FORECAST_MAX_AGE_MINUTES", 180.0), 180.0),
         default_order_min_size=_float(get("DEFAULT_ORDER_MIN_SIZE", 5.0), 5.0),
         default_tick_size=_float(get("DEFAULT_TICK_SIZE", 0.01), 0.01),

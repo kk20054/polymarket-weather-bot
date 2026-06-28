@@ -31,6 +31,7 @@ const REASON_LABELS: Record<string, string> = {
   orderbook_snapshots_missing: '盘口快照缺失',
   all_orderbooks_stale: '盘口已过期',
   fresh_clob_depth_missing: 'CLOB 深度缺失',
+  fresh_clob_depth_below_min: 'CLOB 深度不足',
 }
 
 function reasonLabel(code: string) {

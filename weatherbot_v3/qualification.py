@@ -177,6 +177,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             stale_orderbooks += 1
         elif row.get("snapshot_type") == "clob" and row.get("bids_json") and row.get("asks_json"):
             fresh_clob_orderbooks.append(row)
+    fresh_clob_gap = max(0, cfg.min_fresh_clob_orderbooks - len(fresh_clob_orderbooks))
 
     stages = [
         _stage(
@@ -266,16 +267,19 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         _stage(
             "orderbooks",
             "盘口快照",
-            len(fresh_clob_orderbooks) > 0,
+            len(fresh_clob_orderbooks) >= cfg.min_fresh_clob_orderbooks,
             [
                 ("orderbook_snapshots_missing", 1 if not orderbooks else 0),
                 ("all_orderbooks_stale", 1 if orderbooks and stale_orderbooks == len(orderbooks) else 0),
                 ("fresh_clob_depth_missing", 1 if orderbooks and not fresh_clob_orderbooks else 0),
+                ("fresh_clob_depth_below_min", fresh_clob_gap),
             ],
             {
                 "snapshots": len(orderbooks),
                 "stale_snapshots": stale_orderbooks,
                 "fresh_clob_snapshots": len(fresh_clob_orderbooks),
+                "minimum_fresh_clob_snapshots": cfg.min_fresh_clob_orderbooks,
+                "fresh_clob_snapshot_gap": fresh_clob_gap,
                 "latest_at": latest_orderbook_at.isoformat() if latest_orderbook_at else None,
             },
         ),
@@ -495,6 +499,7 @@ def _build_next_actions(
         int(reason_counts.get("orderbook_snapshots_missing") or 0),
         int(reason_counts.get("all_orderbooks_stale") or 0),
         int(reason_counts.get("fresh_clob_depth_missing") or 0),
+        int(reason_counts.get("fresh_clob_depth_below_min") or 0),
     )
     if orderbook_gap:
         actions.append({
