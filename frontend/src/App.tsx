@@ -250,44 +250,28 @@ function SimulationCard({
 
   return (
     <div className="border border-neutral-800 bg-black p-3">
-      <div className="mb-3 flex items-center gap-2">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
         <Wallet className="h-4 w-4 text-cyan-300" />
         <div>
-          <div className="text-sm font-medium text-neutral-100">模拟账户</div>
-          <div className="text-[11px] text-neutral-500">设置本金、自动模拟新信号，并检查已有持仓结算。</div>
-        </div>
-      </div>
-
-      <div className={`mb-3 flex items-center justify-between gap-3 border px-2 py-2 ${
-        autoRunning ? 'border-green-500/25 bg-green-500/5' : 'border-neutral-800 bg-neutral-950'
-      }`}>
-        <div className="flex items-center gap-2">
-          <span className={`h-2 w-2 shrink-0 rounded-full ${autoRunning ? 'live-dot' : 'bg-neutral-600'}`} aria-hidden="true" />
-          <div>
-            <div className={`text-[11px] font-medium ${autoRunning ? 'text-green-200' : 'text-neutral-300'}`}>
-              {autoRunning ? '自动模拟运行中' : '自动模拟已停止'}
-            </div>
-            <div className="text-[10px] text-neutral-500">
-              {autoRunning
-                ? `每 ${Math.round(autoSimulation.interval_seconds / 60)} 分钟检查新信号；关闭前会持续运行。`
-                : '启动后由后端持续检查新信号，无需保持页面打开。'}
-            </div>
+            <div className="text-sm font-medium text-neutral-100">模拟账户</div>
+            <div className="text-[10px] text-neutral-500">paper trading</div>
           </div>
         </div>
         <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${
           autoRunning ? 'border-green-500/30 text-green-300' : 'border-neutral-700 text-neutral-500'
         }`}>
-          {autoRunning ? '持续运行' : '未运行'}
+          {autoRunning ? '运行中' : '已停止'}
         </span>
       </div>
 
       <div className="grid grid-cols-2 gap-2 text-[11px]">
         <div className="border border-neutral-800 p-2">
-          <div className="text-neutral-600">当前权益</div>
+          <div className="text-neutral-600">权益</div>
           <div className="tabular-nums text-lg text-neutral-100">{money(stats.bankroll)}</div>
         </div>
         <div className="border border-neutral-800 p-2">
-          <div className="text-neutral-600">未实现盈亏</div>
+          <div className="text-neutral-600">未实现</div>
           <div className={`tabular-nums text-lg ${(stats.unrealized_pnl ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
             {money(stats.unrealized_pnl ?? 0)}
           </div>
@@ -297,12 +281,12 @@ function SimulationCard({
           <div className="tabular-nums text-neutral-200">{money(stats.cash_balance ?? stats.bankroll)} / {money(stats.reserved_capital ?? 0)}</div>
         </div>
         <div className="border border-neutral-800 p-2">
-          <div className="text-neutral-600">持仓 / 已结算</div>
+          <div className="text-neutral-600">持仓 / 结算</div>
           <div className="tabular-nums text-neutral-200">{stats.open_trades ?? 0} / {stats.settled_trades ?? 0}</div>
         </div>
       </div>
 
-      <div className="mt-3 flex gap-2">
+      <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
         <input
           type="number"
           min="0"
@@ -315,20 +299,20 @@ function SimulationCard({
         <button
           onClick={onReset}
           disabled={resetting}
-          className="border border-cyan-500/30 px-2 py-1 text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-40"
+          className="border border-cyan-500/30 px-2 py-1 text-[11px] text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-40"
         >
-          应用本金
+          应用
         </button>
       </div>
 
-      <label className="mt-2 flex items-center gap-2 text-[11px] text-neutral-500">
+      <label className="mt-2 flex items-center gap-2 text-[10px] text-neutral-500">
         <input
           type="checkbox"
           checked={clearMarks}
           onChange={event => onClearMarks(event.target.checked)}
           className="h-3 w-3 p-0"
         />
-        重置时清除模拟/跳过/实盘标记
+        重置时清除模拟标记
       </label>
 
       <div className="mt-3 grid grid-cols-2 gap-2">
@@ -341,7 +325,7 @@ function SimulationCard({
               : 'border-green-500/30 bg-green-500/10 text-green-300 hover:border-green-500/60'
           }`}
         >
-          {autoPending ? '更新中...' : autoRunning ? '停止自动模拟' : '一键模拟'}
+          {autoPending ? '更新中...' : autoRunning ? '停止模拟' : '一键模拟'}
         </button>
         <button
           onClick={onSettle}
@@ -353,11 +337,11 @@ function SimulationCard({
       </div>
 
       {(lastResult || autoSimulation.last_error) && (
-        <div className="mt-3 border border-neutral-800 p-2 text-[11px] leading-relaxed text-neutral-400">
-          <div className="mb-1 text-neutral-200">最近一次自动检查 · {timeText(autoSimulation.last_run)}</div>
+        <div className="mt-3 border border-neutral-800 p-2 text-[10px] leading-relaxed text-neutral-400">
+          <div className="mb-1 text-neutral-200">最近检查 · {timeText(autoSimulation.last_run)}</div>
           {lastResult && (
             <div>
-              买入 {lastResult.count} 笔，跳过 {lastResult.skipped} 笔，花费 {money(lastResult.spent)}，剩余 {money(lastResult.remaining)}
+              买入 {lastResult.count}，跳过 {lastResult.skipped}，花费 {money(lastResult.spent)}，剩余 {money(lastResult.remaining)}
               {lastResult.orderbooks_refreshed !== undefined && (
                 <span title={`盘口刷新失败 ${lastResult.orderbook_refresh_failed ?? 0} 个`}>
                   {' '}· 盘口 {lastResult.orderbooks_refreshed}
@@ -369,9 +353,12 @@ function SimulationCard({
         </div>
       )}
 
-      <p className="mt-3 text-[11px] leading-relaxed text-neutral-600">
-        新买入立刻显示浮亏，多数是因为按卖一成交、按买一估值，spread 会先计入未实现亏损；这不等于最终判断已经错。
-      </p>
+      <details className="mt-3 text-[10px] text-neutral-600">
+        <summary className="cursor-pointer select-none hover:text-neutral-300">模拟说明</summary>
+        <p className="mt-1 leading-relaxed">
+          新买入会按卖一成交、按买一估值，spread 先进入未实现亏损；这只是执行成本，不代表最终结算已经错。
+        </p>
+      </details>
     </div>
   )
 }
@@ -388,6 +375,7 @@ function App() {
   const [simBalance, setSimBalance] = useState('40')
   const [clearMarks, setClearMarks] = useState(false)
   const [contractStatus, setContractStatus] = useState('mature-auto')
+  const [citySearch, setCitySearch] = useState('')
   const balanceInitRef = useRef(false)
 
   const { data, isLoading, error, refetch } = useQuery({
@@ -583,6 +571,11 @@ function App() {
 
   const selectedCityMeta = cityOptions.find(city => city.key === selectedCity)
   const recommendedCity = cityOptions.find(city => city.actionable > 0) ?? selectedCityMeta ?? cityOptions[0]
+  const filteredCityOptions = cityOptions.filter(city => {
+    const query = citySearch.trim().toLowerCase()
+    if (!query) return true
+    return `${city.name} ${city.station ?? ''} ${city.key}`.toLowerCase().includes(query)
+  })
 
   useEffect(() => {
     if (!selectedCityMeta || typeof window === 'undefined') return
@@ -633,18 +626,27 @@ function App() {
 
   return (
     <div className="flex min-h-screen flex-col bg-black text-neutral-200 xl:h-screen xl:overflow-hidden">
-      <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-neutral-800 px-3 py-2">
-        <div className="min-w-[190px] shrink-0">
-          <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot 城市天气交易台</h1>
-          <div className="text-[11px] text-neutral-600">先看城市证据，再看信号和执行；实盘默认锁定。</div>
+      <header className="flex shrink-0 flex-wrap items-start gap-2 border-b border-neutral-800 px-3 py-2">
+        <div className="min-w-0 flex-1 basis-[130px]">
+          <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot</h1>
+          <div className="text-[11px] text-neutral-600">城市最高温交易工作台</div>
         </div>
-        <div className="order-3 min-w-0 basis-full overflow-x-auto xl:order-none xl:basis-auto xl:flex-1">
-          <StatsCards stats={stats} />
+        <div className="order-last flex min-w-0 basis-full flex-nowrap items-center gap-1.5 overflow-x-auto text-[10px] xl:overflow-visible">
+          <span className="shrink-0 border border-neutral-800 px-2 py-1 text-neutral-400">数据 {dataAge(stats.data_age_minutes)}</span>
+          <span className={`shrink-0 border px-2 py-1 ${stats.is_running ? 'border-green-500/30 text-green-300' : 'border-neutral-800 text-neutral-500'}`}>
+            {stats.is_running ? '旧扫描运行中' : '手动刷新'}
+          </span>
+          <span className={`shrink-0 border px-2 py-1 ${autoSimulation.enabled ? 'border-cyan-500/30 text-cyan-300' : 'border-neutral-800 text-neutral-500'}`}>
+            {autoSimulation.enabled ? '一键模拟运行中' : '一键模拟关闭'}
+          </span>
+          <span className={`shrink-0 border px-2 py-1 ${liveAvailable ? 'border-green-500/30 text-green-300' : 'border-amber-500/30 text-amber-300'}`}>
+            {liveAvailable ? '实盘可用' : '实盘锁定'}
+          </span>
         </div>
         <button
           onClick={() => productionRefreshMutation.mutate()}
           disabled={productionRefreshMutation.isPending}
-          className="inline-flex items-center gap-1 border border-green-500/30 px-2 py-1 text-[11px] text-green-300 hover:bg-green-500/10 disabled:opacity-40"
+          className="inline-flex items-center gap-1 whitespace-nowrap border border-green-500/30 px-2 py-1.5 text-[11px] text-green-300 hover:bg-green-500/10 disabled:opacity-40"
           title="受控刷新：同步合约、预测快照和 CLOB 盘口；默认不启动旧版无限信号扫描。"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${productionRefreshMutation.isPending ? 'animate-spin' : ''}`} />
@@ -654,7 +656,7 @@ function App() {
           <button
             onClick={() => stopMutation.mutate()}
             disabled={stopMutation.isPending}
-            className="inline-flex items-center gap-1 border border-red-500/30 px-2 py-1 text-[11px] text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+            className="inline-flex items-center gap-1 whitespace-nowrap border border-red-500/30 px-2 py-1.5 text-[11px] text-red-300 hover:bg-red-500/10 disabled:opacity-40"
             title="停止旧版 weatherbet.py 循环扫描。v3 数据刷新不依赖这个进程。"
           >
             <PauseCircle className="h-3.5 w-3.5" />
@@ -663,15 +665,15 @@ function App() {
         )}
         <button
           onClick={() => refetch()}
-          className="inline-flex items-center gap-1 border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-900"
+          className="inline-flex items-center gap-1 whitespace-nowrap border border-neutral-700 px-2 py-1.5 text-[11px] text-neutral-300 hover:bg-neutral-900"
         >
           <RefreshCw className="h-3.5 w-3.5" />
           刷新
         </button>
       </header>
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[240px_minmax(520px,1fr)_360px] xl:overflow-hidden">
-        <aside className="order-1 space-y-3 border-b border-neutral-800 bg-neutral-950/40 p-3 xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
+      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[260px_minmax(560px,1fr)_340px] xl:overflow-hidden">
+        <aside className="order-2 border-b border-neutral-800 bg-neutral-950/40 xl:order-1 xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
           {recommendedCity && (
             <a
               href={`?city=${cityPageSlug(recommendedCity)}`}
@@ -679,7 +681,7 @@ function App() {
                 event.preventDefault()
                 setSelectedCity(recommendedCity.key)
               }}
-              className="block border border-emerald-500/30 bg-emerald-500/10 p-3 text-left hover:bg-emerald-500/15"
+              className="m-3 block border border-emerald-500/30 bg-emerald-500/10 p-3 text-left hover:bg-emerald-500/15"
             >
               <div className="mb-1 flex items-center justify-between gap-2">
                 <div className="text-xs font-medium text-emerald-100">推荐关注</div>
@@ -695,21 +697,33 @@ function App() {
             </a>
           )}
 
-          <div>
+          <div className="border-t border-neutral-800 p-3">
             <div className="mb-2 flex items-center justify-between">
               <div>
                 <div className="text-sm font-medium text-neutral-100">城市索引</div>
-                <div className="text-[10px] text-neutral-600">优先显示有行动信号的城市</div>
+                <div className="text-[10px] text-neutral-600">按信号优先排序</div>
               </div>
               <span className="border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">{cityOptions.length}</span>
             </div>
+            <input
+              value={citySearch}
+              onChange={event => setCitySearch(event.target.value)}
+              placeholder="搜索城市或机场"
+              className="mb-2 w-full border-neutral-800 bg-black px-2 py-1.5 text-[11px]"
+              aria-label="搜索城市或机场"
+            />
             <div className="space-y-1">
               {cityOptions.length === 0 && (
                 <div className="border border-neutral-800 bg-black/40 p-3 text-[11px] leading-relaxed text-neutral-500">
                   暂无城市快照。点击顶部“手动抓取”后，这里会按城市列出预报、站点和信号数量。
                 </div>
               )}
-              {cityOptions.map(city => (
+              {cityOptions.length > 0 && filteredCityOptions.length === 0 && (
+                <div className="border border-neutral-800 bg-black/40 p-3 text-[11px] text-neutral-500">
+                  没有匹配的城市。
+                </div>
+              )}
+              {filteredCityOptions.map(city => (
                 <a
                   key={city.key}
                   href={`?city=${cityPageSlug(city)}`}
@@ -717,22 +731,22 @@ function App() {
                     event.preventDefault()
                     setSelectedCity(city.key)
                   }}
-                  className={`w-full border px-2 py-2 text-left transition ${
+                  className={`block min-h-[54px] w-full border px-2 py-2 text-left transition ${
                     selectedCity === city.key
                       ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
                       : 'border-neutral-800 bg-black/40 text-neutral-300 hover:border-neutral-700'
                   }`}
                 >
-                  <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
-                      <div className="truncate text-xs font-medium">{city.name}</div>
-                      <div className="truncate text-[10px] text-neutral-600">{city.station || 'station 未映射'}</div>
+                      <div className="truncate text-xs font-medium leading-tight">{city.name}</div>
+                      <div className="mt-1 truncate text-[10px] leading-tight text-neutral-600">{city.station || 'station 未映射'}</div>
                     </div>
-                    <div className="text-right">
-                      <div className="tabular-nums text-[11px] text-neutral-200">
+                    <div className="shrink-0 text-right">
+                      <div className="tabular-nums text-[11px] leading-tight text-neutral-200">
                         {city.latest === null || city.latest === undefined ? '--' : `${Number(city.latest).toFixed(1)}°${city.unit}`}
                       </div>
-                      <div className={`text-[10px] ${city.actionable > 0 ? 'text-green-300' : 'text-neutral-600'}`}>
+                      <div className={`mt-1 text-[10px] leading-tight ${city.actionable > 0 ? 'text-green-300' : 'text-neutral-600'}`}>
                         {city.actionable}/{city.signals}
                       </div>
                     </div>
@@ -744,57 +758,33 @@ function App() {
 
         </aside>
 
-        <section className="order-2 min-h-0 overflow-y-auto xl:overflow-hidden">
-          {needsManualRefresh && (
-            <div className="border-b border-cyan-500/20 bg-cyan-500/10 px-6 py-3 text-[12px] text-cyan-100">
-              后端已连接，当前处于轻量启动状态。点击右上角“手动抓取”后，会同步合约、预测和盘口，并刷新城市证据页。
-            </div>
-          )}
-          {recommendedCity && (
-            <a
-              href={`?city=${cityPageSlug(recommendedCity)}`}
-              onClick={event => {
-                event.preventDefault()
-                setSelectedCity(recommendedCity.key)
-              }}
-              className="flex flex-wrap items-center gap-3 border-b border-yellow-500/20 bg-yellow-500/10 px-6 py-3 hover:bg-yellow-500/15"
-            >
-              <div className="text-sm font-semibold text-yellow-200">推荐关注</div>
-              <div className="rounded border border-yellow-400/25 bg-black/25 px-4 py-2">
-                <div className="text-base font-semibold text-neutral-100">{recommendedCity.name}</div>
-                <div className="mt-0.5 flex flex-wrap gap-3 text-[11px] text-yellow-100/80">
-                  <span>现在 {recommendedCity.latest === null || recommendedCity.latest === undefined ? '--' : `${Number(recommendedCity.latest).toFixed(1)}°${recommendedCity.unit}`}</span>
-                  <span>信号 {recommendedCity.actionable}/{recommendedCity.signals}</span>
-                  <span>{recommendedCity.station || 'station 未映射'}</span>
-                </div>
-              </div>
-            </a>
-          )}
+        <section className="order-1 min-h-0 overflow-y-auto xl:order-2 xl:overflow-hidden">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 px-3 py-2">
             <div className="min-w-0">
               <div className="truncate text-sm font-medium text-neutral-100">
                 {selectedCityMeta?.name ?? '城市天气证据'} · 最高温判断
               </div>
-              <div className="text-[11px] text-neutral-600">
-                预报、METAR、历史观测和湿度同屏对照；说明收进标签，不挤占主图。
+              <div className="mt-0.5 flex flex-wrap gap-1.5 text-[10px]">
+                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">{selectedCityMeta?.station || 'station 未映射'}</span>
+                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">
+                  {selectedCityMeta?.latest === null || selectedCityMeta?.latest === undefined ? '暂无最新温度' : `最新 ${Number(selectedCityMeta.latest).toFixed(1)}°${selectedCityMeta.unit}`}
+                </span>
+                <span className={`border px-1.5 py-0.5 ${actionable > 0 ? 'border-green-500/30 text-green-300' : 'border-neutral-800 text-neutral-500'}`}>
+                  信号 {actionable}/{signals.length}
+                </span>
               </div>
             </div>
             <div className="flex flex-wrap gap-1.5 text-[10px]">
+              {needsManualRefresh && (
+                <span className="border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-cyan-200">
+                  等待手动抓取
+                </span>
+              )}
               <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-400">数据 {dataAge(stats.data_age_minutes)}</span>
-              <span className={`border px-1.5 py-0.5 ${stats.is_running ? 'border-green-500/30 text-green-300' : 'border-neutral-800 text-neutral-500'}`}>
-                {stats.is_running ? '旧扫描运行中' : '等待手动抓取'}
-              </span>
-              <span className={`border px-1.5 py-0.5 ${autoSimulation.enabled ? 'border-cyan-500/30 text-cyan-300' : 'border-neutral-800 text-neutral-500'}`}>
-                {autoSimulation.enabled ? '自动模拟中' : '自动模拟关闭'}
-              </span>
             </div>
           </div>
 
-          <div className="h-[640px] min-h-[640px] border-b border-neutral-800 xl:h-[calc(100vh-214px)] xl:min-h-0">
-            <div className="flex flex-col items-start gap-0.5 border-b border-neutral-800 px-3 py-1.5 sm:flex-row sm:items-center sm:justify-between">
-              <div className="text-sm text-neutral-100">机场天气趋势</div>
-              <div className="text-[11px] text-neutral-600">预测、METAR、历史 truth 和湿度同屏对照。</div>
-            </div>
+          <div className="h-[720px] min-h-[720px] xl:h-[calc(100vh-94px)] xl:min-h-0">
             <WeatherPanel
               forecasts={forecasts}
               signals={signals}
@@ -898,6 +888,10 @@ function App() {
                 <StatusTile label="数据年龄" value={dataAge(stats.data_age_minutes)} />
                 <StatusTile label="当前信号" value={`${actionable} / ${signals.length}`} tone={actionable > 0 ? 'green' : 'neutral'} />
                 <StatusTile label="实盘状态" value={liveAvailable ? '可用' : '锁定'} tone={liveAvailable ? 'green' : 'amber'} />
+              </div>
+
+              <div className="overflow-x-auto border border-neutral-800 bg-black p-2">
+                <StatsCards stats={stats} />
               </div>
 
               <ReadinessBanner stats={stats} readiness={dataReadiness} />

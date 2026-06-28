@@ -189,7 +189,9 @@ export function WeatherPanel({
   const series = citySeries.find(row => row.city_key === selected) ?? citySeries[0]
   const forecastFallback = forecasts.find(row => row.city_key === selected) ?? forecasts[0]
   const cityKey = series?.city_key ?? forecastFallback?.city_key ?? selected
+  const cityName = series?.city_name ?? forecastFallback?.city_name ?? '当前城市'
   const unit = series?.unit ?? 'F'
+  const todayDate = new Date().toISOString().slice(0, 10)
 
   const citySignals = useMemo(() => signals.filter(signal => signal.city_key === cityKey), [signals, cityKey])
   const actionableSignals = citySignals.filter(signal => signal.actionable)
@@ -269,18 +271,22 @@ export function WeatherPanel({
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_auto_auto_minmax(210px,1fr)_auto] gap-2 p-3 text-[11px] text-neutral-400">
+    <div className="grid h-full min-h-0 grid-rows-[auto_auto_auto_minmax(260px,1fr)_auto] gap-2 p-3 text-[11px] text-neutral-400">
       <div className="flex flex-wrap items-center gap-2">
         <select
           value={cityKey}
           onChange={event => setSelected(event.target.value)}
-          className="min-w-[180px] flex-1 border border-neutral-800 bg-black px-2 py-1 text-neutral-200 outline-none focus:border-cyan-500/50"
+          className="min-w-[180px] flex-1 border border-neutral-800 bg-black px-2 py-1 text-neutral-200 outline-none focus:border-cyan-500/50 xl:hidden"
           aria-label="选择城市"
         >
           {cities.map(row => (
             <option key={row.key} value={row.key}>{row.name}</option>
           ))}
         </select>
+        <div className="hidden min-w-0 flex-1 xl:block">
+          <div className="truncate text-xs font-medium text-neutral-100">{cityName}</div>
+          <div className="text-[10px] text-neutral-600">逐小时预报、METAR、历史观测、偏差统计和抓取日志</div>
+        </div>
         <div className="shrink-0 border border-neutral-800 px-2 py-1 text-[10px] text-neutral-400">
           站点 {series?.station_id || '未映射'}
         </div>
@@ -303,6 +309,13 @@ export function WeatherPanel({
             className="px-2 py-1 text-[10px] text-neutral-400 hover:bg-neutral-900 disabled:opacity-30"
           >
             后一天
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedDate(todayDate)}
+            className="border-l border-neutral-800 px-2 py-1 text-[10px] text-neutral-400 hover:bg-neutral-900"
+          >
+            今天
           </button>
         </div>
         {bestSignal?.event_url && (
