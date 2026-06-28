@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
@@ -28,15 +28,15 @@ import {
   verifySettlementContract,
   verifySettlementContractsBulk,
 } from './api'
-import { EquityChart } from './components/EquityChart'
 import { DataReadinessPanel } from './components/DataReadinessPanel'
+import { EquityChart } from './components/EquityChart'
+import { ModelDatasetPanel } from './components/ModelDatasetPanel'
 import { SignalsTable } from './components/SignalsTable'
 import { StatsCards } from './components/StatsCards'
 import { TemperatureFitPage } from './components/TemperatureFitPage'
 import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
-import { ModelDatasetPanel } from './components/ModelDatasetPanel'
 import type { AutoSimulationStatus, BotStats, DataReadiness } from './types'
 
 const GlobeView = lazy(() => import('./components/GlobeView').then(module => ({ default: module.GlobeView })))
@@ -101,9 +101,11 @@ function reasonLabel(reason: string) {
     settlement_rule_not_manually_verified: '结算规则未核验',
     settlement_contracts_missing: '事件级合同缺失',
     timezone_mismatch: '规则时区不一致',
-    independent_truth_days_below_min: '独立 Truth 日不足',
+    independent_truth_days_below_min: '独立 truth 日不足',
     all_orderbooks_stale: '盘口快照已过期',
     fresh_clob_depth_missing: 'CLOB 深度缺失',
+    fresh_clob_depth_below_min: 'CLOB 深度不足',
+    forecast_city_coverage_incomplete: '预测城市覆盖不足',
   }
   return map[reason] ?? reason
 }
@@ -112,6 +114,7 @@ function ReadinessBanner({ stats, readiness }: { stats: BotStats; readiness?: Da
   const ready = Boolean(stats.strategy_live_ready)
   const reasons = stats.strategy_readiness_reasons ?? []
   const phase = readiness?.production_phase
+
   return (
     <div className={`border px-3 py-2 ${ready ? 'border-green-500/30 bg-green-500/10' : 'border-amber-500/30 bg-amber-500/10'}`}>
       <div className="flex items-center gap-2">
@@ -202,7 +205,7 @@ function TradeModeSwitch({
       </div>
       {!liveAvailable && (
         <p id="live-mode-unavailable" className="mt-2 text-[10px] leading-relaxed text-amber-300">
-          实盘尚未连接或策略门槛未通过，因此目前只能使用模拟盘。
+          实盘尚未连接或策略闸门未通过，因此目前只能使用模拟盘。
         </p>
       )}
     </div>
@@ -238,13 +241,14 @@ function SimulationCard({
 }) {
   const autoRunning = autoSimulation.enabled
   const lastResult = autoSimulation.last_result
+
   return (
     <div className="border border-neutral-800 bg-black p-3">
       <div className="mb-3 flex items-center gap-2">
         <Wallet className="h-4 w-4 text-cyan-300" />
         <div>
           <div className="text-sm font-medium text-neutral-100">模拟账户</div>
-          <div className="text-[11px] text-neutral-500">设置本金、批量模拟当前可操作信号、检查已有持仓结算。</div>
+          <div className="text-[11px] text-neutral-500">设置本金、自动模拟新信号，并检查已有持仓结算。</div>
         </div>
       </div>
 
@@ -360,7 +364,7 @@ function SimulationCard({
       )}
 
       <p className="mt-3 text-[11px] leading-relaxed text-neutral-600">
-        新买入立刻显示浮亏，多数是因为按卖一成交、按买一估值，spread 会先被计入未实现亏损；这不等于最终判断已经错。
+        新买入立刻显示浮亏，多数是因为按卖一成交、按买一估值，spread 会先计入未实现亏损；这不等于最终判断已经错。
       </p>
     </div>
   )
@@ -395,6 +399,7 @@ function App() {
     queryFn: () => fetchSettlementContracts(contractStatus, 12),
     refetchInterval: 120000,
   })
+
   const forecastArchiveManifestQuery = useQuery({
     queryKey: ['forecast-archive-manifest'],
     queryFn: fetchForecastArchiveManifest,
@@ -405,25 +410,28 @@ function App() {
     mutationFn: startBot,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
+
   const stopMutation = useMutation({
     mutationFn: stopBot,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
+
   const signalStatusMutation = useMutation({
     mutationFn: ({ signalId, status, amount }: { signalId: number; status: string; amount?: number }) =>
       updateSignalStatus(signalId, status, amount),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
+
   const liveOrderMutation = useMutation({
     mutationFn: ({ signalId, amount }: { signalId: number; amount?: number }) => placeLiveOrder(signalId, amount),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
+
   const autoSimulationMutation = useMutation({
     mutationFn: (enabled: boolean) => setAutoSimulation(enabled, 300),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
+
   const verifyContractMutation = useMutation({
     mutationFn: ({ contractId, note }: { contractId: string; note: string }) =>
       verifySettlementContract(contractId, true, note || 'dashboard manual review'),
@@ -432,6 +440,7 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     },
   })
+
   const bulkVerifyContractMutation = useMutation({
     mutationFn: ({ contractIds, note }: { contractIds: string[]; note: string }) =>
       verifySettlementContractsBulk(contractIds, true, true, note || 'dashboard visible batch review'),
@@ -440,6 +449,7 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     },
   })
+
   const productionRefreshMutation = useMutation({
     mutationFn: () => runProductionRefresh({ days: 1, limit: 20, skipSignalScan: true }),
     onSuccess: () => {
@@ -447,6 +457,7 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     },
   })
+
   const resetSimulationMutation = useMutation({
     mutationFn: ({ balance, clear }: { balance: number; clear: boolean }) => resetSimulation(balance, clear),
     onSuccess: result => {
@@ -454,10 +465,12 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     },
   })
+
   const settleMutation = useMutation({
     mutationFn: settleTradesApi,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
+
   const historyBackfillMutation = useMutation({
     mutationFn: () => backfillWeatherHistory(30),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
@@ -524,7 +537,7 @@ function App() {
         <div className="max-w-md border border-red-500/30 bg-red-500/5 p-5 text-center">
           <div className="mb-2 text-sm text-red-300">后端未连接</div>
           <p className="mb-4 text-[12px] leading-relaxed text-neutral-500">
-            请确认 dashboard_server 正在运行在 http://127.0.0.1:8765，然后刷新页面。
+            请确认 dashboard_server 正在运行于 http://127.0.0.1:8765，然后刷新页面。
           </p>
           <button onClick={() => refetch()} className="border border-neutral-700 px-3 py-1.5 text-xs text-neutral-200">
             重试
@@ -539,7 +552,7 @@ function App() {
       <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-neutral-800 px-3 py-2">
         <div className="min-w-[190px] shrink-0">
           <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot 生产化看板</h1>
-          <div className="text-[11px] text-neutral-600">当前是模拟优先模式；实盘未达标前不会自动下单。</div>
+          <div className="text-[11px] text-neutral-600">模拟优先；实盘未达标前不会自动下单。</div>
         </div>
         <div className="order-3 min-w-0 basis-full overflow-x-auto xl:order-none xl:basis-auto xl:flex-1">
           <StatsCards stats={stats} />
@@ -556,25 +569,10 @@ function App() {
       <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[320px_minmax(500px,1fr)_390px] xl:overflow-hidden">
         <aside className="order-3 space-y-3 border-t border-neutral-800 bg-neutral-950/40 p-3 xl:order-1 xl:min-h-0 xl:overflow-y-auto xl:border-r xl:border-t-0">
           <div className="grid grid-cols-2 gap-2 text-[11px]">
-            <div className={`border p-2 ${stats.is_running ? 'border-green-500/30 bg-green-500/10' : 'border-neutral-800'}`}>
-              <div className="mb-1 flex items-center gap-1 text-neutral-500">
-                <Activity className="h-3.5 w-3.5" />
-                扫描器
-              </div>
-              <div className={stats.is_running ? 'text-green-300' : 'text-neutral-300'}>{stats.is_running ? '运行中' : '已停止'}</div>
-            </div>
-            <div className="border border-neutral-800 p-2">
-              <div className="text-neutral-500">数据年龄</div>
-              <div className="text-neutral-200">{dataAge(stats.data_age_minutes)}</div>
-            </div>
-            <div className="border border-neutral-800 p-2">
-              <div className="text-neutral-500">当前信号</div>
-              <div className="tabular-nums text-green-300">{actionable} / {signals.length}</div>
-            </div>
-            <div className="border border-neutral-800 p-2">
-              <div className="text-neutral-500">实盘状态</div>
-              <div className={liveAvailable ? 'text-green-300' : 'text-amber-300'}>{liveAvailable ? '可用' : '锁定'}</div>
-            </div>
+            <StatusTile label="扫描器" value={stats.is_running ? '运行中' : '已停止'} active={stats.is_running} icon={<Activity className="h-3.5 w-3.5" />} />
+            <StatusTile label="数据年龄" value={dataAge(stats.data_age_minutes)} />
+            <StatusTile label="当前信号" value={`${actionable} / ${signals.length}`} tone="green" />
+            <StatusTile label="实盘状态" value={liveAvailable ? '可用' : '锁定'} tone={liveAvailable ? 'green' : 'amber'} />
           </div>
 
           <div className="grid grid-cols-2 gap-2">
@@ -597,7 +595,6 @@ function App() {
           </div>
 
           <TradeModeSwitch mode={tradeMode} liveAvailable={liveAvailable} onMode={setTradeMode} />
-
           <ReadinessBanner stats={stats} readiness={dataReadiness} />
 
           <div className="border border-neutral-800 bg-black">
@@ -616,33 +613,31 @@ function App() {
             />
           </div>
 
-          <div>
-            <SimulationCard
-              stats={stats}
-              value={simBalance}
-              clearMarks={clearMarks}
-              autoSimulation={autoSimulation}
-              onValue={setSimBalance}
-              onClearMarks={setClearMarks}
-              onReset={() => {
-                const parsed = Number(simBalance)
-                if (Number.isFinite(parsed) && parsed >= 0) {
-                  resetSimulationMutation.mutate({ balance: parsed, clear: clearMarks })
-                }
-              }}
-              onSettle={() => settleMutation.mutate()}
-              onToggleAuto={() => autoSimulationMutation.mutate(!autoSimulation.enabled)}
-              resetting={resetSimulationMutation.isPending}
-              settling={settleMutation.isPending}
-              autoPending={autoSimulationMutation.isPending}
-            />
-          </div>
+          <SimulationCard
+            stats={stats}
+            value={simBalance}
+            clearMarks={clearMarks}
+            autoSimulation={autoSimulation}
+            onValue={setSimBalance}
+            onClearMarks={setClearMarks}
+            onReset={() => {
+              const parsed = Number(simBalance)
+              if (Number.isFinite(parsed) && parsed >= 0) {
+                resetSimulationMutation.mutate({ balance: parsed, clear: clearMarks })
+              }
+            }}
+            onSettle={() => settleMutation.mutate()}
+            onToggleAuto={() => autoSimulationMutation.mutate(!autoSimulation.enabled)}
+            resetting={resetSimulationMutation.isPending}
+            settling={settleMutation.isPending}
+            autoPending={autoSimulationMutation.isPending}
+          />
 
           <div className="border border-neutral-800 bg-black">
             <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-2">
               <div>
                 <div className="text-sm text-neutral-100">资金曲线</div>
-                <div className="text-[10px] text-neutral-600">仅统计已结算盈亏，未结算浮动显示在账户指标中。</div>
+                <div className="text-[10px] text-neutral-600">仅统计已结算盈亏；未结算浮动显示在账户指标中。</div>
               </div>
               <div className={`tabular-nums text-[11px] ${(stats.total_pnl ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
                 {money(stats.total_pnl)}
@@ -658,7 +653,7 @@ function App() {
               <BarChart3 className="h-4 w-4 text-cyan-300" />
               <div>
                 <div className="text-sm text-neutral-100">分析中心</div>
-                <div className="text-[11px] text-neutral-600">查看温度拟合、truth 覆盖、城市偏差。</div>
+                <div className="text-[11px] text-neutral-600">查看温度拟合、truth 覆盖和城市偏差。</div>
               </div>
             </div>
             <button
@@ -685,17 +680,17 @@ function App() {
               <GlobeView forecasts={forecasts} signals={signals} />
             </Suspense>
             <div className="absolute left-3 top-3 border border-neutral-800 bg-black/80 px-2 py-1 text-[11px]">
-              <span className="text-neutral-500">可操作信号 </span>
-              <span className="tabular-nums text-green-300">{actionable}</span>
-              <span className="ml-2 text-neutral-500">最新扫描 </span>
-              <span className="tabular-nums text-neutral-300">{timeText(stats.last_run)}</span>
+              <span className="text-neutral-500">可操作信号</span>
+              <span className="ml-1 tabular-nums text-green-300">{actionable}</span>
+              <span className="ml-2 text-neutral-500">最新扫描</span>
+              <span className="ml-1 tabular-nums text-neutral-300">{timeText(stats.last_run)}</span>
             </div>
           </div>
 
           <div className="h-[520px] min-h-[520px] border-b border-neutral-800 xl:h-[390px] xl:min-h-[390px] 2xl:h-[430px] 2xl:min-h-[430px]">
             <div className="flex flex-col items-start gap-0.5 border-b border-neutral-800 px-3 py-1.5 sm:flex-row sm:items-center sm:justify-between">
               <div className="text-sm text-neutral-100">机场天气趋势</div>
-              <div className="text-[11px] text-neutral-600">温度来自 forecast 快照；湿度当前仅在数据源提供时显示。</div>
+              <div className="text-[11px] text-neutral-600">预测、METAR、历史 truth 和湿度同屏对照。</div>
             </div>
             <WeatherPanel
               forecasts={forecasts}
@@ -706,7 +701,6 @@ function App() {
               backfillResult={historyBackfillMutation.data}
             />
           </div>
-
         </section>
 
         <aside className="order-2 flex h-[760px] min-h-0 flex-col border-t border-neutral-800 xl:order-3 xl:h-auto xl:border-l xl:border-t-0">
@@ -743,30 +737,55 @@ function App() {
                 点击信号查看盘口、风控原因与 Polymarket 链接。
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto">
-              <SignalsTable
-                signals={[]}
-                weatherSignals={signals}
-                onSimulateTrade={() => undefined}
-                isSimulating={signalStatusMutation.isPending}
-                onSignalStatus={(signalId, status, amount) => signalStatusMutation.mutate({ signalId, status, amount })}
-                onLiveOrder={(signalId, amount) => liveOrderMutation.mutate({ signalId, amount })}
-                liveModeAvailable={liveAvailable}
-                tradeMode={tradeMode}
-              />
+                <SignalsTable
+                  signals={[]}
+                  weatherSignals={signals}
+                  onSimulateTrade={() => undefined}
+                  isSimulating={signalStatusMutation.isPending}
+                  onSignalStatus={(signalId, status, amount) => signalStatusMutation.mutate({ signalId, status, amount })}
+                  onLiveOrder={(signalId, amount) => liveOrderMutation.mutate({ signalId, amount })}
+                  liveModeAvailable={liveAvailable}
+                  tradeMode={tradeMode}
+                />
+              </div>
             </div>
-          </div>
           ) : (
             <div className="flex min-h-0 flex-1 flex-col">
               <div className="border-b border-neutral-800 px-3 py-2 text-[10px] text-neutral-600">
                 未结算持仓按当前 bid 估值，会包含买卖价差造成的即时浮亏。
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto">
-              <TradesTable trades={trades} />
-            </div>
+                <TradesTable trades={trades} />
+              </div>
             </div>
           )}
         </aside>
       </main>
+    </div>
+  )
+}
+
+function StatusTile({
+  label,
+  value,
+  active = false,
+  tone = 'neutral',
+  icon,
+}: {
+  label: string
+  value: string
+  active?: boolean
+  tone?: 'neutral' | 'green' | 'amber'
+  icon?: ReactNode
+}) {
+  const valueClass = tone === 'green' || active ? 'text-green-300' : tone === 'amber' ? 'text-amber-300' : 'text-neutral-200'
+  return (
+    <div className={`border p-2 ${active ? 'border-green-500/30 bg-green-500/10' : 'border-neutral-800'}`}>
+      <div className="mb-1 flex items-center gap-1 text-neutral-500">
+        {icon}
+        {label}
+      </div>
+      <div className={valueClass}>{value}</div>
     </div>
   )
 }
