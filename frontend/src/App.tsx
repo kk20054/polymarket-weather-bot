@@ -582,7 +582,7 @@ function App() {
   }, [cityOptions, selectedCity])
 
   const selectedCityMeta = cityOptions.find(city => city.key === selectedCity)
-  const recommendedCity = cityOptions.find(city => city.actionable > 0) ?? cityOptions[0]
+  const recommendedCity = cityOptions.find(city => city.actionable > 0) ?? selectedCityMeta ?? cityOptions[0]
 
   useEffect(() => {
     if (!selectedCityMeta || typeof window === 'undefined') return

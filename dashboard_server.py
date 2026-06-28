@@ -45,6 +45,7 @@ from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.notifier import FeishuNotifier
 from weatherbot_v3.polymarket import PolymarketDataClient
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
+from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.cli import run_production_refresh
 
@@ -72,6 +73,7 @@ AUTO_REFRESH_DAYS = max(1, min(int(os.getenv("WEATHERBOT_AUTO_REFRESH_DAYS", "1"
 AUTO_REFRESH_LIMIT = max(1, min(int(os.getenv("WEATHERBOT_AUTO_REFRESH_LIMIT", "20") or "20"), 100))
 AUTO_REFRESH_CITIES = os.getenv("WEATHERBOT_AUTO_REFRESH_CITIES", "").strip()
 AUTO_REFRESH_SIGNAL_SCAN = os.getenv("WEATHERBOT_AUTO_REFRESH_SIGNAL_SCAN", "false").strip().lower() not in {"0", "false", "no", "off"}
+RESUME_AUTO_SIMULATION = os.getenv("WEATHERBOT_RESUME_AUTO_SIMULATION", "false").strip().lower() not in {"0", "false", "no", "off"}
 dashboard_payload_cache: dict | None = None
 dashboard_payload_cache_at: datetime | None = None
 DASHBOARD_CACHE_TTL_SECONDS = int(os.getenv("WEATHERBOT_DASHBOARD_CACHE_TTL", "20") or "20")
@@ -1998,6 +2000,30 @@ def _build_weather_city_series(markets):
     return sorted(rows, key=lambda row: row.get("city_name") or "")
 
 
+def _registry_city_series():
+    """Lightweight city index used before the first manual data refresh."""
+    rows = []
+    for profile in SETTLEMENT_REGISTRY.values():
+        rows.append({
+            "city_key": profile.city,
+            "city_name": profile.city_name,
+            "station_id": profile.station_id,
+            "station_name": profile.station_name,
+            "unit": profile.unit,
+            "latest_best": None,
+            "latest_metar": None,
+            "latest_source": None,
+            "latest_timestamp": None,
+            "humidity_status": "not_collected",
+            "history_count": 0,
+            "forecast_count": 0,
+            "history_points": [],
+            "forecast_points": [],
+            "points": [],
+        })
+    return sorted(rows, key=lambda row: (row.get("city_name") or "").lower())
+
+
 def _strategy_diagnostics(signal, raw_signal, market, fit):
     tags = []
     notes = []
@@ -2796,7 +2822,7 @@ def _minimal_dashboard_payload(reason: str = "cache_warming"):
         "backtest": None,
         "weather_signals": [],
         "weather_forecasts": [],
-        "weather_city_series": [],
+        "weather_city_series": _registry_city_series(),
         "events": list_events(50),
         "_meta": {"cache": "warming", "reason": reason, "generated_at": now},
     }
@@ -2928,6 +2954,13 @@ def _ensure_auto_simulation_task():
         auto_simulation_task = asyncio.create_task(_auto_simulation_loop())
 
 
+def _disable_persisted_auto_simulation_on_startup():
+    state = _auto_simulation_state()
+    if not state["enabled"]:
+        return state
+    return _save_auto_simulation_state(enabled=False, last_error=None)
+
+
 async def _stop_auto_simulation_task():
     global auto_simulation_task
     task = auto_simulation_task
@@ -2953,17 +2986,21 @@ async def startup():
             _start_bot_process("dashboard startup")
         except Exception as exc:
             log_event("error", f"Scanner auto-start failed: {exc}")
+    _ensure_auto_refresh_task()
+    if RESUME_AUTO_SIMULATION:
+        _ensure_auto_simulation_task()
+    else:
+        _disable_persisted_auto_simulation_on_startup()
     global dashboard_payload_cache
     dashboard_payload_cache = _minimal_dashboard_payload("manual_refresh_required")
     if DASHBOARD_AUTO_BUILD:
         _ensure_dashboard_refresh(force=True)
-    _ensure_auto_refresh_task()
-    _ensure_auto_simulation_task()
     log_event("info", "Dashboard started", {
         "auto_refresh_enabled": AUTO_REFRESH_ENABLED,
         "auto_refresh_initial_delay_seconds": AUTO_REFRESH_INITIAL_DELAY_SECONDS,
         "auto_refresh_interval_seconds": AUTO_REFRESH_INTERVAL_SECONDS,
         "auto_refresh_signal_scan": AUTO_REFRESH_SIGNAL_SCAN,
+        "auto_simulation_resume": RESUME_AUTO_SIMULATION,
         "legacy_scanner_auto_start": AUTO_START_SCANNER,
         "dashboard_auto_build": DASHBOARD_AUTO_BUILD,
         "startup_maintenance": STARTUP_MAINTENANCE,
