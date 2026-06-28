@@ -87,6 +87,20 @@ function reasonLabel(code: string) {
   return REASON_LABELS[code] ?? code
 }
 
+const ORDERBOOK_REASON_LABELS: Record<string, string> = {
+  fresh_clob_depth_available: '双边盘口可用',
+  no_clob_orderbook: '无 CLOB 盘口',
+  empty_clob_depth: '盘口为空',
+  missing_bid_depth: '缺 Bid 深度',
+  missing_ask_depth: '缺 Ask 深度',
+  invalid_best_bid_ask: 'Bid/Ask 异常',
+  quote_fetch_error: '抓取失败',
+}
+
+function orderbookReasonLabel(code: string) {
+  return ORDERBOOK_REASON_LABELS[code] ?? reasonLabel(code)
+}
+
 function stageLabel(stage: DataReadinessStage) {
   return STAGE_LABELS[stage.key] ?? stage.label ?? stage.key
 }
@@ -101,6 +115,10 @@ function metricRecord(value: unknown): Record<string, number> {
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, Number(item) || 0])
   )
+}
+
+function metricNumber(metrics: Record<string, unknown> | undefined, key: string) {
+  return Number(metrics?.[key]) || 0
 }
 
 function reviewStatusLabel(status?: string | null) {
@@ -182,6 +200,16 @@ export function DataReadinessPanel({
   const refreshFailedStages = refreshStages.filter(stage => !stage.ok)
   const refreshBlockedKeys = productionRefresh?.readiness?.blocked_keys ?? phase?.blocked_keys ?? []
   const refreshHistory = productionRefresh?.history ?? []
+  const orderbookStage = readiness.stages.find(stage => stage.key === 'orderbooks')
+  const orderbookMetrics = orderbookStage?.metrics
+  const orderbookRefresh = refreshStages.find(stage => stage.name === 'orderbook_backfill')
+  const orderbookReasonCounts = metricRecord(orderbookRefresh?.payload?.reason_counts)
+  const freshClobSnapshots = metricNumber(orderbookMetrics, 'fresh_clob_snapshots')
+  const executableClobSnapshots = metricNumber(orderbookMetrics, 'fresh_clob_with_depth_snapshots')
+  const requiredClobSnapshots = metricNumber(orderbookMetrics, 'minimum_fresh_clob_snapshots')
+  const clobDepthGap = metricNumber(orderbookMetrics, 'fresh_clob_snapshot_gap')
+  const staleOrderbooks = metricNumber(orderbookMetrics, 'stale_snapshots')
+  const latestOrderbookAt = String(orderbookMetrics?.latest_at || '')
   const queueOptions = [
     ['mature-auto', '成熟自动', contractQueue.mature_auto_verified_unreviewed ?? 0],
     ['future-auto', '未来自动', contractQueue.future_auto_verified_unreviewed ?? 0],
@@ -359,6 +387,59 @@ export function DataReadinessPanel({
         <Metric label="预测运行" value={readiness.summary.forecast_runs} title="版本化预测运行档案数量" />
         <Metric label="盘口" value={readiness.summary.orderbook_snapshots} title="已保存盘口快照数量" />
       </div>
+
+      {orderbookStage && (
+        <div className="space-y-2 border border-neutral-800 bg-neutral-950 p-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-[10px] text-neutral-300">盘口闸门</div>
+              <div className="truncate text-[9px] text-neutral-600">
+                双边 CLOB 深度才计入可执行盘口；单边盘口只用于观察。
+              </div>
+            </div>
+            <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${
+              orderbookStage.status === 'ready'
+                ? 'border-green-500/30 bg-green-500/5 text-green-200'
+                : 'border-red-500/30 bg-red-500/5 text-red-200'
+            }`}>
+              {orderbookStage.status === 'ready' ? '可执行' : '未过闸'}
+            </span>
+          </div>
+          <div className="grid grid-cols-4 gap-1 text-center">
+            <Metric label="CLOB" value={freshClobSnapshots} title="新鲜 CLOB 快照数量，未必有双边深度" />
+            <Metric label="双边深度" value={`${executableClobSnapshots}/${requiredClobSnapshots || 0}`} title="Bid 和 Ask 同时存在的可执行盘口 / 最低门槛" />
+            <Metric label="缺口" value={clobDepthGap} title="距离生产闸门还缺多少个双边深度快照" />
+            <Metric label="过期" value={staleOrderbooks} title="超过 freshness 窗口的盘口快照" />
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {orderbookStage.reasons.length > 0 ? orderbookStage.reasons.map(reason => (
+              <span
+                key={reason.code}
+                className="border border-amber-500/20 bg-amber-500/5 px-1.5 py-0.5 text-[9px] text-amber-200"
+                title={`${reasonLabel(reason.code)}: ${reason.count}`}
+              >
+                {reasonLabel(reason.code)} {reason.count}
+              </span>
+            )) : (
+              <span className="border border-green-500/20 bg-green-500/5 px-1.5 py-0.5 text-[9px] text-green-200">
+                盘口闸门通过
+              </span>
+            )}
+            {Object.entries(orderbookReasonCounts).slice(0, 5).map(([code, count]) => (
+              <span
+                key={code}
+                className="border border-neutral-800 bg-black/40 px-1.5 py-0.5 text-[9px] text-neutral-400"
+                title={`最近一次盘口刷新: ${code}=${count}`}
+              >
+                {orderbookReasonLabel(code)} {count}
+              </span>
+            ))}
+          </div>
+          <div className="truncate text-[9px] text-neutral-600">
+            最新盘口：{latestOrderbookAt ? shortTime(latestOrderbookAt) : '暂无'} · 刷新命令：.\.venv\Scripts\python.exe -m weatherbot_v3.cli orderbook-backfill --limit 200
+          </div>
+        </div>
+      )}
 
       <div className="space-y-1">
         <div className="flex items-center justify-between text-[10px] text-neutral-500">
