@@ -59,9 +59,22 @@ AUTO_SIMULATION_PATH = DATA_DIR / "auto-simulation.json"
 PRODUCTION_REFRESH_PATH = DATA_DIR / "production-refresh.json"
 bot_process: subprocess.Popen | None = None
 auto_simulation_task: asyncio.Task | None = None
+dashboard_refresh_task: asyncio.Task | None = None
+auto_refresh_task: asyncio.Task | None = None
 bulk_simulation_lock = asyncio.Lock()
 production_refresh_lock = asyncio.Lock()
 _market_rule_sync_signature: tuple[tuple[str, float], ...] | None = None
+AUTO_START_SCANNER = os.getenv("WEATHERBOT_AUTO_START_SCANNER", "false").strip().lower() not in {"0", "false", "no", "off"}
+AUTO_REFRESH_ENABLED = os.getenv("WEATHERBOT_AUTO_REFRESH", "false").strip().lower() not in {"0", "false", "no", "off"}
+AUTO_REFRESH_INTERVAL_SECONDS = max(900, int(os.getenv("WEATHERBOT_AUTO_REFRESH_INTERVAL", "1800") or "1800"))
+AUTO_REFRESH_INITIAL_DELAY_SECONDS = max(0, int(os.getenv("WEATHERBOT_AUTO_REFRESH_INITIAL_DELAY", "30") or "30"))
+AUTO_REFRESH_DAYS = max(1, min(int(os.getenv("WEATHERBOT_AUTO_REFRESH_DAYS", "1") or "1"), 3))
+AUTO_REFRESH_LIMIT = max(1, min(int(os.getenv("WEATHERBOT_AUTO_REFRESH_LIMIT", "20") or "20"), 100))
+AUTO_REFRESH_CITIES = os.getenv("WEATHERBOT_AUTO_REFRESH_CITIES", "").strip()
+AUTO_REFRESH_SIGNAL_SCAN = os.getenv("WEATHERBOT_AUTO_REFRESH_SIGNAL_SCAN", "false").strip().lower() not in {"0", "false", "no", "off"}
+dashboard_payload_cache: dict | None = None
+dashboard_payload_cache_at: datetime | None = None
+DASHBOARD_CACHE_TTL_SECONDS = int(os.getenv("WEATHERBOT_DASHBOARD_CACHE_TTL", "20") or "20")
 
 app = FastAPI(title="WeatherBot Dashboard", version="1.0")
 app.add_middleware(
@@ -715,6 +728,40 @@ def _cleanup_stale_bot_process():
     if cleaned:
         log_event("warning", f"已清理残留扫描器进程 PID {pid}")
     return cleaned
+
+
+def _start_bot_process(source: str = "dashboard") -> dict:
+    global bot_process
+    if _bot_running():
+        return {"status": "running", "is_running": True, "already_running": True}
+    _cleanup_stale_bot_process()
+    DATA_DIR.mkdir(exist_ok=True)
+    log_file = BOT_LOG_PATH.open("a", encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
+    for proxy_key in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        env.pop(proxy_key, None)
+    env["NO_PROXY"] = "*"
+    env["no_proxy"] = "*"
+    bot_process = subprocess.Popen(
+        [sys.executable, "-u", "weatherbet.py"],
+        cwd=ROOT,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    )
+    BOT_PID_PATH.write_text(str(bot_process.pid), encoding="utf-8")
+    log_event("success", f"Scanner started by {source}; logs write to data/weatherbet-dashboard.log")
+    return {"status": "running", "is_running": True, "pid": bot_process.pid}
 
 
 def _event_to_payload(event):
@@ -2461,17 +2508,6 @@ def build_dashboard_payload():
             signal_distribution,
             truth_by_city.get(signal.get("city")),
         )
-        try:
-            if signal_distribution.get("items"):
-                insert_event_distribution(
-                    str(signal.get("market_id") or ""),
-                    _event_slug_from_url(signal.get("event_url")) or "",
-                    signal_distribution,
-                    int(signal.get("id") or 0) or None,
-                )
-            upsert_signal_decision(int(signal.get("id") or 0), decision_payload)
-        except Exception:
-            pass
         weather_signals.append({
             "id": signal.get("id"),
             "market_id": signal.get("market_id"),
@@ -2627,7 +2663,7 @@ def build_dashboard_payload():
         "brier_score": (sum(brier_values) / len(brier_values)) if brier_values else 0,
     }
     backtest_summary = _build_backtest_summary(markets)
-    model_dataset_audit = build_model_dataset_audit()
+    model_dataset_audit = None
     strategy_readiness = backtest_summary.get("strategy_readiness") or {}
     cfg = load_v3_config()
     readiness_reasons = list(strategy_readiness.get("reasons") or [])
@@ -2711,6 +2747,142 @@ def build_dashboard_payload():
     }
 
 
+def _minimal_dashboard_payload(reason: str = "cache_warming"):
+    now = datetime.now(timezone.utc).isoformat()
+    stats = {
+        "bankroll": 0,
+        "cash_balance": 0,
+        "reserved_capital": 0,
+        "realized_pnl": 0,
+        "unrealized_pnl": 0,
+        "total_trades": 0,
+        "open_trades": 0,
+        "settled_trades": 0,
+        "winning_trades": 0,
+        "win_rate": 0,
+        "total_pnl": 0,
+        "is_running": _bot_running(),
+        "last_run": None,
+        "latest_market_update": None,
+        "data_age_minutes": None,
+        "expired_signal_count": 0,
+        "signal_count": 0,
+        "actionable_count": 0,
+        "live_candidate_count": 0,
+        "live_blocked_count": 0,
+        "strategy_live_ready": False,
+        "strategy_readiness_status": "warming",
+        "strategy_readiness_reasons": [reason],
+        "simulation_started_at": None,
+        "scanner_status": "running" if _bot_running() else "stopped",
+        "auto_simulation": _auto_simulation_state(),
+    }
+    return {
+        "stats": stats,
+        "v3": {},
+        "data_readiness": None,
+        "production_refresh": _read_json(PRODUCTION_REFRESH_PATH, None),
+        "model_dataset_audit": None,
+        "truth_health": None,
+        "btc_price": None,
+        "microstructure": None,
+        "windows": [],
+        "active_signals": [],
+        "recent_trades": [],
+        "equity_curve": [],
+        "calibration": None,
+        "backtest": None,
+        "weather_signals": [],
+        "weather_forecasts": [],
+        "weather_city_series": [],
+        "events": list_events(50),
+        "_meta": {"cache": "warming", "reason": reason, "generated_at": now},
+    }
+
+
+async def _refresh_dashboard_cache_once():
+    global dashboard_payload_cache, dashboard_payload_cache_at
+    try:
+        payload = await asyncio.to_thread(build_dashboard_payload)
+        dashboard_payload_cache_at = datetime.now(timezone.utc)
+        payload["_meta"] = {
+            "cache": "fresh",
+            "generated_at": dashboard_payload_cache_at.isoformat(),
+        }
+        dashboard_payload_cache = payload
+    except Exception as exc:
+        log_event("error", f"Dashboard cache refresh failed: {exc}")
+
+
+def _ensure_dashboard_refresh(force: bool = False):
+    global dashboard_refresh_task
+    stale = True
+    if dashboard_payload_cache_at:
+        stale = (datetime.now(timezone.utc) - dashboard_payload_cache_at).total_seconds() > DASHBOARD_CACHE_TTL_SECONDS
+    if not force and not stale:
+        return
+    if dashboard_refresh_task is None or dashboard_refresh_task.done():
+        dashboard_refresh_task = asyncio.create_task(_refresh_dashboard_cache_once())
+
+
+async def _auto_refresh_loop():
+    global auto_refresh_task
+    try:
+        if AUTO_REFRESH_INITIAL_DELAY_SECONDS:
+            await asyncio.sleep(AUTO_REFRESH_INITIAL_DELAY_SECONDS)
+        while True:
+            try:
+                async with production_refresh_lock:
+                    result = await asyncio.to_thread(
+                        run_production_refresh,
+                        cities=AUTO_REFRESH_CITIES,
+                        days=AUTO_REFRESH_DAYS,
+                        limit=AUTO_REFRESH_LIMIT,
+                        start_date="",
+                        end_date="",
+                        scan_signals=AUTO_REFRESH_SIGNAL_SCAN,
+                    )
+                    result = {
+                        **result,
+                        "requested_at": datetime.now(timezone.utc).isoformat(),
+                        "auto_refresh": True,
+                    }
+                    _save_production_refresh_result(result)
+                    log_event(
+                        "success" if result.get("ok") else "warning",
+                        "Auto data refresh completed" if result.get("ok") else "Auto data refresh finished with failed stages",
+                        _production_refresh_summary(result),
+                    )
+                await _refresh_dashboard_cache_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_event("error", f"Auto refresh failed: {exc}")
+            await asyncio.sleep(AUTO_REFRESH_INTERVAL_SECONDS)
+    finally:
+        auto_refresh_task = None
+
+
+def _ensure_auto_refresh_task():
+    global auto_refresh_task
+    if not AUTO_REFRESH_ENABLED:
+        return
+    if auto_refresh_task is None or auto_refresh_task.done():
+        auto_refresh_task = asyncio.create_task(_auto_refresh_loop())
+
+
+async def _stop_auto_refresh_task():
+    global auto_refresh_task
+    task = auto_refresh_task
+    auto_refresh_task = None
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 async def _auto_simulation_loop():
     global auto_simulation_task
     try:
@@ -2773,13 +2945,29 @@ async def startup():
     migrate_legacy_signals(500)
     persist_data_readiness(build_data_readiness())
     _cleanup_stale_bot_process()
+    if AUTO_START_SCANNER:
+        try:
+            _start_bot_process("dashboard startup")
+        except Exception as exc:
+            log_event("error", f"Scanner auto-start failed: {exc}")
+    _ensure_dashboard_refresh(force=True)
+    _ensure_auto_refresh_task()
     _ensure_auto_simulation_task()
-    log_event("info", "Dashboard started")
+    log_event("info", "Dashboard started", {
+        "auto_refresh_enabled": AUTO_REFRESH_ENABLED,
+        "auto_refresh_initial_delay_seconds": AUTO_REFRESH_INITIAL_DELAY_SECONDS,
+        "auto_refresh_interval_seconds": AUTO_REFRESH_INTERVAL_SECONDS,
+        "auto_refresh_signal_scan": AUTO_REFRESH_SIGNAL_SCAN,
+        "legacy_scanner_auto_start": AUTO_START_SCANNER,
+    })
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    await _stop_auto_refresh_task()
     await _stop_auto_simulation_task()
+    if _bot_running():
+        _terminate_pid_tree(bot_process.pid)
 
 
 @app.get("/")
@@ -2789,7 +2977,10 @@ async def index():
 
 @app.get("/api/dashboard")
 async def dashboard():
-    return build_dashboard_payload()
+    _ensure_dashboard_refresh()
+    if dashboard_payload_cache is not None:
+        return dashboard_payload_cache
+    return _minimal_dashboard_payload()
 
 
 @app.get("/api/signals")

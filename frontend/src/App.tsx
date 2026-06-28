@@ -6,7 +6,6 @@ import {
   CheckCircle2,
   FlaskConical,
   PauseCircle,
-  PlayCircle,
   RefreshCw,
   ShieldAlert,
   Wallet,
@@ -22,7 +21,6 @@ import {
   runProductionRefresh,
   setAutoSimulation,
   settleTradesApi,
-  startBot,
   stopBot,
   updateSignalStatus,
   verifySettlementContract,
@@ -107,6 +105,15 @@ function reasonLabel(reason: string) {
     forecast_city_coverage_incomplete: '预测城市覆盖不足',
   }
   return map[reason] ?? reason
+}
+
+function cityPageSlug(city: { key: string; station?: string }) {
+  return `${city.key}${city.station ? `-${city.station.toLowerCase()}` : ''}`
+}
+
+function cityKeyFromParam(value: string | null) {
+  if (!value) return ''
+  return value.split('-').slice(0, -1).join('-') || value
 }
 
 function ReadinessBanner({ stats, readiness }: { stats: BotStats; readiness?: DataReadiness | null }) {
@@ -374,7 +381,10 @@ function App() {
   const [view, setView] = useState<'dashboard' | 'temperature-fit'>('dashboard')
   const [tradeMode, setTradeMode] = useState<TradeMode>('paper')
   const [activityView, setActivityView] = useState<'signals' | 'trades'>('signals')
-  const [selectedCity, setSelectedCity] = useState('')
+  const [selectedCity, setSelectedCity] = useState(() => {
+    if (typeof window === 'undefined') return ''
+    return cityKeyFromParam(new URLSearchParams(window.location.search).get('city'))
+  })
   const [simBalance, setSimBalance] = useState('40')
   const [clearMarks, setClearMarks] = useState(false)
   const [contractStatus, setContractStatus] = useState('mature-auto')
@@ -404,11 +414,6 @@ function App() {
     queryKey: ['forecast-archive-manifest'],
     queryFn: fetchForecastArchiveManifest,
     refetchInterval: 120000,
-  })
-
-  const startMutation = useMutation({
-    mutationFn: startBot,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
 
   const stopMutation = useMutation({
@@ -480,6 +485,7 @@ function App() {
   const signals = data?.weather_signals ?? []
   const forecasts = data?.weather_forecasts ?? []
   const citySeries = data?.weather_city_series ?? []
+  const events = data?.events ?? []
   const trades = data?.recent_trades ?? []
   const equityCurve = data?.equity_curve ?? []
   const truthHealth = data?.truth_health ?? null
@@ -575,6 +581,17 @@ function App() {
   }, [cityOptions, selectedCity])
 
   const selectedCityMeta = cityOptions.find(city => city.key === selectedCity)
+  const recommendedCity = cityOptions.find(city => city.actionable > 0) ?? cityOptions[0]
+
+  useEffect(() => {
+    if (!selectedCityMeta || typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    const nextCity = cityPageSlug(selectedCityMeta)
+    if (params.get('city') === nextCity) return
+    params.set('city', nextCity)
+    const nextUrl = `${window.location.pathname}?${params.toString()}`
+    window.history.replaceState(null, '', nextUrl)
+  }, [selectedCityMeta])
 
   if (view === 'temperature-fit') {
     return (
@@ -624,21 +641,25 @@ function App() {
           <StatsCards stats={stats} />
         </div>
         <button
-          onClick={() => startMutation.mutate()}
-          disabled={stats.is_running || startMutation.isPending}
+          onClick={() => productionRefreshMutation.mutate()}
+          disabled={productionRefreshMutation.isPending}
           className="inline-flex items-center gap-1 border border-green-500/30 px-2 py-1 text-[11px] text-green-300 hover:bg-green-500/10 disabled:opacity-40"
+          title="受控刷新：同步合约、预测快照和 CLOB 盘口；默认不启动旧版无限信号扫描。"
         >
-          <PlayCircle className="h-3.5 w-3.5" />
-          启动扫描
+          <RefreshCw className={`h-3.5 w-3.5 ${productionRefreshMutation.isPending ? 'animate-spin' : ''}`} />
+          {productionRefreshMutation.isPending ? '抓取中' : '手动抓取'}
         </button>
-        <button
-          onClick={() => stopMutation.mutate()}
-          disabled={!stats.is_running || stopMutation.isPending}
-          className="inline-flex items-center gap-1 border border-red-500/30 px-2 py-1 text-[11px] text-red-300 hover:bg-red-500/10 disabled:opacity-40"
-        >
-          <PauseCircle className="h-3.5 w-3.5" />
-          停止
-        </button>
+        {stats.is_running && (
+          <button
+            onClick={() => stopMutation.mutate()}
+            disabled={stopMutation.isPending}
+            className="inline-flex items-center gap-1 border border-red-500/30 px-2 py-1 text-[11px] text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+            title="停止旧版 weatherbet.py 循环扫描。v3 数据刷新不依赖这个进程。"
+          >
+            <PauseCircle className="h-3.5 w-3.5" />
+            停止旧扫描
+          </button>
+        )}
         <button
           onClick={() => refetch()}
           className="inline-flex items-center gap-1 border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-900"
@@ -650,6 +671,29 @@ function App() {
 
       <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[260px_minmax(640px,1fr)_420px] xl:overflow-hidden">
         <aside className="order-1 space-y-3 border-b border-neutral-800 bg-neutral-950/40 p-3 xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
+          {recommendedCity && (
+            <a
+              href={`?city=${cityPageSlug(recommendedCity)}`}
+              onClick={event => {
+                event.preventDefault()
+                setSelectedCity(recommendedCity.key)
+              }}
+              className="block border border-emerald-500/30 bg-emerald-500/10 p-3 text-left hover:bg-emerald-500/15"
+            >
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <div className="text-xs font-medium text-emerald-100">推荐关注</div>
+                <div className="text-[10px] text-emerald-300">{recommendedCity.actionable}/{recommendedCity.signals} 信号</div>
+              </div>
+              <div className="truncate text-sm text-neutral-100">{recommendedCity.name}</div>
+              <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-neutral-500">
+                <span>{recommendedCity.station || 'station 未映射'}</span>
+                <span className="tabular-nums text-neutral-200">
+                  {recommendedCity.latest === null || recommendedCity.latest === undefined ? '--' : `${Number(recommendedCity.latest).toFixed(1)}°${recommendedCity.unit}`}
+                </span>
+              </div>
+            </a>
+          )}
+
           <div>
             <div className="mb-2 flex items-center justify-between">
               <div>
@@ -660,10 +704,13 @@ function App() {
             </div>
             <div className="space-y-1">
               {cityOptions.map(city => (
-                <button
+                <a
                   key={city.key}
-                  type="button"
-                  onClick={() => setSelectedCity(city.key)}
+                  href={`?city=${cityPageSlug(city)}`}
+                  onClick={event => {
+                    event.preventDefault()
+                    setSelectedCity(city.key)
+                  }}
                   className={`w-full border px-2 py-2 text-left transition ${
                     selectedCity === city.key
                       ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
@@ -684,125 +731,34 @@ function App() {
                       </div>
                     </div>
                   </div>
-                </button>
+                </a>
               ))}
             </div>
           </div>
 
-          <details className="border border-neutral-800 bg-black">
-            <summary className="cursor-pointer select-none px-3 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
-              系统健康与高级工具
-            </summary>
-            <div className="space-y-3 border-t border-neutral-800 p-3">
-          <div className="grid grid-cols-2 gap-2 text-[11px]">
-            <StatusTile label="扫描器" value={stats.is_running ? '运行中' : '已停止'} active={stats.is_running} icon={<Activity className="h-3.5 w-3.5" />} />
-            <StatusTile label="数据年龄" value={dataAge(stats.data_age_minutes)} />
-            <StatusTile label="当前信号" value={`${actionable} / ${signals.length}`} tone="green" />
-            <StatusTile label="实盘状态" value={liveAvailable ? '可用' : '锁定'} tone={liveAvailable ? 'green' : 'amber'} />
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              onClick={() => startMutation.mutate()}
-              disabled={stats.is_running || startMutation.isPending}
-              className="inline-flex items-center justify-center gap-1 border border-green-500/30 px-2 py-1.5 text-green-300 hover:bg-green-500/10 disabled:opacity-40"
-            >
-              <PlayCircle className="h-4 w-4" />
-              启动扫描
-            </button>
-            <button
-              onClick={() => stopMutation.mutate()}
-              disabled={!stats.is_running || stopMutation.isPending}
-              className="inline-flex items-center justify-center gap-1 border border-red-500/30 px-2 py-1.5 text-red-300 hover:bg-red-500/10 disabled:opacity-40"
-            >
-              <PauseCircle className="h-4 w-4" />
-              停止扫描
-            </button>
-          </div>
-
-          <TradeModeSwitch mode={tradeMode} liveAvailable={liveAvailable} onMode={setTradeMode} />
-          <ReadinessBanner stats={stats} readiness={dataReadiness} />
-
-          <div className="border border-neutral-800 bg-black">
-            <DataReadinessPanel
-              readiness={dataReadiness}
-              contracts={contractsQuery.data}
-              contractStatus={contractStatus}
-              onContractStatus={setContractStatus}
-              verifyingContractId={verifyContractMutation.variables?.contractId}
-              bulkVerifying={bulkVerifyContractMutation.isPending}
-              productionRefresh={productionRefresh}
-              productionRefreshing={productionRefreshMutation.isPending}
-              onProductionRefresh={() => productionRefreshMutation.mutate()}
-              onVerifyContract={(contractId, note) => verifyContractMutation.mutate({ contractId, note })}
-              onVerifyVisibleContracts={(contractIds, note) => bulkVerifyContractMutation.mutate({ contractIds, note })}
-            />
-          </div>
-
-          <SimulationCard
-            stats={stats}
-            value={simBalance}
-            clearMarks={clearMarks}
-            autoSimulation={autoSimulation}
-            onValue={setSimBalance}
-            onClearMarks={setClearMarks}
-            onReset={() => {
-              const parsed = Number(simBalance)
-              if (Number.isFinite(parsed) && parsed >= 0) {
-                resetSimulationMutation.mutate({ balance: parsed, clear: clearMarks })
-              }
-            }}
-            onSettle={() => settleMutation.mutate()}
-            onToggleAuto={() => autoSimulationMutation.mutate(!autoSimulation.enabled)}
-            resetting={resetSimulationMutation.isPending}
-            settling={settleMutation.isPending}
-            autoPending={autoSimulationMutation.isPending}
-          />
-
-          <div className="border border-neutral-800 bg-black">
-            <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-2">
-              <div>
-                <div className="text-sm text-neutral-100">资金曲线</div>
-                <div className="text-[10px] text-neutral-600">仅统计已结算盈亏；未结算浮动显示在账户指标中。</div>
-              </div>
-              <div className={`tabular-nums text-[11px] ${(stats.total_pnl ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
-                {money(stats.total_pnl)}
-              </div>
-            </div>
-            <div className="h-[160px] p-2">
-              <EquityChart data={equityCurve} initialBankroll={stats.bankroll - stats.total_pnl} />
-            </div>
-          </div>
-
-          <div className="border border-neutral-800 bg-black p-3">
-            <div className="mb-2 flex items-center gap-2">
-              <BarChart3 className="h-4 w-4 text-cyan-300" />
-              <div>
-                <div className="text-sm text-neutral-100">分析中心</div>
-                <div className="text-[11px] text-neutral-600">查看温度拟合、truth 覆盖和城市偏差。</div>
-              </div>
-            </div>
-            <button
-              onClick={() => setView('temperature-fit')}
-              className="w-full border border-cyan-500/30 px-2 py-1.5 text-cyan-300 hover:bg-cyan-500/10"
-            >
-              打开温度拟合
-            </button>
-          </div>
-
-          <div className="border border-neutral-800 bg-black">
-            <ModelDatasetPanel audit={modelDatasetAudit} archiveManifest={forecastArchiveManifest} />
-          </div>
-
-          <div className="border border-neutral-800 bg-black p-3">
-            <div className="mb-2 text-sm text-neutral-100">结算源健康</div>
-            <TruthHealthPanel truth={truthHealth} />
-          </div>
-            </div>
-          </details>
         </aside>
 
         <section className="order-2 min-h-0 overflow-y-auto xl:overflow-hidden">
+          {recommendedCity && (
+            <a
+              href={`?city=${cityPageSlug(recommendedCity)}`}
+              onClick={event => {
+                event.preventDefault()
+                setSelectedCity(recommendedCity.key)
+              }}
+              className="flex flex-wrap items-center gap-3 border-b border-yellow-500/20 bg-yellow-500/10 px-6 py-3 hover:bg-yellow-500/15"
+            >
+              <div className="text-sm font-semibold text-yellow-200">推荐关注</div>
+              <div className="rounded border border-yellow-400/25 bg-black/25 px-4 py-2">
+                <div className="text-base font-semibold text-neutral-100">{recommendedCity.name}</div>
+                <div className="mt-0.5 flex flex-wrap gap-3 text-[11px] text-yellow-100/80">
+                  <span>现在 {recommendedCity.latest === null || recommendedCity.latest === undefined ? '--' : `${Number(recommendedCity.latest).toFixed(1)}°${recommendedCity.unit}`}</span>
+                  <span>信号 {recommendedCity.actionable}/{recommendedCity.signals}</span>
+                  <span>{recommendedCity.station || 'station 未映射'}</span>
+                </div>
+              </div>
+            </a>
+          )}
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 px-3 py-2">
             <div className="min-w-0">
               <div className="truncate text-sm font-medium text-neutral-100">
@@ -815,7 +771,7 @@ function App() {
             <div className="flex flex-wrap gap-1.5 text-[10px]">
               <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-400">数据 {dataAge(stats.data_age_minutes)}</span>
               <span className={`border px-1.5 py-0.5 ${stats.is_running ? 'border-green-500/30 text-green-300' : 'border-neutral-800 text-neutral-500'}`}>
-                {stats.is_running ? '自动扫描中' : '扫描已停止'}
+                {stats.is_running ? '旧扫描运行中' : '等待手动抓取'}
               </span>
               <span className={`border px-1.5 py-0.5 ${autoSimulation.enabled ? 'border-cyan-500/30 text-cyan-300' : 'border-neutral-800 text-neutral-500'}`}>
                 {autoSimulation.enabled ? '自动模拟中' : '自动模拟关闭'}
@@ -823,7 +779,7 @@ function App() {
             </div>
           </div>
 
-          <div className="h-[640px] min-h-[640px] border-b border-neutral-800 xl:h-[calc(100vh-144px)] xl:min-h-0">
+          <div className="h-[640px] min-h-[640px] border-b border-neutral-800 xl:h-[calc(100vh-214px)] xl:min-h-0">
             <div className="flex flex-col items-start gap-0.5 border-b border-neutral-800 px-3 py-1.5 sm:flex-row sm:items-center sm:justify-between">
               <div className="text-sm text-neutral-100">机场天气趋势</div>
               <div className="text-[11px] text-neutral-600">预测、METAR、历史 truth 和湿度同屏对照。</div>
@@ -832,6 +788,7 @@ function App() {
               forecasts={forecasts}
               signals={signals}
               citySeries={citySeries}
+              events={events}
               selectedCity={selectedCity}
               onSelectedCity={setSelectedCity}
               onBackfillHistory={() => historyBackfillMutation.mutate()}
@@ -919,6 +876,68 @@ function App() {
               </div>
             </div>
           )}
+
+          <details className="shrink-0 border-t border-neutral-800 bg-black">
+            <summary className="cursor-pointer select-none px-3 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
+              系统、复盘与风控
+            </summary>
+            <div className="max-h-[48vh] space-y-3 overflow-y-auto border-t border-neutral-800 p-3">
+              <div className="grid grid-cols-2 gap-2 text-[11px]">
+                <StatusTile label="扫描器" value={stats.is_running ? '运行中' : '已停止'} active={stats.is_running} icon={<Activity className="h-3.5 w-3.5" />} />
+                <StatusTile label="数据年龄" value={dataAge(stats.data_age_minutes)} />
+                <StatusTile label="当前信号" value={`${actionable} / ${signals.length}`} tone={actionable > 0 ? 'green' : 'neutral'} />
+                <StatusTile label="实盘状态" value={liveAvailable ? '可用' : '锁定'} tone={liveAvailable ? 'green' : 'amber'} />
+              </div>
+
+              <ReadinessBanner stats={stats} readiness={dataReadiness} />
+
+              <div className="border border-neutral-800 bg-black">
+                <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-2">
+                  <div className="text-sm text-neutral-100">资金曲线</div>
+                  <div className={`tabular-nums text-[11px] ${(stats.total_pnl ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
+                    {money(stats.total_pnl)}
+                  </div>
+                </div>
+                <div className="h-[150px] p-2">
+                  <EquityChart data={equityCurve} initialBankroll={stats.bankroll - stats.total_pnl} />
+                </div>
+              </div>
+
+              <div className="border border-neutral-800 bg-black p-3">
+                <div className="mb-2 flex items-center gap-2">
+                  <BarChart3 className="h-4 w-4 text-cyan-300" />
+                  <div className="text-sm text-neutral-100">温度拟合与数据审计</div>
+                </div>
+                <button
+                  onClick={() => setView('temperature-fit')}
+                  className="w-full border border-cyan-500/30 px-2 py-1.5 text-cyan-300 hover:bg-cyan-500/10"
+                >
+                  打开温度拟合
+                </button>
+              </div>
+
+              <DataReadinessPanel
+                readiness={dataReadiness}
+                contracts={contractsQuery.data}
+                contractStatus={contractStatus}
+                onContractStatus={setContractStatus}
+                verifyingContractId={verifyContractMutation.variables?.contractId}
+                bulkVerifying={bulkVerifyContractMutation.isPending}
+                productionRefresh={productionRefresh}
+                productionRefreshing={productionRefreshMutation.isPending}
+                onProductionRefresh={() => productionRefreshMutation.mutate()}
+                onVerifyContract={(contractId, note) => verifyContractMutation.mutate({ contractId, note })}
+                onVerifyVisibleContracts={(contractIds, note) => bulkVerifyContractMutation.mutate({ contractIds, note })}
+              />
+
+              <ModelDatasetPanel audit={modelDatasetAudit} archiveManifest={forecastArchiveManifest} />
+
+              <div className="border border-neutral-800 bg-black p-3">
+                <div className="mb-2 text-sm text-neutral-100">结算源健康</div>
+                <TruthHealthPanel truth={truthHealth} />
+              </div>
+            </div>
+          </details>
         </aside>
       </main>
     </div>

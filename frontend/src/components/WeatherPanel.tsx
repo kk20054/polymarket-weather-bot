@@ -10,12 +10,13 @@ import {
   YAxis,
 } from 'recharts'
 import { CloudSun, Database, ExternalLink, RefreshCw, Signal, ThermometerSun } from 'lucide-react'
-import type { HistoricalWeatherPoint, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { DashboardEvent, HistoricalWeatherPoint, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
   signals: WeatherSignal[]
   citySeries?: WeatherCitySeries[]
+  events?: DashboardEvent[]
   selectedCity?: string
   onSelectedCity?: (cityKey: string) => void
   onBackfillHistory?: () => void
@@ -27,6 +28,7 @@ interface Props {
 }
 
 type EvidenceStatus = 'fresh' | 'stale' | 'missing'
+type WeatherTab = 'overview' | 'forecast' | 'metar' | 'history' | 'bias' | 'logs' | 'signals'
 
 function fmtTemp(value?: number | null, unit = 'F') {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
@@ -58,6 +60,16 @@ function shortTime(value?: string | null) {
       minute: '2-digit',
       hour12: false,
     })
+  } catch {
+    return value
+  }
+}
+
+function longDate(value?: string | null) {
+  if (!value) return '--'
+  try {
+    const date = new Date(value.includes('T') ? value : `${value}T00:00:00`)
+    return date.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
   } catch {
     return value
   }
@@ -147,6 +159,7 @@ export function WeatherPanel({
   forecasts,
   signals,
   citySeries = [],
+  events = [],
   selectedCity,
   onSelectedCity,
   onBackfillHistory,
@@ -155,6 +168,11 @@ export function WeatherPanel({
 }: Props) {
   const cities = useMemo(() => uniqueCities(citySeries, forecasts), [citySeries, forecasts])
   const [internalSelected, setInternalSelected] = useState(cities[0]?.key ?? '')
+  const [activeTab, setActiveTab] = useState<WeatherTab>('overview')
+  const [selectedDate, setSelectedDate] = useState(() => {
+    if (typeof window === 'undefined') return ''
+    return new URLSearchParams(window.location.search).get('date') ?? ''
+  })
   const selected = selectedCity ?? internalSelected
   const setSelected = (cityKey: string) => {
     setInternalSelected(cityKey)
@@ -192,6 +210,10 @@ export function WeatherPanel({
     point => point.timestamp
   )
   const chartData = useMemo(() => buildChartData(series), [series])
+  const availableDates = useMemo(() => {
+    return [...new Set(chartData.map(row => String(row.date)).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b))
+  }, [chartData])
   const forecastStatus = evidenceStatus(latestForecast?.timestamp)
   const metarStatus = evidenceStatus(latestMetar?.timestamp, 45)
   const historyStatus = latestHistory ? 'fresh' : 'missing'
@@ -202,6 +224,42 @@ export function WeatherPanel({
       ? '研究 truth'
       : 'truth 待补'
 
+  useEffect(() => {
+    const fallbackDate = availableDates[availableDates.length - 1] ?? forecastFallback?.target_date ?? latestForecast?.target_date ?? ''
+    if (!selectedDate && fallbackDate) {
+      setSelectedDate(fallbackDate)
+    } else if (selectedDate && availableDates.length > 0 && !availableDates.includes(selectedDate)) {
+      setSelectedDate(fallbackDate)
+    }
+  }, [availableDates, forecastFallback?.target_date, latestForecast?.target_date, selectedDate])
+
+  const selectedDateIndex = availableDates.indexOf(selectedDate)
+  const selectedDateRow = chartData.find(row => row.date === selectedDate) ?? chartData[chartData.length - 1]
+  const forecastRows = [...(series?.forecast_points ?? series?.points ?? [])]
+    .filter(point => !selectedDate || point.target_date === selectedDate)
+    .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
+    .slice(0, 18)
+  const metarRows = forecastRows
+    .filter(point => point.metar !== null && point.metar !== undefined)
+    .slice(0, 18)
+  const historyRows = [...(series?.history_points ?? [])]
+    .sort((a, b) => String(b.target_date).localeCompare(String(a.target_date)))
+    .slice(0, 18)
+  const eventRows = events
+    .filter(event => {
+      const text = `${event.message ?? ''} ${JSON.stringify(event.data ?? {})}`.toLowerCase()
+      return !cityKey || text.includes(cityKey.toLowerCase()) || text.includes(String(series?.city_name ?? '').toLowerCase()) || /scan|forecast|orderbook|truth|refresh|scanner|weather/i.test(text)
+    })
+    .slice(0, 18)
+
+  useEffect(() => {
+    if (!selectedDate || typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('date') === selectedDate) return
+    params.set('date', selectedDate)
+    window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`)
+  }, [selectedDate])
+
   if (forecasts.length === 0 && citySeries.length === 0 && signals.length === 0) {
     return (
       <div className="flex h-full items-center justify-center p-4 text-center text-[11px] leading-relaxed text-neutral-600">
@@ -211,7 +269,7 @@ export function WeatherPanel({
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(210px,1fr)_auto] gap-2 p-3 text-[11px] text-neutral-400">
+    <div className="grid h-full min-h-0 grid-rows-[auto_auto_auto_minmax(210px,1fr)_auto] gap-2 p-3 text-[11px] text-neutral-400">
       <div className="flex flex-wrap items-center gap-2">
         <select
           value={cityKey}
@@ -226,6 +284,32 @@ export function WeatherPanel({
         <div className="shrink-0 border border-neutral-800 px-2 py-1 text-[10px] text-neutral-400">
           站点 {series?.station_id || '未映射'}
         </div>
+        <div className="inline-flex shrink-0 items-center border border-neutral-800">
+          <button
+            type="button"
+            onClick={() => selectedDateIndex > 0 && setSelectedDate(availableDates[selectedDateIndex - 1])}
+            disabled={selectedDateIndex <= 0}
+            className="px-2 py-1 text-[10px] text-neutral-400 hover:bg-neutral-900 disabled:opacity-30"
+          >
+            前一天
+          </button>
+          <div className="border-x border-neutral-800 px-2 py-1 text-[10px] tabular-nums text-neutral-200">
+            {longDate(selectedDate)}
+          </div>
+          <button
+            type="button"
+            onClick={() => selectedDateIndex >= 0 && selectedDateIndex < availableDates.length - 1 && setSelectedDate(availableDates[selectedDateIndex + 1])}
+            disabled={selectedDateIndex < 0 || selectedDateIndex >= availableDates.length - 1}
+            className="px-2 py-1 text-[10px] text-neutral-400 hover:bg-neutral-900 disabled:opacity-30"
+          >
+            后一天
+          </button>
+        </div>
+        {bestSignal?.event_url && (
+          <a href={bestSignal.event_url} target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-1 border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-300 hover:bg-cyan-500/10">
+            Polymarket <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
         <button
           onClick={onBackfillHistory}
           disabled={backfilling || !onBackfillHistory}
@@ -244,6 +328,25 @@ export function WeatherPanel({
         <Metric icon={<Signal className="h-3.5 w-3.5" />} label="可操作信号" value={`${actionableSignals.length}/${citySignals.length}`} tone={actionableSignals.length > 0 ? 'green' : 'neutral'} sub={bestSignal ? `${bestSignal.bucket_label || bestSignal.threshold_f} · ${(((bestSignal.probability_edge ?? bestSignal.edge) || 0) * 100).toFixed(1)}%` : '暂无'} />
       </div>
 
+      <div className="flex flex-wrap items-center justify-between gap-2 border border-neutral-800 bg-black px-2 py-1.5">
+        <div className="flex flex-wrap gap-1" role="tablist" aria-label="天气证据标签">
+          <TabButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')}>总览</TabButton>
+          <TabButton active={activeTab === 'forecast'} onClick={() => setActiveTab('forecast')}>预报</TabButton>
+          <TabButton active={activeTab === 'metar'} onClick={() => setActiveTab('metar')}>METAR</TabButton>
+          <TabButton active={activeTab === 'history'} onClick={() => setActiveTab('history')}>历史观测</TabButton>
+          <TabButton active={activeTab === 'bias'} onClick={() => setActiveTab('bias')}>偏差统计</TabButton>
+          <TabButton active={activeTab === 'logs'} onClick={() => setActiveTab('logs')}>抓取日志</TabButton>
+          <TabButton active={activeTab === 'signals'} onClick={() => setActiveTab('signals')}>市场信号</TabButton>
+        </div>
+        <div className="flex flex-wrap gap-1 text-[10px] text-neutral-500">
+          <span className="border border-neutral-800 px-1.5 py-0.5">预报 {forecastRows.length}</span>
+          <span className="border border-neutral-800 px-1.5 py-0.5">METAR {metarRows.length}</span>
+          <span className="border border-neutral-800 px-1.5 py-0.5">历史 {historyRows.length}</span>
+          <span className="border border-neutral-800 px-1.5 py-0.5">信号 {citySignals.length}</span>
+          <span className="border border-neutral-800 px-1.5 py-0.5">日志 {eventRows.length}</span>
+        </div>
+      </div>
+
       <div className="flex min-h-0 flex-col border border-neutral-800 bg-black">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
           <div className="flex flex-wrap items-center gap-1.5">
@@ -260,7 +363,8 @@ export function WeatherPanel({
           </details>
         </div>
 
-        {chartData.length > 0 ? (
+        {activeTab === 'overview' ? (
+          chartData.length > 0 ? (
           <div
             className="min-h-0 flex-1 p-2"
             role="img"
@@ -299,6 +403,84 @@ export function WeatherPanel({
           <div className="flex h-full min-h-[180px] items-center justify-center p-4 text-center text-neutral-600">
             该城市还没有历史或预测曲线。先补历史数据，再启动扫描器获取预测线。
           </div>
+          )
+        ) : activeTab === 'forecast' ? (
+          <EvidenceTable
+            empty="该日期暂无预报快照"
+            columns={['更新时间', '目标日', '最佳', 'ECMWF', 'HRRR', 'METAR', '湿度', '来源']}
+            rows={forecastRows.map(point => [
+              shortTime(point.timestamp),
+              longDate(point.target_date),
+              fmtTemp(point.best ?? point.ensemble_mean, unit),
+              fmtTemp(point.ecmwf, unit),
+              fmtTemp(point.hrrr, unit),
+              fmtTemp(point.metar, unit),
+              fmtPct(point.humidity),
+              point.source || '--',
+            ])}
+          />
+        ) : activeTab === 'metar' ? (
+          <EvidenceTable
+            empty="该日期暂无 METAR 快照"
+            columns={['更新时间', '目标日', 'METAR', '当前 best', 'ECMWF', 'HRRR', '湿度', 'source']}
+            rows={metarRows.map(point => [
+              shortTime(point.timestamp),
+              longDate(point.target_date),
+              fmtTemp(point.metar, unit),
+              fmtTemp(point.best ?? point.ensemble_mean, unit),
+              fmtTemp(point.ecmwf, unit),
+              fmtTemp(point.hrrr, unit),
+              fmtPct(point.humidity),
+              point.source || '--',
+            ])}
+          />
+        ) : activeTab === 'history' ? (
+          <EvidenceTable
+            empty="暂无历史观测"
+            columns={['日期', '实际最高', '湿度', 'provider', 'truth 层级', '站点']}
+            rows={historyRows.map(point => [
+              longDate(point.target_date),
+              fmtTemp(point.actual_high, point.unit || unit),
+              fmtPct(point.humidity_mean),
+              point.provider || '--',
+              point.calibration_tier || '--',
+              point.station_id || series?.station_id || '--',
+            ])}
+          />
+        ) : activeTab === 'bias' ? (
+          <div className="grid min-h-0 flex-1 grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2 overflow-y-auto p-3">
+            <MetricCard label="选中日期" value={longDate(selectedDate)} sub={`实际 ${fmtTemp(selectedDateRow?.actual_high, unit)} · 预测 ${fmtTemp(selectedDateRow?.forecast_high, unit)}`} />
+            <MetricCard label="预测误差" value={selectedDateRow?.actual_high !== null && selectedDateRow?.actual_high !== undefined && selectedDateRow?.forecast_high !== null && selectedDateRow?.forecast_high !== undefined ? fmtTemp(Number(selectedDateRow.actual_high) - Number(selectedDateRow.forecast_high), unit) : '--'} sub="实际最高 - 预测最高" />
+            <MetricCard label="历史样本" value={`${series?.history_count ?? historyRows.length}`} sub={latestHistory?.provider || truthTier} />
+            <MetricCard label="预报样本" value={`${series?.forecast_count ?? forecastRows.length}`} sub={latestForecast?.source || 'forecast'} />
+            <MetricCard label="信号数量" value={`${citySignals.length}`} sub={`可操作 ${actionableSignals.length}`} />
+            <MetricCard label="数据状态" value={forecastStatus === 'fresh' ? '新鲜' : forecastStatus === 'stale' ? '过期' : '缺失'} sub={`METAR ${metarStatus} · 历史 ${historyStatus}`} />
+          </div>
+        ) : activeTab === 'logs' ? (
+          <EvidenceTable
+            empty="暂无抓取或扫描日志"
+            columns={['时间', '类型', '消息']}
+            rows={eventRows.map(event => [
+              shortTime(event.timestamp),
+              event.type || '--',
+              event.message || '--',
+            ])}
+          />
+        ) : (
+          <EvidenceTable
+            empty="该城市暂无市场信号"
+            columns={['日期', '温度桶', '价格', '模型概率', 'edge', '状态', '链接']}
+            rows={citySignals.slice(0, 18).map(signal => [
+              longDate(signal.target_date),
+              signal.bucket_label || String(signal.threshold_f),
+              signal.limit_price !== undefined && signal.limit_price !== null ? `$${Number(signal.limit_price).toFixed(3)}` : '--',
+              `${((signal.calibrated_probability ?? signal.model_probability ?? 0) * 100).toFixed(1)}%`,
+              `${((signal.probability_edge ?? signal.edge ?? 0) * 100).toFixed(1)}%`,
+              signal.actionable ? 'BUY' : signal.status || 'watch',
+              signal.event_url ? 'Polymarket' : '--',
+            ])}
+            links={citySignals.slice(0, 18).map(signal => signal.event_url)}
+          />
         )}
       </div>
 
@@ -327,6 +509,82 @@ export function WeatherPanel({
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={`border px-2 py-1 text-[10px] transition ${
+        active
+          ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200'
+          : 'border-neutral-800 text-neutral-500 hover:border-neutral-700 hover:text-neutral-300'
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+function EvidenceTable({
+  columns,
+  rows,
+  empty,
+  links,
+}: {
+  columns: string[]
+  rows: string[][]
+  empty: string
+  links?: Array<string | undefined>
+}) {
+  if (rows.length === 0) {
+    return <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-neutral-600">{empty}</div>
+  }
+
+  return (
+    <div className="min-h-0 flex-1 overflow-auto">
+      <table className="min-w-full border-collapse text-left text-[10px]">
+        <thead className="sticky top-0 bg-black text-neutral-500">
+          <tr>
+            {columns.map(column => (
+              <th key={column} className="border-b border-neutral-800 px-2 py-1 font-medium">{column}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={`${rowIndex}-${row.join('|')}`} className="border-b border-neutral-900 hover:bg-neutral-950">
+              {row.map((cell, cellIndex) => {
+                const href = cellIndex === row.length - 1 ? links?.[rowIndex] : undefined
+                return (
+                  <td key={`${rowIndex}-${cellIndex}`} className="whitespace-nowrap px-2 py-1 text-neutral-300">
+                    {href ? (
+                      <a href={href} target="_blank" rel="noreferrer" className="text-cyan-300 hover:text-cyan-100">
+                        {cell}
+                      </a>
+                    ) : cell}
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function MetricCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="border border-neutral-800 bg-neutral-950/40 p-3">
+      <div className="text-[10px] text-neutral-500">{label}</div>
+      <div className="mt-1 text-lg tabular-nums text-neutral-100">{value}</div>
+      {sub && <div className="mt-1 truncate text-[10px] text-neutral-600" title={sub}>{sub}</div>}
     </div>
   )
 }

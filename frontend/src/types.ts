@@ -803,6 +803,15 @@ export interface DashboardData {
   weather_signals: WeatherSignal[]
   weather_forecasts: WeatherForecast[]
   weather_city_series?: WeatherCitySeries[]
+  events?: DashboardEvent[]
+}
+
+export interface DashboardEvent {
+  id?: number
+  timestamp?: string
+  type?: string
+  message?: string
+  data?: unknown
 }
 
 export interface V3Summary {
