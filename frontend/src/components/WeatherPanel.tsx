@@ -16,6 +16,8 @@ interface Props {
   forecasts: WeatherForecast[]
   signals: WeatherSignal[]
   citySeries?: WeatherCitySeries[]
+  selectedCity?: string
+  onSelectedCity?: (cityKey: string) => void
   onBackfillHistory?: () => void
   backfilling?: boolean
   backfillResult?: {
@@ -145,12 +147,19 @@ export function WeatherPanel({
   forecasts,
   signals,
   citySeries = [],
+  selectedCity,
+  onSelectedCity,
   onBackfillHistory,
   backfilling = false,
   backfillResult,
 }: Props) {
   const cities = useMemo(() => uniqueCities(citySeries, forecasts), [citySeries, forecasts])
-  const [selected, setSelected] = useState(cities[0]?.key ?? '')
+  const [internalSelected, setInternalSelected] = useState(cities[0]?.key ?? '')
+  const selected = selectedCity ?? internalSelected
+  const setSelected = (cityKey: string) => {
+    setInternalSelected(cityKey)
+    onSelectedCity?.(cityKey)
+  }
 
   useEffect(() => {
     if (!selected && cities[0]?.key) setSelected(cities[0].key)

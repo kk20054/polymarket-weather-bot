@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
@@ -39,7 +39,6 @@ import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
 import type { AutoSimulationStatus, BotStats, DataReadiness } from './types'
 
-const GlobeView = lazy(() => import('./components/GlobeView').then(module => ({ default: module.GlobeView })))
 type TradeMode = 'paper' | 'live'
 
 const EMPTY_STATS: BotStats = {
@@ -375,6 +374,7 @@ function App() {
   const [view, setView] = useState<'dashboard' | 'temperature-fit'>('dashboard')
   const [tradeMode, setTradeMode] = useState<TradeMode>('paper')
   const [activityView, setActivityView] = useState<'signals' | 'trades'>('signals')
+  const [selectedCity, setSelectedCity] = useState('')
   const [simBalance, setSimBalance] = useState('40')
   const [clearMarks, setClearMarks] = useState(false)
   const [contractStatus, setContractStatus] = useState('mature-auto')
@@ -496,6 +496,62 @@ function App() {
     last_result: null,
     last_error: null,
   }
+  const cityOptions = useMemo(() => {
+    const rows = new Map<string, {
+      key: string
+      name: string
+      station?: string
+      unit: string
+      latest?: number | null
+      signals: number
+      actionable: number
+    }>()
+
+    for (const row of citySeries) {
+      rows.set(row.city_key, {
+        key: row.city_key,
+        name: row.city_name,
+        station: row.station_id,
+        unit: row.unit || 'F',
+        latest: row.latest_best ?? null,
+        signals: 0,
+        actionable: 0,
+      })
+    }
+
+    for (const row of forecasts) {
+      if (!rows.has(row.city_key)) {
+        rows.set(row.city_key, {
+          key: row.city_key,
+          name: row.city_name,
+          unit: 'F',
+          latest: row.mean_high,
+          signals: 0,
+          actionable: 0,
+        })
+      }
+    }
+
+    for (const signal of signals) {
+      const row = rows.get(signal.city_key) ?? {
+        key: signal.city_key,
+        name: signal.city_name,
+        unit: 'F',
+        latest: null,
+        signals: 0,
+        actionable: 0,
+      }
+      row.signals += 1
+      if (signal.actionable) row.actionable += 1
+      rows.set(signal.city_key, row)
+    }
+
+    return [...rows.values()].sort((a, b) => {
+      if (b.actionable !== a.actionable) return b.actionable - a.actionable
+      if (b.signals !== a.signals) return b.signals - a.signals
+      return a.name.localeCompare(b.name)
+    })
+  }, [citySeries, forecasts, signals])
 
   useEffect(() => {
     if (!balanceInitRef.current && data?.stats?.bankroll !== undefined) {
@@ -509,6 +565,16 @@ function App() {
       setTradeMode('paper')
     }
   }, [liveAvailable, tradeMode])
+
+  useEffect(() => {
+    if (!selectedCity && cityOptions[0]?.key) {
+      setSelectedCity(cityOptions[0].key)
+    } else if (selectedCity && cityOptions.length > 0 && !cityOptions.some(city => city.key === selectedCity)) {
+      setSelectedCity(cityOptions[0].key)
+    }
+  }, [cityOptions, selectedCity])
+
+  const selectedCityMeta = cityOptions.find(city => city.key === selectedCity)
 
   if (view === 'temperature-fit') {
     return (
@@ -551,12 +617,28 @@ function App() {
     <div className="flex min-h-screen flex-col bg-black text-neutral-200 xl:h-screen xl:overflow-hidden">
       <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-neutral-800 px-3 py-2">
         <div className="min-w-[190px] shrink-0">
-          <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot 生产化看板</h1>
-          <div className="text-[11px] text-neutral-600">模拟优先；实盘未达标前不会自动下单。</div>
+          <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot 城市天气交易台</h1>
+          <div className="text-[11px] text-neutral-600">先看城市证据，再看信号和执行；实盘默认锁定。</div>
         </div>
         <div className="order-3 min-w-0 basis-full overflow-x-auto xl:order-none xl:basis-auto xl:flex-1">
           <StatsCards stats={stats} />
         </div>
+        <button
+          onClick={() => startMutation.mutate()}
+          disabled={stats.is_running || startMutation.isPending}
+          className="inline-flex items-center gap-1 border border-green-500/30 px-2 py-1 text-[11px] text-green-300 hover:bg-green-500/10 disabled:opacity-40"
+        >
+          <PlayCircle className="h-3.5 w-3.5" />
+          启动扫描
+        </button>
+        <button
+          onClick={() => stopMutation.mutate()}
+          disabled={!stats.is_running || stopMutation.isPending}
+          className="inline-flex items-center gap-1 border border-red-500/30 px-2 py-1 text-[11px] text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+        >
+          <PauseCircle className="h-3.5 w-3.5" />
+          停止
+        </button>
         <button
           onClick={() => refetch()}
           className="inline-flex items-center gap-1 border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-900"
@@ -566,8 +648,52 @@ function App() {
         </button>
       </header>
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[320px_minmax(500px,1fr)_390px] xl:overflow-hidden">
-        <aside className="order-3 space-y-3 border-t border-neutral-800 bg-neutral-950/40 p-3 xl:order-1 xl:min-h-0 xl:overflow-y-auto xl:border-r xl:border-t-0">
+      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[260px_minmax(640px,1fr)_420px] xl:overflow-hidden">
+        <aside className="order-1 space-y-3 border-b border-neutral-800 bg-neutral-950/40 p-3 xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
+          <div>
+            <div className="mb-2 flex items-center justify-between">
+              <div>
+                <div className="text-sm font-medium text-neutral-100">城市索引</div>
+                <div className="text-[10px] text-neutral-600">优先显示有行动信号的城市</div>
+              </div>
+              <span className="border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">{cityOptions.length}</span>
+            </div>
+            <div className="space-y-1">
+              {cityOptions.map(city => (
+                <button
+                  key={city.key}
+                  type="button"
+                  onClick={() => setSelectedCity(city.key)}
+                  className={`w-full border px-2 py-2 text-left transition ${
+                    selectedCity === city.key
+                      ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
+                      : 'border-neutral-800 bg-black/40 text-neutral-300 hover:border-neutral-700'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-xs font-medium">{city.name}</div>
+                      <div className="truncate text-[10px] text-neutral-600">{city.station || 'station 未映射'}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="tabular-nums text-[11px] text-neutral-200">
+                        {city.latest === null || city.latest === undefined ? '--' : `${Number(city.latest).toFixed(1)}°${city.unit}`}
+                      </div>
+                      <div className={`text-[10px] ${city.actionable > 0 ? 'text-green-300' : 'text-neutral-600'}`}>
+                        {city.actionable}/{city.signals}
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <details className="border border-neutral-800 bg-black">
+            <summary className="cursor-pointer select-none px-3 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
+              系统健康与高级工具
+            </summary>
+            <div className="space-y-3 border-t border-neutral-800 p-3">
           <div className="grid grid-cols-2 gap-2 text-[11px]">
             <StatusTile label="扫描器" value={stats.is_running ? '运行中' : '已停止'} active={stats.is_running} icon={<Activity className="h-3.5 w-3.5" />} />
             <StatusTile label="数据年龄" value={dataAge(stats.data_age_minutes)} />
@@ -672,22 +798,32 @@ function App() {
             <div className="mb-2 text-sm text-neutral-100">结算源健康</div>
             <TruthHealthPanel truth={truthHealth} />
           </div>
+            </div>
+          </details>
         </aside>
 
-        <section className="order-1 min-h-0 overflow-y-auto xl:order-2">
-          <div className="relative h-[300px] min-h-[300px] border-b border-neutral-800 2xl:h-[340px]">
-            <Suspense fallback={<div className="flex h-full items-center justify-center text-neutral-600">加载地球视图...</div>}>
-              <GlobeView forecasts={forecasts} signals={signals} />
-            </Suspense>
-            <div className="absolute left-3 top-3 border border-neutral-800 bg-black/80 px-2 py-1 text-[11px]">
-              <span className="text-neutral-500">可操作信号</span>
-              <span className="ml-1 tabular-nums text-green-300">{actionable}</span>
-              <span className="ml-2 text-neutral-500">最新扫描</span>
-              <span className="ml-1 tabular-nums text-neutral-300">{timeText(stats.last_run)}</span>
+        <section className="order-2 min-h-0 overflow-y-auto xl:overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 px-3 py-2">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-medium text-neutral-100">
+                {selectedCityMeta?.name ?? '城市天气证据'} · 最高温判断
+              </div>
+              <div className="text-[11px] text-neutral-600">
+                预报、METAR、历史观测和湿度同屏对照；说明收进标签，不挤占主图。
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-1.5 text-[10px]">
+              <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-400">数据 {dataAge(stats.data_age_minutes)}</span>
+              <span className={`border px-1.5 py-0.5 ${stats.is_running ? 'border-green-500/30 text-green-300' : 'border-neutral-800 text-neutral-500'}`}>
+                {stats.is_running ? '自动扫描中' : '扫描已停止'}
+              </span>
+              <span className={`border px-1.5 py-0.5 ${autoSimulation.enabled ? 'border-cyan-500/30 text-cyan-300' : 'border-neutral-800 text-neutral-500'}`}>
+                {autoSimulation.enabled ? '自动模拟中' : '自动模拟关闭'}
+              </span>
             </div>
           </div>
 
-          <div className="h-[520px] min-h-[520px] border-b border-neutral-800 xl:h-[390px] xl:min-h-[390px] 2xl:h-[430px] 2xl:min-h-[430px]">
+          <div className="h-[640px] min-h-[640px] border-b border-neutral-800 xl:h-[calc(100vh-144px)] xl:min-h-0">
             <div className="flex flex-col items-start gap-0.5 border-b border-neutral-800 px-3 py-1.5 sm:flex-row sm:items-center sm:justify-between">
               <div className="text-sm text-neutral-100">机场天气趋势</div>
               <div className="text-[11px] text-neutral-600">预测、METAR、历史 truth 和湿度同屏对照。</div>
@@ -696,6 +832,8 @@ function App() {
               forecasts={forecasts}
               signals={signals}
               citySeries={citySeries}
+              selectedCity={selectedCity}
+              onSelectedCity={setSelectedCity}
               onBackfillHistory={() => historyBackfillMutation.mutate()}
               backfilling={historyBackfillMutation.isPending}
               backfillResult={historyBackfillMutation.data}
@@ -703,7 +841,29 @@ function App() {
           </div>
         </section>
 
-        <aside className="order-2 flex h-[760px] min-h-0 flex-col border-t border-neutral-800 xl:order-3 xl:h-auto xl:border-l xl:border-t-0">
+        <aside className="order-3 flex h-[900px] min-h-0 flex-col border-t border-neutral-800 xl:h-auto xl:border-l xl:border-t-0">
+          <div className="space-y-3 border-b border-neutral-800 p-3">
+            <TradeModeSwitch mode={tradeMode} liveAvailable={liveAvailable} onMode={setTradeMode} />
+            <SimulationCard
+              stats={stats}
+              value={simBalance}
+              clearMarks={clearMarks}
+              autoSimulation={autoSimulation}
+              onValue={setSimBalance}
+              onClearMarks={setClearMarks}
+              onReset={() => {
+                const parsed = Number(simBalance)
+                if (Number.isFinite(parsed) && parsed >= 0) {
+                  resetSimulationMutation.mutate({ balance: parsed, clear: clearMarks })
+                }
+              }}
+              onSettle={() => settleMutation.mutate()}
+              onToggleAuto={() => autoSimulationMutation.mutate(!autoSimulation.enabled)}
+              resetting={resetSimulationMutation.isPending}
+              settling={settleMutation.isPending}
+              autoPending={autoSimulationMutation.isPending}
+            />
+          </div>
           <div className="grid grid-cols-2 border-b border-neutral-800" role="tablist" aria-label="行动与交易记录">
             <button
               type="button"
