@@ -69,6 +69,161 @@ def select_orderbook_backfill_markets(
     ).fetchall()
 
 
+def readiness_stage(readiness: dict, key: str) -> dict | None:
+    return next((stage for stage in readiness.get("stages", []) if stage.get("key") == key), None)
+
+
+def run_forecast_backfill(cities_arg: str = "", days_arg: int = 4) -> dict:
+    from bot_v2 import LOCATIONS, take_forecast_snapshot, target_dates_for_city
+
+    requested = {item.strip() for item in cities_arg.split(",") if item.strip()}
+    cities = [city for city in LOCATIONS if not requested or city in requested]
+    unknown = sorted(requested - set(LOCATIONS))
+    days = max(1, min(int(days_arg or 4), 7))
+    results = []
+    for city in cities:
+        dates = target_dates_for_city(city, days)
+        try:
+            snapshots = take_forecast_snapshot(city, dates)
+            results.append({
+                "city": city,
+                "dates": dates,
+                "stored_dates": sum(1 for value in snapshots.values() if value.get("best") is not None),
+                "ok": True,
+            })
+        except Exception as exc:
+            results.append({"city": city, "dates": dates, "stored_dates": 0, "ok": False, "error": str(exc)})
+        time.sleep(0.2)
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    return {
+        "cities": len(cities),
+        "unknown_cities": unknown,
+        "days": days,
+        "ok": sum(1 for row in results if row["ok"]),
+        "failed": sum(1 for row in results if not row["ok"]),
+        "results": results,
+        "forecast_stage": readiness_stage(readiness, "forecast_runs"),
+    }
+
+
+def run_orderbook_backfill(limit_arg: int = 50, start_date_arg: str = "", end_date_arg: str = "") -> dict:
+    from .polymarket import PolymarketDataClient
+
+    limit = max(1, min(int(limit_arg or 50), 500))
+    start_date = start_date_arg or default_orderbook_start_date()
+    end_date = end_date_arg or ""
+    with connect() as conn:
+        rows = select_orderbook_backfill_markets(
+            conn,
+            limit=limit,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    client = PolymarketDataClient()
+    results = []
+    for row in rows:
+        market_id = str(row["market_id"])
+        target_date = str(row["latest_target_date"] or "")
+        signal_count = int(row["signal_count"] or 0)
+        try:
+            quote = client.quote(market_id)
+            results.append({
+                "market_id": market_id,
+                "target_date": target_date,
+                "signal_count": signal_count,
+                "ok": quote.book_source == "clob",
+                "source": quote.book_source,
+                "best_bid": quote.best_bid,
+                "best_ask": quote.best_ask,
+                "spread": quote.spread,
+                "bid_levels": len(quote.bids),
+                "ask_levels": len(quote.asks),
+                "age_seconds": quote.quote_age_seconds,
+            })
+        except Exception as exc:
+            results.append({
+                "market_id": market_id,
+                "target_date": target_date,
+                "signal_count": signal_count,
+                "ok": False,
+                "error": str(exc),
+            })
+        time.sleep(0.05)
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    return {
+        "selection_mode": "current_or_future_signal_markets",
+        "start_date": start_date,
+        "end_date": end_date or None,
+        "requested": len(rows),
+        "ok": sum(1 for row in results if row["ok"]),
+        "failed": sum(1 for row in results if not row["ok"]),
+        "results": results,
+        "orderbook_stage": readiness_stage(readiness, "orderbooks"),
+    }
+
+
+def run_legacy_signal_scan() -> dict:
+    from bot_v2 import scan_and_update
+
+    new_pos, closed, resolved = scan_and_update()
+    migrated = migrate_legacy_signals()
+    return {
+        "ok": True,
+        "new_positions": new_pos,
+        "closed_positions": closed,
+        "resolved_positions": resolved,
+        "migrated_signals": migrated,
+    }
+
+
+def _stage_result(name: str, fn) -> dict:
+    try:
+        return {"name": name, "ok": True, "payload": fn()}
+    except Exception as exc:
+        return {"name": name, "ok": False, "error": str(exc)}
+
+
+def run_production_refresh(
+    *,
+    cities: str = "",
+    days: int = 4,
+    limit: int = 50,
+    start_date: str = "",
+    end_date: str = "",
+    scan_signals: bool = True,
+) -> dict:
+    init_v3_db()
+    stages = []
+    stages.append(_stage_result("contracts_sync", sync_settlement_contracts))
+    stages.append(_stage_result("forecast_backfill", lambda: run_forecast_backfill(cities, days)))
+    if scan_signals:
+        stages.append(_stage_result("signal_scan", run_legacy_signal_scan))
+    else:
+        stages.append({"name": "signal_scan", "ok": True, "skipped": True, "reason": "skip_signal_scan"})
+        stages.append(_stage_result("signal_migration", migrate_legacy_signals))
+    stages.append(_stage_result("orderbook_backfill", lambda: run_orderbook_backfill(limit, start_date, end_date)))
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    failed = [stage for stage in stages if not stage.get("ok")]
+    return {
+        "refresh_version": "production-refresh-v1",
+        "ok": not failed,
+        "failed_stages": [stage["name"] for stage in failed],
+        "scan_signals": scan_signals,
+        "stages": stages,
+        "readiness": {
+            "status": readiness.get("status"),
+            "score": readiness.get("score"),
+            "live_allowed": readiness.get("live_allowed"),
+            "production_phase": readiness.get("production_phase"),
+            "blocked_keys": (readiness.get("production_phase") or {}).get("blocked_keys", []),
+            "next_actions": readiness.get("next_actions", [])[:5],
+        },
+    }
+
+
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -80,6 +235,7 @@ def main() -> None:
             "migrate",
             "summary",
             "notify-daily",
+            "production-refresh",
             "data-readiness",
             "model-dataset-audit",
             "forecast-backfill",
@@ -113,6 +269,7 @@ def main() -> None:
     parser.add_argument("--unverify", action="store_true", help="Clear manual verification instead of setting it")
     parser.add_argument("--apply", action="store_true", help="Apply a bulk write; without it bulk commands are dry-run")
     parser.add_argument("--mature-only", action="store_true", help="Only act on contracts whose local settlement day has ended")
+    parser.add_argument("--skip-signal-scan", action="store_true", help="Skip the legacy signal scan during production-refresh")
     args = parser.parse_args()
 
     if args.command == "init-db":
@@ -128,6 +285,16 @@ def main() -> None:
         summary = dashboard_summary()
         sent = FeishuNotifier().daily_summary(summary)
         print(json.dumps({"sent": sent, "summary": summary}, ensure_ascii=False, indent=2))
+    elif args.command == "production-refresh":
+        payload = run_production_refresh(
+            cities=args.cities,
+            days=args.days,
+            limit=args.limit,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            scan_signals=not args.skip_signal_scan,
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "data-readiness":
         payload = build_data_readiness()
         persist_data_readiness(payload)
@@ -136,40 +303,7 @@ def main() -> None:
         payload = build_model_dataset_audit(min_samples=args.limit)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "forecast-backfill":
-        from bot_v2 import LOCATIONS, take_forecast_snapshot, target_dates_for_city
-
-        requested = {item.strip() for item in args.cities.split(",") if item.strip()}
-        cities = [city for city in LOCATIONS if not requested or city in requested]
-        unknown = sorted(requested - set(LOCATIONS))
-        days = max(1, min(int(args.days or 4), 7))
-        results = []
-        for city in cities:
-            dates = target_dates_for_city(city, days)
-            try:
-                snapshots = take_forecast_snapshot(city, dates)
-                results.append({
-                    "city": city,
-                    "dates": dates,
-                    "stored_dates": sum(1 for value in snapshots.values() if value.get("best") is not None),
-                    "ok": True,
-                })
-            except Exception as exc:
-                results.append({"city": city, "dates": dates, "stored_dates": 0, "ok": False, "error": str(exc)})
-            time.sleep(0.2)
-        readiness = build_data_readiness()
-        persist_data_readiness(readiness)
-        print(json.dumps({
-            "cities": len(cities),
-            "unknown_cities": unknown,
-            "days": days,
-            "ok": sum(1 for row in results if row["ok"]),
-            "failed": sum(1 for row in results if not row["ok"]),
-            "results": results,
-            "forecast_stage": next(
-                (stage for stage in readiness["stages"] if stage["key"] == "forecast_runs"),
-                None,
-            ),
-        }, ensure_ascii=False, indent=2))
+        print(json.dumps(run_forecast_backfill(args.cities, args.days), ensure_ascii=False, indent=2))
     elif args.command == "forecast-archive-import":
         if not args.archive_path:
             raise SystemExit("--archive-path is required")
@@ -199,63 +333,7 @@ def main() -> None:
             payload["output_path"] = args.output_path
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "orderbook-backfill":
-        from .polymarket import PolymarketDataClient
-
-        limit = max(1, min(int(args.limit or 50), 500))
-        start_date = args.start_date or default_orderbook_start_date()
-        end_date = args.end_date or ""
-        with connect() as conn:
-            rows = select_orderbook_backfill_markets(
-                conn,
-                limit=limit,
-                start_date=start_date,
-                end_date=end_date,
-            )
-        client = PolymarketDataClient()
-        results = []
-        for row in rows:
-            market_id = str(row["market_id"])
-            target_date = str(row["latest_target_date"] or "")
-            signal_count = int(row["signal_count"] or 0)
-            try:
-                quote = client.quote(market_id)
-                results.append({
-                    "market_id": market_id,
-                    "target_date": target_date,
-                    "signal_count": signal_count,
-                    "ok": quote.book_source == "clob",
-                    "source": quote.book_source,
-                    "best_bid": quote.best_bid,
-                    "best_ask": quote.best_ask,
-                    "spread": quote.spread,
-                    "bid_levels": len(quote.bids),
-                    "ask_levels": len(quote.asks),
-                    "age_seconds": quote.quote_age_seconds,
-                })
-            except Exception as exc:
-                results.append({
-                    "market_id": market_id,
-                    "target_date": target_date,
-                    "signal_count": signal_count,
-                    "ok": False,
-                    "error": str(exc),
-                })
-            time.sleep(0.05)
-        readiness = build_data_readiness()
-        persist_data_readiness(readiness)
-        print(json.dumps({
-            "selection_mode": "current_or_future_signal_markets",
-            "start_date": start_date,
-            "end_date": end_date or None,
-            "requested": len(rows),
-            "ok": sum(1 for row in results if row["ok"]),
-            "failed": sum(1 for row in results if not row["ok"]),
-            "results": results,
-            "orderbook_stage": next(
-                (stage for stage in readiness["stages"] if stage["key"] == "orderbooks"),
-                None,
-            ),
-        }, ensure_ascii=False, indent=2))
+        print(json.dumps(run_orderbook_backfill(args.limit, args.start_date, args.end_date), ensure_ascii=False, indent=2))
     elif args.command == "contracts-sync":
         payload = sync_settlement_contracts()
         readiness = build_data_readiness()

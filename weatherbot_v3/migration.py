@@ -98,12 +98,23 @@ def sync_settlement_contracts() -> dict[str, Any]:
                 contracts[str(contract["event_slug"])] = contract
     upsert_market_rules(rules, prune_missing=True)
     upsert_settlement_contracts(list(contracts.values()))
+    with connect() as conn:
+        persisted = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS settlement_contracts,
+                SUM(CASE WHEN auto_verified_at IS NOT NULL AND auto_verified_at != '' THEN 1 ELSE 0 END) AS auto_verified_contracts,
+                SUM(CASE WHEN manual_verified_at IS NOT NULL AND manual_verified_at != '' THEN 1 ELSE 0 END) AS manual_verified_contracts
+            FROM settlement_contracts
+            """
+        ).fetchone()
     return {
         "market_files": files,
         "market_rules": len(rules),
-        "settlement_contracts": len(contracts),
-        "auto_verified_contracts": sum(1 for item in contracts.values() if item.get("auto_verified_at")),
-        "manual_verified_contracts": sum(1 for item in contracts.values() if item.get("manual_verified_at")),
+        "parsed_settlement_contracts": len(contracts),
+        "settlement_contracts": int(persisted["settlement_contracts"] or 0),
+        "auto_verified_contracts": int(persisted["auto_verified_contracts"] or 0),
+        "manual_verified_contracts": int(persisted["manual_verified_contracts"] or 0),
     }
 
 

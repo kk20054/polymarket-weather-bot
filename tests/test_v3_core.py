@@ -17,7 +17,7 @@ from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from weatherbot_v3.cli import default_orderbook_start_date, select_orderbook_backfill_markets
+from weatherbot_v3.cli import default_orderbook_start_date, run_production_refresh, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timezone
@@ -226,6 +226,54 @@ class V3CoreTests(unittest.TestCase):
     def test_orderbook_backfill_default_start_keeps_global_settlement_window(self):
         now = datetime(2026, 6, 28, 0, 30, tzinfo=timezone.utc)
         self.assertEqual(default_orderbook_start_date(now), "2026-06-27")
+
+    def test_production_refresh_summarizes_pipeline_without_signal_scan(self):
+        db_path = test_db_path("production_refresh")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        readiness = {
+            "status": "blocked",
+            "score": 0.5,
+            "live_allowed": False,
+            "production_phase": {
+                "id": "phase1_5",
+                "blocked_keys": ["settlement_contracts", "orderbooks"],
+            },
+            "next_actions": [{"key": "refresh_clob_orderbooks"}],
+        }
+        with (
+            patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False),
+            patch("weatherbot_v3.cli.sync_settlement_contracts", return_value={"settlement_contracts": 2}),
+            patch("weatherbot_v3.cli.run_forecast_backfill", return_value={"ok": 1, "failed": 0}) as forecast,
+            patch("weatherbot_v3.cli.run_legacy_signal_scan") as signal_scan,
+            patch("weatherbot_v3.cli.migrate_legacy_signals", return_value={"imported": 3, "skipped": 0}) as migrate,
+            patch("weatherbot_v3.cli.run_orderbook_backfill", return_value={"requested": 2, "ok": 1, "failed": 1}) as orderbooks,
+            patch("weatherbot_v3.cli.build_data_readiness", return_value=readiness),
+            patch("weatherbot_v3.cli.persist_data_readiness") as persist,
+        ):
+            payload = run_production_refresh(
+                cities="nyc",
+                days=2,
+                limit=5,
+                start_date="2026-06-27",
+                scan_signals=False,
+            )
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["scan_signals"])
+        self.assertEqual(payload["readiness"]["status"], "blocked")
+        self.assertEqual(payload["readiness"]["blocked_keys"], ["settlement_contracts", "orderbooks"])
+        self.assertEqual([stage["name"] for stage in payload["stages"]], [
+            "contracts_sync",
+            "forecast_backfill",
+            "signal_scan",
+            "signal_migration",
+            "orderbook_backfill",
+        ])
+        self.assertTrue(payload["stages"][2]["skipped"])
+        forecast.assert_called_once_with("nyc", 2)
+        signal_scan.assert_not_called()
+        migrate.assert_called_once()
+        orderbooks.assert_called_once_with(5, "2026-06-27", "")
+        persist.assert_called_once_with(readiness)
 
     def test_ai_disabled_default_allows_quant_flow(self):
         db_path = test_db_path("ai_disabled")
