@@ -18,7 +18,7 @@ from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import default_orderbook_start_date, run_production_refresh, select_orderbook_backfill_markets
-from dashboard_server import AutoSimulationUpdate, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, update_auto_simulation
+from dashboard_server import AutoSimulationUpdate, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, production_refresh, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timezone
 
@@ -274,6 +274,41 @@ class V3CoreTests(unittest.TestCase):
         migrate.assert_called_once()
         orderbooks.assert_called_once_with(5, "2026-06-27", "")
         persist.assert_called_once_with(readiness)
+
+    def test_dashboard_production_refresh_endpoint_persists_result(self):
+        state_path = TEST_DB_DIR / "production-refresh-state.json"
+        state_path.unlink(missing_ok=True)
+        self.addCleanup(lambda: state_path.unlink(missing_ok=True))
+        payload = {
+            "refresh_version": "production-refresh-v1",
+            "ok": True,
+            "failed_stages": [],
+            "scan_signals": False,
+            "stages": [{"name": "contracts_sync", "ok": True}],
+            "readiness": {"status": "blocked", "blocked_keys": ["orderbooks"]},
+        }
+        with (
+            patch("dashboard_server.PRODUCTION_REFRESH_PATH", state_path),
+            patch("dashboard_server.run_production_refresh", return_value=payload) as refresh,
+            patch("dashboard_server.log_event") as log_event,
+        ):
+            result = asyncio.run(production_refresh(ProductionRefreshRequest(
+                cities=["shanghai"],
+                days=1,
+                limit=2,
+                skip_signal_scan=True,
+            )))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["request"]["cities"], ["shanghai"])
+        self.assertTrue(result["request"]["skip_signal_scan"])
+        saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["refresh_version"], "production-refresh-v1")
+        self.assertEqual(saved["request"]["limit"], 2)
+        refresh.assert_called_once()
+        _, kwargs = refresh.call_args
+        self.assertEqual(kwargs["cities"], "shanghai")
+        self.assertFalse(kwargs["scan_signals"])
+        log_event.assert_called_once()
 
     def test_ai_disabled_default_allows_quant_flow(self):
         db_path = test_db_path("ai_disabled")

@@ -19,6 +19,7 @@ import {
   fetchTemperatureFit,
   placeLiveOrder,
   resetSimulation,
+  runProductionRefresh,
   setAutoSimulation,
   settleTradesApi,
   startBot,
@@ -439,6 +440,13 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
     },
   })
+  const productionRefreshMutation = useMutation({
+    mutationFn: () => runProductionRefresh({ days: 1, limit: 20, skipSignalScan: true }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    },
+  })
   const resetSimulationMutation = useMutation({
     mutationFn: ({ balance, clear }: { balance: number; clear: boolean }) => resetSimulation(balance, clear),
     onSuccess: result => {
@@ -463,6 +471,7 @@ function App() {
   const equityCurve = data?.equity_curve ?? []
   const truthHealth = data?.truth_health ?? null
   const dataReadiness = data?.data_readiness ?? null
+  const productionRefresh = productionRefreshMutation.data ?? data?.production_refresh ?? null
   const modelDatasetAudit = data?.model_dataset_audit ?? null
   const forecastArchiveManifest = forecastArchiveManifestQuery.data ?? null
   const actionable = signals.filter(signal => signal.actionable).length
@@ -599,6 +608,9 @@ function App() {
               onContractStatus={setContractStatus}
               verifyingContractId={verifyContractMutation.variables?.contractId}
               bulkVerifying={bulkVerifyContractMutation.isPending}
+              productionRefresh={productionRefresh}
+              productionRefreshing={productionRefreshMutation.isPending}
+              onProductionRefresh={() => productionRefreshMutation.mutate()}
               onVerifyContract={(contractId, note) => verifyContractMutation.mutate({ contractId, note })}
               onVerifyVisibleContracts={(contractIds, note) => bulkVerifyContractMutation.mutate({ contractIds, note })}
             />

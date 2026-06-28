@@ -46,6 +46,7 @@ from weatherbot_v3.notifier import FeishuNotifier
 from weatherbot_v3.polymarket import PolymarketDataClient
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
 from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_rule
+from weatherbot_v3.cli import run_production_refresh
 
 
 ROOT = Path(__file__).resolve().parent
@@ -55,6 +56,7 @@ DASHBOARD_DIR = ROOT / "dashboard"
 BOT_LOG_PATH = DATA_DIR / "weatherbet-dashboard.log"
 BOT_PID_PATH = DATA_DIR / "weatherbet-dashboard.pid"
 AUTO_SIMULATION_PATH = DATA_DIR / "auto-simulation.json"
+PRODUCTION_REFRESH_PATH = DATA_DIR / "production-refresh.json"
 bot_process: subprocess.Popen | None = None
 auto_simulation_task: asyncio.Task | None = None
 bulk_simulation_lock = asyncio.Lock()
@@ -105,6 +107,15 @@ class BulkContractVerificationRequest(BaseModel):
     note: str | None = None
     mature_only: bool = False
     apply: bool = False
+
+
+class ProductionRefreshRequest(BaseModel):
+    cities: list[str] | None = None
+    days: int = 1
+    limit: int = 20
+    start_date: str = ""
+    end_date: str = ""
+    skip_signal_scan: bool = True
 
 
 class LiveOrderUpdate(BaseModel):
@@ -2657,6 +2668,7 @@ def build_dashboard_payload():
         "stats": stats,
         "v3": v3_dashboard_summary(),
         "data_readiness": data_readiness,
+        "production_refresh": _read_json(PRODUCTION_REFRESH_PATH, None),
         "model_dataset_audit": model_dataset_audit,
         "truth_health": truth_health,
         "btc_price": None,
@@ -2810,6 +2822,42 @@ async def data_readiness():
     payload = build_data_readiness()
     persist_data_readiness(payload)
     return payload
+
+
+@app.post("/api/production-refresh")
+async def production_refresh(request: ProductionRefreshRequest):
+    cities = ",".join(item.strip() for item in (request.cities or []) if item.strip())
+    payload = await asyncio.to_thread(
+        run_production_refresh,
+        cities=cities,
+        days=max(1, min(int(request.days or 1), 7)),
+        limit=max(1, min(int(request.limit or 20), 500)),
+        start_date=request.start_date or "",
+        end_date=request.end_date or "",
+        scan_signals=not request.skip_signal_scan,
+    )
+    saved = {
+        **payload,
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+        "request": {
+            "cities": request.cities or [],
+            "days": request.days,
+            "limit": request.limit,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+            "skip_signal_scan": request.skip_signal_scan,
+        },
+    }
+    _write_json(PRODUCTION_REFRESH_PATH, saved)
+    log_event(
+        "success" if saved.get("ok") else "warning",
+        "production-refresh completed" if saved.get("ok") else "production-refresh finished with failed stages",
+        {
+            "failed_stages": saved.get("failed_stages", []),
+            "readiness": saved.get("readiness", {}),
+        },
+    )
+    return saved
 
 
 @app.get("/api/contracts")

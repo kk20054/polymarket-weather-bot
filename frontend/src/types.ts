@@ -226,6 +226,40 @@ export interface DataReadiness {
   }
 }
 
+export interface ProductionRefreshStage {
+  name: string
+  ok: boolean
+  skipped?: boolean
+  reason?: string
+  error?: string
+  payload?: Record<string, unknown>
+}
+
+export interface ProductionRefreshResult {
+  refresh_version: string
+  ok: boolean
+  failed_stages: string[]
+  scan_signals: boolean
+  stages: ProductionRefreshStage[]
+  requested_at?: string
+  request?: {
+    cities: string[]
+    days: number
+    limit: number
+    start_date: string
+    end_date: string
+    skip_signal_scan: boolean
+  }
+  readiness?: {
+    status?: 'ready' | 'blocked'
+    score?: number
+    live_allowed?: boolean
+    production_phase?: DataReadiness['production_phase']
+    blocked_keys?: string[]
+    next_actions?: DataReadinessAction[]
+  }
+}
+
 export interface SettlementContract {
   contract_id: string
   event_slug: string
@@ -744,6 +778,7 @@ export interface DashboardData {
   stats: BotStats
   v3?: V3Summary
   data_readiness?: DataReadiness
+  production_refresh?: ProductionRefreshResult | null
   model_dataset_audit?: ModelDatasetAudit
   truth_health?: TruthHealth
   btc_price: BtcPrice | null

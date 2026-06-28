@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest } from './types'
+import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -137,6 +137,21 @@ export async function verifySettlementContractsBulk(contractIds: string[], apply
     note,
     mature_only: matureOnly,
     apply,
+  })
+  return data
+}
+
+export async function runProductionRefresh(options: {
+  cities?: string[]
+  days?: number
+  limit?: number
+  skipSignalScan?: boolean
+} = {}): Promise<ProductionRefreshResult> {
+  const { data } = await api.post<ProductionRefreshResult>('/production-refresh', {
+    cities: options.cities ?? [],
+    days: options.days ?? 1,
+    limit: options.limit ?? 20,
+    skip_signal_scan: options.skipSignalScan ?? true,
   })
   return data
 }

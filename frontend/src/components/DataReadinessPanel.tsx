@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, Database, ExternalLink, ShieldAlert } from 'lucide-react'
-import type { DataReadiness, SettlementContractList } from '../types'
+import { CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, Database, ExternalLink, RefreshCw, ShieldAlert } from 'lucide-react'
+import type { DataReadiness, ProductionRefreshResult, SettlementContractList } from '../types'
 
 interface Props {
   readiness?: DataReadiness | null
@@ -9,6 +9,9 @@ interface Props {
   onContractStatus?: (status: string) => void
   verifyingContractId?: string
   bulkVerifying?: boolean
+  productionRefresh?: ProductionRefreshResult | null
+  productionRefreshing?: boolean
+  onProductionRefresh?: () => void
   onVerifyContract?: (contractId: string, note: string) => void
   onVerifyVisibleContracts?: (contractIds: string[], note: string) => void
 }
@@ -89,6 +92,30 @@ function reviewStatusClass(status?: string | null) {
   return 'border-neutral-800 text-neutral-500'
 }
 
+const REFRESH_STAGE_LABELS: Record<string, string> = {
+  contracts_sync: '合同',
+  forecast_backfill: '预测',
+  signal_scan: '信号',
+  signal_migration: '迁移',
+  orderbook_backfill: '盘口',
+}
+
+function refreshStageLabel(name: string) {
+  return REFRESH_STAGE_LABELS[name] ?? name
+}
+
+function shortTime(value?: string | null) {
+  if (!value) return '尚未运行'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString(undefined, {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 export function DataReadinessPanel({
   readiness,
   contracts,
@@ -96,6 +123,9 @@ export function DataReadinessPanel({
   onContractStatus,
   verifyingContractId,
   bulkVerifying = false,
+  productionRefresh,
+  productionRefreshing = false,
+  onProductionRefresh,
   onVerifyContract,
   onVerifyVisibleContracts,
 }: Props) {
@@ -116,6 +146,10 @@ export function DataReadinessPanel({
   const contractQueue = metricRecord(contractStage?.metrics?.contract_review_queue)
   const canBulkVerifyVisible = contractStatus === 'mature-auto'
   const reviewNoteReady = reviewNote.trim().length > 0
+  const refreshStages = productionRefresh?.stages ?? []
+  const refreshOkStages = refreshStages.filter(stage => stage.ok).length
+  const refreshFailedStages = refreshStages.filter(stage => !stage.ok)
+  const refreshBlockedKeys = productionRefresh?.readiness?.blocked_keys ?? phase?.blocked_keys ?? []
   const queueOptions = [
     ['mature-auto', '成熟自动', contractQueue.mature_auto_verified_unreviewed ?? 0],
     ['future-auto', '未来自动', contractQueue.future_auto_verified_unreviewed ?? 0],
@@ -169,6 +203,73 @@ export function DataReadinessPanel({
           </div>
         </div>
       )}
+
+      <div className="border border-neutral-800 bg-neutral-950 p-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <div className="text-[10px] text-neutral-300">生产刷新</div>
+              <span className={`border px-1.5 py-0.5 text-[9px] ${
+                productionRefresh?.ok
+                  ? 'border-green-500/20 bg-green-500/5 text-green-200'
+                  : productionRefresh
+                    ? 'border-amber-500/20 bg-amber-500/5 text-amber-200'
+                    : 'border-neutral-800 text-neutral-500'
+              }`}>
+                {productionRefresh?.ok ? '最近成功' : productionRefresh ? '需查看' : '未运行'}
+              </span>
+            </div>
+            <div className="mt-0.5 truncate text-[9px] text-neutral-600">
+              {shortTime(productionRefresh?.requested_at)} · {refreshOkStages}/{refreshStages.length || 5} 阶段
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={!onProductionRefresh || productionRefreshing}
+            onClick={() => onProductionRefresh?.()}
+            className="inline-flex shrink-0 items-center gap-1 border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40"
+            title="安全刷新：同步合同、刷新预测、迁移信号、刷新当前盘口；默认不运行旧扫描器"
+          >
+            <RefreshCw className={`h-3 w-3 ${productionRefreshing ? 'animate-spin' : ''}`} />
+            安全刷新
+          </button>
+        </div>
+        {productionRefresh && (
+          <div className="mt-2 space-y-1">
+            <div className="flex flex-wrap gap-1">
+              {refreshStages.map(stage => (
+                <span
+                  key={stage.name}
+                  className={`border px-1.5 py-0.5 text-[9px] ${
+                    stage.ok
+                      ? stage.skipped
+                        ? 'border-neutral-800 text-neutral-500'
+                        : 'border-green-500/20 bg-green-500/5 text-green-200'
+                      : 'border-red-500/20 bg-red-500/5 text-red-200'
+                  }`}
+                  title={stage.error || stage.reason || stage.name}
+                >
+                  {refreshStageLabel(stage.name)}
+                </span>
+              ))}
+            </div>
+            {(refreshFailedStages.length > 0 || refreshBlockedKeys.length > 0) && (
+              <div className="flex flex-wrap gap-1">
+                {refreshFailedStages.map(stage => (
+                  <span key={stage.name} className="border border-red-500/20 bg-red-500/5 px-1.5 py-0.5 text-[9px] text-red-200">
+                    {refreshStageLabel(stage.name)}失败
+                  </span>
+                ))}
+                {refreshBlockedKeys.map(key => (
+                  <span key={key} className="border border-amber-500/20 bg-amber-500/5 px-1.5 py-0.5 text-[9px] text-amber-200">
+                    {key}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       <div className="grid grid-cols-4 border border-neutral-800">
         {readiness.stages.map(stage => (
