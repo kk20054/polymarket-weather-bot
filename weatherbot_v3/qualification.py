@@ -169,15 +169,18 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     stale_orderbooks = 0
     latest_orderbook_at = None
     fresh_clob_orderbooks = []
+    fresh_clob_with_depth_orderbooks = []
     for row in orderbooks:
         quote_at = _orderbook_time(row.get("quote_timestamp")) or _parse_time(row.get("created_at"))
         if quote_at and (latest_orderbook_at is None or quote_at > latest_orderbook_at):
             latest_orderbook_at = quote_at
         if not quote_at or (now - quote_at).total_seconds() > cfg.orderbook_max_age_minutes * 60:
             stale_orderbooks += 1
-        elif row.get("snapshot_type") == "clob" and row.get("bids_json") and row.get("asks_json"):
+        elif row.get("snapshot_type") == "clob":
             fresh_clob_orderbooks.append(row)
-    fresh_clob_gap = max(0, cfg.min_fresh_clob_orderbooks - len(fresh_clob_orderbooks))
+            if _orderbook_has_two_sided_depth(row):
+                fresh_clob_with_depth_orderbooks.append(row)
+    fresh_clob_gap = max(0, cfg.min_fresh_clob_orderbooks - len(fresh_clob_with_depth_orderbooks))
 
     stages = [
         _stage(
@@ -267,17 +270,18 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         _stage(
             "orderbooks",
             "盘口快照",
-            len(fresh_clob_orderbooks) >= cfg.min_fresh_clob_orderbooks,
+            len(fresh_clob_with_depth_orderbooks) >= cfg.min_fresh_clob_orderbooks,
             [
                 ("orderbook_snapshots_missing", 1 if not orderbooks else 0),
                 ("all_orderbooks_stale", 1 if orderbooks and stale_orderbooks == len(orderbooks) else 0),
-                ("fresh_clob_depth_missing", 1 if orderbooks and not fresh_clob_orderbooks else 0),
+                ("fresh_clob_depth_missing", 1 if orderbooks and not fresh_clob_with_depth_orderbooks else 0),
                 ("fresh_clob_depth_below_min", fresh_clob_gap),
             ],
             {
                 "snapshots": len(orderbooks),
                 "stale_snapshots": stale_orderbooks,
                 "fresh_clob_snapshots": len(fresh_clob_orderbooks),
+                "fresh_clob_with_depth_snapshots": len(fresh_clob_with_depth_orderbooks),
                 "minimum_fresh_clob_snapshots": cfg.min_fresh_clob_orderbooks,
                 "fresh_clob_snapshot_gap": fresh_clob_gap,
                 "latest_at": latest_orderbook_at.isoformat() if latest_orderbook_at else None,
@@ -315,6 +319,22 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             "orderbook_snapshots": len(orderbooks),
         },
     }
+
+
+def _orderbook_has_two_sided_depth(row: dict[str, Any]) -> bool:
+    return bool(_orderbook_levels(row.get("bids_json")) and _orderbook_levels(row.get("asks_json")))
+
+
+def _orderbook_levels(raw: Any) -> list[Any]:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return raw
+    try:
+        value = json.loads(str(raw))
+        return value if isinstance(value, list) else []
+    except Exception:
+        return []
 
 
 def _production_phase(

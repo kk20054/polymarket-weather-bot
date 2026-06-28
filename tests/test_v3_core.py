@@ -3,6 +3,7 @@ import json
 import os
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from weatherbot_v3.ai_review import AIReviewer
@@ -17,7 +18,7 @@ from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from weatherbot_v3.cli import default_orderbook_start_date, run_production_refresh, select_orderbook_backfill_markets
+from weatherbot_v3.cli import default_orderbook_start_date, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timezone
@@ -226,6 +227,72 @@ class V3CoreTests(unittest.TestCase):
     def test_orderbook_backfill_default_start_keeps_global_settlement_window(self):
         now = datetime(2026, 6, 28, 0, 30, tzinfo=timezone.utc)
         self.assertEqual(default_orderbook_start_date(now), "2026-06-27")
+
+    def test_orderbook_backfill_reports_structured_blocker_reasons(self):
+        db_path = test_db_path("orderbook_reason_counts")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        init_v3_db(db_path)
+        now = "2026-06-26T00:00:00+00:00"
+        with connect(db_path) as conn:
+            conn.executemany(
+                """
+                INSERT INTO signals (
+                    signal_key, market_id, target_date, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    ("clob-ok", "1", "2026-06-28", "signal", now, now),
+                    ("clob-empty", "2", "2026-06-28", "signal", now, now),
+                    ("fallback", "3", "2026-06-28", "signal", now, now),
+                ],
+            )
+        quotes = [
+            SimpleNamespace(
+                book_source="clob",
+                best_bid=0.2,
+                best_ask=0.22,
+                spread=0.02,
+                bids=({"price": 0.2, "size": 10.0},),
+                asks=({"price": 0.22, "size": 10.0},),
+                quote_age_seconds=1.0,
+            ),
+            SimpleNamespace(
+                book_source="clob",
+                best_bid=0.0,
+                best_ask=0.0,
+                spread=0.0,
+                bids=(),
+                asks=(),
+                quote_age_seconds=1.0,
+            ),
+            SimpleNamespace(
+                book_source="gamma_fallback",
+                best_bid=0.1,
+                best_ask=0.12,
+                spread=0.02,
+                bids=(),
+                asks=(),
+                quote_age_seconds=None,
+            ),
+        ]
+        with (
+            patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False),
+            patch("weatherbot_v3.polymarket.PolymarketDataClient") as client_cls,
+            patch("weatherbot_v3.cli.time.sleep"),
+        ):
+            client_cls.return_value.quote.side_effect = quotes
+            payload = run_orderbook_backfill(10, "2026-06-28", "")
+
+        self.assertEqual(payload["requested"], 3)
+        self.assertEqual(payload["ok"], 1)
+        self.assertEqual(payload["failed"], 2)
+        self.assertEqual(payload["reason_counts"]["fresh_clob_depth_available"], 1)
+        self.assertEqual(payload["reason_counts"]["empty_clob_depth"], 1)
+        self.assertEqual(payload["reason_counts"]["no_clob_orderbook"], 1)
+        self.assertEqual(
+            [row["reason"] for row in payload["results"]],
+            ["fresh_clob_depth_available", "empty_clob_depth", "no_clob_orderbook"],
+        )
 
     def test_production_refresh_summarizes_pipeline_without_signal_scan(self):
         db_path = test_db_path("production_refresh")
@@ -587,6 +654,7 @@ class V3CoreTests(unittest.TestCase):
 
         self.assertEqual(orderbook_stage["status"], "blocked")
         self.assertEqual(orderbook_stage["metrics"]["fresh_clob_snapshots"], 4)
+        self.assertEqual(orderbook_stage["metrics"]["fresh_clob_with_depth_snapshots"], 4)
         self.assertEqual(orderbook_stage["metrics"]["minimum_fresh_clob_snapshots"], 5)
         self.assertEqual(orderbook_stage["metrics"]["fresh_clob_snapshot_gap"], 1)
         self.assertIn(
@@ -594,6 +662,32 @@ class V3CoreTests(unittest.TestCase):
             orderbook_stage["reasons"],
         )
         self.assertEqual(ready_orderbook_stage["status"], "ready")
+
+    def test_data_readiness_does_not_count_empty_clob_arrays_as_depth(self):
+        db_path = test_db_path("data_readiness_empty_clob")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        now = datetime.now(timezone.utc).isoformat()
+        with patch.dict(os.environ, {
+            "V3_DB_PATH": str(db_path),
+            "MIN_FRESH_CLOB_ORDERBOOKS": "1",
+        }, clear=False):
+            insert_orderbook("market-empty", {
+                "snapshot_key": "market-empty:fresh",
+                "snapshot_type": "clob",
+                "quote_timestamp": now,
+                "bids": [],
+                "asks": [],
+            })
+            readiness = build_data_readiness(db_path)
+            orderbook_stage = next(stage for stage in readiness["stages"] if stage["key"] == "orderbooks")
+
+        self.assertEqual(orderbook_stage["status"], "blocked")
+        self.assertEqual(orderbook_stage["metrics"]["fresh_clob_snapshots"], 1)
+        self.assertEqual(orderbook_stage["metrics"]["fresh_clob_with_depth_snapshots"], 0)
+        self.assertIn(
+            {"code": "fresh_clob_depth_missing", "count": 1},
+            orderbook_stage["reasons"],
+        )
 
     def test_settlement_contract_manual_verification_updates_contract_and_rules(self):
         db_path = test_db_path("contract_verification")

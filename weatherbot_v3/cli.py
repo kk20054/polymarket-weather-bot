@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from .db import bulk_settlement_contract_verification, connect, dashboard_summary, init_v3_db, list_settlement_contracts, set_settlement_contract_verification
@@ -122,17 +123,22 @@ def run_orderbook_backfill(limit_arg: int = 50, start_date_arg: str = "", end_da
         )
     client = PolymarketDataClient()
     results = []
+    reason_counts: Counter[str] = Counter()
     for row in rows:
         market_id = str(row["market_id"])
         target_date = str(row["latest_target_date"] or "")
         signal_count = int(row["signal_count"] or 0)
         try:
             quote = client.quote(market_id)
+            ok = _orderbook_quote_usable(quote)
+            reason = _orderbook_quote_reason(quote) if not ok else "fresh_clob_depth_available"
+            reason_counts[reason] += 1
             results.append({
                 "market_id": market_id,
                 "target_date": target_date,
                 "signal_count": signal_count,
-                "ok": quote.book_source == "clob",
+                "ok": ok,
+                "reason": reason,
                 "source": quote.book_source,
                 "best_bid": quote.best_bid,
                 "best_ask": quote.best_ask,
@@ -147,8 +153,10 @@ def run_orderbook_backfill(limit_arg: int = 50, start_date_arg: str = "", end_da
                 "target_date": target_date,
                 "signal_count": signal_count,
                 "ok": False,
+                "reason": "quote_fetch_error",
                 "error": str(exc),
             })
+            reason_counts["quote_fetch_error"] += 1
         time.sleep(0.05)
     readiness = build_data_readiness()
     persist_data_readiness(readiness)
@@ -159,9 +167,34 @@ def run_orderbook_backfill(limit_arg: int = 50, start_date_arg: str = "", end_da
         "requested": len(rows),
         "ok": sum(1 for row in results if row["ok"]),
         "failed": sum(1 for row in results if not row["ok"]),
+        "reason_counts": dict(reason_counts),
         "results": results,
         "orderbook_stage": readiness_stage(readiness, "orderbooks"),
     }
+
+
+def _orderbook_quote_usable(quote) -> bool:
+    return (
+        quote.book_source == "clob"
+        and len(quote.bids) > 0
+        and len(quote.asks) > 0
+        and quote.best_bid > 0
+        and quote.best_ask > 0
+    )
+
+
+def _orderbook_quote_reason(quote) -> str:
+    if quote.book_source != "clob":
+        return "no_clob_orderbook"
+    if not quote.bids and not quote.asks:
+        return "empty_clob_depth"
+    if not quote.bids:
+        return "missing_bid_depth"
+    if not quote.asks:
+        return "missing_ask_depth"
+    if quote.best_bid <= 0 or quote.best_ask <= 0:
+        return "invalid_best_bid_ask"
+    return "unknown_orderbook_blocker"
 
 
 def run_legacy_signal_scan() -> dict:
