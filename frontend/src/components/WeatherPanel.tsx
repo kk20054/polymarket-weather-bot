@@ -59,6 +59,35 @@ function fmtSignedPct(value?: number | null) {
   return `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`
 }
 
+function compactData(value: unknown, max = 180) {
+  if (value === null || value === undefined) return ''
+  try {
+    const raw = typeof value === 'string' ? value : JSON.stringify(value)
+    return raw.length > max ? `${raw.slice(0, max)}...` : raw
+  } catch {
+    return String(value)
+  }
+}
+
+function eventTone(event: DashboardEvent) {
+  const text = `${event.type ?? ''} ${event.message ?? ''} ${compactData(event.data, 120)}`.toLowerCase()
+  if (/error|fail|forbidden|timeout|exception|err/.test(text)) return 'red'
+  if (/buy|signal|order|clob|market|盘口/.test(text)) return 'cyan'
+  if (/truth|history|settle|actual|observ/.test(text)) return 'amber'
+  if (/forecast|weather|metar|refresh|scan/.test(text)) return 'green'
+  return 'neutral'
+}
+
+function eventStage(event: DashboardEvent) {
+  const text = `${event.type ?? ''} ${event.message ?? ''} ${compactData(event.data, 120)}`.toLowerCase()
+  if (/orderbook|clob|market|盘口/.test(text)) return '盘口'
+  if (/signal|buy|trade|order/.test(text)) return '信号'
+  if (/truth|history|settle|actual|observ/.test(text)) return '观测'
+  if (/forecast|weather|metar/.test(text)) return '天气'
+  if (/refresh|scan|scanner/.test(text)) return '刷新'
+  return event.type || '事件'
+}
+
 function fmtBucket(item: DistributionItem, unit: string) {
   if (item.bucket_low <= -900) return `${fmtTemp(item.bucket_high, unit)} 或以下`
   if (item.bucket_high >= 900) return `${fmtTemp(item.bucket_low, unit)} 或以上`
@@ -647,15 +676,7 @@ export function WeatherPanel({
             <MetricCard label="数据状态" value={forecastStatus === 'fresh' ? '新鲜' : forecastStatus === 'stale' ? '过期' : '缺失'} sub={`METAR ${metarStatus} · 历史 ${historyStatus}`} />
           </div>
         ) : activeTab === 'logs' ? (
-          <EvidenceTable
-            empty="暂无抓取或扫描日志"
-            columns={['时间', '类型', '消息']}
-            rows={eventRows.map(event => [
-              shortTime(event.timestamp),
-              event.type || '--',
-              event.message || '--',
-            ])}
-          />
+          <EventTimeline events={eventRows} />
         ) : (
           <EvidenceTable
             empty="该城市暂无市场信号"
@@ -698,6 +719,67 @@ export function WeatherPanel({
             </div>
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+function EventTimeline({ events }: { events: DashboardEvent[] }) {
+  if (events.length === 0) {
+    return <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-neutral-600">暂无抓取或扫描日志</div>
+  }
+
+  const toneClass = (tone: string) => {
+    if (tone === 'red') return 'border-red-500/30 bg-red-500/5 text-red-200'
+    if (tone === 'cyan') return 'border-cyan-500/30 bg-cyan-500/5 text-cyan-200'
+    if (tone === 'amber') return 'border-amber-500/30 bg-amber-500/5 text-amber-200'
+    if (tone === 'green') return 'border-green-500/30 bg-green-500/5 text-green-200'
+    return 'border-neutral-800 bg-neutral-950 text-neutral-400'
+  }
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      <div className="mb-2 grid grid-cols-[repeat(auto-fit,minmax(110px,1fr))] gap-1 text-[10px]">
+        {['天气', '观测', '盘口', '信号', '刷新'].map(stage => {
+          const count = events.filter(event => eventStage(event) === stage).length
+          return (
+            <div key={stage} className="border border-neutral-800 px-2 py-1 text-neutral-500">
+              {stage} <span className="tabular-nums text-neutral-200">{count}</span>
+            </div>
+          )
+        })}
+      </div>
+      <div className="space-y-1">
+        {events.map((event, index) => {
+          const tone = eventTone(event)
+          const data = compactData(event.data, 500)
+          return (
+            <div key={event.id ?? `${event.timestamp}-${index}`} className={`border px-2 py-1.5 ${toneClass(tone)}`}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="border border-current/20 px-1.5 py-0.5 text-[9px]">{eventStage(event)}</span>
+                    <span className="truncate text-[10px] text-neutral-200">{event.type || 'event'}</span>
+                  </div>
+                  <div className="mt-1 truncate text-[11px] text-neutral-100" title={event.message || '--'}>
+                    {event.message || '--'}
+                  </div>
+                </div>
+                <div className="shrink-0 text-right text-[9px] tabular-nums text-neutral-500">
+                  {shortTime(event.timestamp)}
+                </div>
+              </div>
+              {data && (
+                <details className="mt-1 border-t border-neutral-800/70 pt-1 text-[9px] text-neutral-500">
+                  <summary className="cursor-pointer select-none hover:text-neutral-300">数据</summary>
+                  <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-words font-mono text-[9px] leading-relaxed text-neutral-400">
+                    {data}
+                  </pre>
+                </details>
+              )}
+            </div>
+          )
+        })}
       </div>
     </div>
   )
