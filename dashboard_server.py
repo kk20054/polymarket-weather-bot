@@ -2187,6 +2187,9 @@ def _live_gate(signal, quality_flags, strategy):
     reasons = []
     cautions = []
     tags = set(strategy.get("strategy_tags") or [])
+    low, high = _bucket_bounds(signal)
+    if (low is not None and low <= -900) or (high is not None and high >= 900):
+        cautions.append("open_tail_bucket")
 
     if "fit_missing" in quality_flags:
         reasons.append("fit_missing")
@@ -3697,6 +3700,7 @@ async def update_auto_simulation(update: AutoSimulationUpdate):
         await _stop_auto_simulation_task()
         log_event("warning", "自动模拟已停止")
     _clear_production_validation_cache()
+    await _refresh_dashboard_cache_once()
     return {"ok": True, **state}
 
 

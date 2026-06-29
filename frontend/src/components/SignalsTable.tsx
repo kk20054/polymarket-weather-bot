@@ -24,6 +24,18 @@ function cents(value?: number | null) {
   return `${(Number(value) * 100).toFixed(1)}c`
 }
 
+function temp(value?: number | null, unit = '') {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${Number(value).toFixed(1)}°${unit}`
+}
+
+function bucketRange(low?: number | null, high?: number | null, unit = '') {
+  if (low === null || low === undefined || high === null || high === undefined) return '--'
+  if (Number(low) <= -900) return `${temp(high, unit)} 或以下`
+  if (Number(high) >= 900) return `${temp(low, unit)} 或以上`
+  return `${temp(low, unit)} - ${temp(high, unit)}`
+}
+
 function money(value?: number | null) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   return `$${Number(value).toFixed(2)}`
@@ -72,6 +84,7 @@ function reasonLabel(reason: string) {
     truth_independent_days_low: '高置信结算日不足',
     strategy_score_low: '综合策略评分不足',
     fit_sample_low: '拟合样本偏少',
+    open_tail_bucket: '开放尾桶需严控',
   }
   return map[reason] ?? reason
 }
@@ -264,7 +277,7 @@ export function SignalsTable({
                           key={item.market_id}
                           className={`border px-2 py-1 ${item.is_signal ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200' : 'border-neutral-800 text-neutral-400'}`}
                         >
-                          <div className="truncate">{item.bucket_low}-{item.bucket_high}</div>
+                          <div className="truncate">{bucketRange(item.bucket_low, item.bucket_high)}</div>
                           <div className="tabular-nums text-[10px]">P {pct(item.probability)} / Ask {cents(item.ask)}</div>
                         </div>
                       ))}

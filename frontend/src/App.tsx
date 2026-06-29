@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
-  BarChart3,
   CheckCircle2,
   FlaskConical,
   ListChecks,
@@ -17,7 +16,6 @@ import {
   fetchForecastArchiveManifest,
   fetchProductionValidation,
   fetchSettlementContracts,
-  fetchTemperatureFit,
   placeLiveOrder,
   resetSimulation,
   runProductionAction,
@@ -30,11 +28,8 @@ import {
   verifySettlementContractsBulk,
 } from './api'
 import { DataReadinessPanel } from './components/DataReadinessPanel'
-import { EquityChart } from './components/EquityChart'
 import { ModelDatasetPanel } from './components/ModelDatasetPanel'
 import { SignalsTable } from './components/SignalsTable'
-import { StatsCards } from './components/StatsCards'
-import { TemperatureFitPage } from './components/TemperatureFitPage'
 import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
@@ -534,7 +529,6 @@ function SimulationCard({
 
 function App() {
   const queryClient = useQueryClient()
-  const [view, setView] = useState<'dashboard' | 'temperature-fit'>('dashboard')
   const [tradeMode, setTradeMode] = useState<TradeMode>('paper')
   const [activityView, setActivityView] = useState<'signals' | 'trades'>('signals')
   const [selectedCity, setSelectedCity] = useState(() => {
@@ -549,6 +543,7 @@ function App() {
   const [clearMarks, setClearMarks] = useState(false)
   const [contractStatus, setContractStatus] = useState('mature-auto')
   const [citySearch, setCitySearch] = useState('')
+  const [citySort, setCitySort] = useState<'signal' | 'alpha'>('signal')
   const [productionActionResult, setProductionActionResult] = useState<ProductionActionRunResult | null>(null)
   const balanceInitRef = useRef(false)
 
@@ -557,13 +552,6 @@ function App() {
     queryFn: fetchDashboard,
     refetchInterval: 10000,
     retry: 1,
-  })
-
-  const temperatureFitQuery = useQuery({
-    queryKey: ['temperature-fit'],
-    queryFn: fetchTemperatureFit,
-    enabled: view === 'temperature-fit',
-    refetchInterval: view === 'temperature-fit' ? 30000 : false,
   })
 
   const contractsQuery = useQuery({
@@ -658,7 +646,6 @@ function App() {
       if (result.status === 'executed') {
         queryClient.invalidateQueries({ queryKey: ['dashboard'] })
         queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
-        queryClient.invalidateQueries({ queryKey: ['temperature-fit'] })
         queryClient.invalidateQueries({ queryKey: ['forecast-archive-manifest'] })
       }
     },
@@ -695,7 +682,6 @@ function App() {
   const citySeries = data?.weather_city_series ?? []
   const events = data?.events ?? []
   const trades = data?.recent_trades ?? []
-  const equityCurve = data?.equity_curve ?? []
   const truthHealth = data?.truth_health ?? null
   const dataReadiness = data?.data_readiness ?? null
   const productionRefresh = productionRefreshMutation.data ?? data?.production_refresh ?? null
@@ -790,11 +776,12 @@ function App() {
     }
 
     return [...rows.values()].sort((a, b) => {
+      if (citySort === 'alpha') return a.name.localeCompare(b.name)
       if (b.actionable !== a.actionable) return b.actionable - a.actionable
       if (b.signals !== a.signals) return b.signals - a.signals
       return a.name.localeCompare(b.name)
     })
-  }, [citySeries, forecasts, signals])
+  }, [citySeries, forecasts, signals, citySort])
 
   useEffect(() => {
     if (!balanceInitRef.current && data?.stats?.bankroll !== undefined) {
@@ -856,16 +843,6 @@ function App() {
     const nextUrl = `${window.location.pathname}?${params.toString()}`
     window.history.replaceState(null, '', nextUrl)
   }, [selectedDate])
-
-  if (view === 'temperature-fit') {
-    return (
-      <TemperatureFitPage
-        data={temperatureFitQuery.data}
-        loading={temperatureFitQuery.isLoading}
-        onBack={() => setView('dashboard')}
-      />
-    )
-  }
 
   if (isLoading) {
     return (
@@ -978,20 +955,31 @@ function App() {
           <div className="border-t border-neutral-800 p-3">
             <div className="mb-2 flex items-center justify-between">
               <div>
-                <div className="text-sm font-medium text-neutral-100">城市索引</div>
+                <div className="text-sm font-medium text-neutral-100">城市</div>
                 <div className="text-[10px] text-neutral-600">
                   {actionableCityCount > 0 ? `${actionableCityCount} 个城市有可执行信号` : '无信号时按城市浏览证据'}
                 </div>
               </div>
               <span className="border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">{cityOptions.length}</span>
             </div>
-            <input
-              value={citySearch}
-              onChange={event => setCitySearch(event.target.value)}
-              placeholder="搜索城市或机场"
-              className="mb-2 w-full border-neutral-800 bg-black px-2 py-1.5 text-[11px]"
-              aria-label="搜索城市或机场"
-            />
+            <div className="mb-2 grid grid-cols-[minmax(0,1fr)_92px] gap-1.5">
+              <input
+                value={citySearch}
+                onChange={event => setCitySearch(event.target.value)}
+                placeholder="搜索城市或机场"
+                className="w-full border-neutral-800 bg-black px-2 py-1.5 text-[11px]"
+                aria-label="搜索城市或机场"
+              />
+              <select
+                value={citySort}
+                onChange={event => setCitySort(event.target.value as 'signal' | 'alpha')}
+                className="border border-neutral-800 bg-black px-1.5 py-1.5 text-[11px] text-neutral-300"
+                aria-label="城市排序"
+              >
+                <option value="signal">按信号</option>
+                <option value="alpha">字母</option>
+              </select>
+            </div>
             <div className="space-y-1">
               {cityOptions.length === 0 && (
                 <div className="border border-neutral-800 bg-black/40 p-3 text-[11px] leading-relaxed text-neutral-500">
@@ -1065,6 +1053,11 @@ function App() {
                     {city.humidityStatus === 'available' && (
                       <span className="border border-blue-500/20 bg-blue-500/5 px-1 py-0.5 text-blue-200" title="湿度数据可用">
                         RH
+                      </span>
+                    )}
+                    {city.signals > 0 && (
+                      <span className="ml-auto border border-neutral-700 px-1 py-0.5 text-neutral-400">
+                        Poly ↗
                       </span>
                     )}
                   </div>
@@ -1228,7 +1221,7 @@ function App() {
 
           <details className="shrink-0 border-t border-neutral-800 bg-black">
             <summary className="cursor-pointer select-none px-3 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
-              系统、复盘与风控
+              生产验证与风控
             </summary>
             <div className="max-h-[48vh] space-y-3 overflow-y-auto border-t border-neutral-800 p-3">
               <div className="grid grid-cols-2 gap-2 text-[11px]">
@@ -1247,57 +1240,35 @@ function App() {
                 onExecuteAction={runValidationActionExecute}
               />
 
-              <div className="overflow-x-auto border border-neutral-800 bg-black p-2">
-                <StatsCards stats={stats} />
-              </div>
-
               <ReadinessBanner stats={stats} readiness={dataReadiness} />
 
-              <div className="border border-neutral-800 bg-black">
-                <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-2">
-                  <div className="text-sm text-neutral-100">资金曲线</div>
-                  <div className={`tabular-nums text-[11px] ${(stats.total_pnl ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
-                    {money(stats.total_pnl)}
+              <details className="border border-neutral-800 bg-black">
+                <summary className="cursor-pointer select-none px-3 py-2 text-xs text-neutral-400 hover:bg-neutral-950 hover:text-neutral-200">
+                  数据基座审计（开发）
+                </summary>
+                <div className="space-y-3 border-t border-neutral-800 p-3">
+                  <DataReadinessPanel
+                    readiness={dataReadiness}
+                    contracts={contractsQuery.data}
+                    contractStatus={contractStatus}
+                    onContractStatus={setContractStatus}
+                    verifyingContractId={verifyContractMutation.variables?.contractId}
+                    bulkVerifying={bulkVerifyContractMutation.isPending}
+                    productionRefresh={productionRefresh}
+                    productionRefreshing={productionRefreshMutation.isPending}
+                    onProductionRefresh={() => productionRefreshMutation.mutate()}
+                    onVerifyContract={(contractId, note) => verifyContractMutation.mutate({ contractId, note })}
+                    onVerifyVisibleContracts={(contractIds, note) => bulkVerifyContractMutation.mutate({ contractIds, note })}
+                  />
+
+                  <ModelDatasetPanel audit={modelDatasetAudit} archiveManifest={forecastArchiveManifest} />
+
+                  <div className="border border-neutral-800 bg-black p-3">
+                    <div className="mb-2 text-sm text-neutral-100">结算源健康</div>
+                    <TruthHealthPanel truth={truthHealth} />
                   </div>
                 </div>
-                <div className="h-[150px] p-2">
-                  <EquityChart data={equityCurve} initialBankroll={stats.bankroll - stats.total_pnl} />
-                </div>
-              </div>
-
-              <div className="border border-neutral-800 bg-black p-3">
-                <div className="mb-2 flex items-center gap-2">
-                  <BarChart3 className="h-4 w-4 text-cyan-300" />
-                  <div className="text-sm text-neutral-100">温度拟合与数据审计</div>
-                </div>
-                <button
-                  onClick={() => setView('temperature-fit')}
-                  className="w-full border border-cyan-500/30 px-2 py-1.5 text-cyan-300 hover:bg-cyan-500/10"
-                >
-                  打开温度拟合
-                </button>
-              </div>
-
-              <DataReadinessPanel
-                readiness={dataReadiness}
-                contracts={contractsQuery.data}
-                contractStatus={contractStatus}
-                onContractStatus={setContractStatus}
-                verifyingContractId={verifyContractMutation.variables?.contractId}
-                bulkVerifying={bulkVerifyContractMutation.isPending}
-                productionRefresh={productionRefresh}
-                productionRefreshing={productionRefreshMutation.isPending}
-                onProductionRefresh={() => productionRefreshMutation.mutate()}
-                onVerifyContract={(contractId, note) => verifyContractMutation.mutate({ contractId, note })}
-                onVerifyVisibleContracts={(contractIds, note) => bulkVerifyContractMutation.mutate({ contractIds, note })}
-              />
-
-              <ModelDatasetPanel audit={modelDatasetAudit} archiveManifest={forecastArchiveManifest} />
-
-              <div className="border border-neutral-800 bg-black p-3">
-                <div className="mb-2 text-sm text-neutral-100">结算源健康</div>
-                <TruthHealthPanel truth={truthHealth} />
-              </div>
+              </details>
             </div>
           </details>
         </aside>

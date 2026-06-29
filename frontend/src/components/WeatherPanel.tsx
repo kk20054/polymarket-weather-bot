@@ -149,6 +149,29 @@ function fmtBucket(item: DistributionItem, unit: string) {
   return `${fmtTemp(item.bucket_low, unit)} - ${fmtTemp(item.bucket_high, unit)}`
 }
 
+function fmtBucketLabel(raw?: string | null, fallback?: number | null, unit = 'F') {
+  if (!raw) return fmtTemp(fallback, unit)
+  const normalized = String(raw).trim()
+  const match = normalized.match(/^\s*(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)([CF])?\s*$/i)
+  if (!match) return normalized.replace(/掳/g, '°')
+  const low = Number(match[1])
+  const high = Number(match[2])
+  const labelUnit = (match[3] || unit).toUpperCase()
+  if (low <= -900) return `${fmtTemp(high, labelUnit)} 或以下`
+  if (high >= 900) return `${fmtTemp(low, labelUnit)} 或以上`
+  return `${fmtTemp(low, labelUnit)} - ${fmtTemp(high, labelUnit)}`
+}
+
+function signalBucketLabel(signal: WeatherSignal | undefined, unit = 'F') {
+  if (!signal) return '--'
+  return fmtBucketLabel(signal.bucket_label, signal.threshold_f, unit)
+}
+
+function isOpenTailBucket(signal?: WeatherSignal) {
+  if (!signal?.bucket_label) return false
+  return /(?:^|-)999(?:\.0+)?[CF]?$/i.test(signal.bucket_label) || /^-999(?:\.0+)?-/i.test(signal.bucket_label)
+}
+
 function shortDate(value?: string | null) {
   if (!value) return '--'
   try {
@@ -450,7 +473,7 @@ export function WeatherPanel({
     const edge = signal.probability_edge ?? signal.edge
     const price = signal.limit_price ?? signal.market_probability
     return {
-      label: `${shortDate(signal.target_date)} · ${signal.bucket_label || fmtTemp(signal.threshold_f, unit)}`,
+      label: `${shortDate(signal.target_date)} · ${signalBucketLabel(signal, unit)}`,
       value: signal.actionable ? 'BUY YES' : signal.status || '观察',
       meta: `price ${fmtPrice(price)} · edge ${fmtSignedPct(edge)} · ${signal.decision?.reasons?.[0] || signal.manual_note || signal.reasoning || '--'}`,
       tone: signal.actionable ? 'green' : 'neutral',
@@ -684,7 +707,7 @@ export function WeatherPanel({
           </div>
           <div className="truncate text-[10px] text-neutral-600" title={decisionReason}>{decisionReason}</div>
         </div>
-        <DecisionMetric label="目标桶" value={bestSignal?.bucket_label || (bestSignal ? fmtTemp(bestSignal.threshold_f, unit) : '--')} sub={bestSignal ? longDate(bestSignal.target_date) : longDate(selectedDate)} />
+        <DecisionMetric label="目标桶" value={signalBucketLabel(bestSignal, unit)} sub={bestSignal ? (isOpenTailBucket(bestSignal) ? '开放尾桶，需严控' : longDate(bestSignal.target_date)) : longDate(selectedDate)} />
         <DecisionMetric label="盘口" value={bestSignal?.limit_price !== undefined && bestSignal?.limit_price !== null ? fmtPrice(bestSignal.limit_price) : '--'} sub={bestSignal?.spread !== undefined && bestSignal?.spread !== null ? `spread ${fmtPrice(bestSignal.spread)}` : '等待盘口'} />
         <DecisionMetric label="模型 / Edge" value={bestSignal ? fmtProb(bestSignal.calibrated_probability ?? bestSignal.model_probability) : '--'} sub={bestSignal ? fmtSignedPct(bestSignal.probability_edge ?? bestSignal.edge) : '无概率'} />
         <DecisionMetric label="预测-METAR" value={metarGap === null ? '--' : fmtTemp(metarGap, unit)} sub={`预测 ${fmtTemp(selectedForecast, unit)}`} />
@@ -701,7 +724,7 @@ export function WeatherPanel({
         <Metric icon={<ThermometerSun className="h-3.5 w-3.5" />} label="最新预测" value={fmtTemp(latestForecast?.best ?? forecastFallback?.mean_high, unit)} tone="green" sub={freshnessLabel(latestForecast?.timestamp)} />
         <Metric icon={<CloudSun className="h-3.5 w-3.5" />} label="METAR 实测" value={fmtTemp(latestMetar?.metar, unit)} tone="amber" sub={freshnessLabel(latestMetar?.timestamp)} />
         <Metric icon={<Database className="h-3.5 w-3.5" />} label="历史最高" value={fmtTemp(latestHistory?.actual_high, unit)} tone="cyan" sub={latestHistory?.provider || truthTier} />
-        <Metric icon={<Signal className="h-3.5 w-3.5" />} label="可操作信号" value={`${actionableSignals.length}/${citySignals.length}`} tone={actionableSignals.length > 0 ? 'green' : 'neutral'} sub={bestSignal ? `${bestSignal.bucket_label || bestSignal.threshold_f} · ${(((bestSignal.probability_edge ?? bestSignal.edge) || 0) * 100).toFixed(1)}%` : '暂无'} />
+        <Metric icon={<Signal className="h-3.5 w-3.5" />} label="可操作信号" value={`${actionableSignals.length}/${citySignals.length}`} tone={actionableSignals.length > 0 ? 'green' : 'neutral'} sub={bestSignal ? `${signalBucketLabel(bestSignal, unit)} · ${(((bestSignal.probability_edge ?? bestSignal.edge) || 0) * 100).toFixed(1)}%` : '暂无'} />
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2 border border-neutral-800 bg-black px-2 py-1.5">
@@ -817,7 +840,7 @@ export function WeatherPanel({
         <div className="border border-neutral-800 p-2 leading-relaxed">
           <div className="mb-1 text-neutral-500">当前城市信号</div>
           <div className="text-neutral-300">
-            {bestSignal ? `${bestSignal.bucket_label || bestSignal.threshold_f} · ${bestSignal.direction || 'YES'} · EV ${((bestSignal.edge ?? 0) * 100).toFixed(1)}%` : '暂无可排序信号'}
+            {bestSignal ? `${signalBucketLabel(bestSignal, unit)} · ${bestSignal.direction || 'YES'} · EV ${((bestSignal.edge ?? 0) * 100).toFixed(1)}%` : '暂无可排序信号'}
           </div>
           <div className="text-[10px] text-neutral-600">最新预测更新时间 {shortTime(latestForecast?.timestamp)}</div>
           {bestSignal?.event_url && (
@@ -1110,9 +1133,10 @@ function SignalCards({ signals, unit, selectedDate }: { signals: WeatherSignal[]
                     </span>
                     {isSelectedDate && <span className="border border-cyan-500/25 px-1.5 py-0.5 text-[9px] text-cyan-300">当前日期</span>}
                     {signal.paper_position && <span className="border border-amber-500/25 px-1.5 py-0.5 text-[9px] text-amber-300">已模拟</span>}
+                    {isOpenTailBucket(signal) && <span className="border border-red-500/25 px-1.5 py-0.5 text-[9px] text-red-300">开放尾桶</span>}
                   </div>
-                  <div className="mt-1 truncate text-xs text-neutral-100" title={signal.question || signal.bucket_label || String(signal.threshold_f)}>
-                    {signal.bucket_label || fmtTemp(signal.threshold_f, unit)}
+                  <div className="mt-1 truncate text-xs text-neutral-100" title={signal.question || signalBucketLabel(signal, unit)}>
+                    {signalBucketLabel(signal, unit)}
                   </div>
                   <div className="truncate text-[9px] text-neutral-600">{longDate(signal.target_date)} · {signal.direction || 'YES'}</div>
                 </div>
