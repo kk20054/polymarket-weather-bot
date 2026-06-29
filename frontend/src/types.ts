@@ -310,6 +310,41 @@ export interface ProductionValidationReport {
   next_actions: ProductionValidationAction[]
 }
 
+export interface ProductionActionRequest {
+  actionKey: string
+  apply?: boolean
+  operatorConfirmed?: boolean
+  cities?: string[]
+  days?: number
+  limit?: number
+  startDate?: string
+  endDate?: string
+  skipSignalScan?: boolean
+  note?: string
+}
+
+export interface ProductionActionRunResult {
+  ok: boolean
+  status: string
+  action_key: string
+  reason?: string
+  message?: string
+  action?: {
+    label?: string
+    description?: string
+    requires_operator?: boolean
+    mutates?: boolean
+  }
+  params?: Record<string, unknown>
+  payload?: Record<string, unknown>
+  readiness?: {
+    status?: string
+    score?: number
+    live_allowed?: boolean
+    blocked_keys?: string[]
+  }
+}
+
 export interface SettlementContract {
   contract_id: string
   event_slug: string

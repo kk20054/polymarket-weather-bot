@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport } from './types'
+import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -115,6 +115,22 @@ export async function fetchForecastArchiveManifest(): Promise<ForecastArchiveMan
 
 export async function fetchProductionValidation(): Promise<ProductionValidationReport> {
   const { data } = await api.get<ProductionValidationReport>('/production-validation')
+  return data
+}
+
+export async function runProductionAction(options: ProductionActionRequest): Promise<ProductionActionRunResult> {
+  const { data } = await api.post<ProductionActionRunResult>('/production-actions/run', {
+    action_key: options.actionKey,
+    apply: options.apply ?? false,
+    operator_confirmed: options.operatorConfirmed ?? false,
+    cities: options.cities ?? [],
+    days: options.days ?? 1,
+    limit: options.limit ?? 20,
+    start_date: options.startDate ?? '',
+    end_date: options.endDate ?? '',
+    skip_signal_scan: options.skipSignalScan ?? true,
+    note: options.note ?? '',
+  })
   return data
 }
 

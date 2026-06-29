@@ -20,6 +20,7 @@ import {
   fetchTemperatureFit,
   placeLiveOrder,
   resetSimulation,
+  runProductionAction,
   runProductionRefresh,
   setAutoSimulation,
   settleTradesApi,
@@ -37,7 +38,7 @@ import { TemperatureFitPage } from './components/TemperatureFitPage'
 import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
-import type { AutoSimulationStatus, BotStats, DataReadiness, ProductionValidationReport } from './types'
+import type { AutoSimulationStatus, BotStats, DataReadiness, ProductionActionRunResult, ProductionValidationAction, ProductionValidationReport } from './types'
 
 type TradeMode = 'paper' | 'live'
 
@@ -118,6 +119,23 @@ function cityKeyFromParam(value: string | null) {
   return value.split('-').slice(0, -1).join('-') || value
 }
 
+function validationActionLimit(action: ProductionValidationAction) {
+  const raw = Number(action.targets_count ?? action.count ?? 20)
+  if (!Number.isFinite(raw) || raw <= 0) return 20
+  return Math.max(1, Math.min(Math.ceil(raw), 20))
+}
+
+function productionActionSummary(result?: ProductionActionRunResult | null) {
+  if (!result) return ''
+  if (result.reason) return result.reason
+  if (result.message) return result.message
+  const payload = result.payload ?? {}
+  const parts = ['requested', 'ok', 'eligible', 'failed']
+    .filter(key => payload[key] !== undefined)
+    .map(key => `${key} ${String(payload[key])}`)
+  return parts.length ? parts.join(' / ') : result.status
+}
+
 function ReadinessBanner({ stats, readiness }: { stats: BotStats; readiness?: DataReadiness | null }) {
   const ready = Boolean(stats.strategy_live_ready)
   const reasons = stats.strategy_readiness_reasons ?? []
@@ -154,9 +172,17 @@ function ReadinessBanner({ stats, readiness }: { stats: BotStats; readiness?: Da
 function ProductionValidationPanel({
   report,
   loading,
+  runningActionKey,
+  actionResult,
+  onDryRunAction,
+  onExecuteAction,
 }: {
   report?: ProductionValidationReport | null
   loading?: boolean
+  runningActionKey?: string | null
+  actionResult?: ProductionActionRunResult | null
+  onDryRunAction?: (action: ProductionValidationAction) => void
+  onExecuteAction?: (action: ProductionValidationAction) => void
 }) {
   const status = report?.status ?? (loading ? 'loading' : 'missing')
   const readyForCanary = Boolean(report?.live_allowed)
@@ -226,14 +252,52 @@ function ProductionValidationPanel({
         <div className="mt-2 space-y-1">
           {actions.length ? actions.slice(0, 5).map((action, index) => (
             <div key={`${action.key ?? action.label ?? 'action'}-${index}`} className="border border-neutral-800 px-2 py-1.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-neutral-300">{action.label ?? action.key ?? '待处理'}</span>
-                {typeof action.count === 'number' && <span className="tabular-nums text-neutral-500">{action.count}</span>}
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="truncate text-neutral-300">{action.label ?? action.key ?? '待处理'}</div>
+                  <div className="mt-0.5 flex flex-wrap gap-1 text-[9px] text-neutral-600">
+                    {action.layer && <span>{String(action.layer)}</span>}
+                    {action.requires_operator && <span className="text-amber-300">需要确认</span>}
+                    {(action.targets_count !== undefined || action.count !== undefined) && (
+                      <span className="tabular-nums">本次最多 {validationActionLimit(action)}</span>
+                    )}
+                  </div>
+                </div>
+                {typeof action.count === 'number' && <span className="shrink-0 tabular-nums text-neutral-500">{action.count}</span>}
               </div>
               {action.command && <code className="mt-1 block break-all text-[9px] text-neutral-600">{action.command}</code>}
+              {action.key && (
+                <div className="mt-2 grid grid-cols-2 gap-1">
+                  <button
+                    type="button"
+                    disabled={runningActionKey === action.key}
+                    onClick={() => onDryRunAction?.(action)}
+                    className="border border-neutral-700 px-2 py-1 text-neutral-300 hover:bg-neutral-900 disabled:cursor-wait disabled:opacity-50"
+                  >
+                    {runningActionKey === action.key ? '运行中' : '预检'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={runningActionKey === action.key}
+                    onClick={() => onExecuteAction?.(action)}
+                    className="border border-amber-500/30 px-2 py-1 text-amber-200 hover:bg-amber-500/10 disabled:cursor-wait disabled:opacity-50"
+                  >
+                    执行
+                  </button>
+                </div>
+              )}
             </div>
           )) : (
             <div className="text-neutral-500">暂无新增动作。</div>
+          )}
+          {actionResult && (
+            <div className={`border px-2 py-1.5 ${actionResult.ok ? 'border-green-500/20 text-green-200' : 'border-red-500/20 text-red-200'}`}>
+              <div className="flex items-center justify-between gap-2">
+                <span>{actionResult.action?.label ?? actionResult.action_key}</span>
+                <span className="tabular-nums">{actionResult.status}</span>
+              </div>
+              <div className="mt-1 text-[9px] text-neutral-500">{productionActionSummary(actionResult)}</div>
+            </div>
           )}
         </div>
       </details>
@@ -485,6 +549,7 @@ function App() {
   const [clearMarks, setClearMarks] = useState(false)
   const [contractStatus, setContractStatus] = useState('mature-auto')
   const [citySearch, setCitySearch] = useState('')
+  const [productionActionResult, setProductionActionResult] = useState<ProductionActionRunResult | null>(null)
   const balanceInitRef = useRef(false)
 
   const { data, isLoading, error, refetch } = useQuery({
@@ -578,6 +643,27 @@ function App() {
     },
   })
 
+  const productionActionMutation = useMutation({
+    mutationFn: ({ action, apply, operatorConfirmed }: { action: ProductionValidationAction; apply: boolean; operatorConfirmed?: boolean }) =>
+      runProductionAction({
+        actionKey: String(action.key),
+        apply,
+        operatorConfirmed: operatorConfirmed ?? false,
+        limit: validationActionLimit(action),
+        skipSignalScan: true,
+      }),
+    onSuccess: result => {
+      setProductionActionResult(result)
+      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
+      if (result.status === 'executed') {
+        queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+        queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
+        queryClient.invalidateQueries({ queryKey: ['temperature-fit'] })
+        queryClient.invalidateQueries({ queryKey: ['forecast-archive-manifest'] })
+      }
+    },
+  })
+
   const resetSimulationMutation = useMutation({
     mutationFn: ({ balance, clear }: { balance: number; clear: boolean }) => resetSimulation(balance, clear),
     onSuccess: result => {
@@ -625,6 +711,17 @@ function App() {
     last_run: null,
     last_result: null,
     last_error: null,
+  }
+  const runValidationActionDryRun = (action: ProductionValidationAction) => {
+    if (!action.key) return
+    productionActionMutation.mutate({ action, apply: false })
+  }
+  const runValidationActionExecute = (action: ProductionValidationAction) => {
+    if (!action.key) return
+    const needsConfirmation = Boolean(action.requires_operator)
+    const confirmed = !needsConfirmation || window.confirm('这个动作会写入本地状态或执行受控数据刷新，确认继续？')
+    if (!confirmed) return
+    productionActionMutation.mutate({ action, apply: true, operatorConfirmed: needsConfirmation })
   }
   const cityOptions = useMemo(() => {
     const rows = new Map<string, {
@@ -1144,6 +1241,10 @@ function App() {
               <ProductionValidationPanel
                 report={productionValidation}
                 loading={productionValidationQuery.isLoading}
+                runningActionKey={String(productionActionMutation.variables?.action.key ?? '') || null}
+                actionResult={productionActionResult}
+                onDryRunAction={runValidationActionDryRun}
+                onExecuteAction={runValidationActionExecute}
               />
 
               <div className="overflow-x-auto border border-neutral-800 bg-black p-2">
