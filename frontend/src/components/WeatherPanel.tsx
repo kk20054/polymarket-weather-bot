@@ -31,7 +31,7 @@ interface Props {
 }
 
 type EvidenceStatus = 'fresh' | 'stale' | 'missing'
-type WeatherTab = 'overview' | 'forecast' | 'metar' | 'history' | 'bias' | 'logs' | 'signals'
+type WeatherTab = 'hourly' | 'overview' | 'forecast' | 'metar' | 'history' | 'bias' | 'logs' | 'signals'
 
 type WeatherChartRow = {
   date: string
@@ -46,6 +46,21 @@ type WeatherChartRow = {
   hrrr?: number | null
   forecast_source?: string
   forecast_timestamp?: string
+}
+
+type HourlyWeatherRow = {
+  id: string
+  timestamp: string
+  target_date: string
+  label: string
+  forecast?: number | null
+  metar?: number | null
+  ecmwf?: number | null
+  hrrr?: number | null
+  humidity?: number | null
+  gap?: number | null
+  source?: string
+  horizon?: string
 }
 
 type SourceSampleTone = 'green' | 'amber' | 'red' | 'cyan' | 'neutral'
@@ -197,6 +212,19 @@ function shortTime(value?: string | null) {
   }
 }
 
+function shortHour(value?: string | null) {
+  if (!value) return '--'
+  try {
+    return new Date(value).toLocaleTimeString('zh-CN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
+  } catch {
+    return value
+  }
+}
+
 function longDate(value?: string | null) {
   if (!value) return '--'
   try {
@@ -309,6 +337,37 @@ function buildChartData(series?: WeatherCitySeries): WeatherChartRow[] {
     .slice(-60)
 }
 
+function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): HourlyWeatherRow[] {
+  const rows = new Map<string, HourlyWeatherRow>()
+  for (const point of series?.forecast_points ?? series?.points ?? []) {
+    if (selectedDate && point.target_date !== selectedDate) continue
+    if (!point.timestamp) continue
+    const forecast = point.best ?? point.ensemble_mean ?? null
+    const metar = point.metar ?? null
+    const gap = forecast !== null && forecast !== undefined && metar !== null && metar !== undefined
+      ? Number(forecast) - Number(metar)
+      : null
+    const key = `${point.timestamp}:${point.target_date}`
+    rows.set(key, {
+      id: key,
+      timestamp: point.timestamp,
+      target_date: point.target_date,
+      label: shortHour(point.timestamp),
+      forecast,
+      metar,
+      ecmwf: point.ecmwf ?? null,
+      hrrr: point.hrrr ?? null,
+      humidity: point.humidity ?? null,
+      gap,
+      source: point.source || '--',
+      horizon: point.horizon || '--',
+    })
+  }
+  return [...rows.values()]
+    .sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))
+    .slice(-48)
+}
+
 export function WeatherPanel({
   forecasts,
   signals,
@@ -325,7 +384,7 @@ export function WeatherPanel({
 }: Props) {
   const cities = useMemo(() => uniqueCities(citySeries, forecasts), [citySeries, forecasts])
   const [internalSelected, setInternalSelected] = useState(cities[0]?.key ?? '')
-  const [activeTab, setActiveTab] = useState<WeatherTab>('overview')
+  const [activeTab, setActiveTab] = useState<WeatherTab>('hourly')
   const [internalSelectedDate, setInternalSelectedDate] = useState(() => {
     if (typeof window === 'undefined') return ''
     return new URLSearchParams(window.location.search).get('date') ?? ''
@@ -398,6 +457,7 @@ export function WeatherPanel({
     point => point.timestamp
   )
   const chartData = useMemo(() => buildChartData(series), [series])
+  const hourlyRows = useMemo(() => buildHourlyRows(series, selectedDate), [series, selectedDate])
   const availableDates = useMemo(() => {
     return [...new Set(chartData.map(row => String(row.date)).filter(Boolean))]
       .sort((a, b) => a.localeCompare(b))
@@ -729,7 +789,8 @@ export function WeatherPanel({
 
       <div className="flex flex-wrap items-center justify-between gap-2 border border-neutral-800 bg-black px-2 py-1.5">
         <div className="flex flex-wrap gap-1" role="tablist" aria-label="天气证据标签">
-          <TabButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')}>总览</TabButton>
+          <TabButton active={activeTab === 'hourly'} onClick={() => setActiveTab('hourly')}>逐小时</TabButton>
+          <TabButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')}>趋势</TabButton>
           <TabButton active={activeTab === 'forecast'} onClick={() => setActiveTab('forecast')}>预报</TabButton>
           <TabButton active={activeTab === 'metar'} onClick={() => setActiveTab('metar')}>METAR</TabButton>
           <TabButton active={activeTab === 'history'} onClick={() => setActiveTab('history')}>历史观测</TabButton>
@@ -738,6 +799,7 @@ export function WeatherPanel({
           <TabButton active={activeTab === 'signals'} onClick={() => setActiveTab('signals')}>市场信号</TabButton>
         </div>
         <div className="flex flex-wrap gap-1 text-[10px] text-neutral-500">
+          <span className="border border-neutral-800 px-1.5 py-0.5">逐小时 {hourlyRows.length}</span>
           <span className="border border-neutral-800 px-1.5 py-0.5">预报 {forecastRows.length}</span>
           <span className="border border-neutral-800 px-1.5 py-0.5">METAR {metarRows.length}</span>
           <span className="border border-neutral-800 px-1.5 py-0.5">历史 {historyRows.length}</span>
@@ -756,7 +818,9 @@ export function WeatherPanel({
           </div>
         </div>
 
-        {activeTab === 'overview' ? (
+        {activeTab === 'hourly' ? (
+          <HourlyEvidencePanel rows={hourlyRows} unit={unit} cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey} selectedDate={selectedDate} />
+        ) : activeTab === 'overview' ? (
           <div className="grid min-h-0 flex-1 gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_280px]">
             {chartData.length > 0 ? (
               <div
@@ -867,6 +931,123 @@ export function WeatherPanel({
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+function HourlyEvidencePanel({
+  rows,
+  unit,
+  cityName,
+  selectedDate,
+}: {
+  rows: HourlyWeatherRow[]
+  unit: string
+  cityName?: string
+  selectedDate: string
+}) {
+  const forecastValues = rows.map(row => row.forecast).filter((value): value is number => Number.isFinite(Number(value)))
+  const metarValues = rows.map(row => row.metar).filter((value): value is number => Number.isFinite(Number(value)))
+  const humidityValues = rows.map(row => row.humidity).filter((value): value is number => Number.isFinite(Number(value)))
+  const gapValues = rows.map(row => row.gap).filter((value): value is number => Number.isFinite(Number(value)))
+  const forecastMax = forecastValues.length > 0 ? Math.max(...forecastValues) : null
+  const metarMax = metarValues.length > 0 ? Math.max(...metarValues) : null
+  const avgGap = mean(gapValues)
+  const avgHumidity = mean(humidityValues)
+
+  if (rows.length === 0) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-center text-neutral-600">
+        该日期暂无逐小时快照。点击“手动抓取”后，这里会按抓取时间展示预报、METAR、湿度和模型差异。
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid min-h-0 flex-1 gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <section className="min-h-0 border border-neutral-900 bg-neutral-950/30">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-900 px-2 py-1.5">
+          <div>
+            <div className="text-[10px] text-neutral-500">逐小时气温</div>
+            <div className="text-xs text-neutral-100">{cityName || '当前城市'} · {longDate(selectedDate)}</div>
+          </div>
+          <div className="flex flex-wrap gap-1 text-[9px] text-neutral-500">
+            <span className="border border-neutral-800 px-1.5 py-0.5">预报最高 {fmtTemp(forecastMax, unit)}</span>
+            <span className="border border-neutral-800 px-1.5 py-0.5">METAR最高 {fmtTemp(metarMax, unit)}</span>
+            <span className="border border-neutral-800 px-1.5 py-0.5">平均差 {fmtSignedTemp(avgGap, unit)}</span>
+          </div>
+        </div>
+
+        <div
+          className="h-[260px] p-2"
+          role="img"
+          aria-label={`${cityName || '当前城市'}逐小时天气证据图。绿线为预测最高温快照，橙线为 METAR 观测，青线和蓝线分别是 ECMWF 与 HRRR，浅橙柱为湿度。`}
+        >
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={rows} margin={{ top: 8, right: 18, bottom: 0, left: -8 }}>
+              <CartesianGrid stroke="#1f1f1f" strokeDasharray="3 3" />
+              <XAxis dataKey="label" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} minTickGap={12} />
+              <YAxis yAxisId="temp" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} />
+              <YAxis yAxisId="humidity" orientation="right" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
+              <Tooltip
+                contentStyle={{ background: '#050505', border: '1px solid #262626', color: '#e5e5e5', fontSize: 11 }}
+                formatter={(value: any, name: any) => {
+                  if (name === '湿度') return [fmtPct(Number(value)), name]
+                  return [fmtTemp(Number(value), unit), name]
+                }}
+                labelFormatter={(_, payload) => payload?.[0]?.payload?.timestamp ? shortTime(payload[0].payload.timestamp) : ''}
+              />
+              <Bar yAxisId="humidity" dataKey="humidity" name="湿度" fill="#f59e0b" fillOpacity={0.22} maxBarSize={12} radius={[1, 1, 0, 0]} />
+              <Line yAxisId="temp" type="monotone" dataKey="forecast" name="预测" stroke="#22c55e" dot={false} strokeWidth={2.4} connectNulls={false} />
+              <Line yAxisId="temp" type="monotone" dataKey="metar" name="METAR" stroke="#f97316" dot={false} strokeWidth={2} connectNulls={false} />
+              <Line yAxisId="temp" type="monotone" dataKey="ecmwf" name="ECMWF" stroke="#38bdf8" dot={false} strokeWidth={1.5} connectNulls={false} />
+              <Line yAxisId="temp" type="monotone" dataKey="hrrr" name="HRRR" stroke="#818cf8" dot={false} strokeWidth={1.5} connectNulls={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+
+        <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
+          <summary className="cursor-pointer select-none hover:text-neutral-400">数据说明</summary>
+          <div className="mt-1 leading-relaxed">
+            这一版先用本地已保存的 forecast snapshots 按抓取时间组织成逐小时证据层；后续会接入真实 24 小时预报、METAR/PWS 历史观测和结算 truth 后再用于策略校准。
+          </div>
+        </details>
+      </section>
+
+      <aside className="min-h-0 border border-neutral-900 bg-neutral-950/30">
+        <div className="grid grid-cols-2 gap-1 border-b border-neutral-900 p-2 text-[10px]">
+          <MetricCard label="快照" value={`${rows.length}`} sub="当前日期" />
+          <MetricCard label="湿度" value={fmtPct(avgHumidity)} sub="样本均值" />
+          <MetricCard label="预报高点" value={fmtTemp(forecastMax, unit)} sub="预测线" />
+          <MetricCard label="METAR高点" value={fmtTemp(metarMax, unit)} sub="观测线" />
+        </div>
+        <div className="max-h-[360px] overflow-auto">
+          <table className="w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                <th className="px-2 py-1 font-normal">时间</th>
+                <th className="px-2 py-1 font-normal">预报</th>
+                <th className="px-2 py-1 font-normal">METAR</th>
+                <th className="px-2 py-1 font-normal">湿度</th>
+                <th className="px-2 py-1 font-normal">来源</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row => (
+                <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                  <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
+                  <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtTemp(row.metar, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.humidity)}</td>
+                  <td className="max-w-[90px] truncate px-2 py-1 text-neutral-500" title={`${row.source || '--'} · ${row.horizon || '--'} · ${shortTime(row.timestamp)}`}>
+                    {row.source || '--'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </aside>
     </div>
   )
 }
