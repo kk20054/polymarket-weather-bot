@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .cli import run_forecast_backfill, run_orderbook_backfill, run_production_refresh
+from .cli import run_forecast_backfill, run_orderbook_backfill, run_production_refresh, run_truth_backfill
 from .db import bulk_settlement_contract_verification
 from .qualification import build_data_readiness, persist_data_readiness
 
@@ -30,6 +30,12 @@ ACTION_CATALOG: dict[str, dict[str, Any]] = {
         "label": "Review mature auto contracts",
         "description": "Bulk-verify mature contracts that the parser marked as auto-verifiable.",
         "requires_operator": True,
+        "mutates": True,
+    },
+    "backfill_official_truth": {
+        "label": "Backfill official settlement truth",
+        "description": "Fetch station-level actual temperatures for matured settlement contracts.",
+        "requires_operator": False,
         "mutates": True,
     },
     "review_auto_verified_contracts": {
@@ -138,6 +144,8 @@ def _execute_action(action_key: str, params: dict[str, Any]) -> dict[str, Any]:
             end_date=params["end_date"],
             scan_signals=not params["skip_signal_scan"],
         )
+    if action_key == "backfill_official_truth":
+        return run_truth_backfill(cities_arg, params["limit"], params["start_date"], params["end_date"])
     if action_key in {"review_mature_auto_contracts", "review_auto_verified_contracts"}:
         return bulk_settlement_contract_verification(
             contract_ids=None,

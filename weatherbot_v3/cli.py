@@ -198,6 +198,98 @@ def _orderbook_quote_reason(quote) -> str:
     return "unknown_orderbook_blocker"
 
 
+def run_truth_backfill(
+    cities_arg: str = "",
+    limit_arg: int = 50,
+    start_date_arg: str = "",
+    end_date_arg: str = "",
+) -> dict:
+    from .db import upsert_truth_observation
+    from .registry import SETTLEMENT_REGISTRY
+    from .truth import get_actual_observation
+
+    repair = repair_truth_temporal_mismatches()
+    requested = {item.strip() for item in cities_arg.split(",") if item.strip()}
+    profiles = {
+        city: profile
+        for city, profile in SETTLEMENT_REGISTRY.items()
+        if not requested or city in requested
+    }
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT city, target_local_date
+            FROM settlement_contracts
+            WHERE target_local_date IS NOT NULL AND target_local_date != ''
+            ORDER BY target_local_date DESC, city
+            """
+        ).fetchall()
+    locations = {
+        city: {
+            "lat": profile.latitude,
+            "lon": profile.longitude,
+            "name": profile.city_name,
+            "station": profile.station_id,
+            "unit": profile.unit,
+            "region": profile.region,
+        }
+        for city, profile in profiles.items()
+    }
+    timezones = {city: profile.timezone for city, profile in profiles.items()}
+    candidates = []
+    skipped_pending = 0
+    skipped_unknown_city = 0
+    for row in rows:
+        city = str(row["city"] or "")
+        target_date = str(row["target_local_date"] or "")
+        if city not in profiles:
+            skipped_unknown_city += 1
+            continue
+        if start_date_arg and target_date < start_date_arg:
+            continue
+        if end_date_arg and target_date > end_date_arg:
+            continue
+        if is_settlement_pending(target_date, profiles[city].timezone):
+            skipped_pending += 1
+            continue
+        candidates.append((city, target_date))
+    candidates = candidates[: max(1, min(int(limit_arg or 50), 500))]
+    results = []
+    for city, target_date in candidates:
+        try:
+            observation = get_actual_observation(city, target_date, locations, timezones)
+            upsert_truth_observation(observation.to_dict())
+            results.append({
+                "city": city,
+                "target_date": target_date,
+                "provider": observation.provider,
+                "actual_temp": observation.actual_temp,
+                "eligible": observation.calibration_eligible,
+                "is_final": observation.is_final,
+                "ok": observation.actual_temp is not None,
+            })
+        except Exception as exc:
+            results.append({"city": city, "target_date": target_date, "ok": False, "error": str(exc)})
+        time.sleep(0.05)
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    providers = Counter(row.get("provider") or "error" for row in results)
+    return {
+        "requested": len(candidates),
+        "skipped_pending_settlement": skipped_pending,
+        "skipped_unknown_city": skipped_unknown_city,
+        "ok": sum(1 for row in results if row["ok"]),
+        "eligible": sum(1 for row in results if row.get("eligible")),
+        "providers": dict(providers),
+        "temporal_repair": repair,
+        "results": results,
+        "truth_stage": next(
+            (stage for stage in readiness["stages"] if stage["key"] == "truth"),
+            None,
+        ),
+    }
+
+
 def run_legacy_signal_scan() -> dict:
     from bot_v2 import scan_and_update
 
@@ -431,92 +523,8 @@ def main() -> None:
             ),
         }, ensure_ascii=False, indent=2))
     elif args.command == "truth-backfill":
-        from collections import Counter
-
-        from .db import upsert_truth_observation
-        from .registry import SETTLEMENT_REGISTRY
-        from .truth import get_actual_observation
-
-        repair = repair_truth_temporal_mismatches()
-        requested = {item.strip() for item in args.cities.split(",") if item.strip()}
-        profiles = {
-            city: profile
-            for city, profile in SETTLEMENT_REGISTRY.items()
-            if not requested or city in requested
-        }
-        with connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT city, target_local_date
-                FROM settlement_contracts
-                WHERE target_local_date IS NOT NULL AND target_local_date != ''
-                ORDER BY target_local_date DESC, city
-                """
-            ).fetchall()
-        locations = {
-            city: {
-                "lat": profile.latitude,
-                "lon": profile.longitude,
-                "name": profile.city_name,
-                "station": profile.station_id,
-                "unit": profile.unit,
-                "region": profile.region,
-            }
-            for city, profile in profiles.items()
-        }
-        timezones = {city: profile.timezone for city, profile in profiles.items()}
-        candidates = []
-        skipped_pending = 0
-        skipped_unknown_city = 0
-        for row in rows:
-            city = str(row["city"] or "")
-            target_date = str(row["target_local_date"] or "")
-            if city not in profiles:
-                skipped_unknown_city += 1
-                continue
-            if args.start_date and target_date < args.start_date:
-                continue
-            if args.end_date and target_date > args.end_date:
-                continue
-            if is_settlement_pending(target_date, profiles[city].timezone):
-                skipped_pending += 1
-                continue
-            candidates.append((city, target_date))
-        candidates = candidates[: max(1, min(int(args.limit or 50), 500))]
-        results = []
-        for city, target_date in candidates:
-            try:
-                observation = get_actual_observation(city, target_date, locations, timezones)
-                upsert_truth_observation(observation.to_dict())
-                results.append({
-                    "city": city,
-                    "target_date": target_date,
-                    "provider": observation.provider,
-                    "actual_temp": observation.actual_temp,
-                    "eligible": observation.calibration_eligible,
-                    "is_final": observation.is_final,
-                    "ok": observation.actual_temp is not None,
-                })
-            except Exception as exc:
-                results.append({"city": city, "target_date": target_date, "ok": False, "error": str(exc)})
-            time.sleep(0.05)
-        readiness = build_data_readiness()
-        persist_data_readiness(readiness)
-        providers = Counter(row.get("provider") or "error" for row in results)
-        print(json.dumps({
-            "requested": len(candidates),
-            "skipped_pending_settlement": skipped_pending,
-            "skipped_unknown_city": skipped_unknown_city,
-            "ok": sum(1 for row in results if row["ok"]),
-            "eligible": sum(1 for row in results if row.get("eligible")),
-            "providers": dict(providers),
-            "temporal_repair": repair,
-            "results": results,
-            "truth_stage": next(
-                (stage for stage in readiness["stages"] if stage["key"] == "truth"),
-                None,
-            ),
-        }, ensure_ascii=False, indent=2))
+        payload = run_truth_backfill(args.cities, args.limit, args.start_date, args.end_date)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "truth-audit":
         repair = repair_truth_temporal_mismatches()
         readiness = build_data_readiness()

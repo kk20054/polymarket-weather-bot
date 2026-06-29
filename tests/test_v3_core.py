@@ -590,6 +590,7 @@ class V3CoreTests(unittest.TestCase):
     def test_production_actions_are_whitelisted_and_dry_run_by_default(self):
         actions = {action["key"] for action in list_production_actions()}
         self.assertIn("refresh_clob_orderbooks", actions)
+        self.assertIn("backfill_official_truth", actions)
 
         unknown = run_production_action("shell_anything", apply=True)
         self.assertFalse(unknown["ok"])
@@ -633,6 +634,32 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(result["status"], "executed")
         mocked_backfill.assert_called_once_with(7, "2026-06-28", "")
         self.assertEqual(result["readiness"]["blocked_keys"], ["orderbooks"])
+
+    def test_production_action_executes_whitelisted_truth_backfill(self):
+        with patch("weatherbot_v3.production_actions.run_truth_backfill") as mocked_backfill:
+            mocked_backfill.return_value = {"ok": 4, "eligible": 3, "requested": 5}
+            with patch("weatherbot_v3.production_actions.build_data_readiness") as mocked_readiness:
+                mocked_readiness.return_value = {
+                    "status": "blocked",
+                    "score": 0.4,
+                    "live_allowed": False,
+                    "production_phase": {"blocked_keys": ["truth"]},
+                }
+                with patch("weatherbot_v3.production_actions.persist_data_readiness"):
+                    result = run_production_action(
+                        "backfill_official_truth",
+                        apply=True,
+                        cities=["nyc", "seattle"],
+                        limit=9,
+                        start_date="2026-06-20",
+                        end_date="2026-06-28",
+                    )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "executed")
+        mocked_backfill.assert_called_once_with("nyc,seattle", 9, "2026-06-20", "2026-06-28")
+        self.assertEqual(result["payload"]["eligible"], 3)
+        self.assertEqual(result["readiness"]["blocked_keys"], ["truth"])
 
     def test_data_readiness_operator_action_when_auto_contracts_are_not_mature(self):
         db_path = test_db_path("data_readiness_future_auto")
