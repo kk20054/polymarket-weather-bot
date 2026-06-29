@@ -152,6 +152,7 @@ class ProductionActionRequest(BaseModel):
     end_date: str = ""
     skip_signal_scan: bool = True
     note: str = ""
+    archive_path: str = ""
 
 
 class LiveOrderUpdate(BaseModel):
@@ -3170,6 +3171,7 @@ async def production_actions_run(request: ProductionActionRequest):
         end_date=request.end_date,
         skip_signal_scan=request.skip_signal_scan,
         note=request.note,
+        archive_path=request.archive_path,
     )
     if request.apply and result.get("status") == "executed":
         _clear_production_validation_cache()

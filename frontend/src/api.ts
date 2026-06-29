@@ -130,6 +130,7 @@ export async function runProductionAction(options: ProductionActionRequest): Pro
     end_date: options.endDate ?? '',
     skip_signal_scan: options.skipSignalScan ?? true,
     note: options.note ?? '',
+    archive_path: options.archivePath ?? '',
   })
   return data
 }

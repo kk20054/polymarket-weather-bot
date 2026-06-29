@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .cli import run_forecast_backfill, run_orderbook_backfill, run_production_refresh, run_truth_backfill
 from .db import bulk_settlement_contract_verification
+from .forecast_archive import import_forecast_archive
 from .qualification import build_data_readiness, persist_data_readiness
 
 
@@ -38,6 +40,12 @@ ACTION_CATALOG: dict[str, dict[str, Any]] = {
         "requires_operator": False,
         "mutates": True,
     },
+    "backfill_forecast_members": {
+        "label": "Import historical forecast archive",
+        "description": "Validate and import no-leak historical forecast/member archive records.",
+        "requires_operator": False,
+        "mutates": True,
+    },
     "review_auto_verified_contracts": {
         "label": "Review auto verified contracts",
         "description": "Bulk-verify auto-verifiable contracts from the model dataset audit queue.",
@@ -66,6 +74,7 @@ def run_production_action(
     end_date: str = "",
     skip_signal_scan: bool = True,
     note: str = "",
+    archive_path: str = "data/forecast_archive/historical_forecasts.jsonl",
 ) -> dict[str, Any]:
     action = ACTION_CATALOG.get(action_key)
     if not action:
@@ -88,6 +97,7 @@ def run_production_action(
         "end_date": end_date or "",
         "skip_signal_scan": bool(skip_signal_scan),
         "note": note or "",
+        "archive_path": archive_path or "data/forecast_archive/historical_forecasts.jsonl",
     }
 
     if not apply:
@@ -110,7 +120,18 @@ def run_production_action(
             "params": params,
         }
 
-    payload = _execute_action(action_key, params)
+    try:
+        payload = _execute_action(action_key, params)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "failed",
+            "reason": exc.__class__.__name__,
+            "error": str(exc),
+            "action_key": action_key,
+            "action": action,
+            "params": params,
+        }
     readiness = build_data_readiness()
     persist_data_readiness(readiness)
     return {
@@ -146,6 +167,16 @@ def _execute_action(action_key: str, params: dict[str, Any]) -> dict[str, Any]:
         )
     if action_key == "backfill_official_truth":
         return run_truth_backfill(cities_arg, params["limit"], params["start_date"], params["end_date"])
+    if action_key == "backfill_forecast_members":
+        archive_path = Path(str(params["archive_path"] or "data/forecast_archive/historical_forecasts.jsonl"))
+        if not archive_path.exists():
+            return {
+                "ok": False,
+                "reason": "forecast_archive_missing",
+                "archive_path": str(archive_path),
+                "hint": "Generate a template from the forecast archive manifest, fill real historical no-leak forecast records, then run this action again.",
+            }
+        return import_forecast_archive(archive_path, apply=True)
     if action_key in {"review_mature_auto_contracts", "review_auto_verified_contracts"}:
         return bulk_settlement_contract_verification(
             contract_ids=None,

@@ -591,6 +591,7 @@ class V3CoreTests(unittest.TestCase):
         actions = {action["key"] for action in list_production_actions()}
         self.assertIn("refresh_clob_orderbooks", actions)
         self.assertIn("backfill_official_truth", actions)
+        self.assertIn("backfill_forecast_members", actions)
 
         unknown = run_production_action("shell_anything", apply=True)
         self.assertFalse(unknown["ok"])
@@ -660,6 +661,42 @@ class V3CoreTests(unittest.TestCase):
         mocked_backfill.assert_called_once_with("nyc,seattle", 9, "2026-06-20", "2026-06-28")
         self.assertEqual(result["payload"]["eligible"], 3)
         self.assertEqual(result["readiness"]["blocked_keys"], ["truth"])
+
+    def test_production_action_forecast_archive_import_handles_missing_file(self):
+        result = run_production_action(
+            "backfill_forecast_members",
+            apply=True,
+            archive_path=str(TEST_DB_DIR / "missing-forecast-archive.jsonl"),
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "executed")
+        self.assertEqual(result["payload"]["reason"], "forecast_archive_missing")
+
+    def test_production_action_executes_whitelisted_forecast_archive_import(self):
+        archive_path = TEST_DB_DIR / "production-action-forecast-archive.jsonl"
+        archive_path.write_text("{}", encoding="utf-8")
+        self.addCleanup(lambda: archive_path.unlink(missing_ok=True))
+        with patch("weatherbot_v3.production_actions.import_forecast_archive") as mocked_import:
+            mocked_import.return_value = {"ok": True, "requested": 1, "imported": 1}
+            with patch("weatherbot_v3.production_actions.build_data_readiness") as mocked_readiness:
+                mocked_readiness.return_value = {
+                    "status": "blocked",
+                    "score": 0.5,
+                    "live_allowed": False,
+                    "production_phase": {"blocked_keys": ["forecast_runs"]},
+                }
+                with patch("weatherbot_v3.production_actions.persist_data_readiness"):
+                    result = run_production_action(
+                        "backfill_forecast_members",
+                        apply=True,
+                        archive_path=str(archive_path),
+                    )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "executed")
+        mocked_import.assert_called_once_with(archive_path, apply=True)
+        self.assertEqual(result["payload"]["imported"], 1)
 
     def test_data_readiness_operator_action_when_auto_contracts_are_not_mature(self):
         db_path = test_db_path("data_readiness_future_auto")

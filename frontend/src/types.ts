@@ -321,6 +321,7 @@ export interface ProductionActionRequest {
   endDate?: string
   skipSignalScan?: boolean
   note?: string
+  archivePath?: string
 }
 
 export interface ProductionActionRunResult {
