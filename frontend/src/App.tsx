@@ -158,14 +158,13 @@ function TradeModeSwitch({
   liveAvailable: boolean
   onMode: (mode: TradeMode) => void
 }) {
+  const locked = !liveAvailable
+
   return (
     <div className="border border-neutral-800 bg-black p-3">
       <div className="mb-2 flex items-center justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <div className="text-sm font-medium text-neutral-100">交易模式</div>
-          <div className="text-[11px] text-neutral-500">
-            {mode === 'paper' ? '当前所有买入操作只写入模拟账户。' : '当前操作会进入实盘下单检查。'}
-          </div>
         </div>
         <span
           className={`shrink-0 border px-2 py-1 text-[10px] ${
@@ -175,7 +174,7 @@ function TradeModeSwitch({
           }`}
           aria-live="polite"
         >
-          {mode === 'paper' ? '模拟盘' : '实盘'}
+          {mode === 'paper' ? '模拟盘' : '实盘检查'}
         </span>
       </div>
 
@@ -196,7 +195,7 @@ function TradeModeSwitch({
           onClick={() => liveAvailable && onMode('live')}
           disabled={!liveAvailable}
           aria-pressed={mode === 'live'}
-          aria-describedby={!liveAvailable ? 'live-mode-unavailable' : undefined}
+          aria-describedby={locked ? 'live-mode-unavailable' : undefined}
           className={`inline-flex min-h-10 items-center justify-center gap-2 border-l border-neutral-800 px-3 py-2 text-xs ${
             mode === 'live'
               ? 'bg-blue-500/15 text-blue-200'
@@ -209,11 +208,20 @@ function TradeModeSwitch({
           实盘
         </button>
       </div>
-      {!liveAvailable && (
-        <p id="live-mode-unavailable" className="mt-2 text-[10px] leading-relaxed text-amber-300">
-          实盘尚未连接或策略闸门未通过，因此目前只能使用模拟盘。
-        </p>
-      )}
+
+      <div className="mt-2 flex items-center justify-between gap-2 text-[10px]">
+        <span className={`border px-1.5 py-0.5 ${locked ? 'border-amber-500/30 text-amber-300' : 'border-green-500/30 text-green-300'}`}>
+          {locked ? '实盘锁定' : '可用 canary'}
+        </span>
+        <details className="min-w-0 text-right text-neutral-500">
+          <summary className="cursor-pointer select-none hover:text-neutral-300">执行说明</summary>
+          <p id="live-mode-unavailable" className="mt-1 max-w-[260px] text-left leading-relaxed text-neutral-500">
+            {locked
+              ? '策略闸门或实盘配置未通过，买入只会写入模拟账户。'
+              : '实盘会先执行 canary 风控、盘口、tick 和 orderMinSize 检查。'}
+          </p>
+        </details>
+      </div>
     </div>
   )
 }
@@ -252,10 +260,9 @@ function SimulationCard({
     <div className="border border-neutral-800 bg-black p-3">
       <div className="mb-3 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-        <Wallet className="h-4 w-4 text-cyan-300" />
-        <div>
+          <Wallet className="h-4 w-4 text-cyan-300" />
+          <div>
             <div className="text-sm font-medium text-neutral-100">模拟账户</div>
-            <div className="text-[10px] text-neutral-500">paper trading</div>
           </div>
         </div>
         <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${
@@ -287,15 +294,18 @@ function SimulationCard({
       </div>
 
       <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
-        <input
-          type="number"
-          min="0"
-          step="1"
-          value={value}
-          onChange={event => onValue(event.target.value)}
-          className="min-w-0 flex-1 px-2 py-1 text-right tabular-nums"
-          aria-label="设置模拟本金"
-        />
+        <label className="grid min-w-0 grid-cols-[auto_1fr] items-center border border-neutral-800 bg-neutral-950/70 px-2 py-1 text-[10px] text-neutral-500">
+          本金
+          <input
+            type="number"
+            min="0"
+            step="1"
+            value={value}
+            onChange={event => onValue(event.target.value)}
+            className="min-w-0 border-0 bg-transparent p-0 text-right text-xs tabular-nums text-neutral-100 focus:outline-none"
+            aria-label="设置模拟本金"
+          />
+        </label>
         <button
           onClick={onReset}
           disabled={resetting}
@@ -338,7 +348,10 @@ function SimulationCard({
 
       {(lastResult || autoSimulation.last_error) && (
         <div className="mt-3 border border-neutral-800 p-2 text-[10px] leading-relaxed text-neutral-400">
-          <div className="mb-1 text-neutral-200">最近检查 · {timeText(autoSimulation.last_run)}</div>
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <span className="text-neutral-200">最近检查</span>
+            <span className="tabular-nums text-neutral-500">{timeText(autoSimulation.last_run)}</span>
+          </div>
           {lastResult && (
             <div>
               买入 {lastResult.count}，跳过 {lastResult.skipped}，花费 {money(lastResult.spent)}，剩余 {money(lastResult.remaining)}
@@ -354,7 +367,7 @@ function SimulationCard({
       )}
 
       <details className="mt-3 text-[10px] text-neutral-600">
-        <summary className="cursor-pointer select-none hover:text-neutral-300">模拟说明</summary>
+        <summary className="cursor-pointer select-none hover:text-neutral-300">估值口径</summary>
         <p className="mt-1 leading-relaxed">
           新买入会按卖一成交、按买一估值，spread 先进入未实现亏损；这只是执行成本，不代表最终结算已经错。
         </p>
@@ -873,8 +886,19 @@ function App() {
 
           {activityView === 'signals' ? (
             <div className="flex min-h-0 flex-1 flex-col">
-              <div className="border-b border-neutral-800 px-3 py-2 text-[10px] text-neutral-600">
-                点击信号查看盘口、风控原因与 Polymarket 链接。
+              <div className="border-b border-neutral-800 px-3 py-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs text-neutral-200">信号行动</div>
+                    <div className="text-[10px] tabular-nums text-neutral-500">{actionable} 可执行 / {signals.length} 总信号</div>
+                  </div>
+                  <details className="text-right text-[10px] text-neutral-500">
+                    <summary className="cursor-pointer select-none hover:text-neutral-300">详情</summary>
+                    <div className="mt-1 max-w-[240px] text-left leading-relaxed">
+                      展开单条信号可看盘口、风控原因和 Polymarket 链接。
+                    </div>
+                  </details>
+                </div>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto">
                 <SignalsTable
@@ -891,8 +915,19 @@ function App() {
             </div>
           ) : (
             <div className="flex min-h-0 flex-1 flex-col">
-              <div className="border-b border-neutral-800 px-3 py-2 text-[10px] text-neutral-600">
-                未结算持仓按当前 bid 估值，会包含买卖价差造成的即时浮亏。
+              <div className="border-b border-neutral-800 px-3 py-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs text-neutral-200">模拟 / 交易</div>
+                    <div className="text-[10px] tabular-nums text-neutral-500">{stats.open_trades ?? 0} 持仓 / {stats.settled_trades ?? 0} 结算</div>
+                  </div>
+                  <details className="text-right text-[10px] text-neutral-500">
+                    <summary className="cursor-pointer select-none hover:text-neutral-300">口径</summary>
+                    <div className="mt-1 max-w-[240px] text-left leading-relaxed">
+                      未结算持仓按当前 bid 估值，会包含买卖价差造成的即时浮亏。
+                    </div>
+                  </details>
+                </div>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto">
                 <TradesTable trades={trades} />
