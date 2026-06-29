@@ -678,20 +678,7 @@ export function WeatherPanel({
         ) : activeTab === 'logs' ? (
           <EventTimeline events={eventRows} />
         ) : (
-          <EvidenceTable
-            empty="该城市暂无市场信号"
-            columns={['日期', '温度桶', '价格', '模型概率', 'edge', '状态', '链接']}
-            rows={citySignals.slice(0, 18).map(signal => [
-              longDate(signal.target_date),
-              signal.bucket_label || String(signal.threshold_f),
-              signal.limit_price !== undefined && signal.limit_price !== null ? `$${Number(signal.limit_price).toFixed(3)}` : '--',
-              `${((signal.calibrated_probability ?? signal.model_probability ?? 0) * 100).toFixed(1)}%`,
-              `${((signal.probability_edge ?? signal.edge ?? 0) * 100).toFixed(1)}%`,
-              signal.actionable ? 'BUY' : signal.status || 'watch',
-              signal.event_url ? 'Polymarket' : '--',
-            ])}
-            links={citySignals.slice(0, 18).map(signal => signal.event_url)}
-          />
+          <SignalCards signals={citySignals.slice(0, 18)} unit={unit} selectedDate={selectedDate} />
         )}
       </div>
 
@@ -720,6 +707,112 @@ export function WeatherPanel({
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+function SignalCards({ signals, unit, selectedDate }: { signals: WeatherSignal[]; unit: string; selectedDate: string }) {
+  const actionable = signals.filter(signal => signal.actionable).length
+  const withPositions = signals.filter(signal => signal.paper_position).length
+  const dated = selectedDate ? signals.filter(signal => signal.target_date === selectedDate).length : 0
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      <div className="mb-2 grid grid-cols-[repeat(auto-fit,minmax(110px,1fr))] gap-1 text-[10px]">
+        <SignalStat label="可执行" value={`${actionable}`} tone={actionable > 0 ? 'green' : 'neutral'} />
+        <SignalStat label="选中日期" value={`${dated}`} />
+        <SignalStat label="模拟持仓" value={`${withPositions}`} tone={withPositions > 0 ? 'cyan' : 'neutral'} />
+        <SignalStat label="总信号" value={`${signals.length}`} />
+      </div>
+      {signals.length === 0 && (
+        <div className="flex min-h-[180px] items-center justify-center border border-neutral-900 p-4 text-neutral-600">
+          该城市暂无市场信号
+        </div>
+      )}
+      <div className="space-y-1">
+        {signals.map(signal => {
+          const edge = signal.probability_edge ?? signal.edge
+          const probability = signal.calibrated_probability ?? signal.model_probability
+          const price = signal.limit_price ?? signal.market_probability
+          const isSelectedDate = !selectedDate || signal.target_date === selectedDate
+          const blockedReasons = signal.decision?.reasons ?? signal.live_block_reasons ?? []
+          const cautions = signal.decision?.cautions ?? signal.live_cautions ?? []
+          return (
+            <div
+              key={signal.id ?? signal.market_id}
+              className={`border px-2 py-1.5 ${
+                signal.actionable
+                  ? 'border-green-500/30 bg-green-500/5'
+                  : isSelectedDate
+                    ? 'border-amber-500/25 bg-amber-500/5'
+                    : 'border-neutral-800 bg-neutral-950'
+              }`}
+            >
+              <div className="grid gap-2 md:grid-cols-[1.3fr_repeat(4,minmax(0,1fr))_auto]">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-1">
+                    <span className={`border px-1.5 py-0.5 text-[9px] ${signal.actionable ? 'border-green-500/40 text-green-300' : 'border-neutral-700 text-neutral-500'}`}>
+                      {signal.actionable ? 'BUY YES' : signal.status || '观察'}
+                    </span>
+                    {isSelectedDate && <span className="border border-cyan-500/25 px-1.5 py-0.5 text-[9px] text-cyan-300">当前日期</span>}
+                    {signal.paper_position && <span className="border border-amber-500/25 px-1.5 py-0.5 text-[9px] text-amber-300">已模拟</span>}
+                  </div>
+                  <div className="mt-1 truncate text-xs text-neutral-100" title={signal.question || signal.bucket_label || String(signal.threshold_f)}>
+                    {signal.bucket_label || fmtTemp(signal.threshold_f, unit)}
+                  </div>
+                  <div className="truncate text-[9px] text-neutral-600">{longDate(signal.target_date)} · {signal.direction || 'YES'}</div>
+                </div>
+                <DecisionMetric label="盘口" value={fmtPrice(price)} sub={signal.spread !== undefined && signal.spread !== null ? `spread ${fmtPrice(signal.spread)}` : `bid ${fmtPrice(signal.bid_price)}`} />
+                <DecisionMetric label="概率" value={fmtProb(probability)} sub={`市场 ${fmtProb(signal.market_probability)}`} />
+                <DecisionMetric label="Edge / EV" value={fmtSignedPct(edge)} sub={signal.calibrated_edge !== undefined && signal.calibrated_edge !== null ? `cal ${fmtSignedPct(signal.calibrated_edge)}` : `raw ${fmtSignedPct(signal.raw_edge)}`} />
+                <DecisionMetric label="模型" value={fmtTemp(signal.ensemble_mean, unit)} sub={`σ ${signal.ensemble_std?.toFixed?.(1) ?? '--'} · n ${signal.ensemble_members ?? '--'}`} />
+                {signal.event_url ? (
+                  <a href={signal.event_url} target="_blank" rel="noreferrer" className="inline-flex min-h-9 items-center justify-center gap-1 border border-cyan-500/30 px-2 text-[10px] text-cyan-300 hover:bg-cyan-500/10">
+                    Polymarket <ExternalLink className="h-3 w-3" />
+                  </a>
+                ) : (
+                  <span className="inline-flex min-h-9 items-center justify-center border border-neutral-800 px-2 text-[10px] text-neutral-600">无链接</span>
+                )}
+              </div>
+              <details className="mt-1 border-t border-neutral-800/80 pt-1 text-[9px] text-neutral-500">
+                <summary className="cursor-pointer select-none hover:text-neutral-300">信号明细</summary>
+                <div className="mt-1 grid gap-1 md:grid-cols-2">
+                  <DetailLine label="建议金额" value={signal.sim_amount !== null && signal.sim_amount !== undefined ? `$${Number(signal.sim_amount).toFixed(2)}` : `$${Number(signal.suggested_size ?? 0).toFixed(2)}`} />
+                  <DetailLine label="份额" value={signal.shares !== null && signal.shares !== undefined ? `${Number(signal.shares).toFixed(2)}` : '--'} />
+                  <DetailLine label="质量分" value={signal.strategy_score !== undefined && signal.strategy_score !== null ? signal.strategy_score.toFixed(2) : '--'} />
+                  <DetailLine label="truth" value={signal.truth?.status || signal.live_risk_level || '--'} />
+                  <DetailLine label="fit" value={signal.fit_samples !== undefined ? `${signal.fit_samples} samples · MAE ${signal.fit_mae_f?.toFixed?.(1) ?? '--'}F` : '--'} />
+                  <DetailLine label="near-lock" value={signal.near_lock ? `${signal.near_lock.hours_left.toFixed(1)}h · obs ${fmtTemp(signal.near_lock.observed_temp, unit)}` : '--'} />
+                  <DetailLine label="阻塞" value={blockedReasons.length ? blockedReasons.join(' · ') : '--'} wide />
+                  <DetailLine label="提醒" value={cautions.length ? cautions.join(' · ') : '--'} wide />
+                  <DetailLine label="标签" value={[...(signal.strategy_tags ?? []), ...(signal.quality_flags ?? [])].join(' · ') || '--'} wide />
+                  <DetailLine label="备注" value={[signal.manual_note, signal.reasoning, ...(signal.strategy_notes ?? [])].filter(Boolean).join(' · ') || '--'} wide />
+                  <DetailLine label="market" value={signal.market_id || '--'} wide />
+                  <DetailLine label="YES token" value={signal.yes_token_id || '--'} wide />
+                </div>
+              </details>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function SignalStat({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: 'green' | 'cyan' | 'neutral' }) {
+  const color = tone === 'green' ? 'text-green-300' : tone === 'cyan' ? 'text-cyan-300' : 'text-neutral-200'
+  return (
+    <div className="border border-neutral-800 px-2 py-1 text-neutral-500">
+      {label} <span className={`tabular-nums ${color}`}>{value}</span>
+    </div>
+  )
+}
+
+function DetailLine({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {
+  return (
+    <div className={`grid grid-cols-[72px_minmax(0,1fr)] gap-1 ${wide ? 'md:col-span-2' : ''}`}>
+      <span className="text-neutral-600">{label}</span>
+      <span className="truncate text-neutral-400" title={value}>{value}</span>
     </div>
   )
 }
