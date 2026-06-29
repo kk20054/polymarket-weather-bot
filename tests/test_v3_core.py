@@ -21,7 +21,7 @@ from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import default_orderbook_start_date, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 TEST_DB_DIR = Path(__file__).resolve().parents[1] / ".tmp-tests"
@@ -901,6 +901,11 @@ class V3CoreTests(unittest.TestCase):
         db_path = test_db_path("bulk_contract_mature_only")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            today = datetime.now(timezone.utc).date()
+            mature_date = today - timedelta(days=7)
+            pending_date = today + timedelta(days=7)
+            mature_label = f"{mature_date.strftime('%B')} {mature_date.day}"
+            pending_label = f"{pending_date.strftime('%B')} {pending_date.day}"
             mature_rule = infer_settlement_rule(
                 {
                     "market_id": "nyc-mature-1",
@@ -908,10 +913,10 @@ class V3CoreTests(unittest.TestCase):
                     "city_name": "New York City",
                     "unit": "F",
                     "event_url": "https://polymarket.com/event/nyc-mature",
-                    "question": "Will the highest temperature in NYC be between 80-81°F on June 23?",
+                    "question": f"Will the highest temperature in NYC be between 80-81°F on {mature_label}?",
                     "description": "Resolves using Wunderground station KLGA history.",
-                    "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/2026-6-23",
-                    "date": "2026-06-23",
+                    "resolutionSource": f"https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/{mature_date.year}-{mature_date.month}-{mature_date.day}",
+                    "date": mature_date.isoformat(),
                 }
             )
             pending_rule = infer_settlement_rule(
@@ -921,10 +926,10 @@ class V3CoreTests(unittest.TestCase):
                     "city_name": "New York City",
                     "unit": "F",
                     "event_url": "https://polymarket.com/event/nyc-pending",
-                    "question": "Will the highest temperature in NYC be between 80-81°F on June 28?",
+                    "question": f"Will the highest temperature in NYC be between 80-81°F on {pending_label}?",
                     "description": "Resolves using Wunderground station KLGA history.",
-                    "resolutionSource": "https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/2026-6-28",
-                    "date": "2026-06-28",
+                    "resolutionSource": f"https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA/date/{pending_date.year}-{pending_date.month}-{pending_date.day}",
+                    "date": pending_date.isoformat(),
                 }
             )
             upsert_market_rules([mature_rule.to_dict(), pending_rule.to_dict()])

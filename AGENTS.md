@@ -1,0 +1,148 @@
+# WeatherBot Agent Rules
+
+This file is the project-level operating guide for Codex and any other coding agent working on WeatherBot.
+
+## Mission
+
+WeatherBot is a production-oriented Polymarket weather trading platform. The goal is:
+
+```text
+real data foundation -> leakage-free probability model -> realistic paper execution -> production dashboard -> 14-30 day validation -> small live canary
+```
+
+Do not claim or imply that the bot can reliably make money until the paper-trading and validation gates prove it. Current status is still Phase 1.5 to Phase 2 transition: usable for simulation and observation, not for unattended live trading.
+
+## Product Direction
+
+- Learn PolyWX's information architecture: city-first dashboard, city index, recommendation focus, refresh time, date switching, forecast, METAR, historical observations, bias statistics, fetch logs, hourly rows, and clear empty states.
+- Do not copy PolyWX branding, membership flows, voting widgets, non-trading prompts, or visual identity.
+- Preserve WeatherBot's own edge: Polymarket event links, YES token data, real orderbooks, paper/live gates, truth versions, simulated fills, live dry-run checks, and risk controls.
+- Use `suislanchez/polymarket-kalshi-weather-bot` only as a reference for FastAPI + SQLite + React dashboard structure and simulation ergonomics. Do not reintroduce BTC modules, Kalshi-first assumptions, or simple `edge > 8%` auto-trading logic.
+- Treat `alteregoeth-ai/weatherbot` as the airport-station and multi-source weather baseline, not as a production trading architecture.
+
+## Technology Stack
+
+- Backend: Python, FastAPI, SQLite, `weatherbot_v3`.
+- Frontend: Vite, React, TypeScript, Tailwind CSS, Recharts, lucide-react.
+- Local backend: `http://127.0.0.1:8765`.
+- Local frontend: `http://127.0.0.1:5173`.
+- Main backend entrypoint: `dashboard_server.py`.
+- Main frontend app: `frontend/src/App.tsx`.
+- Main city dashboard component: `frontend/src/components/WeatherPanel.tsx`.
+
+## Directory Boundaries
+
+- `weatherbot_v3/`: production modules for config, DB, truth, forecast archives, distributions, qualification, execution, AI review, notifications, and CLI utilities.
+- `dashboard_server.py`: API and adapter layer only. Keep business logic moving into `weatherbot_v3/` when practical.
+- `frontend/src/components/`: dashboard UI components.
+- `tests/`: core regression tests, especially `tests/test_v3_core.py`.
+- `legacy/`: read-only historical snapshot unless the user explicitly asks for legacy work.
+- `data/`, `.env`, `config.json`, `.venv/`, `frontend/dist/`, `node_modules/`, `backups/`, and `audits/`: local state or generated artifacts; do not commit.
+
+## UI Rules
+
+- The dashboard is a trading workbench, not an explanation wall.
+- Left column: city index, search, recommendation focus, station and signal summaries only.
+- Center column: one city and one date. Show forecast, METAR, historical observations, bias statistics, fetch logs, market signals, and expandable details.
+- Right column: paper account, one-click simulation, signal queue, trade records, and controlled execution actions.
+- System readiness, data gates, truth health, model dataset audit, equity curve, and long explanations belong in folded "system / review / risk" areas, not the first viewport.
+- Long text must go into `details`, tooltips, row expansion, or a secondary tab.
+- Avoid duplicate city headings. Keep the selected city, station, date, signal state, and data freshness visible when the center panel scrolls.
+- Empty states must be useful and calm: show what is missing and which manual action can refresh it. Do not trigger automatic scans just because a panel is empty.
+- Desktop and mobile layouts must avoid horizontal overflow. Left, center, and right columns should scroll independently on desktop.
+
+## Data And Algorithm Rules
+
+- Settlement truth is the foundation. Production calibration must use station-level or official/paid truth where possible.
+- Open-Meteo archive is only a low-confidence fallback. It cannot unlock live trading.
+- METAR hourly observations are useful for D+0 reasoning but are not automatically final daily settlement truth.
+- Probability must be stored and displayed as an auditable distribution, not just a single bucket EV.
+- Every signal should preserve enough evidence to reconstruct the decision: market rule, station, date, forecast run, truth version, orderbook snapshot, distribution, risk gate, and paper/live decision.
+- Independent settlement days matter more than repeated snapshots. Do not treat many snapshots from one market day as many independent samples.
+- Low-price tail buckets, thin orderbooks, stale books, high spread, missing tick/orderMinSize, missing station truth, and short calibration history must be gated hard.
+- Strategy changes must prove that allowed groups outperform blocked groups in paper/backtest before any live canary expansion.
+
+## Execution Safety
+
+- Backend startup must be lightweight: do not auto-fetch weather, do not resume auto simulation, and do not start legacy infinite scans by default.
+- Data refresh should be triggered by the dashboard "manual fetch" action or by explicit environment variables such as `WEATHERBOT_AUTO_REFRESH=true`.
+- Do not start `weatherbet.py` legacy loops unless the user explicitly asks.
+- Live trading defaults remain off. Live execution must stay behind `LIVE_TRADING=false` by default, dry-run checks, risk gates, and canary sizing.
+- First live behavior, when allowed in the future, is BUY YES limit-only canary with strict idempotency, balance, tick size, orderMinSize, stale-book, duplicate-order, spread, and daily-limit checks.
+
+## Naming And Code Style
+
+- Python functions, variables, and DB helpers use `snake_case`.
+- React components use `PascalCase`.
+- Frontend local state and TypeScript props may use camelCase; backend payload fields generally remain snake_case unless an existing adapter maps them.
+- New database tables, risk events, policy names, and log stages must use explicit, auditable names. Avoid vague abbreviations.
+- Keep changes scoped. Do not refactor unrelated modules while fixing UI, data, or execution behavior.
+- Use UTF-8 for Chinese docs and dashboard copy. Avoid introducing garbled text; read Chinese files with UTF-8 in PowerShell.
+
+## Tools And Workflow
+
+- Use `rg` / `rg --files` first for repo search.
+- Use `apply_patch` for manual tracked-file edits.
+- For UI/product work, use the Product Design and data-visualization skills when requested or relevant.
+- Browser verification should use the in-app browser when available. Before spending time on browser debugging, quickly check `/api/dashboard` latency and runtime state.
+- Figma is a design baseline and communication tool. It does not replace code, runtime, or browser acceptance checks.
+- For GitHub work, keep local git state and remote branch aligned. Stage only intended files.
+
+## Required Checks
+
+Run the checks that match the change. For most dashboard or backend work, run all of these:
+
+```powershell
+cd C:\Users\Administrator\Documents\polymarket\weatherbot
+.\.venv\Scripts\python.exe -m unittest tests.test_v3_core
+```
+
+```powershell
+cd C:\Users\Administrator\Documents\polymarket\weatherbot\frontend
+npm run build
+```
+
+```powershell
+cd C:\Users\Administrator\Documents\polymarket\weatherbot
+Measure-Command { Invoke-RestMethod -Uri 'http://127.0.0.1:8765/api/dashboard' | Out-Null } | Select-Object TotalMilliseconds
+$d=Invoke-RestMethod -Uri 'http://127.0.0.1:8765/api/dashboard'
+[pscustomobject]@{
+  scanner_status=$d.stats.scanner_status
+  is_running=$d.stats.is_running
+  auto_simulation_enabled=$d.auto_simulation.enabled
+} | ConvertTo-Json
+```
+
+For frontend changes, also verify in a browser:
+
+- No long-lived "正在连接本地看板 API".
+- No console errors or warnings introduced by the change.
+- No horizontal overflow on the main dashboard.
+- Left, center, and right columns remain independently scrollable on desktop.
+- Live trading remains locked unless the task explicitly implements canary validation.
+
+## Git Discipline
+
+- Check status before editing and before committing:
+
+```powershell
+git -c safe.directory=C:/Users/Administrator/Documents/polymarket/weatherbot status --short --branch
+```
+
+- Do not stage unrelated user changes.
+- Do not commit `audits/`, `data/`, `.env`, `config.json`, `.venv/`, `frontend/dist/`, `node_modules/`, or secrets.
+- Prefer explicit staging:
+
+```powershell
+git -c safe.directory=C:/Users/Administrator/Documents/polymarket/weatherbot add -- AGENTS.md
+```
+
+- Before push, confirm the diff contains only intended files.
+
+## Next Goal Template
+
+Use this as the next Codex goal when starting the production validation and dashboard pass:
+
+```text
+Continue WeatherBot v6 production validation and dashboard remediation. Follow AGENTS.md. The project goal is real data foundation -> leakage-free probability model -> realistic paper execution -> production dashboard -> 14-30 day validation -> small live canary. Continue optimizing the UI around a PolyWX-style city workbench: left side only city index, recommendation focus, and search; center city page shows forecast, METAR, historical observations, bias statistics, fetch logs, market signals, and expandable details; right side only paper account, signal queue, trade records, and controlled actions. Do not put data gates, long explanations, equity curves, or system audits in the first viewport; place them in folded system/review/risk areas. Keep backend startup lightweight: no auto fetch, no auto simulation resume, no legacy scan. After each change, run Python unittest, frontend build, /api/dashboard latency/runtime checks, and browser UI verification. Before commit, confirm no data/config/.env/.venv/audits artifacts are staged.
+```
