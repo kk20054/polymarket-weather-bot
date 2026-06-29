@@ -21,7 +21,7 @@ from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_c
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import default_orderbook_start_date, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
-from dashboard_server import AutoSimulationUpdate, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
+from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timedelta, timezone
 
@@ -612,6 +612,51 @@ class V3CoreTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["reason"], "operator_confirmation_required")
+
+    def test_dashboard_paper_validation_action_is_dry_run_by_default(self):
+        result = asyncio.run(_run_paper_validation_action(
+            ProductionActionRequest(action_key="run_paper_validation", apply=False, limit=3)
+        ))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "dry_run")
+        self.assertEqual(result["params"]["limit"], 3)
+
+    def test_dashboard_paper_validation_action_requires_operator_confirmation(self):
+        result = asyncio.run(_run_paper_validation_action(
+            ProductionActionRequest(
+                action_key="run_paper_validation",
+                apply=True,
+                operator_confirmed=False,
+            )
+        ))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "operator_confirmation_required")
+
+    def test_dashboard_paper_validation_action_executes_confirmed_paper_pass(self):
+        with patch("dashboard_server._bulk_simulate_signals_once") as mocked_simulate:
+            mocked_simulate.return_value = {
+                "ok": True,
+                "count": 1,
+                "spent": 2.0,
+                "remaining": 38.0,
+                "skipped": 0,
+            }
+            result = asyncio.run(_run_paper_validation_action(
+                ProductionActionRequest(
+                    action_key="run_paper_validation",
+                    apply=True,
+                    operator_confirmed=True,
+                    limit=4,
+                )
+            ))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "executed")
+        self.assertEqual(result["payload"]["count"], 1)
+        mocked_simulate.assert_called_once_with(False, 4)
 
     def test_production_action_executes_whitelisted_orderbook_backfill(self):
         with patch("weatherbot_v3.production_actions.run_orderbook_backfill") as mocked_backfill:

@@ -3159,24 +3159,78 @@ async def production_actions():
 
 @app.post("/api/production-actions/run")
 async def production_actions_run(request: ProductionActionRequest):
-    result = await asyncio.to_thread(
-        run_production_action,
-        request.action_key,
-        apply=request.apply,
-        operator_confirmed=request.operator_confirmed,
-        cities=request.cities or [],
-        days=request.days,
-        limit=request.limit,
-        start_date=request.start_date,
-        end_date=request.end_date,
-        skip_signal_scan=request.skip_signal_scan,
-        note=request.note,
-        archive_path=request.archive_path,
-    )
+    if request.action_key == "run_paper_validation":
+        result = await _run_paper_validation_action(request)
+    else:
+        result = await asyncio.to_thread(
+            run_production_action,
+            request.action_key,
+            apply=request.apply,
+            operator_confirmed=request.operator_confirmed,
+            cities=request.cities or [],
+            days=request.days,
+            limit=request.limit,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            skip_signal_scan=request.skip_signal_scan,
+            note=request.note,
+            archive_path=request.archive_path,
+        )
     if request.apply and result.get("status") == "executed":
         _clear_production_validation_cache()
         await _refresh_dashboard_cache_once()
     return result
+
+
+async def _run_paper_validation_action(request: ProductionActionRequest):
+    action = {
+        "label": "Run paper validation",
+        "description": "Use the dashboard paper executor to simulate eligible current signals.",
+        "requires_operator": True,
+        "mutates": True,
+    }
+    bounded_limit = max(1, min(int(request.limit or 20), 500))
+    params = {
+        "limit": bounded_limit,
+        "note": request.note or "",
+    }
+    if not request.apply:
+        return {
+            "ok": True,
+            "status": "dry_run",
+            "action_key": request.action_key,
+            "action": action,
+            "params": params,
+            "message": "Set apply=true and confirm operator approval to run one controlled paper validation pass.",
+        }
+    if not request.operator_confirmed:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "operator_confirmation_required",
+            "action_key": request.action_key,
+            "action": action,
+            "params": params,
+        }
+    if bulk_simulation_lock.locked():
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "paper_validation_already_running",
+            "action_key": request.action_key,
+            "action": action,
+            "params": params,
+        }
+    async with bulk_simulation_lock:
+        payload = await asyncio.to_thread(_bulk_simulate_signals_once, False, bounded_limit)
+    return {
+        "ok": bool(payload.get("ok", True)),
+        "status": "executed",
+        "action_key": request.action_key,
+        "action": action,
+        "params": params,
+        "payload": payload,
+    }
 
 
 @app.post("/api/production-refresh")
@@ -3470,7 +3524,7 @@ async def reset_simulation(update: SimulationReset):
     }
 
 
-def _bulk_simulate_signals_once(log_when_idle=True):
+def _bulk_simulate_signals_once(log_when_idle=True, limit=None):
     today = _today_str()
     count = 0
     spent = 0.0
@@ -3516,6 +3570,8 @@ def _bulk_simulate_signals_once(log_when_idle=True):
         key=sort_edge,
         reverse=True,
     )
+    if limit is not None:
+        candidates = candidates[:max(1, min(int(limit or 1), 500))]
     for signal in candidates:
         signal_id = int(signal.get("id") or 0)
         dashboard_signal = dashboard_by_id.get(signal_id) or {}
