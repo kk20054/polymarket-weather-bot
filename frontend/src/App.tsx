@@ -790,8 +790,8 @@ function App() {
 
         </aside>
 
-        <section className="order-1 min-h-0 overflow-y-auto xl:order-2">
-          <div className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 bg-black/95 px-3 py-2">
+        <section className="order-1 min-h-[720px] overflow-hidden xl:order-2 xl:flex xl:min-h-0 xl:flex-col">
+          <div className="z-20 shrink-0 flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 bg-black/95 px-3 py-2">
             <div className="min-w-0">
               <div className="truncate text-sm font-medium text-neutral-100">
                 {selectedCityMeta?.name ?? '城市天气证据'} · 最高温判断
@@ -817,7 +817,7 @@ function App() {
             </div>
           </div>
 
-          <div className="min-h-[720px] xl:min-h-[calc(100vh-94px)]">
+          <div className="min-h-[720px] overflow-y-auto xl:min-h-0 xl:flex-1">
             <WeatherPanel
               forecasts={forecasts}
               signals={signals}

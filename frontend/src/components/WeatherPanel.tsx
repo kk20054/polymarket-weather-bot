@@ -33,6 +33,21 @@ interface Props {
 type EvidenceStatus = 'fresh' | 'stale' | 'missing'
 type WeatherTab = 'overview' | 'forecast' | 'metar' | 'history' | 'bias' | 'logs' | 'signals'
 
+type WeatherChartRow = {
+  date: string
+  label: string
+  actual_high?: number | null
+  humidity_mean?: number | null
+  historical_provider?: string
+  calibration_tier?: string
+  forecast_high?: number | null
+  metar?: number | null
+  ecmwf?: number | null
+  hrrr?: number | null
+  forecast_source?: string
+  forecast_timestamp?: string
+}
+
 function fmtTemp(value?: number | null, unit = 'F') {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   return `${Number(value).toFixed(1)}°${unit}`
@@ -57,6 +72,24 @@ function fmtSignedPct(value?: number | null) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   const pct = Number(value) * 100
   return `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`
+}
+
+function fmtSignedTemp(value?: number | null, unit = 'F') {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  const temp = Number(value)
+  return `${temp >= 0 ? '+' : ''}${temp.toFixed(1)}°${unit}`
+}
+
+function mean(values: number[]) {
+  const valid = values.filter(value => Number.isFinite(value))
+  if (valid.length === 0) return null
+  return valid.reduce((total, value) => total + value, 0) / valid.length
+}
+
+function errorTone(absError: number) {
+  if (absError <= 1.5) return 'green'
+  if (absError <= 3) return 'amber'
+  return 'red'
 }
 
 function compactData(value: unknown, max = 180) {
@@ -191,8 +224,8 @@ function uniqueCities(citySeries: WeatherCitySeries[], forecasts: WeatherForecas
   return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name))
 }
 
-function buildChartData(series?: WeatherCitySeries) {
-  const byDate = new Map<string, any>()
+function buildChartData(series?: WeatherCitySeries): WeatherChartRow[] {
+  const byDate = new Map<string, WeatherChartRow>()
   for (const point of series?.history_points ?? []) {
     const key = point.target_date
     byDate.set(key, {
@@ -667,14 +700,23 @@ export function WeatherPanel({
             ])}
           />
         ) : activeTab === 'bias' ? (
-          <div className="grid min-h-0 flex-1 grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2 overflow-y-auto p-3">
-            <MetricCard label="选中日期" value={longDate(selectedDate)} sub={`实际 ${fmtTemp(selectedDateRow?.actual_high, unit)} · 预测 ${fmtTemp(selectedDateRow?.forecast_high, unit)}`} />
-            <MetricCard label="预测误差" value={selectedDateRow?.actual_high !== null && selectedDateRow?.actual_high !== undefined && selectedDateRow?.forecast_high !== null && selectedDateRow?.forecast_high !== undefined ? fmtTemp(Number(selectedDateRow.actual_high) - Number(selectedDateRow.forecast_high), unit) : '--'} sub="实际最高 - 预测最高" />
-            <MetricCard label="历史样本" value={`${series?.history_count ?? historyRows.length}`} sub={latestHistory?.provider || truthTier} />
-            <MetricCard label="预报样本" value={`${series?.forecast_count ?? forecastRows.length}`} sub={latestForecast?.source || 'forecast'} />
-            <MetricCard label="信号数量" value={`${citySignals.length}`} sub={`可操作 ${actionableSignals.length}`} />
-            <MetricCard label="数据状态" value={forecastStatus === 'fresh' ? '新鲜' : forecastStatus === 'stale' ? '过期' : '缺失'} sub={`METAR ${metarStatus} · 历史 ${historyStatus}`} />
-          </div>
+          <BiasPanel
+            chartData={chartData}
+            series={series}
+            historyRows={historyRows}
+            forecastRows={forecastRows}
+            selectedDate={selectedDate}
+            selectedDateRow={selectedDateRow}
+            unit={unit}
+            truthTier={truthTier}
+            forecastStatus={forecastStatus}
+            metarStatus={metarStatus}
+            historyStatus={historyStatus}
+            citySignals={citySignals}
+            actionableSignals={actionableSignals}
+            latestHistory={latestHistory}
+            latestForecast={latestForecast}
+          />
         ) : activeTab === 'logs' ? (
           <EventTimeline events={eventRows} />
         ) : (
@@ -706,6 +748,223 @@ export function WeatherPanel({
             </div>
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+type BiasPoint = {
+  date: string
+  label: string
+  actual: number
+  forecast: number
+  error: number
+  metar?: number | null
+  provider?: string
+  calibrationTier?: string
+  forecastSource?: string
+}
+
+function BiasPanel({
+  chartData,
+  series,
+  historyRows,
+  forecastRows,
+  selectedDate,
+  selectedDateRow,
+  unit,
+  truthTier,
+  forecastStatus,
+  metarStatus,
+  historyStatus,
+  citySignals,
+  actionableSignals,
+  latestHistory,
+  latestForecast,
+}: {
+  chartData: WeatherChartRow[]
+  series?: WeatherCitySeries
+  historyRows: HistoricalWeatherPoint[]
+  forecastRows: WeatherCityPoint[]
+  selectedDate: string
+  selectedDateRow?: WeatherChartRow
+  unit: string
+  truthTier: string
+  forecastStatus: EvidenceStatus
+  metarStatus: EvidenceStatus
+  historyStatus: EvidenceStatus
+  citySignals: WeatherSignal[]
+  actionableSignals: WeatherSignal[]
+  latestHistory?: HistoricalWeatherPoint
+  latestForecast?: WeatherCityPoint
+}) {
+  const paired: BiasPoint[] = chartData
+    .filter(row => row.actual_high !== null && row.actual_high !== undefined && row.forecast_high !== null && row.forecast_high !== undefined)
+    .map(row => {
+      const actual = Number(row.actual_high)
+      const forecast = Number(row.forecast_high)
+      return {
+        date: row.date,
+        label: row.label,
+        actual,
+        forecast,
+        error: actual - forecast,
+        metar: row.metar,
+        provider: row.historical_provider,
+        calibrationTier: row.calibration_tier,
+        forecastSource: row.forecast_source,
+      }
+    })
+
+  const absErrors = paired.map(point => Math.abs(point.error))
+  const mae = mean(absErrors)
+  const bias = mean(paired.map(point => point.error))
+  const maxAbsError = Math.max(1, ...absErrors)
+  const latestPair = paired[paired.length - 1]
+  const selectedPair = paired.find(point => point.date === selectedDate)
+  const focusPair = selectedPair ?? latestPair
+  const historyAll = series?.history_points ?? historyRows
+  const historyTotal = series?.history_count ?? historyAll.length
+  const forecastTotal = series?.forecast_count ?? series?.forecast_points?.length ?? series?.points?.length ?? forecastRows.length
+  const liveTruth = historyAll.filter(point => point.calibration_tier === 'live_truth').length
+  const researchTruth = historyAll.filter(point => point.calibration_tier === 'research_truth').length
+  const eligibleTruth = liveTruth + researchTruth
+  const fallbackTruth = Math.max(0, historyAll.length - eligibleTruth)
+  const truthCoverage = historyAll.length > 0 ? eligibleTruth / historyAll.length : null
+  const providerCounts = historyAll.reduce<Record<string, number>>((counts, point) => {
+    const provider = point.provider || 'unknown'
+    counts[provider] = (counts[provider] ?? 0) + 1
+    return counts
+  }, {})
+  const providerSummary = Object.entries(providerCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([provider, count]) => `${provider} ${count}`)
+    .join(' · ') || '--'
+  const statusLabel = forecastStatus === 'fresh' && historyStatus === 'fresh'
+    ? '可读'
+    : forecastStatus === 'missing' || historyStatus === 'missing'
+      ? '缺数据'
+      : '需刷新'
+
+  if (paired.length === 0) {
+    return (
+      <div className="min-h-0 flex-1 overflow-y-auto p-2">
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2">
+          <MetricCard label="MAE" value="--" sub="等待配对样本" />
+          <MetricCard label="Bias" value="--" sub="实际 - 预测" />
+          <MetricCard label="配对样本" value="0" sub={`历史 ${historyTotal} · 预报 ${forecastTotal}`} />
+          <MetricCard label="Truth 覆盖" value={truthCoverage === null ? '--' : fmtProb(truthCoverage)} sub={`live ${liveTruth} · research ${researchTruth}`} />
+          <MetricCard label="数据状态" value={statusLabel} sub={`预报 ${forecastStatus} · METAR ${metarStatus} · 历史 ${historyStatus}`} />
+        </div>
+        <div className="mt-2 border border-neutral-800 bg-neutral-950/40 p-4 text-center text-neutral-500">
+          <div className="text-xs text-neutral-300">暂无可配对偏差样本</div>
+          <div className="mt-1 text-[10px] leading-relaxed">
+            当前城市还没有同一天同时包含“历史实际最高温”和“保存预测最高温”的样本。补历史数据或完成更多日度抓取后，这里会显示最近误差、MAE 和 bias。
+          </div>
+          <details className="mt-3 text-left text-[10px] text-neutral-500">
+            <summary className="cursor-pointer select-none text-center hover:text-neutral-300">数据明细</summary>
+            <div className="mt-2 grid gap-1 md:grid-cols-2">
+              <DetailLine label="选中日期" value={longDate(selectedDate)} />
+              <DetailLine label="实际最高" value={fmtTemp(selectedDateRow?.actual_high, unit)} />
+              <DetailLine label="预测最高" value={fmtTemp(selectedDateRow?.forecast_high, unit)} />
+              <DetailLine label="provider" value={providerSummary} wide />
+              <DetailLine label="truth" value={`live ${liveTruth} · research ${researchTruth} · fallback ${fallbackTruth}`} wide />
+            </div>
+          </details>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2">
+        <MetricCard label="MAE" value={mae === null ? '--' : fmtTemp(mae, unit)} sub="平均绝对误差" />
+        <MetricCard label="Bias" value={bias === null ? '--' : fmtSignedTemp(bias, unit)} sub="实际 - 预测" />
+        <MetricCard label="配对样本" value={`${paired.length}`} sub={`历史 ${historyTotal} · 预报 ${forecastTotal}`} />
+        <MetricCard label="Truth 覆盖" value={truthCoverage === null ? '--' : fmtProb(truthCoverage)} sub={`live ${liveTruth} · research ${researchTruth}`} />
+      </div>
+
+      <div className="mt-2 grid min-h-0 gap-2 xl:grid-cols-[minmax(0,1fr)_280px]">
+        <section className="min-h-[240px] border border-neutral-800 bg-black" aria-label="最近预测误差">
+          <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+            <div>
+              <div className="text-[10px] text-neutral-500">最近误差</div>
+              <div className="text-xs text-neutral-100">实际最高 - 保存预测</div>
+            </div>
+            <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">
+              {paired.length} paired
+            </span>
+          </div>
+          <div className="max-h-[360px] overflow-y-auto p-2">
+            <div className="space-y-1">
+              {paired.slice(-14).reverse().map(point => {
+                const absError = Math.abs(point.error)
+                const tone = errorTone(absError)
+                const width = Math.max(4, Math.min(100, (absError / maxAbsError) * 100))
+                const barClass = tone === 'green'
+                  ? 'bg-green-400/70'
+                  : tone === 'amber'
+                    ? 'bg-amber-400/75'
+                    : 'bg-red-400/75'
+                return (
+                  <div key={point.date} className={`border px-2 py-1.5 ${point.date === selectedDate ? 'border-cyan-500/35 bg-cyan-500/5' : 'border-neutral-900 bg-neutral-950/50'}`}>
+                    <div className="grid grid-cols-[66px_minmax(0,1fr)_58px] items-center gap-2">
+                      <span className="text-[10px] tabular-nums text-neutral-400">{shortDate(point.date)}</span>
+                      <div className="h-1.5 overflow-hidden bg-neutral-900" aria-hidden="true">
+                        <div className={`h-full ${barClass}`} style={{ width: `${width}%` }} />
+                      </div>
+                      <span className={`text-right text-[10px] tabular-nums ${tone === 'green' ? 'text-green-300' : tone === 'amber' ? 'text-amber-300' : 'text-red-300'}`}>
+                        {fmtSignedTemp(point.error, unit)}
+                      </span>
+                    </div>
+                    <div className="mt-1 grid gap-1 text-[9px] text-neutral-600 md:grid-cols-3">
+                      <span>实际 {fmtTemp(point.actual, unit)}</span>
+                      <span>预测 {fmtTemp(point.forecast, unit)}</span>
+                      <span>{point.provider || point.calibrationTier || '--'}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </section>
+
+        <aside className="min-h-[240px] border border-neutral-800 bg-neutral-950/30">
+          <div className="border-b border-neutral-800 px-2 py-1.5">
+            <div className="text-[10px] text-neutral-500">选中日期校准</div>
+            <div className="text-xs text-neutral-100">{longDate(selectedDate || focusPair?.date)}</div>
+          </div>
+          <div className="space-y-2 p-2">
+            <div className="grid grid-cols-2 gap-1">
+              <DecisionMetric label="实际最高" value={fmtTemp(focusPair?.actual ?? selectedDateRow?.actual_high, unit)} sub={focusPair?.provider || latestHistory?.provider || truthTier} />
+              <DecisionMetric label="预测最高" value={fmtTemp(focusPair?.forecast ?? selectedDateRow?.forecast_high, unit)} sub={focusPair?.forecastSource || latestForecast?.source || 'forecast'} />
+              <DecisionMetric label="误差" value={focusPair ? fmtSignedTemp(focusPair.error, unit) : '--'} sub={focusPair ? (errorTone(Math.abs(focusPair.error)) === 'green' ? '低误差' : errorTone(Math.abs(focusPair.error)) === 'amber' ? '需关注' : '偏差大') : '未配对'} />
+              <DecisionMetric label="信号" value={`${actionableSignals.length}/${citySignals.length}`} sub={statusLabel} />
+            </div>
+
+            <div className="border border-neutral-900 bg-black/40 p-2 text-[10px] leading-relaxed text-neutral-500">
+              <div className="mb-1 text-neutral-300">Truth 分层</div>
+              <div className="grid grid-cols-3 gap-1 text-center tabular-nums">
+                <div className="border border-neutral-800 px-1 py-1">live <span className="text-neutral-200">{liveTruth}</span></div>
+                <div className="border border-neutral-800 px-1 py-1">research <span className="text-neutral-200">{researchTruth}</span></div>
+                <div className="border border-neutral-800 px-1 py-1">fallback <span className="text-neutral-200">{fallbackTruth}</span></div>
+              </div>
+            </div>
+
+            <details className="border border-neutral-900 bg-black/40 p-2 text-[10px] text-neutral-500">
+              <summary className="cursor-pointer select-none hover:text-neutral-300">更多明细</summary>
+              <div className="mt-2 grid gap-1">
+                <DetailLine label="最近配对" value={latestPair ? `${longDate(latestPair.date)} · ${fmtSignedTemp(latestPair.error, unit)}` : '--'} wide />
+                <DetailLine label="provider" value={providerSummary} wide />
+                <DetailLine label="METAR" value={fmtTemp(focusPair?.metar, unit)} />
+                <DetailLine label="数据状态" value={`预报 ${forecastStatus} · METAR ${metarStatus} · 历史 ${historyStatus}`} wide />
+                <DetailLine label="用途" value="这是研究/校准视图，实盘仍需独立 truth 样本和回放闸门通过。" wide />
+              </div>
+            </details>
+          </div>
+        </aside>
       </div>
     </div>
   )
