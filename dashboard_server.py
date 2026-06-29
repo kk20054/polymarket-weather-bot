@@ -48,6 +48,7 @@ from weatherbot_v3.qualification import build_data_readiness, persist_data_readi
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.cli import run_production_refresh
+from weatherbot_v3.validation import build_production_validation_report
 
 
 ROOT = Path(__file__).resolve().parent
@@ -3096,6 +3097,18 @@ async def data_readiness():
     payload = build_data_readiness()
     persist_data_readiness(payload)
     return payload
+
+
+@app.get("/api/production-validation")
+async def production_validation():
+    return build_production_validation_report(
+        dashboard_runtime={
+            "scanner_status": "running" if _bot_running() else "stopped",
+            "is_running": _bot_running(),
+            "auto_simulation_enabled": _auto_simulation_state()["enabled"],
+            "production_refresh_running": production_refresh_lock.locked(),
+        }
+    )
 
 
 @app.post("/api/production-refresh")

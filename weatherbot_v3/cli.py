@@ -12,6 +12,7 @@ from .migration import audit_market_files, migrate_legacy_signals, repair_truth_
 from .model_dataset import build_model_dataset_audit, is_settlement_pending
 from .notifier import FeishuNotifier
 from .qualification import build_data_readiness, persist_data_readiness
+from .validation import build_production_validation_report
 
 
 ORDERBOOK_TERMINAL_SIGNAL_STATUSES = (
@@ -271,6 +272,7 @@ def main() -> None:
             "summary",
             "notify-daily",
             "production-refresh",
+            "production-validation",
             "data-readiness",
             "model-dataset-audit",
             "forecast-backfill",
@@ -329,6 +331,9 @@ def main() -> None:
             end_date=args.end_date,
             scan_signals=not args.skip_signal_scan,
         )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.command == "production-validation":
+        payload = build_production_validation_report()
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "data-readiness":
         payload = build_data_readiness()

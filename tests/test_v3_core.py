@@ -17,6 +17,7 @@ from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
+from weatherbot_v3.validation import build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import default_orderbook_start_date, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
@@ -536,6 +537,38 @@ class V3CoreTests(unittest.TestCase):
         blocker_codes = {item["code"] for item in readiness["blockers"]}
         self.assertIn("settlement_rule_not_manually_verified", blocker_codes)
         self.assertIn("versioned_forecast_runs_missing", blocker_codes)
+
+    def test_production_validation_report_keeps_live_locked_until_all_layers_pass(self):
+        db_path = test_db_path("production_validation")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            report = build_production_validation_report(
+                db_path,
+                dashboard_runtime={
+                    "scanner_status": "stopped",
+                    "is_running": False,
+                    "auto_simulation_enabled": False,
+                },
+            )
+
+        self.assertEqual(report["validation_version"], "production-validation-v1")
+        self.assertEqual(report["status"], "blocked")
+        self.assertFalse(report["live_allowed"])
+        self.assertEqual(report["total_layers"], 5)
+        self.assertEqual(
+            [layer["key"] for layer in report["layers"]],
+            [
+                "data_foundation",
+                "leakage_free_model",
+                "realistic_paper_execution",
+                "production_dashboard",
+                "small_live_canary",
+            ],
+        )
+        self.assertIn("data_foundation_not_ready", report["hard_blockers"])
+        dashboard_layer = next(layer for layer in report["layers"] if layer["key"] == "production_dashboard")
+        self.assertEqual(dashboard_layer["status"], "ready")
+        self.assertTrue(report["next_actions"])
 
     def test_data_readiness_operator_action_when_auto_contracts_are_not_mature(self):
         db_path = test_db_path("data_readiness_future_auto")
