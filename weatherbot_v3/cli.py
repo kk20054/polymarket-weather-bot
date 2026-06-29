@@ -307,6 +307,7 @@ def main() -> None:
     parser.add_argument("--apply", action="store_true", help="Apply a bulk write; without it bulk commands are dry-run")
     parser.add_argument("--mature-only", action="store_true", help="Only act on contracts whose local settlement day has ended")
     parser.add_argument("--skip-signal-scan", action="store_true", help="Skip the legacy signal scan during production-refresh")
+    parser.add_argument("--include-targets", action="store_true", help="Include full next-action target lists in production-validation output")
     args = parser.parse_args()
 
     if args.command == "init-db":
@@ -333,7 +334,7 @@ def main() -> None:
         )
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "production-validation":
-        payload = build_production_validation_report()
+        payload = build_production_validation_report(include_action_targets=args.include_targets)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "data-readiness":
         payload = build_data_readiness()

@@ -8,6 +8,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -78,6 +79,8 @@ RESUME_AUTO_SIMULATION = os.getenv("WEATHERBOT_RESUME_AUTO_SIMULATION", "false")
 dashboard_payload_cache: dict | None = None
 dashboard_payload_cache_at: datetime | None = None
 DASHBOARD_CACHE_TTL_SECONDS = int(os.getenv("WEATHERBOT_DASHBOARD_CACHE_TTL", "20") or "20")
+production_validation_cache: dict[tuple[bool], tuple[float, dict]] = {}
+PRODUCTION_VALIDATION_CACHE_TTL_SECONDS = int(os.getenv("WEATHERBOT_PRODUCTION_VALIDATION_CACHE_TTL", "60") or "60")
 DASHBOARD_AUTO_BUILD = os.getenv("WEATHERBOT_DASHBOARD_AUTO_BUILD", "false").strip().lower() not in {"0", "false", "no", "off"}
 STARTUP_MAINTENANCE = os.getenv("WEATHERBOT_STARTUP_MAINTENANCE", "false").strip().lower() not in {"0", "false", "no", "off"}
 
@@ -2866,6 +2869,19 @@ def _ensure_dashboard_refresh(force: bool = False):
         dashboard_refresh_task = asyncio.create_task(_refresh_dashboard_cache_once())
 
 
+def _clear_production_validation_cache():
+    production_validation_cache.clear()
+
+
+def _production_validation_runtime() -> dict:
+    return {
+        "scanner_status": "running" if _bot_running() else "stopped",
+        "is_running": _bot_running(),
+        "auto_simulation_enabled": _auto_simulation_state()["enabled"],
+        "production_refresh_running": production_refresh_lock.locked(),
+    }
+
+
 async def _auto_refresh_loop():
     global auto_refresh_task
     try:
@@ -3096,19 +3112,29 @@ async def truth_coverage():
 async def data_readiness():
     payload = build_data_readiness()
     persist_data_readiness(payload)
+    _clear_production_validation_cache()
     return payload
 
 
 @app.get("/api/production-validation")
-async def production_validation():
-    return build_production_validation_report(
-        dashboard_runtime={
-            "scanner_status": "running" if _bot_running() else "stopped",
-            "is_running": _bot_running(),
-            "auto_simulation_enabled": _auto_simulation_state()["enabled"],
-            "production_refresh_running": production_refresh_lock.locked(),
-        }
+async def production_validation(include_targets: bool = False, refresh: bool = False):
+    cache_key = (bool(include_targets),)
+    now = time.monotonic()
+    cached = production_validation_cache.get(cache_key)
+    if (
+        not refresh
+        and cached is not None
+        and now - cached[0] <= PRODUCTION_VALIDATION_CACHE_TTL_SECONDS
+    ):
+        return cached[1]
+
+    payload = await asyncio.to_thread(
+        build_production_validation_report,
+        dashboard_runtime=_production_validation_runtime(),
+        include_action_targets=include_targets,
     )
+    production_validation_cache[cache_key] = (now, payload)
+    return payload
 
 
 @app.post("/api/production-refresh")
@@ -3156,6 +3182,7 @@ async def production_refresh(request: ProductionRefreshRequest):
             },
         )
         await _refresh_dashboard_cache_once()
+        _clear_production_validation_cache()
     return saved
 
 
@@ -3179,6 +3206,7 @@ async def verify_contract(contract_id: str, request: ContractVerificationRequest
         raise HTTPException(status_code=400, detail=str(exc))
     readiness = build_data_readiness()
     persist_data_readiness(readiness)
+    _clear_production_validation_cache()
     return {"ok": True, "contract": contract, "data_readiness": readiness}
 
 
@@ -3195,6 +3223,7 @@ async def verify_contracts_bulk(request: BulkContractVerificationRequest):
     )
     readiness = build_data_readiness()
     persist_data_readiness(readiness)
+    _clear_production_validation_cache()
     return {"ok": True, **result, "data_readiness": readiness}
 
 
@@ -3308,6 +3337,7 @@ async def settle_trades():
     if result["errors"]:
         message += f"，错误 {len(result['errors'])} 个"
     log_event("info" if not result["errors"] else "warning", message, result)
+    _clear_production_validation_cache()
     return {
         "ok": True,
         "checked": result["checked"],
@@ -3388,6 +3418,7 @@ async def reset_simulation(update: SimulationReset):
         cleared_positions = _clear_dashboard_positions(started_at)
     payload = update.model_dump()
     payload["cleared_positions"] = cleared_positions
+    _clear_production_validation_cache()
     log_event("warning", f"模拟账户已重置为 ${balance:.2f}", payload)
     return {
         "ok": True,
@@ -3543,7 +3574,9 @@ def _refresh_signal_orderbooks(signals, limit=50):
 @app.post("/api/signals/bulk-simulate")
 async def bulk_simulate_signals():
     async with bulk_simulation_lock:
-        return await asyncio.to_thread(_bulk_simulate_signals_once)
+        result = await asyncio.to_thread(_bulk_simulate_signals_once)
+    _clear_production_validation_cache()
+    return result
 
 
 @app.get("/api/simulation/auto")
@@ -3565,6 +3598,7 @@ async def update_auto_simulation(update: AutoSimulationUpdate):
     else:
         await _stop_auto_simulation_task()
         log_event("warning", "自动模拟已停止")
+    _clear_production_validation_cache()
     return {"ok": True, **state}
 
 
@@ -3605,6 +3639,7 @@ async def signal_status(signal_id: int, update: StatusUpdate):
         note = note or f"Paper amount ${amount:.2f}"
     update_signal_status(signal_id, update.status, note, amount)
     log_event("info", f"Signal {signal_id} marked {update.status}", update.model_dump())
+    _clear_production_validation_cache()
     return {"ok": True}
 
 
@@ -3651,6 +3686,7 @@ async def canary_dry_run(update: CanaryDryRunUpdate):
         f"canary dry-run {result.status}: {result.reason or 'ok'}",
         result.payload,
     )
+    _clear_production_validation_cache()
     return {
         "ok": result.status == "dry_run",
         "mode": result.mode,
@@ -3723,6 +3759,7 @@ async def v3_live_order(update: LiveOrderUpdate):
         }
     result = LiveExecutor().place_order(signal, update.amount)
     log_event("info" if result.ok else "warning", f"v3 live order {result.status}: {result.reason or 'ok'}", result.payload)
+    _clear_production_validation_cache()
     return {
         "ok": result.ok,
         "mode": result.mode,

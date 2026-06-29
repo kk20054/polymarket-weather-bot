@@ -17,7 +17,7 @@ from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
-from weatherbot_v3.validation import build_production_validation_report
+from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import default_orderbook_start_date, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
@@ -569,6 +569,22 @@ class V3CoreTests(unittest.TestCase):
         dashboard_layer = next(layer for layer in report["layers"] if layer["key"] == "production_dashboard")
         self.assertEqual(dashboard_layer["status"], "ready")
         self.assertTrue(report["next_actions"])
+
+    def test_production_validation_action_targets_are_compact_by_default(self):
+        action = {
+            "key": "backfill_official_truth",
+            "label": "Backfill truth",
+            "targets": [{"city": f"city-{idx}"} for idx in range(8)],
+        }
+
+        compact = _compact_action(action, include_targets=False, preview_limit=3)
+        verbose = _compact_action(action, include_targets=True, preview_limit=3)
+
+        self.assertNotIn("targets", compact)
+        self.assertEqual(compact["targets_count"], 8)
+        self.assertEqual(compact["targets_preview"], [{"city": "city-0"}, {"city": "city-1"}, {"city": "city-2"}])
+        self.assertIn("targets", verbose)
+        self.assertEqual(len(verbose["targets"]), 8)
 
     def test_data_readiness_operator_action_when_auto_contracts_are_not_mature(self):
         db_path = test_db_path("data_readiness_future_auto")

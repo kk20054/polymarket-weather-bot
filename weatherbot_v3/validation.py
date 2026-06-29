@@ -20,6 +20,8 @@ def build_production_validation_report(
     min_validation_days: int = 14,
     min_signals: int = 50,
     min_settled_paper: int = 30,
+    include_action_targets: bool = False,
+    action_target_preview_limit: int = 5,
 ) -> dict[str, Any]:
     """Build a bottom-up production validation report without mutating state."""
 
@@ -35,7 +37,11 @@ def build_production_validation_report(
         "数据基座",
         data_readiness.get("status") == "ready" and data_readiness.get("live_allowed"),
         data_readiness.get("production_phase", {}).get("blocked_keys", []),
-        data_readiness.get("next_actions", [])[:3],
+        _compact_actions(
+            data_readiness.get("next_actions", [])[:3],
+            include_targets=include_action_targets,
+            preview_limit=action_target_preview_limit,
+        ),
         {
             "score": data_readiness.get("score"),
             "phase": data_readiness.get("production_phase", {}),
@@ -56,7 +62,11 @@ def build_production_validation_report(
         "无泄漏概率模型",
         not model_reasons,
         model_reasons,
-        model_audit.get("next_actions", [])[:3],
+        _compact_actions(
+            model_audit.get("next_actions", [])[:3],
+            include_targets=include_action_targets,
+            preview_limit=action_target_preview_limit,
+        ),
         {
             "required_samples": model_audit.get("required_samples"),
             "summary": model_summary,
@@ -236,3 +246,36 @@ def _merge_next_actions(layers: list[dict[str, Any]]) -> list[dict[str, Any]]:
             seen.add(key)
             actions.append({**action, "layer": layer.get("key")})
     return actions[:8]
+
+
+def _compact_actions(
+    actions: list[dict[str, Any]],
+    *,
+    include_targets: bool = False,
+    preview_limit: int = 5,
+) -> list[dict[str, Any]]:
+    return [
+        _compact_action(action, include_targets=include_targets, preview_limit=preview_limit)
+        for action in actions
+    ]
+
+
+def _compact_action(
+    action: dict[str, Any],
+    *,
+    include_targets: bool = False,
+    preview_limit: int = 5,
+) -> dict[str, Any]:
+    """Keep validation actions dashboard-safe while preserving audit breadcrumbs."""
+
+    clean = dict(action)
+    targets = clean.get("targets")
+    if include_targets or targets is None:
+        return clean
+
+    if isinstance(targets, list):
+        clean.pop("targets", None)
+        clean["targets_count"] = len(targets)
+        if preview_limit > 0:
+            clean["targets_preview"] = targets[:preview_limit]
+    return clean
