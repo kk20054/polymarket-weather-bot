@@ -606,6 +606,11 @@ function App() {
   const recommendedCity = cityOptions.find(city => city.actionable > 0)
   const citySummaryCard = recommendedCity ?? selectedCityMeta ?? cityOptions[0]
   const actionableCityCount = cityOptions.filter(city => city.actionable > 0).length
+  const selectedEvidenceCount = (selectedCityMeta?.forecastCount ?? 0)
+    + (selectedCityMeta?.historyCount ?? 0)
+    + (selectedCityMeta?.latestMetar !== null && selectedCityMeta?.latestMetar !== undefined ? 1 : 0)
+    + (selectedCityMeta?.humidityStatus === 'available' ? 1 : 0)
+  const selectedEvidenceReady = selectedEvidenceCount > 0
   const filteredCityOptions = cityOptions.filter(city => {
     const query = citySearch.trim().toLowerCase()
     if (!query) return true
@@ -859,13 +864,18 @@ function App() {
           <div className="z-20 shrink-0 flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 bg-black/95 px-3 py-2">
             <div className="min-w-0">
               <div className="truncate text-sm font-medium text-neutral-100">
-                {selectedCityMeta?.name ?? '城市天气证据'} · 最高温判断
+                {selectedCityMeta?.name ?? '城市天气证据'} · {selectedCityMeta?.station || 'station 未映射'}
               </div>
               <div className="mt-0.5 flex flex-wrap gap-1.5 text-[10px]">
-                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">{selectedCityMeta?.station || 'station 未映射'}</span>
                 <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">{selectedDate || '日期待定'}</span>
                 <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">
-                  {selectedCityMeta?.latest === null || selectedCityMeta?.latest === undefined ? '暂无最新温度' : `最新 ${Number(selectedCityMeta.latest).toFixed(1)}°${selectedCityMeta.unit}`}
+                  {selectedCityMeta?.latest === null || selectedCityMeta?.latest === undefined ? '预测 --' : `预测 ${Number(selectedCityMeta.latest).toFixed(1)}°${selectedCityMeta.unit}`}
+                </span>
+                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">
+                  {selectedCityMeta?.latestMetar === null || selectedCityMeta?.latestMetar === undefined ? 'METAR --' : `METAR ${Number(selectedCityMeta.latestMetar).toFixed(1)}°${selectedCityMeta.unit}`}
+                </span>
+                <span className={`border px-1.5 py-0.5 ${selectedEvidenceReady ? 'border-cyan-500/30 text-cyan-200' : 'border-neutral-800 text-neutral-500'}`}>
+                  证据 F{selectedCityMeta?.forecastCount ?? 0} / H{selectedCityMeta?.historyCount ?? 0}
                 </span>
                 <span className={`border px-1.5 py-0.5 ${actionable > 0 ? 'border-green-500/30 text-green-300' : 'border-neutral-800 text-neutral-500'}`}>
                   信号 {actionable}/{signals.length}
