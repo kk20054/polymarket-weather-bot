@@ -790,7 +790,7 @@ function App() {
 
         </aside>
 
-        <section className="order-1 min-h-0 overflow-y-auto xl:order-2 xl:overflow-hidden">
+        <section className="order-1 min-h-0 overflow-y-auto xl:order-2">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 px-3 py-2">
             <div className="min-w-0">
               <div className="truncate text-sm font-medium text-neutral-100">
@@ -816,7 +816,7 @@ function App() {
             </div>
           </div>
 
-          <div className="h-[720px] min-h-[720px] xl:h-[calc(100vh-94px)] xl:min-h-0">
+          <div className="min-h-[720px] xl:min-h-[calc(100vh-94px)]">
             <WeatherPanel
               forecasts={forecasts}
               signals={signals}

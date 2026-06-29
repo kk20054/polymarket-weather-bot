@@ -132,6 +132,11 @@ function refreshStage(productionRefresh: ProductionRefreshResult | null | undefi
   return (productionRefresh?.stages ?? []).find(stage => names.includes(stage.name))
 }
 
+function refreshStageLabel(stage?: { ok?: boolean; elapsed_ms?: number | null; error?: string | null }) {
+  if (!stage) return '未运行'
+  return [stage.ok ? 'ok' : 'err', elapsedLabel(stage.elapsed_ms), stage.error].filter(Boolean).join(' · ')
+}
+
 function evidenceStatus(value?: string | null, staleAfterMinutes = 180): EvidenceStatus {
   const minutes = minutesSince(value)
   if (minutes === null) return 'missing'
@@ -245,7 +250,13 @@ export function WeatherPanel({
 
   const citySignals = useMemo(() => signals.filter(signal => signal.city_key === cityKey), [signals, cityKey])
   const actionableSignals = citySignals.filter(signal => signal.actionable)
-  const bestSignal = [...citySignals].sort((a, b) => Math.abs((b.probability_edge ?? b.edge ?? 0)) - Math.abs((a.probability_edge ?? a.edge ?? 0)))[0]
+  const selectedDateSignals = citySignals.filter(signal => !selectedDate || signal.target_date === selectedDate)
+  const bestSignal = [...(selectedDateSignals.length > 0 ? selectedDateSignals : citySignals)]
+    .sort((a, b) => {
+      const actionDelta = Number(Boolean(b.actionable)) - Number(Boolean(a.actionable))
+      if (actionDelta !== 0) return actionDelta
+      return Math.abs((b.probability_edge ?? b.edge ?? 0)) - Math.abs((a.probability_edge ?? a.edge ?? 0))
+    })[0]
   const distributionSignal = useMemo(() => {
     const dated = citySignals.filter(signal => !selectedDate || signal.target_date === selectedDate)
     const withDistribution = dated.filter(signal => (signal.distribution?.items?.length ?? 0) > 0)
@@ -310,6 +321,14 @@ export function WeatherPanel({
 
   const selectedDateIndex = availableDates.indexOf(selectedDate)
   const selectedDateRow = chartData.find(row => row.date === selectedDate) ?? chartData[chartData.length - 1]
+  const decisionLabel = bestSignal?.actionable ? 'BUY YES' : bestSignal ? '观察' : '等待信号'
+  const decisionTone = bestSignal?.actionable ? 'green' : bestSignal ? 'amber' : 'neutral'
+  const decisionReason = bestSignal?.decision?.reasons?.[0] ?? bestSignal?.status ?? (bestSignal ? '未通过可执行闸门' : '手动抓取后生成')
+  const selectedForecast = selectedDateRow?.forecast_high ?? latestForecast?.best ?? latestForecast?.ensemble_mean ?? forecastFallback?.mean_high
+  const selectedMetar = selectedDateRow?.metar ?? latestMetar?.metar
+  const metarGap = selectedForecast !== null && selectedForecast !== undefined && selectedMetar !== null && selectedMetar !== undefined
+    ? Number(selectedForecast) - Number(selectedMetar)
+    : null
   const forecastRows = [...(series?.forecast_points ?? series?.points ?? [])]
     .filter(point => !selectedDate || point.target_date === selectedDate)
     .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
@@ -344,7 +363,7 @@ export function WeatherPanel({
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_auto_auto_auto_minmax(260px,1fr)_auto] gap-2 p-3 text-[11px] text-neutral-400">
+    <div className="grid h-full min-h-0 grid-rows-[auto_auto_auto_auto_auto_minmax(260px,1fr)_auto] gap-2 p-3 text-[11px] text-neutral-400">
       <div className="flex flex-wrap items-center gap-2">
         <select
           value={cityKey}
@@ -358,7 +377,7 @@ export function WeatherPanel({
         </select>
         <div className="hidden min-w-0 flex-1 xl:block">
           <div className="truncate text-xs font-medium text-neutral-100">{cityName}</div>
-          <div className="text-[10px] text-neutral-600">逐小时预报、METAR、历史观测、偏差统计和抓取日志</div>
+          <div className="text-[10px] text-neutral-600">{series?.station_id || 'station 未映射'} · {longDate(selectedDate)}</div>
         </div>
         <div className="shrink-0 border border-neutral-800 px-2 py-1 text-[10px] text-neutral-400">
           站点 {series?.station_id || '未映射'}
@@ -413,25 +432,75 @@ export function WeatherPanel({
           status={forecastStatus}
           value={freshnessLabel(latestForecast?.timestamp)}
           meta={elapsedLabel(forecastRefreshStage?.elapsed_ms) || latestForecast?.source || '等待抓取'}
+          details={[
+            { label: '更新时间', value: shortTime(latestForecast?.timestamp) },
+            { label: '目标日', value: longDate(latestForecast?.target_date ?? selectedDate) },
+            { label: '最佳 / ECMWF / HRRR', value: `${fmtTemp(latestForecast?.best ?? latestForecast?.ensemble_mean, unit)} / ${fmtTemp(latestForecast?.ecmwf, unit)} / ${fmtTemp(latestForecast?.hrrr, unit)}` },
+            { label: '来源', value: latestForecast?.source || '等待抓取' },
+            { label: '刷新阶段', value: refreshStageLabel(forecastRefreshStage) },
+          ]}
         />
         <SourcePulse
           label="METAR"
           status={metarStatus}
           value={freshnessLabel(latestMetar?.timestamp)}
           meta={latestMetar?.metar !== null && latestMetar?.metar !== undefined ? fmtTemp(latestMetar.metar, unit) : '等待观测'}
+          details={[
+            { label: '观测时间', value: shortTime(latestMetar?.timestamp) },
+            { label: '目标日', value: longDate(latestMetar?.target_date ?? selectedDate) },
+            { label: 'METAR / best', value: `${fmtTemp(latestMetar?.metar, unit)} / ${fmtTemp(latestMetar?.best ?? latestMetar?.ensemble_mean, unit)}` },
+            { label: '湿度', value: fmtPct(latestMetar?.humidity) },
+            { label: '来源', value: latestMetar?.source || '等待观测' },
+          ]}
         />
         <SourcePulse
           label="历史观测"
           status={historyStatus}
           value={latestHistoryFetch ? freshnessLabel(latestHistoryFetch) : latestHistory ? shortDate(latestHistory.target_date) : '无数据'}
           meta={latestHistory?.provider || truthTier}
+          details={[
+            { label: '日期', value: longDate(latestHistory?.target_date ?? selectedDate) },
+            { label: '实际最高', value: fmtTemp(latestHistory?.actual_high, latestHistory?.unit || unit) },
+            { label: 'provider', value: latestHistory?.provider || '无数据' },
+            { label: '站点', value: latestHistory?.station_id || series?.station_id || '未映射' },
+            { label: 'truth 层级', value: truthTier },
+            { label: '抓取时间', value: shortTime(latestHistoryFetch) },
+          ]}
         />
         <SourcePulse
           label="盘口/信号"
           status={orderbookRefreshStage?.ok || signalRefreshStage?.ok ? 'fresh' : 'missing'}
           value={elapsedLabel(orderbookRefreshStage?.elapsed_ms) || elapsedLabel(signalRefreshStage?.elapsed_ms) || '未刷新'}
           meta={orderbookRefreshStage?.error || signalRefreshStage?.error || productionRefresh?.message || '等待手动抓取'}
+          details={[
+            { label: '信号', value: `${actionableSignals.length} 可操作 / ${citySignals.length} 总数` },
+            { label: '选中日期信号', value: `${selectedDateSignals.length}` },
+            { label: '盘口刷新', value: refreshStageLabel(orderbookRefreshStage) },
+            { label: '信号刷新', value: refreshStageLabel(signalRefreshStage) },
+            { label: '最新消息', value: orderbookRefreshStage?.error || signalRefreshStage?.error || productionRefresh?.message || '等待手动抓取' },
+          ]}
         />
+      </div>
+
+      <div className={`grid gap-2 border px-2 py-2 md:grid-cols-[1.2fr_repeat(4,minmax(0,1fr))_auto] ${decisionTone === 'green' ? 'border-green-500/30 bg-green-500/5' : decisionTone === 'amber' ? 'border-amber-500/30 bg-amber-500/5' : 'border-neutral-800 bg-black'}`}>
+        <div className="min-w-0">
+          <div className="text-[10px] text-neutral-500">选中日期判断</div>
+          <div className={`truncate text-sm font-medium ${decisionTone === 'green' ? 'text-green-300' : decisionTone === 'amber' ? 'text-amber-300' : 'text-neutral-200'}`}>
+            {decisionLabel}
+          </div>
+          <div className="truncate text-[10px] text-neutral-600" title={decisionReason}>{decisionReason}</div>
+        </div>
+        <DecisionMetric label="目标桶" value={bestSignal?.bucket_label || (bestSignal ? fmtTemp(bestSignal.threshold_f, unit) : '--')} sub={bestSignal ? longDate(bestSignal.target_date) : longDate(selectedDate)} />
+        <DecisionMetric label="盘口" value={bestSignal?.limit_price !== undefined && bestSignal?.limit_price !== null ? fmtPrice(bestSignal.limit_price) : '--'} sub={bestSignal?.spread !== undefined && bestSignal?.spread !== null ? `spread ${fmtPrice(bestSignal.spread)}` : '等待盘口'} />
+        <DecisionMetric label="模型 / Edge" value={bestSignal ? fmtProb(bestSignal.calibrated_probability ?? bestSignal.model_probability) : '--'} sub={bestSignal ? fmtSignedPct(bestSignal.probability_edge ?? bestSignal.edge) : '无概率'} />
+        <DecisionMetric label="预测-METAR" value={metarGap === null ? '--' : fmtTemp(metarGap, unit)} sub={`预测 ${fmtTemp(selectedForecast, unit)}`} />
+        {bestSignal?.event_url ? (
+          <a href={bestSignal.event_url} target="_blank" rel="noreferrer" className="inline-flex min-h-9 items-center justify-center gap-1 border border-cyan-500/30 px-2 text-[10px] text-cyan-300 hover:bg-cyan-500/10">
+            Polymarket <ExternalLink className="h-3 w-3" />
+          </a>
+        ) : (
+          <span className="inline-flex min-h-9 items-center justify-center border border-neutral-800 px-2 text-[10px] text-neutral-600">无链接</span>
+        )}
       </div>
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(92px,1fr))] gap-2">
@@ -786,6 +855,16 @@ function EvidenceTable({
   )
 }
 
+function DecisionMetric({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="min-w-0 border border-neutral-800/80 bg-black/35 px-2 py-1">
+      <div className="text-[9px] text-neutral-600">{label}</div>
+      <div className="truncate text-xs tabular-nums text-neutral-100" title={value}>{value}</div>
+      {sub && <div className="truncate text-[9px] text-neutral-600" title={sub}>{sub}</div>}
+    </div>
+  )
+}
+
 function MetricCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="border border-neutral-800 bg-neutral-950/40 p-3">
@@ -827,11 +906,13 @@ function SourcePulse({
   status,
   value,
   meta,
+  details = [],
 }: {
   label: string
   status: EvidenceStatus
   value: string
   meta?: string
+  details?: Array<{ label: string; value: string }>
 }) {
   return (
     <div className={`min-w-0 border px-2 py-1.5 ${statusClass(status)}`}>
@@ -841,6 +922,19 @@ function SourcePulse({
       </div>
       <div className="truncate text-xs tabular-nums text-neutral-100">{value}</div>
       {meta && <div className="truncate text-[9px] text-neutral-500" title={meta}>{meta}</div>}
+      {details.length > 0 && (
+        <details className="mt-1 border-t border-neutral-800/70 pt-1 text-[9px] text-neutral-500">
+          <summary className="cursor-pointer select-none hover:text-neutral-300">明细</summary>
+          <div className="mt-1 grid gap-1">
+            {details.map(item => (
+              <div key={`${label}-${item.label}`} className="grid grid-cols-[64px_minmax(0,1fr)] gap-1">
+                <span className="text-neutral-600">{item.label}</span>
+                <span className="truncate text-neutral-400" title={item.value}>{item.value}</span>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   )
 }
