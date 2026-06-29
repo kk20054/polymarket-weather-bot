@@ -61,6 +61,8 @@ type HourlyWeatherRow = {
   gap?: number | null
   source?: string
   horizon?: string
+  member_count?: number
+  archive?: boolean
 }
 
 type SourceSampleTone = 'green' | 'amber' | 'red' | 'cyan' | 'neutral'
@@ -339,7 +341,8 @@ function buildChartData(series?: WeatherCitySeries): WeatherChartRow[] {
 
 function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): HourlyWeatherRow[] {
   const rows = new Map<string, HourlyWeatherRow>()
-  for (const point of series?.forecast_points ?? series?.points ?? []) {
+  const sourcePoints = (series?.hourly_points?.length ? series.hourly_points : (series?.forecast_points ?? series?.points ?? []))
+  for (const point of sourcePoints) {
     if (selectedDate && point.target_date !== selectedDate) continue
     if (!point.timestamp) continue
     const forecast = point.best ?? point.ensemble_mean ?? null
@@ -361,6 +364,8 @@ function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): Hou
       gap,
       source: point.source || '--',
       horizon: point.horizon || '--',
+      member_count: point.member_count,
+      archive: point.archive,
     })
   }
   return [...rows.values()]
@@ -1009,7 +1014,7 @@ function HourlyEvidencePanel({
         <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
           <summary className="cursor-pointer select-none hover:text-neutral-400">数据说明</summary>
           <div className="mt-1 leading-relaxed">
-            这一版先用本地已保存的 forecast snapshots 按抓取时间组织成逐小时证据层；后续会接入真实 24 小时预报、METAR/PWS 历史观测和结算 truth 后再用于策略校准。
+            优先使用版本化 forecast archive 的成员级小时数据；若该城市/日期尚未导入 archive，则退回本地 forecast snapshots，等待后续接入 METAR/PWS 小时观测和结算 truth。
           </div>
         </details>
       </section>
@@ -1039,8 +1044,8 @@ function HourlyEvidencePanel({
                   <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
                   <td className="px-2 py-1 tabular-nums text-amber-300">{fmtTemp(row.metar, unit)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.humidity)}</td>
-                  <td className="max-w-[90px] truncate px-2 py-1 text-neutral-500" title={`${row.source || '--'} · ${row.horizon || '--'} · ${shortTime(row.timestamp)}`}>
-                    {row.source || '--'}
+                  <td className="max-w-[90px] truncate px-2 py-1 text-neutral-500" title={`${row.source || '--'} · ${row.horizon || '--'} · n=${row.member_count ?? '--'} · ${shortTime(row.timestamp)}`}>
+                    {row.archive ? 'archive' : row.source || '--'}
                   </td>
                 </tr>
               ))}

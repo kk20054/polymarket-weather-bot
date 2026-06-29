@@ -41,6 +41,7 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
+from weatherbot_v3.hourly import forecast_hourly_points
 from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.notifier import FeishuNotifier
@@ -1971,6 +1972,13 @@ def _build_weather_city_series(markets):
     """Compact chart-friendly forecast history by city for the dashboard."""
     by_city = {}
     history_cache = merge_history_points(market_history_points(markets))
+    hourly_targets = {}
+    for market in markets:
+        city_key = market.get("city") or ""
+        target_date = market.get("date") or ""
+        if city_key and target_date:
+            hourly_targets.setdefault(city_key, set()).add(target_date)
+    hourly_cache = forecast_hourly_points(hourly_targets) if hourly_targets else {}
     for market in markets:
         city_key = market.get("city") or ""
         if not city_key:
@@ -1983,6 +1991,7 @@ def _build_weather_city_series(markets):
             "unit": unit,
             "forecast_points": [],
             "history_points": list(history_cache.get(city_key) or []),
+            "hourly_points": list(hourly_cache.get(city_key) or []),
             "humidity_status": "not_collected",
         })
         for snap in market.get("forecast_snapshots") or []:
@@ -2019,6 +2028,7 @@ def _build_weather_city_series(markets):
         humidity_values += [p.get("humidity_mean") for p in history_points if p.get("humidity_mean") is not None]
         city["forecast_points"] = points
         city["history_points"] = history_points
+        city["hourly_points"] = sorted(city.get("hourly_points") or [], key=lambda p: p.get("timestamp") or "")[-120:]
         city["points"] = points
         city["latest_best"] = latest.get("best")
         city["latest_metar"] = latest.get("metar")
@@ -2027,6 +2037,7 @@ def _build_weather_city_series(markets):
         city["humidity_status"] = "available" if humidity_values else "not_collected"
         city["history_count"] = len(history_points)
         city["forecast_count"] = len(points)
+        city["hourly_count"] = len(city["hourly_points"])
         rows.append(city)
     return sorted(rows, key=lambda row: row.get("city_name") or "")
 
@@ -2048,8 +2059,10 @@ def _registry_city_series():
             "humidity_status": "not_collected",
             "history_count": 0,
             "forecast_count": 0,
+            "hourly_count": 0,
             "history_points": [],
             "forecast_points": [],
+            "hourly_points": [],
             "points": [],
         })
     return sorted(rows, key=lambda row: (row.get("city_name") or "").lower())

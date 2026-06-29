@@ -13,6 +13,7 @@ from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payloa
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
+from weatherbot_v3.hourly import forecast_hourly_points
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
@@ -1202,6 +1203,53 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(run_count, 1)
         self.assertEqual(member_count, 2)
         self.assertIn("temperature_2m", hourly_json)
+
+    def test_forecast_hourly_points_use_latest_source_run(self):
+        db_path = test_db_path("forecast_hourly_points")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        base_run = {
+            "city": "chicago",
+            "target_date": "2026-06-29",
+            "source": "ecmwf",
+            "provider": "archive",
+            "model": "ifs",
+            "run_type": "forecast",
+            "station_id": "KORD",
+            "timezone": "America/Chicago",
+            "unit": "F",
+            "mean_high": 90,
+            "std_high": 1,
+            "member_count": 2,
+            "training_eligible": True,
+        }
+        older = {
+            **base_run,
+            "run_key": "ecmwf:chicago:2026-06-29:old",
+            "retrieved_at": "2026-06-28T00:00:00+00:00",
+        }
+        newer = {
+            **base_run,
+            "run_key": "ecmwf:chicago:2026-06-29:new",
+            "retrieved_at": "2026-06-28T12:00:00+00:00",
+        }
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            insert_forecast_run(older, [
+                {"member_id": "old01", "high_temp": 70, "hourly": [{"valid_at": "2026-06-29T12:00:00+00:00", "temperature_2m": 70}]},
+            ])
+            insert_forecast_run(newer, [
+                {"member_id": "new01", "high_temp": 80, "hourly": [{"valid_at": "2026-06-29T12:00:00+00:00", "temperature_2m": 80, "relative_humidity_2m": 40}]},
+                {"member_id": "new02", "high_temp": 82, "hourly": [{"valid_at": "2026-06-29T12:00:00+00:00", "temperature_2m": 82, "relative_humidity_2m": 60}]},
+            ])
+            points = forecast_hourly_points({"chicago": {"2026-06-29"}}, db_path=db_path)
+
+        self.assertIn("chicago", points)
+        self.assertEqual(len(points["chicago"]), 1)
+        point = points["chicago"][0]
+        self.assertEqual(point["timestamp"], "2026-06-29T12:00:00+00:00")
+        self.assertEqual(point["best"], 81)
+        self.assertEqual(point["humidity"], 50)
+        self.assertEqual(point["member_count"], 2)
+        self.assertTrue(point["archive"])
 
     def test_forecast_archive_import_persists_no_leak_members(self):
         db_path = test_db_path("forecast_archive_import")

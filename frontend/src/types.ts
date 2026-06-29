@@ -659,6 +659,8 @@ export interface WeatherCityPoint {
   ensemble_std?: number | null
   humidity?: number | null
   source?: string
+  member_count?: number
+  archive?: boolean
 }
 
 export interface HistoricalWeatherPoint {
@@ -688,8 +690,10 @@ export interface WeatherCitySeries {
   humidity_status?: 'available' | 'not_collected' | string
   history_count?: number
   forecast_count?: number
+  hourly_count?: number
   history_points?: HistoricalWeatherPoint[]
   forecast_points?: WeatherCityPoint[]
+  hourly_points?: WeatherCityPoint[]
   points: WeatherCityPoint[]
 }
 
