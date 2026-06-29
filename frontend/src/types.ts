@@ -276,6 +276,40 @@ export interface ProductionRefreshResult {
   }>
 }
 
+export interface ProductionValidationAction {
+  key?: string
+  label?: string
+  count?: number
+  command?: string
+  apply_command?: string
+  requires_operator?: boolean
+  layer?: string
+  [key: string]: unknown
+}
+
+export interface ProductionValidationLayer {
+  key: string
+  label: string
+  ready: boolean
+  status: string
+  blockers: string[]
+  next_actions: ProductionValidationAction[]
+  metrics: Record<string, unknown>
+}
+
+export interface ProductionValidationReport {
+  validation_version: string
+  generated_at: string
+  status: string
+  score: number
+  ready_layers: number
+  total_layers: number
+  live_allowed: boolean
+  hard_blockers: string[]
+  layers: ProductionValidationLayer[]
+  next_actions: ProductionValidationAction[]
+}
+
 export interface SettlementContract {
   contract_id: string
   event_slug: string

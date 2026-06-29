@@ -5,6 +5,7 @@ import {
   BarChart3,
   CheckCircle2,
   FlaskConical,
+  ListChecks,
   PauseCircle,
   RefreshCw,
   ShieldAlert,
@@ -14,6 +15,7 @@ import {
   backfillWeatherHistory,
   fetchDashboard,
   fetchForecastArchiveManifest,
+  fetchProductionValidation,
   fetchSettlementContracts,
   fetchTemperatureFit,
   placeLiveOrder,
@@ -35,7 +37,7 @@ import { TemperatureFitPage } from './components/TemperatureFitPage'
 import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
-import type { AutoSimulationStatus, BotStats, DataReadiness } from './types'
+import type { AutoSimulationStatus, BotStats, DataReadiness, ProductionValidationReport } from './types'
 
 type TradeMode = 'paper' | 'live'
 
@@ -145,6 +147,96 @@ function ReadinessBanner({ stats, readiness }: { stats: BotStats; readiness?: Da
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+function ProductionValidationPanel({
+  report,
+  loading,
+}: {
+  report?: ProductionValidationReport | null
+  loading?: boolean
+}) {
+  const status = report?.status ?? (loading ? 'loading' : 'missing')
+  const readyForCanary = Boolean(report?.live_allowed)
+  const score = report ? Math.round(Number(report.score ?? 0) * 100) : 0
+  const layers = report?.layers ?? []
+  const actions = report?.next_actions ?? []
+
+  return (
+    <div className="border border-neutral-800 bg-black p-3">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <ListChecks className="h-4 w-4 shrink-0 text-cyan-300" />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-neutral-100">生产验证</div>
+            <div className="truncate text-[10px] text-neutral-500">
+              {report ? `更新 ${timeText(report.generated_at)}` : '等待后端验证报告'}
+            </div>
+          </div>
+        </div>
+        <span className={`shrink-0 border px-2 py-1 text-[10px] ${readyForCanary ? 'border-green-500/30 bg-green-500/10 text-green-200' : 'border-amber-500/30 bg-amber-500/10 text-amber-200'}`}>
+          {readyForCanary ? '可 Canary' : status === 'loading' ? '读取中' : '阻塞'}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 text-[10px]">
+        <div className="border border-neutral-800 p-2">
+          <div className="text-neutral-500">评分</div>
+          <div className="mt-1 tabular-nums text-neutral-100">{report ? `${score}%` : '--'}</div>
+        </div>
+        <div className="border border-neutral-800 p-2">
+          <div className="text-neutral-500">层级</div>
+          <div className="mt-1 tabular-nums text-neutral-100">
+            {report ? `${report.ready_layers}/${report.total_layers}` : '--'}
+          </div>
+        </div>
+        <div className="border border-neutral-800 p-2">
+          <div className="text-neutral-500">实盘</div>
+          <div className={`mt-1 ${readyForCanary ? 'text-green-300' : 'text-amber-300'}`}>
+            {readyForCanary ? '放行' : '锁定'}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 space-y-1">
+        {layers.length ? layers.map(layer => {
+          const blockedText = layer.blockers?.[0] ? reasonLabel(layer.blockers[0]) : '已通过'
+          return (
+            <div key={layer.key} className="flex items-center justify-between gap-2 border border-neutral-800 px-2 py-1.5 text-[10px]">
+              <div className="min-w-0">
+                <div className="truncate text-neutral-200">{layer.label}</div>
+                <div className="truncate text-neutral-500" title={(layer.blockers ?? []).join(', ')}>
+                  {blockedText}
+                </div>
+              </div>
+              <span className={`shrink-0 tabular-nums ${layer.ready ? 'text-green-300' : 'text-amber-300'}`}>
+                {layer.ready ? 'ready' : 'blocked'}
+              </span>
+            </div>
+          )
+        }) : (
+          <div className="border border-neutral-800 px-2 py-2 text-[10px] text-neutral-500">暂无生产验证层级。</div>
+        )}
+      </div>
+
+      <details className="mt-3 text-[10px] text-neutral-500">
+        <summary className="cursor-pointer select-none hover:text-neutral-300">下一步动作</summary>
+        <div className="mt-2 space-y-1">
+          {actions.length ? actions.slice(0, 5).map((action, index) => (
+            <div key={`${action.key ?? action.label ?? 'action'}-${index}`} className="border border-neutral-800 px-2 py-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-neutral-300">{action.label ?? action.key ?? '待处理'}</span>
+                {typeof action.count === 'number' && <span className="tabular-nums text-neutral-500">{action.count}</span>}
+              </div>
+              {action.command && <code className="mt-1 block break-all text-[9px] text-neutral-600">{action.command}</code>}
+            </div>
+          )) : (
+            <div className="text-neutral-500">暂无新增动作。</div>
+          )}
+        </div>
+      </details>
     </div>
   )
 }
@@ -421,6 +513,12 @@ function App() {
     refetchInterval: 120000,
   })
 
+  const productionValidationQuery = useQuery({
+    queryKey: ['production-validation'],
+    queryFn: fetchProductionValidation,
+    refetchInterval: 120000,
+  })
+
   const stopMutation = useMutation({
     mutationFn: stopBot,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
@@ -429,17 +527,26 @@ function App() {
   const signalStatusMutation = useMutation({
     mutationFn: ({ signalId, status, amount }: { signalId: number; status: string; amount?: number }) =>
       updateSignalStatus(signalId, status, amount),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
+    },
   })
 
   const liveOrderMutation = useMutation({
     mutationFn: ({ signalId, amount }: { signalId: number; amount?: number }) => placeLiveOrder(signalId, amount),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
+    },
   })
 
   const autoSimulationMutation = useMutation({
     mutationFn: (enabled: boolean) => setAutoSimulation(enabled, 300),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
+    },
   })
 
   const verifyContractMutation = useMutation({
@@ -448,6 +555,7 @@ function App() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
     },
   })
 
@@ -457,6 +565,7 @@ function App() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
     },
   })
 
@@ -465,6 +574,7 @@ function App() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
     },
   })
 
@@ -473,17 +583,24 @@ function App() {
     onSuccess: result => {
       setSimBalance(String(result.balance))
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
     },
   })
 
   const settleMutation = useMutation({
     mutationFn: settleTradesApi,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
+    },
   })
 
   const historyBackfillMutation = useMutation({
     mutationFn: () => backfillWeatherHistory(30),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
+    },
   })
 
   const stats = data?.stats ?? EMPTY_STATS
@@ -496,6 +613,7 @@ function App() {
   const truthHealth = data?.truth_health ?? null
   const dataReadiness = data?.data_readiness ?? null
   const productionRefresh = productionRefreshMutation.data ?? data?.production_refresh ?? null
+  const productionValidation = productionValidationQuery.data ?? null
   const modelDatasetAudit = data?.model_dataset_audit ?? null
   const forecastArchiveManifest = forecastArchiveManifestQuery.data ?? null
   const actionable = signals.filter(signal => signal.actionable).length
@@ -1022,6 +1140,11 @@ function App() {
                 <StatusTile label="当前信号" value={`${actionable} / ${signals.length}`} tone={actionable > 0 ? 'green' : 'neutral'} />
                 <StatusTile label="实盘状态" value={liveAvailable ? '可用' : '锁定'} tone={liveAvailable ? 'green' : 'amber'} />
               </div>
+
+              <ProductionValidationPanel
+                report={productionValidation}
+                loading={productionValidationQuery.isLoading}
+              />
 
               <div className="overflow-x-auto border border-neutral-800 bg-black p-2">
                 <StatsCards stats={stats} />
