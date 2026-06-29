@@ -240,6 +240,10 @@ export interface ProductionRefreshResult {
   refresh_version: string
   ok: boolean
   running?: boolean
+  production_refresh_running?: boolean
+  auto_refresh_enabled?: boolean
+  auto_refresh_running?: boolean
+  last_refresh_was_auto?: boolean
   message?: string
   failed_stages: string[]
   scan_signals: boolean

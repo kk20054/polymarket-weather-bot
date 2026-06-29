@@ -985,3 +985,10 @@ candidate -> submitted -> open -> partially_filled -> filled
 - 信号、模拟记录、系统健康展开时不得互相重叠。
 - 文字解释不能挤占图表主体；复杂解释默认收起。
 - 看板服务模拟验证优先，不能给用户造成“实盘已准备好”的错觉。
+
+## 15. 2026-06-29 修复记录：运行态去歧义与证据卡片
+
+- 后端 `/api/dashboard` 不再把历史 `auto_refresh` 记录当成当前运行态；新增当前 `auto_refresh_enabled`、`auto_refresh_running`、`production_refresh_running` 和 `last_refresh_was_auto` 字段。
+- 当前默认仍是手动刷新：扫描器、一键模拟、生产刷新都不会在打开看板后自动长时间运行，除非操作者点击按钮或显式设置环境变量。
+- 城市详情页的“预报 / METAR / 历史观测”从横向表格改为证据卡片，默认展示关键值，字段明细放入展开项，避免主界面解释文字过多。
+- 证据卡片支持 provider、truth 层级、站点、湿度、预测差、来源 URL 等字段，后续可继续扩展 PolyWX 风格的模块内明细。

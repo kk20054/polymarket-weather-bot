@@ -57,6 +57,19 @@ type SourceSample = {
   tone?: SourceSampleTone
 }
 
+type EvidenceCardTone = SourceSampleTone
+
+type EvidenceCardItem = {
+  id: string
+  eyebrow: string
+  title: string
+  value: string
+  meta?: string
+  tone?: EvidenceCardTone
+  badges?: Array<{ label: string; tone?: EvidenceCardTone }>
+  details?: Array<{ label: string; value: string; wide?: boolean }>
+}
+
 function fmtTemp(value?: number | null, unit = 'F') {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   return `${Number(value).toFixed(1)}°${unit}`
@@ -444,6 +457,92 @@ export function WeatherPanel({
       tone: signal.actionable ? 'green' : 'neutral',
     }
   })
+  const forecastCards: EvidenceCardItem[] = forecastRows.map((point, index) => ({
+    id: `forecast-${point.timestamp}-${point.target_date}-${index}`,
+    eyebrow: shortTime(point.timestamp),
+    title: longDate(point.target_date),
+    value: fmtTemp(point.best ?? point.ensemble_mean, unit),
+    meta: point.source || 'forecast',
+    tone: point.target_date === selectedDate ? 'green' : 'neutral',
+    badges: [
+      { label: `ECMWF ${fmtTemp(point.ecmwf, unit)}`, tone: 'cyan' },
+      { label: `HRRR ${fmtTemp(point.hrrr, unit)}`, tone: 'green' },
+      { label: `METAR ${fmtTemp(point.metar, unit)}`, tone: 'amber' },
+      { label: `湿度 ${fmtPct(point.humidity)}`, tone: 'neutral' },
+    ],
+    details: [
+      { label: '更新时间', value: shortTime(point.timestamp) },
+      { label: '目标日期', value: longDate(point.target_date) },
+      { label: 'best / ensemble', value: `${fmtTemp(point.best, unit)} / ${fmtTemp(point.ensemble_mean, unit)}` },
+      { label: 'ensemble std', value: point.ensemble_std === null || point.ensemble_std === undefined ? '--' : point.ensemble_std.toFixed(2) },
+      { label: 'ECMWF', value: fmtTemp(point.ecmwf, unit) },
+      { label: 'HRRR', value: fmtTemp(point.hrrr, unit) },
+      { label: 'METAR', value: fmtTemp(point.metar, unit) },
+      { label: '湿度', value: fmtPct(point.humidity) },
+      { label: 'horizon', value: point.horizon || '--' },
+      { label: '来源', value: point.source || '--', wide: true },
+    ],
+  }))
+  const metarCards: EvidenceCardItem[] = metarRows.map((point, index) => {
+    const forecastValue = point.best ?? point.ensemble_mean
+    const gap = forecastValue !== null && forecastValue !== undefined && point.metar !== null && point.metar !== undefined
+      ? Number(forecastValue) - Number(point.metar)
+      : null
+    return {
+      id: `metar-${point.timestamp}-${point.target_date}-${index}`,
+      eyebrow: shortTime(point.timestamp),
+      title: longDate(point.target_date),
+      value: fmtTemp(point.metar, unit),
+      meta: `预测差 ${fmtSignedTemp(gap, unit)}`,
+      tone: gap === null ? 'neutral' : Math.abs(gap) <= 1.5 ? 'green' : Math.abs(gap) <= 3 ? 'amber' : 'red',
+      badges: [
+        { label: `best ${fmtTemp(forecastValue, unit)}`, tone: 'cyan' },
+        { label: `差值 ${fmtSignedTemp(gap, unit)}`, tone: gap === null ? 'neutral' : Math.abs(gap) <= 1.5 ? 'green' : Math.abs(gap) <= 3 ? 'amber' : 'red' },
+        { label: `湿度 ${fmtPct(point.humidity)}`, tone: 'neutral' },
+      ],
+      details: [
+        { label: '观测时间', value: shortTime(point.timestamp) },
+        { label: '目标日期', value: longDate(point.target_date) },
+        { label: 'METAR', value: fmtTemp(point.metar, unit) },
+        { label: 'best', value: fmtTemp(forecastValue, unit) },
+        { label: 'ECMWF', value: fmtTemp(point.ecmwf, unit) },
+        { label: 'HRRR', value: fmtTemp(point.hrrr, unit) },
+        { label: '湿度', value: fmtPct(point.humidity) },
+        { label: '来源', value: point.source || '--', wide: true },
+      ],
+    }
+  })
+  const historyCards: EvidenceCardItem[] = historyRows.map((point, index) => {
+    const confidence = point.source_confidence
+    const confidenceLabel = confidence === null || confidence === undefined
+      ? '--'
+      : Number(confidence) <= 1
+        ? fmtProb(confidence)
+        : `${Number(confidence).toFixed(0)}%`
+    return {
+      id: `history-${point.station_id || cityKey}-${point.target_date}-${index}`,
+      eyebrow: point.provider || 'history',
+      title: longDate(point.target_date),
+      value: fmtTemp(point.actual_high, point.unit || unit),
+      meta: `${point.calibration_tier || '--'} / ${point.station_id || series?.station_id || '--'}`,
+      tone: point.calibration_tier === 'live_truth' ? 'green' : point.calibration_tier === 'research_truth' ? 'amber' : 'neutral',
+      badges: [
+        { label: point.calibration_tier || 'truth 待补', tone: point.calibration_tier === 'live_truth' ? 'green' : point.calibration_tier === 'research_truth' ? 'amber' : 'neutral' },
+        { label: `湿度 ${fmtPct(point.humidity_mean)}`, tone: 'neutral' },
+        { label: `置信 ${confidenceLabel}`, tone: 'cyan' },
+      ],
+      details: [
+        { label: '日期', value: longDate(point.target_date) },
+        { label: '实际最高', value: fmtTemp(point.actual_high, point.unit || unit) },
+        { label: '湿度', value: fmtPct(point.humidity_mean) },
+        { label: 'provider', value: point.provider || '--' },
+        { label: 'truth 层级', value: point.calibration_tier || '--' },
+        { label: '站点', value: point.station_id || series?.station_id || '--' },
+        { label: '抓取时间', value: shortTime(point.fetched_at) },
+        { label: '来源链接', value: point.source_url || '--', wide: true },
+      ],
+    }
+  })
 
   useEffect(() => {
     if (!selectedDate || typeof window === 'undefined') return
@@ -698,48 +797,11 @@ export function WeatherPanel({
             />
           </div>
         ) : activeTab === 'forecast' ? (
-          <EvidenceTable
-            empty="该日期暂无预报快照"
-            columns={['更新时间', '目标日', '最佳', 'ECMWF', 'HRRR', 'METAR', '湿度', '来源']}
-            rows={forecastRows.map(point => [
-              shortTime(point.timestamp),
-              longDate(point.target_date),
-              fmtTemp(point.best ?? point.ensemble_mean, unit),
-              fmtTemp(point.ecmwf, unit),
-              fmtTemp(point.hrrr, unit),
-              fmtTemp(point.metar, unit),
-              fmtPct(point.humidity),
-              point.source || '--',
-            ])}
-          />
+          <EvidenceCards empty="该日期暂无预报快照" items={forecastCards} />
         ) : activeTab === 'metar' ? (
-          <EvidenceTable
-            empty="该日期暂无 METAR 快照"
-            columns={['更新时间', '目标日', 'METAR', '当前 best', 'ECMWF', 'HRRR', '湿度', 'source']}
-            rows={metarRows.map(point => [
-              shortTime(point.timestamp),
-              longDate(point.target_date),
-              fmtTemp(point.metar, unit),
-              fmtTemp(point.best ?? point.ensemble_mean, unit),
-              fmtTemp(point.ecmwf, unit),
-              fmtTemp(point.hrrr, unit),
-              fmtPct(point.humidity),
-              point.source || '--',
-            ])}
-          />
+          <EvidenceCards empty="该日期暂无 METAR 快照" items={metarCards} />
         ) : activeTab === 'history' ? (
-          <EvidenceTable
-            empty="暂无历史观测"
-            columns={['日期', '实际最高', '湿度', 'provider', 'truth 层级', '站点']}
-            rows={historyRows.map(point => [
-              longDate(point.target_date),
-              fmtTemp(point.actual_high, point.unit || unit),
-              fmtPct(point.humidity_mean),
-              point.provider || '--',
-              point.calibration_tier || '--',
-              point.station_id || series?.station_id || '--',
-            ])}
-          />
+          <EvidenceCards empty="暂无历史观测" items={historyCards} />
         ) : activeTab === 'bias' ? (
           <BiasPanel
             chartData={chartData}
@@ -1282,50 +1344,71 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
   )
 }
 
-function EvidenceTable({
-  columns,
-  rows,
-  empty,
-  links,
-}: {
-  columns: string[]
-  rows: string[][]
-  empty: string
-  links?: Array<string | undefined>
-}) {
-  if (rows.length === 0) {
+function toneClass(tone: EvidenceCardTone = 'neutral') {
+  if (tone === 'green') return 'border-green-500/25 bg-green-500/5 text-green-200'
+  if (tone === 'amber') return 'border-amber-500/25 bg-amber-500/5 text-amber-200'
+  if (tone === 'red') return 'border-red-500/25 bg-red-500/5 text-red-200'
+  if (tone === 'cyan') return 'border-cyan-500/25 bg-cyan-500/5 text-cyan-200'
+  return 'border-neutral-800 bg-neutral-950/40 text-neutral-400'
+}
+
+function EvidenceCards({ items, empty }: { items: EvidenceCardItem[]; empty: string }) {
+  if (items.length === 0) {
     return <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-neutral-600">{empty}</div>
   }
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto">
-      <table className="min-w-full border-collapse text-left text-[10px]">
-        <thead className="sticky top-0 bg-black text-neutral-500">
-          <tr>
-            {columns.map(column => (
-              <th key={column} className="border-b border-neutral-800 px-2 py-1 font-medium">{column}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, rowIndex) => (
-            <tr key={`${rowIndex}-${row.join('|')}`} className="border-b border-neutral-900 hover:bg-neutral-950">
-              {row.map((cell, cellIndex) => {
-                const href = cellIndex === row.length - 1 ? links?.[rowIndex] : undefined
-                return (
-                  <td key={`${rowIndex}-${cellIndex}`} className="whitespace-nowrap px-2 py-1 text-neutral-300">
-                    {href ? (
-                      <a href={href} target="_blank" rel="noreferrer" className="text-cyan-300 hover:text-cyan-100">
-                        {cell}
-                      </a>
-                    ) : cell}
-                  </td>
-                )
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      <div className="grid gap-2 lg:grid-cols-2">
+        {items.map(item => (
+          <article key={item.id} className={`min-w-0 border p-2 ${toneClass(item.tone)}`}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="truncate text-[9px] uppercase tracking-wide opacity-70">{item.eyebrow}</div>
+                <div className="truncate text-[11px] text-neutral-100" title={item.title}>{item.title}</div>
+              </div>
+              <div className="shrink-0 text-right">
+                <div className="text-sm tabular-nums text-neutral-50">{item.value}</div>
+                {item.meta && <div className="max-w-[160px] truncate text-[9px] opacity-70" title={item.meta}>{item.meta}</div>}
+              </div>
+            </div>
+
+            {(item.badges?.length ?? 0) > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {item.badges?.map((badge, index) => (
+                  <span key={`${badge.label}-${index}`} className={`border px-1.5 py-0.5 text-[9px] ${toneClass(badge.tone)}`}>
+                    {badge.label}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {(item.details?.length ?? 0) > 0 && (
+              <details className="mt-2 border-t border-neutral-800/70 pt-1 text-[10px]">
+                <summary className="cursor-pointer select-none text-neutral-500 hover:text-neutral-300">展开字段</summary>
+                <div className="mt-2 grid gap-1 md:grid-cols-2">
+                  {item.details?.map(detail => {
+                    const isLink = /^https?:\/\//.test(detail.value)
+                    return (
+                      <div key={detail.label} className={detail.wide ? 'min-w-0 md:col-span-2' : 'min-w-0'}>
+                        <div className="text-[9px] text-neutral-600">{detail.label}</div>
+                        {isLink ? (
+                          <a href={detail.value} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1 truncate text-cyan-300 hover:text-cyan-100">
+                            <span className="truncate">{detail.value}</span>
+                            <ExternalLink className="h-3 w-3 shrink-0" />
+                          </a>
+                        ) : (
+                          <div className="truncate text-neutral-300" title={detail.value}>{detail.value}</div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </details>
+            )}
+          </article>
+        ))}
+      </div>
     </div>
   )
 }

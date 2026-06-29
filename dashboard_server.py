@@ -182,6 +182,18 @@ def _save_production_refresh_result(payload):
     return payload
 
 
+def _production_refresh_runtime_state(payload):
+    if not payload:
+        return None
+    state = dict(payload)
+    state["last_refresh_was_auto"] = bool(state.pop("auto_refresh", False))
+    state["auto_refresh_enabled"] = AUTO_REFRESH_ENABLED
+    state["auto_refresh_running"] = bool(auto_refresh_task and not auto_refresh_task.done())
+    state["production_refresh_running"] = production_refresh_lock.locked()
+    state["running"] = production_refresh_lock.locked()
+    return state
+
+
 def _auto_simulation_state():
     state = _read_json(AUTO_SIMULATION_PATH, {})
     return {
@@ -2757,7 +2769,7 @@ def build_dashboard_payload():
         "stats": stats,
         "v3": v3_dashboard_summary(),
         "data_readiness": data_readiness,
-        "production_refresh": _read_json(PRODUCTION_REFRESH_PATH, None),
+        "production_refresh": _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None)),
         "model_dataset_audit": model_dataset_audit,
         "truth_health": truth_health,
         "btc_price": None,
@@ -2809,7 +2821,7 @@ def _minimal_dashboard_payload(reason: str = "cache_warming"):
         "stats": stats,
         "v3": {},
         "data_readiness": None,
-        "production_refresh": _read_json(PRODUCTION_REFRESH_PATH, None),
+        "production_refresh": _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None)),
         "model_dataset_audit": None,
         "truth_health": None,
         "btc_price": None,
