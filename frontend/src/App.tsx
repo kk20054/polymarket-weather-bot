@@ -791,13 +791,14 @@ function App() {
         </aside>
 
         <section className="order-1 min-h-0 overflow-y-auto xl:order-2">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 px-3 py-2">
+          <div className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 bg-black/95 px-3 py-2">
             <div className="min-w-0">
               <div className="truncate text-sm font-medium text-neutral-100">
                 {selectedCityMeta?.name ?? '城市天气证据'} · 最高温判断
               </div>
               <div className="mt-0.5 flex flex-wrap gap-1.5 text-[10px]">
                 <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">{selectedCityMeta?.station || 'station 未映射'}</span>
+                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">{selectedDate || '日期待定'}</span>
                 <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">
                   {selectedCityMeta?.latest === null || selectedCityMeta?.latest === undefined ? '暂无最新温度' : `最新 ${Number(selectedCityMeta.latest).toFixed(1)}°${selectedCityMeta.unit}`}
                 </span>
