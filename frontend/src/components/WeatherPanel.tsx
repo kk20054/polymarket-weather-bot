@@ -10,7 +10,7 @@ import {
   YAxis,
 } from 'recharts'
 import { CloudSun, Database, ExternalLink, RefreshCw, Signal, ThermometerSun } from 'lucide-react'
-import type { DashboardEvent, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { DashboardEvent, DistributionItem, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -41,6 +41,28 @@ function fmtTemp(value?: number | null, unit = 'F') {
 function fmtPct(value?: number | null) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   return `${Number(value).toFixed(0)}%`
+}
+
+function fmtProb(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${(Number(value) * 100).toFixed(1)}%`
+}
+
+function fmtPrice(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${(Number(value) * 100).toFixed(1)}¢`
+}
+
+function fmtSignedPct(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  const pct = Number(value) * 100
+  return `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`
+}
+
+function fmtBucket(item: DistributionItem, unit: string) {
+  if (item.bucket_low <= -900) return `${fmtTemp(item.bucket_high, unit)} 或以下`
+  if (item.bucket_high >= 900) return `${fmtTemp(item.bucket_low, unit)} 或以上`
+  return `${fmtTemp(item.bucket_low, unit)} - ${fmtTemp(item.bucket_high, unit)}`
 }
 
 function shortDate(value?: string | null) {
@@ -224,6 +246,25 @@ export function WeatherPanel({
   const citySignals = useMemo(() => signals.filter(signal => signal.city_key === cityKey), [signals, cityKey])
   const actionableSignals = citySignals.filter(signal => signal.actionable)
   const bestSignal = [...citySignals].sort((a, b) => Math.abs((b.probability_edge ?? b.edge ?? 0)) - Math.abs((a.probability_edge ?? a.edge ?? 0)))[0]
+  const distributionSignal = useMemo(() => {
+    const dated = citySignals.filter(signal => !selectedDate || signal.target_date === selectedDate)
+    const withDistribution = dated.filter(signal => (signal.distribution?.items?.length ?? 0) > 0)
+    const candidates = withDistribution.length > 0 ? withDistribution : citySignals.filter(signal => (signal.distribution?.items?.length ?? 0) > 0)
+    return [...candidates].sort((a, b) => {
+      const actionDelta = Number(Boolean(b.actionable)) - Number(Boolean(a.actionable))
+      if (actionDelta !== 0) return actionDelta
+      return Math.abs((b.probability_edge ?? b.edge ?? 0)) - Math.abs((a.probability_edge ?? a.edge ?? 0))
+    })[0]
+  }, [citySignals, selectedDate])
+  const distributionItems = useMemo(() => {
+    const items = [...(distributionSignal?.distribution?.items ?? [])]
+    return items
+      .sort((a, b) => {
+        if (Number(Boolean(b.is_signal)) !== Number(Boolean(a.is_signal))) return Number(Boolean(b.is_signal)) - Number(Boolean(a.is_signal))
+        return Number(b.probability ?? 0) - Number(a.probability ?? 0)
+      })
+      .slice(0, 8)
+  }, [distributionSignal])
   const latestHistory = latestBy<HistoricalWeatherPoint>(
     series?.history_points ?? [],
     point => point.actual_high !== null && point.actual_high !== undefined,
@@ -436,46 +477,54 @@ export function WeatherPanel({
         </div>
 
         {activeTab === 'overview' ? (
-          chartData.length > 0 ? (
-          <div
-            className="min-h-0 flex-1 p-2"
-            role="img"
-            aria-label={`${series?.city_name ?? '当前城市'}天气证据图。蓝线表示历史实际最高温，绿虚线表示预测最高温，橙线表示 METAR 观测，浅橙柱表示湿度。`}
-          >
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: -8 }}>
-                <CartesianGrid stroke="#1f1f1f" strokeDasharray="3 3" />
-                <XAxis dataKey="label" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} minTickGap={14} />
-                <YAxis yAxisId="temp" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} />
-                <YAxis yAxisId="humidity" orientation="right" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
-                <Tooltip
-                  contentStyle={{ background: '#050505', border: '1px solid #262626', color: '#e5e5e5', fontSize: 11 }}
-                  formatter={(value: any, name: any) => {
-                    if (name === '日均湿度') return [fmtPct(Number(value)), name]
-                    return [fmtTemp(Number(value), unit), name]
-                  }}
-                  labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ''}
-                />
-                <Bar
-                  yAxisId="humidity"
-                  dataKey="humidity_mean"
-                  name="日均湿度"
-                  fill="#f59e0b"
-                  fillOpacity={0.24}
-                  maxBarSize={10}
-                  radius={[1, 1, 0, 0]}
-                />
-                <Line yAxisId="temp" type="monotone" dataKey="actual_high" name="历史实际最高温" stroke="#38bdf8" dot={false} strokeWidth={2.3} connectNulls={false} />
-                <Line yAxisId="temp" type="monotone" dataKey="forecast_high" name="预测最高温" stroke="#22c55e" strokeDasharray="7 4" dot={false} strokeWidth={2.3} connectNulls={false} />
-                <Line yAxisId="temp" type="monotone" dataKey="metar" name="METAR 实测" stroke="#f97316" dot={false} strokeWidth={1.8} connectNulls={false} />
-              </ComposedChart>
-            </ResponsiveContainer>
+          <div className="grid min-h-0 flex-1 gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_280px]">
+            {chartData.length > 0 ? (
+              <div
+                className="min-h-[220px]"
+                role="img"
+                aria-label={`${series?.city_name ?? '当前城市'}天气证据图。蓝线表示历史实际最高温，绿虚线表示预测最高温，橙线表示 METAR 观测，浅橙柱表示湿度。`}
+              >
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: -8 }}>
+                    <CartesianGrid stroke="#1f1f1f" strokeDasharray="3 3" />
+                    <XAxis dataKey="label" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} minTickGap={14} />
+                    <YAxis yAxisId="temp" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} />
+                    <YAxis yAxisId="humidity" orientation="right" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
+                    <Tooltip
+                      contentStyle={{ background: '#050505', border: '1px solid #262626', color: '#e5e5e5', fontSize: 11 }}
+                      formatter={(value: any, name: any) => {
+                        if (name === '日均湿度') return [fmtPct(Number(value)), name]
+                        return [fmtTemp(Number(value), unit), name]
+                      }}
+                      labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ''}
+                    />
+                    <Bar
+                      yAxisId="humidity"
+                      dataKey="humidity_mean"
+                      name="日均湿度"
+                      fill="#f59e0b"
+                      fillOpacity={0.24}
+                      maxBarSize={10}
+                      radius={[1, 1, 0, 0]}
+                    />
+                    <Line yAxisId="temp" type="monotone" dataKey="actual_high" name="历史实际最高温" stroke="#38bdf8" dot={false} strokeWidth={2.3} connectNulls={false} />
+                    <Line yAxisId="temp" type="monotone" dataKey="forecast_high" name="预测最高温" stroke="#22c55e" strokeDasharray="7 4" dot={false} strokeWidth={2.3} connectNulls={false} />
+                    <Line yAxisId="temp" type="monotone" dataKey="metar" name="METAR 实测" stroke="#f97316" dot={false} strokeWidth={1.8} connectNulls={false} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <div className="flex min-h-[220px] items-center justify-center border border-neutral-900 p-4 text-center text-neutral-600">
+                该城市还没有历史或预测曲线。点击“手动抓取”同步预测和观测后，这里会显示最高温趋势。
+              </div>
+            )}
+            <TemperatureDistributionPanel
+              signal={distributionSignal}
+              items={distributionItems}
+              unit={unit}
+              selectedDate={selectedDate}
+            />
           </div>
-        ) : (
-          <div className="flex h-full min-h-[180px] items-center justify-center p-4 text-center text-neutral-600">
-            该城市还没有历史或预测曲线。点击“手动抓取”同步预测和观测后，这里会显示最高温趋势。
-          </div>
-          )
         ) : activeTab === 'forecast' ? (
           <EvidenceTable
             empty="该日期暂无预报快照"
@@ -582,6 +631,92 @@ export function WeatherPanel({
         </div>
       </div>
     </div>
+  )
+}
+
+function TemperatureDistributionPanel({
+  signal,
+  items,
+  unit,
+  selectedDate,
+}: {
+  signal?: WeatherSignal
+  items: DistributionItem[]
+  unit: string
+  selectedDate: string
+}) {
+  const distribution = signal?.distribution
+  const maxProbability = Math.max(0.01, ...items.map(item => Number(item.probability || 0)))
+  const forecastValue = distribution?.forecast_f === null || distribution?.forecast_f === undefined
+    ? null
+    : unit === 'C'
+      ? (Number(distribution.forecast_f) - 32) * 5 / 9
+      : Number(distribution.forecast_f)
+
+  return (
+    <aside className="flex min-h-[220px] flex-col border border-neutral-900 bg-neutral-950/30" aria-label="当日最高温概率分布">
+      <div className="border-b border-neutral-900 px-2 py-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <div className="text-[10px] text-neutral-500">当日最高温分布</div>
+            <div className="text-xs text-neutral-100">
+              {signal ? signal.city_name : '等待信号'} · {longDate(signal?.target_date ?? selectedDate)}
+            </div>
+          </div>
+          {signal?.event_url && (
+            <a href={signal.event_url} target="_blank" rel="noreferrer" className="shrink-0 text-[10px] text-cyan-300 hover:text-cyan-100">
+              Poly ↗
+            </a>
+          )}
+        </div>
+        <div className="mt-1 flex flex-wrap gap-1 text-[9px] text-neutral-500">
+          <span className="border border-neutral-800 px-1 py-0.5">μ {fmtTemp(forecastValue, unit)}</span>
+          <span className="border border-neutral-800 px-1 py-0.5">σ {distribution?.sigma_f?.toFixed?.(1) ?? '--'}F</span>
+          <span className="border border-neutral-800 px-1 py-0.5">{distribution?.normalized ? '已归一' : '未归一'}</span>
+        </div>
+      </div>
+
+      {items.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center px-3 text-center text-[10px] leading-relaxed text-neutral-600">
+          暂无温度桶分布。手动抓取并生成市场信号后，这里会显示各温度桶的模型概率、盘口价格和可执行 edge。
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {items.map(item => {
+            const edge = Number(item.probability_edge ?? 0)
+            const positive = edge > 0
+            const width = Math.max(4, Math.min(100, (Number(item.probability || 0) / maxProbability) * 100))
+            return (
+              <div key={item.market_id || `${item.bucket_low}-${item.bucket_high}`} className={`border-b border-neutral-900 px-2 py-1.5 ${item.is_signal ? 'bg-cyan-500/5' : ''}`}>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <div className="truncate text-[10px] text-neutral-200" title={item.question}>
+                    {fmtBucket(item, unit)}
+                  </div>
+                  <span className={`shrink-0 text-[10px] tabular-nums ${positive ? 'text-green-300' : 'text-neutral-500'}`}>
+                    {fmtSignedPct(edge)}
+                  </span>
+                </div>
+                <div className="h-1.5 overflow-hidden bg-neutral-900">
+                  <div className={positive ? 'h-full bg-green-400/70' : 'h-full bg-neutral-600/70'} style={{ width: `${width}%` }} />
+                </div>
+                <div className="mt-1 grid grid-cols-3 gap-1 text-[9px] tabular-nums text-neutral-500">
+                  <span>模型 {fmtProb(item.probability)}</span>
+                  <span>卖一 {fmtPrice(item.ask)}</span>
+                  <span>EV {fmtSignedPct(item.ev)}</span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {(distribution?.notes?.length ?? 0) > 0 && (
+        <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
+          <summary className="cursor-pointer select-none hover:text-neutral-400">分布备注</summary>
+          <div className="mt-1 leading-relaxed">{distribution?.notes?.join(' · ')}</div>
+        </details>
+      )}
+    </aside>
   )
 }
 
