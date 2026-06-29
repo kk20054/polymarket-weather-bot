@@ -328,7 +328,6 @@ export function WeatherPanel({
   const series = citySeries.find(row => row.city_key === selected) ?? citySeries[0]
   const forecastFallback = forecasts.find(row => row.city_key === selected) ?? forecasts[0]
   const cityKey = series?.city_key ?? forecastFallback?.city_key ?? selected
-  const cityName = series?.city_name ?? forecastFallback?.city_name ?? '当前城市'
   const unit = series?.unit ?? 'F'
   const todayDate = localDateString()
 
@@ -573,13 +572,6 @@ export function WeatherPanel({
             <option key={row.key} value={row.key}>{row.name}</option>
           ))}
         </select>
-        <div className="hidden min-w-0 flex-1 xl:block">
-          <div className="truncate text-xs font-medium text-neutral-100">{cityName}</div>
-          <div className="text-[10px] text-neutral-600">{series?.station_id || 'station 未映射'} · {longDate(selectedDate)}</div>
-        </div>
-        <div className="shrink-0 border border-neutral-800 px-2 py-1 text-[10px] text-neutral-400">
-          站点 {series?.station_id || '未映射'}
-        </div>
         <div className="inline-flex shrink-0 items-center border border-neutral-800">
           <button
             type="button"
