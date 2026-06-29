@@ -10,6 +10,7 @@ from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.db import bulk_settlement_contract_verification, connect, init_v3_db, insert_forecast_run, insert_orderbook, list_settlement_contracts, set_settlement_contract_verification, upsert_market_rule, upsert_market_rules, upsert_settlement_contracts
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
+from weatherbot_v3.production_actions import list_production_actions, run_production_action
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
@@ -585,6 +586,53 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(compact["targets_preview"], [{"city": "city-0"}, {"city": "city-1"}, {"city": "city-2"}])
         self.assertIn("targets", verbose)
         self.assertEqual(len(verbose["targets"]), 8)
+
+    def test_production_actions_are_whitelisted_and_dry_run_by_default(self):
+        actions = {action["key"] for action in list_production_actions()}
+        self.assertIn("refresh_clob_orderbooks", actions)
+
+        unknown = run_production_action("shell_anything", apply=True)
+        self.assertFalse(unknown["ok"])
+        self.assertEqual(unknown["reason"], "unsupported_production_action")
+
+        dry_run = run_production_action("refresh_clob_orderbooks", limit=3)
+        self.assertTrue(dry_run["ok"])
+        self.assertEqual(dry_run["status"], "dry_run")
+        self.assertEqual(dry_run["params"]["limit"], 3)
+
+    def test_production_action_requires_operator_confirmation_for_bulk_review(self):
+        result = run_production_action(
+            "review_mature_auto_contracts",
+            apply=True,
+            operator_confirmed=False,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reason"], "operator_confirmation_required")
+
+    def test_production_action_executes_whitelisted_orderbook_backfill(self):
+        with patch("weatherbot_v3.production_actions.run_orderbook_backfill") as mocked_backfill:
+            mocked_backfill.return_value = {"ok": 2, "failed": 0}
+            with patch("weatherbot_v3.production_actions.build_data_readiness") as mocked_readiness:
+                mocked_readiness.return_value = {
+                    "status": "blocked",
+                    "score": 0.25,
+                    "live_allowed": False,
+                    "production_phase": {"blocked_keys": ["orderbooks"]},
+                }
+                with patch("weatherbot_v3.production_actions.persist_data_readiness"):
+                    result = run_production_action(
+                        "refresh_clob_orderbooks",
+                        apply=True,
+                        limit=7,
+                        start_date="2026-06-28",
+                    )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "executed")
+        mocked_backfill.assert_called_once_with(7, "2026-06-28", "")
+        self.assertEqual(result["readiness"]["blocked_keys"], ["orderbooks"])
 
     def test_data_readiness_operator_action_when_auto_contracts_are_not_mature(self):
         db_path = test_db_path("data_readiness_future_auto")

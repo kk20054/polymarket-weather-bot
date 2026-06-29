@@ -45,6 +45,7 @@ from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.notifier import FeishuNotifier
 from weatherbot_v3.polymarket import PolymarketDataClient
+from weatherbot_v3.production_actions import list_production_actions, run_production_action
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_rule
@@ -138,6 +139,19 @@ class ProductionRefreshRequest(BaseModel):
     start_date: str = ""
     end_date: str = ""
     skip_signal_scan: bool = True
+
+
+class ProductionActionRequest(BaseModel):
+    action_key: str
+    apply: bool = False
+    operator_confirmed: bool = False
+    cities: list[str] | None = None
+    days: int = 1
+    limit: int = 20
+    start_date: str = ""
+    end_date: str = ""
+    skip_signal_scan: bool = True
+    note: str = ""
 
 
 class LiveOrderUpdate(BaseModel):
@@ -3135,6 +3149,32 @@ async def production_validation(include_targets: bool = False, refresh: bool = F
     )
     production_validation_cache[cache_key] = (now, payload)
     return payload
+
+
+@app.get("/api/production-actions")
+async def production_actions():
+    return {"actions": list_production_actions()}
+
+
+@app.post("/api/production-actions/run")
+async def production_actions_run(request: ProductionActionRequest):
+    result = await asyncio.to_thread(
+        run_production_action,
+        request.action_key,
+        apply=request.apply,
+        operator_confirmed=request.operator_confirmed,
+        cities=request.cities or [],
+        days=request.days,
+        limit=request.limit,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        skip_signal_scan=request.skip_signal_scan,
+        note=request.note,
+    )
+    if request.apply and result.get("status") == "executed":
+        _clear_production_validation_cache()
+        await _refresh_dashboard_cache_once()
+    return result
 
 
 @app.post("/api/production-refresh")
