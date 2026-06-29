@@ -27,6 +27,7 @@ class HistoricalWeatherPoint:
     source_confidence: float
     calibration_tier: str
     source_url: str
+    fetched_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -133,6 +134,7 @@ def fetch_open_meteo_history(
     dates = daily.get("time") or []
     highs = daily.get("temperature_2m_max") or []
     humidity_by_date = _humidity_mean_by_date(data.get("hourly") or {})
+    fetched_at = datetime.utcnow().isoformat() + "Z"
     rows: list[dict[str, Any]] = []
     for idx, day in enumerate(dates):
         high = highs[idx] if idx < len(highs) else None
@@ -148,6 +150,7 @@ def fetch_open_meteo_history(
             source_confidence=0.45,
             calibration_tier="research_truth",
             source_url=source_url,
+            fetched_at=fetched_at,
         ).to_dict())
     return rows
 

@@ -212,10 +212,12 @@ def run_legacy_signal_scan() -> dict:
 
 
 def _stage_result(name: str, fn) -> dict:
+    started = time.perf_counter()
     try:
-        return {"name": name, "ok": True, "payload": fn()}
+        payload = fn()
+        return {"name": name, "ok": True, "elapsed_ms": round((time.perf_counter() - started) * 1000), "payload": payload}
     except Exception as exc:
-        return {"name": name, "ok": False, "error": str(exc)}
+        return {"name": name, "ok": False, "elapsed_ms": round((time.perf_counter() - started) * 1000), "error": str(exc)}
 
 
 def run_production_refresh(

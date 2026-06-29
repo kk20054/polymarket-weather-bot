@@ -372,6 +372,10 @@ function App() {
     if (typeof window === 'undefined') return ''
     return cityKeyFromParam(new URLSearchParams(window.location.search).get('city'))
   })
+  const [selectedDate, setSelectedDate] = useState(() => {
+    if (typeof window === 'undefined') return ''
+    return new URLSearchParams(window.location.search).get('date') ?? ''
+  })
   const [simBalance, setSimBalance] = useState('40')
   const [clearMarks, setClearMarks] = useState(false)
   const [contractStatus, setContractStatus] = useState('mature-auto')
@@ -576,6 +580,12 @@ function App() {
     if (!query) return true
     return `${city.name} ${city.station ?? ''} ${city.key}`.toLowerCase().includes(query)
   })
+  const cityHref = (city: { key: string; station?: string }) => {
+    const params = new URLSearchParams()
+    params.set('city', cityPageSlug(city))
+    if (selectedDate) params.set('date', selectedDate)
+    return `?${params.toString()}`
+  }
 
   useEffect(() => {
     if (!selectedCityMeta || typeof window === 'undefined') return
@@ -586,6 +596,15 @@ function App() {
     const nextUrl = `${window.location.pathname}?${params.toString()}`
     window.history.replaceState(null, '', nextUrl)
   }, [selectedCityMeta])
+
+  useEffect(() => {
+    if (!selectedDate || typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('date') === selectedDate) return
+    params.set('date', selectedDate)
+    const nextUrl = `${window.location.pathname}?${params.toString()}`
+    window.history.replaceState(null, '', nextUrl)
+  }, [selectedDate])
 
   if (view === 'temperature-fit') {
     return (
@@ -676,7 +695,7 @@ function App() {
         <aside className="order-2 border-b border-neutral-800 bg-neutral-950/40 xl:order-1 xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
           {recommendedCity && (
             <a
-              href={`?city=${cityPageSlug(recommendedCity)}`}
+              href={cityHref(recommendedCity)}
               onClick={event => {
                 event.preventDefault()
                 setSelectedCity(recommendedCity.key)
@@ -726,7 +745,7 @@ function App() {
               {filteredCityOptions.map(city => (
                 <a
                   key={city.key}
-                  href={`?city=${cityPageSlug(city)}`}
+                  href={cityHref(city)}
                   onClick={event => {
                     event.preventDefault()
                     setSelectedCity(city.key)
@@ -790,8 +809,11 @@ function App() {
               signals={signals}
               citySeries={citySeries}
               events={events}
+              productionRefresh={productionRefresh}
               selectedCity={selectedCity}
               onSelectedCity={setSelectedCity}
+              selectedDate={selectedDate}
+              onSelectedDate={setSelectedDate}
               onBackfillHistory={() => historyBackfillMutation.mutate()}
               backfilling={historyBackfillMutation.isPending}
               backfillResult={historyBackfillMutation.data}

@@ -10,15 +10,18 @@ import {
   YAxis,
 } from 'recharts'
 import { CloudSun, Database, ExternalLink, RefreshCw, Signal, ThermometerSun } from 'lucide-react'
-import type { DashboardEvent, HistoricalWeatherPoint, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { DashboardEvent, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
   signals: WeatherSignal[]
   citySeries?: WeatherCitySeries[]
   events?: DashboardEvent[]
+  productionRefresh?: ProductionRefreshResult | null
   selectedCity?: string
   onSelectedCity?: (cityKey: string) => void
+  selectedDate?: string
+  onSelectedDate?: (date: string) => void
   onBackfillHistory?: () => void
   backfilling?: boolean
   backfillResult?: {
@@ -88,6 +91,23 @@ function freshnessLabel(value?: string | null) {
   if (minutes < 60) return `${minutes.toFixed(0)} 分钟前`
   if (minutes < 1440) return `${(minutes / 60).toFixed(1)} 小时前`
   return `${(minutes / 1440).toFixed(1)} 天前`
+}
+
+function localDateString(date = new Date()) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function elapsedLabel(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return ''
+  if (value < 1000) return `${Math.round(Number(value))}ms`
+  return `${(Number(value) / 1000).toFixed(1)}s`
+}
+
+function refreshStage(productionRefresh: ProductionRefreshResult | null | undefined, names: string[]) {
+  return (productionRefresh?.stages ?? []).find(stage => names.includes(stage.name))
 }
 
 function evidenceStatus(value?: string | null, staleAfterMinutes = 180): EvidenceStatus {
@@ -160,8 +180,11 @@ export function WeatherPanel({
   signals,
   citySeries = [],
   events = [],
+  productionRefresh,
   selectedCity,
   onSelectedCity,
+  selectedDate: controlledSelectedDate,
+  onSelectedDate,
   onBackfillHistory,
   backfilling = false,
   backfillResult,
@@ -169,7 +192,7 @@ export function WeatherPanel({
   const cities = useMemo(() => uniqueCities(citySeries, forecasts), [citySeries, forecasts])
   const [internalSelected, setInternalSelected] = useState(cities[0]?.key ?? '')
   const [activeTab, setActiveTab] = useState<WeatherTab>('overview')
-  const [selectedDate, setSelectedDate] = useState(() => {
+  const [internalSelectedDate, setInternalSelectedDate] = useState(() => {
     if (typeof window === 'undefined') return ''
     return new URLSearchParams(window.location.search).get('date') ?? ''
   })
@@ -177,6 +200,11 @@ export function WeatherPanel({
   const setSelected = (cityKey: string) => {
     setInternalSelected(cityKey)
     onSelectedCity?.(cityKey)
+  }
+  const selectedDate = controlledSelectedDate ?? internalSelectedDate
+  const setSelectedDate = (date: string) => {
+    setInternalSelectedDate(date)
+    onSelectedDate?.(date)
   }
 
   useEffect(() => {
@@ -191,7 +219,7 @@ export function WeatherPanel({
   const cityKey = series?.city_key ?? forecastFallback?.city_key ?? selected
   const cityName = series?.city_name ?? forecastFallback?.city_name ?? '当前城市'
   const unit = series?.unit ?? 'F'
-  const todayDate = new Date().toISOString().slice(0, 10)
+  const todayDate = localDateString()
 
   const citySignals = useMemo(() => signals.filter(signal => signal.city_key === cityKey), [signals, cityKey])
   const actionableSignals = citySignals.filter(signal => signal.actionable)
@@ -220,6 +248,10 @@ export function WeatherPanel({
   const metarStatus = evidenceStatus(latestMetar?.timestamp, 45)
   const historyStatus = latestHistory ? 'fresh' : 'missing'
   const humidityAvailable = chartData.some(row => row.humidity_mean !== null && row.humidity_mean !== undefined)
+  const forecastRefreshStage = refreshStage(productionRefresh, ['forecast_backfill'])
+  const signalRefreshStage = refreshStage(productionRefresh, ['signal_scan', 'signal_migration'])
+  const orderbookRefreshStage = refreshStage(productionRefresh, ['orderbook_backfill'])
+  const latestHistoryFetch = latestHistory?.fetched_at
   const truthTier = latestHistory?.calibration_tier === 'live_truth'
     ? '实盘 truth'
     : latestHistory?.calibration_tier === 'research_truth'
@@ -271,7 +303,7 @@ export function WeatherPanel({
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_auto_auto_minmax(260px,1fr)_auto] gap-2 p-3 text-[11px] text-neutral-400">
+    <div className="grid h-full min-h-0 grid-rows-[auto_auto_auto_auto_minmax(260px,1fr)_auto] gap-2 p-3 text-[11px] text-neutral-400">
       <div className="flex flex-wrap items-center gap-2">
         <select
           value={cityKey}
@@ -332,6 +364,33 @@ export function WeatherPanel({
           <RefreshCw className={`h-3 w-3 ${backfilling ? 'animate-spin' : ''}`} />
           {backfilling ? '补历史中' : '补历史数据'}
         </button>
+      </div>
+
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2">
+        <SourcePulse
+          label="预报"
+          status={forecastStatus}
+          value={freshnessLabel(latestForecast?.timestamp)}
+          meta={elapsedLabel(forecastRefreshStage?.elapsed_ms) || latestForecast?.source || '等待抓取'}
+        />
+        <SourcePulse
+          label="METAR"
+          status={metarStatus}
+          value={freshnessLabel(latestMetar?.timestamp)}
+          meta={latestMetar?.metar !== null && latestMetar?.metar !== undefined ? fmtTemp(latestMetar.metar, unit) : '等待观测'}
+        />
+        <SourcePulse
+          label="历史观测"
+          status={historyStatus}
+          value={latestHistoryFetch ? freshnessLabel(latestHistoryFetch) : latestHistory ? shortDate(latestHistory.target_date) : '无数据'}
+          meta={latestHistory?.provider || truthTier}
+        />
+        <SourcePulse
+          label="盘口/信号"
+          status={orderbookRefreshStage?.ok || signalRefreshStage?.ok ? 'fresh' : 'missing'}
+          value={elapsedLabel(orderbookRefreshStage?.elapsed_ms) || elapsedLabel(signalRefreshStage?.elapsed_ms) || '未刷新'}
+          meta={orderbookRefreshStage?.error || signalRefreshStage?.error || productionRefresh?.message || '等待手动抓取'}
+        />
       </div>
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(92px,1fr))] gap-2">
@@ -624,6 +683,29 @@ function Metric({
       </div>
       <div className={`truncate tabular-nums ${color}`}>{value}</div>
       {sub && <div className="truncate text-[9px] text-neutral-600" title={sub}>{sub}</div>}
+    </div>
+  )
+}
+
+function SourcePulse({
+  label,
+  status,
+  value,
+  meta,
+}: {
+  label: string
+  status: EvidenceStatus
+  value: string
+  meta?: string
+}) {
+  return (
+    <div className={`min-w-0 border px-2 py-1.5 ${statusClass(status)}`}>
+      <div className="mb-0.5 flex items-center gap-1 text-[9px]">
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${status === 'fresh' ? 'bg-green-300' : status === 'stale' ? 'bg-amber-300' : 'bg-neutral-600'}`} />
+        <span className="truncate text-neutral-300">{label}</span>
+      </div>
+      <div className="truncate text-xs tabular-nums text-neutral-100">{value}</div>
+      {meta && <div className="truncate text-[9px] text-neutral-500" title={meta}>{meta}</div>}
     </div>
   )
 }

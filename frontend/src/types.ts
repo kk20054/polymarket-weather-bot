@@ -229,6 +229,7 @@ export interface DataReadiness {
 export interface ProductionRefreshStage {
   name: string
   ok: boolean
+  elapsed_ms?: number
   skipped?: boolean
   reason?: string
   error?: string
@@ -598,6 +599,7 @@ export interface HistoricalWeatherPoint {
   source_confidence?: number
   calibration_tier?: 'live_truth' | 'research_truth' | string
   source_url?: string
+  fetched_at?: string | null
 }
 
 export interface WeatherCitySeries {
