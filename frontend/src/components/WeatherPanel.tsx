@@ -48,6 +48,15 @@ type WeatherChartRow = {
   forecast_timestamp?: string
 }
 
+type SourceSampleTone = 'green' | 'amber' | 'red' | 'cyan' | 'neutral'
+
+type SourceSample = {
+  label: string
+  value: string
+  meta?: string
+  tone?: SourceSampleTone
+}
+
 function fmtTemp(value?: number | null, unit = 'F') {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   return `${Number(value).toFixed(1)}°${unit}`
@@ -407,6 +416,34 @@ export function WeatherPanel({
       return !cityKey || text.includes(cityKey.toLowerCase()) || text.includes(String(series?.city_name ?? '').toLowerCase()) || /scan|forecast|orderbook|truth|refresh|scanner|weather/i.test(text)
     })
     .slice(0, 18)
+  const forecastSamples: SourceSample[] = forecastRows.slice(0, 4).map(point => ({
+    label: `${shortDate(point.target_date)} · ${shortTime(point.timestamp)}`,
+    value: fmtTemp(point.best ?? point.ensemble_mean, unit),
+    meta: `ECMWF ${fmtTemp(point.ecmwf, unit)} · HRRR ${fmtTemp(point.hrrr, unit)} · METAR ${fmtTemp(point.metar, unit)} · ${point.source || '--'}`,
+    tone: point.target_date === selectedDate ? 'green' : 'neutral',
+  }))
+  const metarSamples: SourceSample[] = metarRows.slice(0, 4).map(point => ({
+    label: `${shortDate(point.target_date)} · ${shortTime(point.timestamp)}`,
+    value: fmtTemp(point.metar, unit),
+    meta: `best ${fmtTemp(point.best ?? point.ensemble_mean, unit)} · humidity ${fmtPct(point.humidity)} · ${point.source || '--'}`,
+    tone: point.target_date === selectedDate ? 'amber' : 'neutral',
+  }))
+  const historySamples: SourceSample[] = historyRows.slice(0, 4).map(point => ({
+    label: longDate(point.target_date),
+    value: fmtTemp(point.actual_high, point.unit || unit),
+    meta: `${point.provider || '--'} · ${point.calibration_tier || '--'} · ${point.station_id || series?.station_id || '--'}`,
+    tone: point.calibration_tier === 'live_truth' ? 'green' : point.calibration_tier === 'research_truth' ? 'amber' : 'neutral',
+  }))
+  const marketSamples: SourceSample[] = (selectedDateSignals.length > 0 ? selectedDateSignals : citySignals).slice(0, 4).map(signal => {
+    const edge = signal.probability_edge ?? signal.edge
+    const price = signal.limit_price ?? signal.market_probability
+    return {
+      label: `${shortDate(signal.target_date)} · ${signal.bucket_label || fmtTemp(signal.threshold_f, unit)}`,
+      value: signal.actionable ? 'BUY YES' : signal.status || '观察',
+      meta: `price ${fmtPrice(price)} · edge ${fmtSignedPct(edge)} · ${signal.decision?.reasons?.[0] || signal.manual_note || signal.reasoning || '--'}`,
+      tone: signal.actionable ? 'green' : 'neutral',
+    }
+  })
 
   useEffect(() => {
     if (!selectedDate || typeof window === 'undefined') return
@@ -501,6 +538,7 @@ export function WeatherPanel({
             { label: '来源', value: latestForecast?.source || '等待抓取' },
             { label: '刷新阶段', value: refreshStageLabel(forecastRefreshStage) },
           ]}
+          samples={forecastSamples}
         />
         <SourcePulse
           label="METAR"
@@ -514,6 +552,7 @@ export function WeatherPanel({
             { label: '湿度', value: fmtPct(latestMetar?.humidity) },
             { label: '来源', value: latestMetar?.source || '等待观测' },
           ]}
+          samples={metarSamples}
         />
         <SourcePulse
           label="历史观测"
@@ -528,6 +567,7 @@ export function WeatherPanel({
             { label: 'truth 层级', value: truthTier },
             { label: '抓取时间', value: shortTime(latestHistoryFetch) },
           ]}
+          samples={historySamples}
         />
         <SourcePulse
           label="盘口/信号"
@@ -541,6 +581,7 @@ export function WeatherPanel({
             { label: '信号刷新', value: refreshStageLabel(signalRefreshStage) },
             { label: '最新消息', value: orderbookRefreshStage?.error || signalRefreshStage?.error || productionRefresh?.message || '等待手动抓取' },
           ]}
+          samples={marketSamples}
         />
       </div>
 
@@ -1341,13 +1382,23 @@ function SourcePulse({
   value,
   meta,
   details = [],
+  samples = [],
 }: {
   label: string
   status: EvidenceStatus
   value: string
   meta?: string
   details?: Array<{ label: string; value: string }>
+  samples?: SourceSample[]
 }) {
+  const sampleToneClass = (tone: SourceSampleTone = 'neutral') => {
+    if (tone === 'green') return 'border-green-500/25 bg-green-500/5 text-green-200'
+    if (tone === 'amber') return 'border-amber-500/25 bg-amber-500/5 text-amber-200'
+    if (tone === 'red') return 'border-red-500/25 bg-red-500/5 text-red-200'
+    if (tone === 'cyan') return 'border-cyan-500/25 bg-cyan-500/5 text-cyan-200'
+    return 'border-neutral-800 bg-black/35 text-neutral-300'
+  }
+
   return (
     <div className={`min-w-0 border px-2 py-1.5 ${statusClass(status)}`}>
       <div className="mb-0.5 flex items-center gap-1 text-[9px]">
@@ -1356,7 +1407,7 @@ function SourcePulse({
       </div>
       <div className="truncate text-xs tabular-nums text-neutral-100">{value}</div>
       {meta && <div className="truncate text-[9px] text-neutral-500" title={meta}>{meta}</div>}
-      {details.length > 0 && (
+      {(details.length > 0 || samples.length > 0) && (
         <details className="mt-1 border-t border-neutral-800/70 pt-1 text-[9px] text-neutral-500">
           <summary className="cursor-pointer select-none hover:text-neutral-300">明细</summary>
           <div className="mt-1 grid gap-1">
@@ -1366,6 +1417,24 @@ function SourcePulse({
                 <span className="truncate text-neutral-400" title={item.value}>{item.value}</span>
               </div>
             ))}
+          </div>
+          <div className="mt-2 border-t border-neutral-800/70 pt-1">
+            <div className="mb-1 text-neutral-600">最近记录</div>
+            {samples.length === 0 ? (
+              <div className="border border-neutral-800 bg-black/35 px-1.5 py-1 text-neutral-600">暂无最近记录</div>
+            ) : (
+              <div className="space-y-1">
+                {samples.map(sample => (
+                  <div key={`${label}-${sample.label}-${sample.value}`} className={`border px-1.5 py-1 ${sampleToneClass(sample.tone)}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 truncate text-neutral-400" title={sample.label}>{sample.label}</span>
+                      <span className="shrink-0 tabular-nums text-neutral-100">{sample.value}</span>
+                    </div>
+                    {sample.meta && <div className="mt-0.5 truncate text-[9px] text-neutral-600" title={sample.meta}>{sample.meta}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </details>
       )}
