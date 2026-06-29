@@ -731,12 +731,6 @@ export function WeatherPanel({
             <EvidenceBadge label="历史观测" status={historyStatus} detail={latestHistory?.provider || '无数据'} />
             <EvidenceBadge label="湿度" status={humidityAvailable ? 'fresh' : 'missing'} detail={humidityAvailable ? '已采集' : '无数据'} />
           </div>
-          <details className="text-[10px] text-neutral-500">
-            <summary className="cursor-pointer select-none hover:text-neutral-300">读图方式</summary>
-            <div className="mt-1 max-w-xl leading-relaxed text-neutral-500">
-              蓝线是已保存的实际最高温，绿虚线是预测最高温，橙色柱是日均湿度，橙线是 METAR 观测。实盘校准只应使用高置信结算 truth；研究级历史只能辅助观察。
-            </div>
-          </details>
         </div>
 
         {activeTab === 'overview' ? (
@@ -837,6 +831,12 @@ export function WeatherPanel({
           <div className="mb-1 text-neutral-500">数据明细</div>
           <div>历史点 {series?.history_count ?? series?.history_points?.length ?? 0} · 预测点 {series?.forecast_count ?? series?.forecast_points?.length ?? series?.points?.length ?? 0}</div>
           <div className="text-[10px] text-neutral-600">truth 层级：{truthTier}；站点：{series?.station_id || '未映射'}</div>
+          <details className="mt-1 text-[10px] text-neutral-600">
+            <summary className="cursor-pointer select-none hover:text-neutral-300">读图方式</summary>
+            <div className="mt-1 leading-relaxed">
+              蓝线是实际最高温，绿虚线是预测最高温，橙线是 METAR 观测，浅橙柱是湿度。实盘校准只应使用高置信结算 truth。
+            </div>
+          </details>
           {backfillResult && (
             <div className="mt-1 text-[10px] text-cyan-300">
               最近补历史：写入 {backfillResult.fetched} 条，错误 {backfillResult.errors.length} 个
