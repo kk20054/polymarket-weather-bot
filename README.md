@@ -109,10 +109,17 @@ and SQLite signal records, then shows manual order tickets for human review.
 
 ```bash
 pip install -r requirements.txt
-python -m uvicorn dashboard_server:app --host 127.0.0.1 --port 8765
+.\.venv\Scripts\python.exe -m uvicorn dashboard_server:app --host 127.0.0.1 --port 8765
 cd frontend
 npm install
 npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+If port `8765` is already occupied or the dashboard was started with the wrong
+Python interpreter, restart it from PowerShell:
+
+```powershell
+.\scripts\restart_dashboard.ps1
 ```
 
 Open:
