@@ -515,6 +515,10 @@ function App() {
       station?: string
       unit: string
       latest?: number | null
+      latestMetar?: number | null
+      forecastCount: number
+      historyCount: number
+      humidityStatus?: string
       signals: number
       actionable: number
     }>()
@@ -526,6 +530,10 @@ function App() {
         station: row.station_id,
         unit: row.unit || 'F',
         latest: row.latest_best ?? null,
+        latestMetar: row.latest_metar ?? null,
+        forecastCount: row.forecast_count ?? row.forecast_points?.length ?? row.points?.length ?? 0,
+        historyCount: row.history_count ?? row.history_points?.length ?? 0,
+        humidityStatus: row.humidity_status,
         signals: 0,
         actionable: 0,
       })
@@ -538,6 +546,10 @@ function App() {
           name: row.city_name,
           unit: 'F',
           latest: row.mean_high,
+          latestMetar: null,
+          forecastCount: 1,
+          historyCount: 0,
+          humidityStatus: 'not_collected',
           signals: 0,
           actionable: 0,
         })
@@ -550,6 +562,10 @@ function App() {
         name: signal.city_name,
         unit: 'F',
         latest: null,
+        latestMetar: null,
+        forecastCount: 0,
+        historyCount: 0,
+        humidityStatus: 'not_collected',
         signals: 0,
         actionable: 0,
       }
@@ -794,6 +810,43 @@ function App() {
                         {city.actionable}/{city.signals}
                       </div>
                     </div>
+                  </div>
+                  <div className="mt-2 flex items-center gap-1 text-[9px]">
+                    <span
+                      className={`border px-1 py-0.5 ${
+                        city.forecastCount > 0
+                          ? 'border-cyan-500/25 bg-cyan-500/5 text-cyan-200'
+                          : 'border-neutral-800 text-neutral-600'
+                      }`}
+                      title={`预报快照 ${city.forecastCount}`}
+                    >
+                      F {city.forecastCount}
+                    </span>
+                    <span
+                      className={`border px-1 py-0.5 ${
+                        city.latestMetar !== null && city.latestMetar !== undefined
+                          ? 'border-amber-500/25 bg-amber-500/5 text-amber-200'
+                          : 'border-neutral-800 text-neutral-600'
+                      }`}
+                      title={city.latestMetar !== null && city.latestMetar !== undefined ? `METAR ${Number(city.latestMetar).toFixed(1)}°${city.unit}` : '暂无 METAR'}
+                    >
+                      M {city.latestMetar !== null && city.latestMetar !== undefined ? Number(city.latestMetar).toFixed(0) : '--'}
+                    </span>
+                    <span
+                      className={`border px-1 py-0.5 ${
+                        city.historyCount > 0
+                          ? 'border-emerald-500/25 bg-emerald-500/5 text-emerald-200'
+                          : 'border-neutral-800 text-neutral-600'
+                      }`}
+                      title={`历史观测 ${city.historyCount}`}
+                    >
+                      H {city.historyCount}
+                    </span>
+                    {city.humidityStatus === 'available' && (
+                      <span className="border border-blue-500/20 bg-blue-500/5 px-1 py-0.5 text-blue-200" title="湿度数据可用">
+                        RH
+                      </span>
+                    )}
                   </div>
                 </a>
               ))}
