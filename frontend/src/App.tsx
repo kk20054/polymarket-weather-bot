@@ -587,7 +587,9 @@ function App() {
   }, [cityOptions, selectedCity])
 
   const selectedCityMeta = cityOptions.find(city => city.key === selectedCity)
-  const recommendedCity = cityOptions.find(city => city.actionable > 0) ?? selectedCityMeta ?? cityOptions[0]
+  const recommendedCity = cityOptions.find(city => city.actionable > 0)
+  const citySummaryCard = recommendedCity ?? selectedCityMeta ?? cityOptions[0]
+  const actionableCityCount = cityOptions.filter(city => city.actionable > 0).length
   const filteredCityOptions = cityOptions.filter(city => {
     const query = citySearch.trim().toLowerCase()
     if (!query) return true
@@ -706,24 +708,32 @@ function App() {
 
       <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[260px_minmax(560px,1fr)_340px] xl:overflow-hidden">
         <aside className="order-2 border-b border-neutral-800 bg-neutral-950/40 xl:order-1 xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
-          {recommendedCity && (
+          {citySummaryCard && (
             <a
-              href={cityHref(recommendedCity)}
+              href={cityHref(citySummaryCard)}
               onClick={event => {
                 event.preventDefault()
-                setSelectedCity(recommendedCity.key)
+                setSelectedCity(citySummaryCard.key)
               }}
-              className="m-3 block border border-emerald-500/30 bg-emerald-500/10 p-3 text-left hover:bg-emerald-500/15"
+              className={`m-3 block border p-3 text-left transition ${
+                recommendedCity
+                  ? 'border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/15'
+                  : 'border-neutral-800 bg-black/35 hover:border-neutral-700'
+              }`}
             >
               <div className="mb-1 flex items-center justify-between gap-2">
-                <div className="text-xs font-medium text-emerald-100">推荐关注</div>
-                <div className="text-[10px] text-emerald-300">{recommendedCity.actionable}/{recommendedCity.signals} 信号</div>
+                <div className={`text-xs font-medium ${recommendedCity ? 'text-emerald-100' : 'text-neutral-300'}`}>
+                  {recommendedCity ? '推荐关注' : needsManualRefresh ? '等待抓取' : '当前城市'}
+                </div>
+                <div className={`text-[10px] ${recommendedCity ? 'text-emerald-300' : 'text-neutral-500'}`}>
+                  {citySummaryCard.actionable}/{citySummaryCard.signals} 信号
+                </div>
               </div>
-              <div className="truncate text-sm text-neutral-100">{recommendedCity.name}</div>
+              <div className="truncate text-sm text-neutral-100">{citySummaryCard.name}</div>
               <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-neutral-500">
-                <span>{recommendedCity.station || 'station 未映射'}</span>
+                <span>{citySummaryCard.station || 'station 未映射'}</span>
                 <span className="tabular-nums text-neutral-200">
-                  {recommendedCity.latest === null || recommendedCity.latest === undefined ? '--' : `${Number(recommendedCity.latest).toFixed(1)}°${recommendedCity.unit}`}
+                  {citySummaryCard.latest === null || citySummaryCard.latest === undefined ? '--' : `${Number(citySummaryCard.latest).toFixed(1)}°${citySummaryCard.unit}`}
                 </span>
               </div>
             </a>
@@ -733,7 +743,9 @@ function App() {
             <div className="mb-2 flex items-center justify-between">
               <div>
                 <div className="text-sm font-medium text-neutral-100">城市索引</div>
-                <div className="text-[10px] text-neutral-600">按信号优先排序</div>
+                <div className="text-[10px] text-neutral-600">
+                  {actionableCityCount > 0 ? `${actionableCityCount} 个城市有可执行信号` : '无信号时按城市浏览证据'}
+                </div>
               </div>
               <span className="border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">{cityOptions.length}</span>
             </div>
