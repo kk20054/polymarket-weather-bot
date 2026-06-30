@@ -677,6 +677,12 @@ export function WeatherPanel({
     if (selectedDate && !dates.includes(selectedDate)) dates.push(selectedDate)
     return dates.sort((a, b) => a.localeCompare(b))
   }, [availableDates, selectedDate, selectedDateIndex, todayDate])
+  const dateOptions = useMemo(() => {
+    const rows = availableDates.length > 0 ? [...availableDates] : []
+    if (selectedDate && !rows.includes(selectedDate)) rows.push(selectedDate)
+    if (rows.length === 0) rows.push(todayDate)
+    return rows.sort((a, b) => a.localeCompare(b))
+  }, [availableDates, selectedDate, todayDate])
   const selectedDateRow = chartData.find(row => row.date === selectedDate) ?? chartData[chartData.length - 1]
   const decisionLabel = bestSignal?.actionable ? 'BUY YES' : bestSignal ? '观察' : '等待信号'
   const decisionTone = bestSignal?.actionable ? 'green' : bestSignal ? 'amber' : 'neutral'
@@ -884,6 +890,16 @@ export function WeatherPanel({
             今天
           </button>
         </div>
+        <select
+          value={selectedDate || dateOptions[dateOptions.length - 1] || todayDate}
+          onChange={event => setSelectedDate(event.target.value)}
+          className="min-w-[150px] shrink-0 border border-gray-200 bg-white px-2 py-1 text-[10px] tabular-nums text-gray-900 outline-none focus:border-gray-400"
+          aria-label="Select date"
+        >
+          {dateOptions.map(date => (
+            <option key={date} value={date}>{longDate(date)}</option>
+          ))}
+        </select>
         {bestSignal?.event_url && (
           <a href={bestSignal.event_url} target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-1 border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-300 hover:bg-cyan-500/10">
             Polymarket <ExternalLink className="h-3 w-3" />
