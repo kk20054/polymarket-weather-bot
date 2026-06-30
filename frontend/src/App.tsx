@@ -1247,7 +1247,7 @@ function App() {
 
           <details className="shrink-0 border-t border-neutral-800 bg-black">
             <summary className="cursor-pointer select-none px-3 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
-              生产验证与风控
+              高级诊断与风控
             </summary>
             <div className="max-h-[48vh] space-y-3 overflow-y-auto border-t border-neutral-800 p-3">
               <div className="grid grid-cols-2 gap-2 text-[11px]">
@@ -1270,7 +1270,7 @@ function App() {
 
               <details className="border border-neutral-800 bg-black">
                 <summary className="cursor-pointer select-none px-3 py-2 text-xs text-neutral-400 hover:bg-neutral-950 hover:text-neutral-200">
-                  数据基座审计（开发）
+                  数据基座诊断
                 </summary>
                 <div className="space-y-3 border-t border-neutral-800 p-3">
                   <DataReadinessPanel

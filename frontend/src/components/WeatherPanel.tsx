@@ -169,13 +169,19 @@ function fmtBucket(item: DistributionItem, unit: string) {
 }
 
 function fmtBucketLabel(raw?: string | null, fallback?: number | null, unit = 'F') {
-  if (!raw) return fmtTemp(fallback, unit)
+  const fallbackNative =
+    fallback === null || fallback === undefined || Number.isNaN(Number(fallback))
+      ? null
+      : unit === 'C'
+        ? (Number(fallback) - 32) * 5 / 9
+        : Number(fallback)
+  if (!raw) return fmtTemp(fallbackNative, unit)
   const normalized = String(raw).trim()
-  const match = normalized.match(/^\s*(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)([CF])?\s*$/i)
+  const match = normalized.match(/^\s*(-?\d+(?:\.\d+)?)\s*°?\s*([CF])?\s*-\s*(-?\d+(?:\.\d+)?)\s*°?\s*([CF])?\s*$/i)
   if (!match) return normalized.replace(/掳/g, '°')
   const low = Number(match[1])
-  const high = Number(match[2])
-  const labelUnit = (match[3] || unit).toUpperCase()
+  const high = Number(match[3])
+  const labelUnit = (match[4] || match[2] || unit).toUpperCase()
   if (low <= -900) return `${fmtTemp(high, labelUnit)} 或以下`
   if (high >= 900) return `${fmtTemp(low, labelUnit)} 或以上`
   return `${fmtTemp(low, labelUnit)} - ${fmtTemp(high, labelUnit)}`
@@ -785,7 +791,7 @@ export function WeatherPanel({
           </div>
           <div className="truncate text-[10px] text-neutral-600" title={decisionReason}>{decisionReason}</div>
         </div>
-        <DecisionMetric label="目标桶" value={signalBucketLabel(bestSignal, unit)} sub={bestSignal ? (isOpenTailBucket(bestSignal) ? '开放尾桶，需严控' : longDate(bestSignal.target_date)) : longDate(selectedDate)} />
+        <DecisionMetric label="推荐合约" value={signalBucketLabel(bestSignal, unit)} sub={bestSignal ? (isOpenTailBucket(bestSignal) ? '开放尾桶，需严控' : longDate(bestSignal.target_date)) : longDate(selectedDate)} />
         <DecisionMetric label="盘口" value={bestSignal?.limit_price !== undefined && bestSignal?.limit_price !== null ? fmtPrice(bestSignal.limit_price) : '--'} sub={bestSignal?.spread !== undefined && bestSignal?.spread !== null ? `spread ${fmtPrice(bestSignal.spread)}` : '等待盘口'} />
         <DecisionMetric label="模型 / Edge" value={bestSignal ? fmtProb(bestSignal.calibrated_probability ?? bestSignal.model_probability) : '--'} sub={bestSignal ? fmtSignedPct(bestSignal.probability_edge ?? bestSignal.edge) : '无概率'} />
         <DecisionMetric label="预测-METAR" value={metarGap === null ? '--' : fmtTemp(metarGap, unit)} sub={`预测 ${fmtTemp(selectedForecast, unit)}`} />

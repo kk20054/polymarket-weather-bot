@@ -36,6 +36,36 @@ function bucketRange(low?: number | null, high?: number | null, unit = '') {
   return `${temp(low, unit)} - ${temp(high, unit)}`
 }
 
+function unitFromSignal(signal: WeatherSignal) {
+  const raw = `${signal.bucket_label ?? ''} ${signal.question ?? ''}`
+  if (/°?\s*C\b|celsius/i.test(raw)) return 'C'
+  if (/°?\s*F\b|fahrenheit/i.test(raw)) return 'F'
+  return 'F'
+}
+
+function signalBucketText(signal: WeatherSignal) {
+  const unit = unitFromSignal(signal)
+  const raw = String(signal.bucket_label ?? '').trim()
+  const match = raw.match(/^\s*(-?\d+(?:\.\d+)?)\s*°?\s*([CF])?\s*-\s*(-?\d+(?:\.\d+)?)\s*°?\s*([CF])?\s*$/i)
+  if (match) {
+    const low = Number(match[1])
+    const high = Number(match[3])
+    const labelUnit = (match[4] || match[2] || unit).toUpperCase()
+    return bucketRange(low, high, labelUnit)
+  }
+  if (raw) return raw.replace(/掳/g, '°')
+  if (Number.isFinite(Number(signal.threshold_f))) {
+    const value = unit === 'C' ? (Number(signal.threshold_f) - 32) * 5 / 9 : Number(signal.threshold_f)
+    return temp(value, unit)
+  }
+  return signal.question || signal.market_id
+}
+
+function isOpenTailSignal(signal: WeatherSignal) {
+  const raw = String(signal.bucket_label ?? '')
+  return /(?:^|-)999(?:\.0+)?[CF]?$/i.test(raw) || /^-999(?:\.0+)?-/i.test(raw)
+}
+
 function money(value?: number | null) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   return `$${Number(value).toFixed(2)}`
@@ -137,6 +167,9 @@ export function SignalsTable({
         const qualityFlags = signal.quality_flags ?? []
         const decisionReasons = signal.decision?.reasons ?? []
         const allReasons = [...new Set([...decisionReasons, ...liveReasons, ...qualityFlags])]
+        const unit = unitFromSignal(signal)
+        const bucketText = signalBucketText(signal)
+        const openTail = isOpenTailSignal(signal)
 
         return (
           <div key={key} className="bg-black text-[11px] hover:bg-neutral-950">
@@ -147,7 +180,14 @@ export function SignalsTable({
             >
               <ChevronDown className={`mt-0.5 h-3.5 w-3.5 text-neutral-600 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
               <div className="min-w-0">
-                <div className="break-words leading-snug text-neutral-200">{signal.question || signal.market_id}</div>
+                <div className="flex flex-wrap items-center gap-1 leading-snug">
+                  <span className="text-neutral-100">{bucketText}</span>
+                  <span className="text-neutral-600">YES</span>
+                  {openTail && <span className="border border-red-500/25 px-1 py-0.5 text-[9px] text-red-300">尾桶</span>}
+                </div>
+                <div className="mt-0.5 truncate text-[10px] text-neutral-600" title={signal.question || signal.market_id}>
+                  {signal.question || signal.market_id}
+                </div>
                 <div className="mt-1 flex flex-wrap items-center gap-1">
                   <span className={`border px-1.5 py-0.5 text-[9px] ${statusClass(signal)}`}>{statusText(signal)}</span>
                   <span className="text-[9px] text-neutral-600">{signal.city_name} / {signal.target_date}</span>
@@ -277,7 +317,7 @@ export function SignalsTable({
                           key={item.market_id}
                           className={`border px-2 py-1 ${item.is_signal ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200' : 'border-neutral-800 text-neutral-400'}`}
                         >
-                          <div className="truncate">{bucketRange(item.bucket_low, item.bucket_high)}</div>
+                          <div className="truncate">{bucketRange(item.bucket_low, item.bucket_high, unit)}</div>
                           <div className="tabular-nums text-[10px]">P {pct(item.probability)} / Ask {cents(item.ask)}</div>
                         </div>
                       ))}
