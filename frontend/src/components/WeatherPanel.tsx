@@ -2022,6 +2022,15 @@ function EventTimeline({ events }: { events: DashboardEvent[] }) {
     if (typeof raw === 'string') return raw
     return '--'
   }
+  const sourceLabel = (event: DashboardEvent) => {
+    const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data)
+      ? event.data as Record<string, unknown>
+      : {}
+    const raw = data.source ?? data.provider ?? data.stage ?? data.action ?? event.type
+    if (typeof raw === 'string' && raw.trim()) return raw.trim()
+    if (typeof raw === 'number') return String(raw)
+    return eventStage(event)
+  }
   const statusLabel = (event: DashboardEvent) => {
     const tone = eventTone(event)
     if (tone === 'red') return 'ERR'
@@ -2068,7 +2077,7 @@ function EventTimeline({ events }: { events: DashboardEvent[] }) {
             <tbody>
               <tr>
                 <td colSpan={6} className="px-2 py-12 text-center text-neutral-600">
-                  No fetch or scanner events yet.
+                  No log entries.
                 </td>
               </tr>
             </tbody>
@@ -2093,7 +2102,7 @@ function EventTimeline({ events }: { events: DashboardEvent[] }) {
                   <tr key={event.id ?? `${event.timestamp}-${index}`} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
                     <td className="px-2 py-1 tabular-nums text-neutral-500">{index + 1}</td>
                     <td className="px-2 py-1 tabular-nums text-neutral-300">{shortTime(event.timestamp)}</td>
-                    <td className="px-2 py-1 text-neutral-400">{eventStage(event)}</td>
+                    <td className="max-w-[160px] truncate px-2 py-1 text-neutral-400" title={eventStage(event)}>{sourceLabel(event)}</td>
                     <td className={`px-2 py-1 tabular-nums ${statusClass(status)}`}>{status}</td>
                     <td className="px-2 py-1 tabular-nums text-neutral-500">{durationLabel(event)}</td>
                     <td className="max-w-[480px] px-2 py-1 text-neutral-400">
