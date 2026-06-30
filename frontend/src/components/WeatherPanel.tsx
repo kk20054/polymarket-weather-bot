@@ -22,6 +22,8 @@ interface Props {
   onSelectedCity?: (cityKey: string) => void
   selectedDate?: string
   onSelectedDate?: (date: string) => void
+  onRefreshWeather?: () => void
+  weatherRefreshing?: boolean
   onBackfillHistory?: () => void
   backfilling?: boolean
   backfillResult?: {
@@ -383,6 +385,8 @@ export function WeatherPanel({
   onSelectedCity,
   selectedDate: controlledSelectedDate,
   onSelectedDate,
+  onRefreshWeather,
+  weatherRefreshing = false,
   onBackfillHistory,
   backfilling = false,
   backfillResult,
@@ -693,6 +697,15 @@ export function WeatherPanel({
             Polymarket <ExternalLink className="h-3 w-3" />
           </a>
         )}
+        <button
+          onClick={onRefreshWeather}
+          disabled={weatherRefreshing || !onRefreshWeather}
+          className="inline-flex shrink-0 items-center gap-1 border border-green-500/30 px-2 py-1 text-[10px] text-green-300 hover:bg-green-500/10 disabled:opacity-40"
+          title="只补当前城市的预测、小时预报和盘口快照；不会启动旧版无限扫描。"
+        >
+          <RefreshCw className={`h-3 w-3 ${weatherRefreshing ? 'animate-spin' : ''}`} />
+          {weatherRefreshing ? '补天气中' : '补当前天气'}
+        </button>
         <button
           onClick={onBackfillHistory}
           disabled={backfilling || !onBackfillHistory}

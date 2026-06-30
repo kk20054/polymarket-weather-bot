@@ -120,6 +120,16 @@ function validationActionLimit(action: ProductionValidationAction) {
   return Math.max(1, Math.min(Math.ceil(raw), 20))
 }
 
+function refreshDaysForDate(date?: string | null) {
+  if (!date) return 2
+  const selectedTime = new Date(`${date}T00:00:00`).getTime()
+  if (!Number.isFinite(selectedTime)) return 2
+  const today = new Date()
+  const todayTime = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()
+  const diffDays = Math.ceil((selectedTime - todayTime) / 86400000)
+  return Math.max(1, Math.min(diffDays + 2, 7))
+}
+
 function productionActionSummary(result?: ProductionActionRunResult | null) {
   if (!result) return ''
   if (result.reason) return result.reason
@@ -623,7 +633,13 @@ function App() {
   })
 
   const productionRefreshMutation = useMutation({
-    mutationFn: () => runProductionRefresh({ days: 1, limit: 20, skipSignalScan: true }),
+    mutationFn: (options: { cities?: string[]; days?: number; limit?: number } | undefined) =>
+      runProductionRefresh({
+        cities: options?.cities ?? [],
+        days: options?.days ?? 2,
+        limit: options?.limit ?? 20,
+        skipSignalScan: true,
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
@@ -891,7 +907,11 @@ function App() {
           </span>
         </div>
         <button
-          onClick={() => productionRefreshMutation.mutate()}
+          onClick={() => productionRefreshMutation.mutate({
+            cities: selectedCity ? [selectedCity] : [],
+            days: refreshDaysForDate(selectedDate),
+            limit: 20,
+          })}
           disabled={productionRefreshMutation.isPending}
           className="inline-flex items-center gap-1 whitespace-nowrap border border-green-500/30 px-2 py-1.5 text-[11px] text-green-300 hover:bg-green-500/10 disabled:opacity-40"
           title="受控刷新：同步合约、预测快照和 CLOB 盘口；默认不启动旧版无限信号扫描。"
@@ -1111,6 +1131,12 @@ function App() {
               onSelectedCity={setSelectedCity}
               selectedDate={selectedDate}
               onSelectedDate={setSelectedDate}
+              onRefreshWeather={() => productionRefreshMutation.mutate({
+                cities: selectedCity ? [selectedCity] : [],
+                days: refreshDaysForDate(selectedDate),
+                limit: 20,
+              })}
+              weatherRefreshing={productionRefreshMutation.isPending}
               onBackfillHistory={() => historyBackfillMutation.mutate()}
               backfilling={historyBackfillMutation.isPending}
               backfillResult={historyBackfillMutation.data}
@@ -1256,7 +1282,11 @@ function App() {
                     bulkVerifying={bulkVerifyContractMutation.isPending}
                     productionRefresh={productionRefresh}
                     productionRefreshing={productionRefreshMutation.isPending}
-                    onProductionRefresh={() => productionRefreshMutation.mutate()}
+                    onProductionRefresh={() => productionRefreshMutation.mutate({
+                      cities: selectedCity ? [selectedCity] : [],
+                      days: refreshDaysForDate(selectedDate),
+                      limit: 20,
+                    })}
                     onVerifyContract={(contractId, note) => verifyContractMutation.mutate({ contractId, note })}
                     onVerifyVisibleContracts={(contractIds, note) => bulkVerifyContractMutation.mutate({ contractIds, note })}
                   />
