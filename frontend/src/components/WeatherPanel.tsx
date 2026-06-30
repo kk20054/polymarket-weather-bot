@@ -4,8 +4,8 @@ import {
   CartesianGrid,
   Cell,
   ComposedChart,
+  LineChart,
   Line,
-  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -61,6 +61,15 @@ type HourlyWeatherRow = {
   ecmwf?: number | null
   hrrr?: number | null
   humidity?: number | null
+  cloud_cover?: number | null
+  precipitation?: number | null
+  precipitation_probability?: number | null
+  wind_speed?: number | null
+  wind_direction?: number | null
+  pressure?: number | null
+  dew_point?: number | null
+  shortwave_radiation?: number | null
+  condition?: string | null
   gap?: number | null
   source?: string
   horizon?: string
@@ -93,12 +102,24 @@ type EvidenceCardItem = {
 type WeatherWorkbenchTab = 'forecast' | 'metar' | 'historical' | 'diff' | 'fetch'
 
 const WORKBENCH_TABS: Array<{ id: WeatherWorkbenchTab; label: string; note: string }> = [
-  { id: 'forecast', label: 'Forecast', note: 'Hourly Temperature + DEB + Forecast Data' },
+  { id: 'forecast', label: '预报', note: 'Hourly Temperature + DEB + Forecast Data' },
   { id: 'metar', label: 'METAR', note: 'Station observations' },
-  { id: 'historical', label: 'Historical', note: 'Settlement-truth history' },
-  { id: 'diff', label: 'Diff Stats', note: 'Observed - Forecast' },
-  { id: 'fetch', label: 'Fetch Log', note: 'Last 100 events' },
+  { id: 'historical', label: '历史', note: 'Settlement-truth history' },
+  { id: 'diff', label: '偏差统计', note: 'Observed - Forecast' },
+  { id: 'fetch', label: '抓取日志', note: 'Last 100 events' },
 ]
+
+const CONTINENTS = ['全部', 'Americas', 'Europe', 'Asia', 'Pacific', 'Africa', 'Other'] as const
+
+function cityContinent(cityKey?: string, cityName?: string) {
+  const value = `${cityKey || ''} ${cityName || ''}`.toLowerCase()
+  if (/london|paris|munich|madrid|milan|amsterdam|warsaw|helsinki|moscow|istanbul|ankara/.test(value)) return 'Europe'
+  if (/tokyo|seoul|shanghai|beijing|wuhan|singapore|taipei|hong|busan|chengdu|chongqing|guangzhou|jakarta|jeddah|karachi|kuala|lucknow|manila|qingdao|tel-aviv/.test(value)) return 'Asia'
+  if (/sydney|wellington/.test(value)) return 'Pacific'
+  if (/cape|lagos/.test(value)) return 'Africa'
+  if (/new-york|nyc|chicago|miami|dallas|seattle|atlanta|toronto|sao|paulo|austin|denver|houston|los-angeles|san-francisco|mexico|panama|buenos/.test(value)) return 'Americas'
+  return 'Other'
+}
 
 function fmtTemp(value?: number | null, unit = 'F') {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
@@ -108,6 +129,29 @@ function fmtTemp(value?: number | null, unit = 'F') {
 function fmtPct(value?: number | null) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   return `${Number(value).toFixed(0)}%`
+}
+
+function fmtPrecip(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${Number(value).toFixed(2)}`
+}
+
+function fmtPressure(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return Number(value).toFixed(0)
+}
+
+function fmtWind(speed?: number | null, direction?: number | null) {
+  if ((speed === null || speed === undefined || Number.isNaN(Number(speed))) && (direction === null || direction === undefined || Number.isNaN(Number(direction)))) return '--'
+  const speedText = speed === null || speed === undefined || Number.isNaN(Number(speed)) ? '--' : Number(speed).toFixed(0)
+  if (direction === null || direction === undefined || Number.isNaN(Number(direction))) return `-- ${speedText}`
+  const degrees = Number(direction)
+  return `${windCompass(degrees)} ${degrees.toFixed(0)}° ${speedText}`
+}
+
+function windCompass(direction: number) {
+  const labels = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
+  return labels[Math.round((((direction % 360) + 360) % 360) / 22.5) % 16]
 }
 
 function fmtProb(value?: number | null) {
@@ -130,6 +174,23 @@ function fmtSignedTemp(value?: number | null, unit = 'F') {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   const temp = Number(value)
   return `${temp >= 0 ? '+' : ''}${temp.toFixed(1)}°${unit}`
+}
+
+function tempToC(value?: number | null, unit = 'F') {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return null
+  const numeric = Number(value)
+  return unit === 'C' ? numeric : (numeric - 32) * 5 / 9
+}
+
+function deltaToC(value?: number | null, unit = 'F') {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return null
+  const numeric = Number(value)
+  return unit === 'C' ? numeric : numeric * 5 / 9
+}
+
+function fmtC(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${Number(value).toFixed(1)}°C`
 }
 
 function mean(values: number[]) {
@@ -409,6 +470,15 @@ function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): Hou
       ecmwf: point.ecmwf ?? null,
       hrrr: point.hrrr ?? null,
       humidity: point.humidity ?? null,
+      cloud_cover: point.cloud_cover ?? point.humidity ?? null,
+      precipitation: point.precipitation ?? null,
+      precipitation_probability: point.precipitation_probability ?? null,
+      wind_speed: point.wind_speed ?? null,
+      wind_direction: point.wind_direction ?? null,
+      pressure: point.pressure ?? null,
+      dew_point: point.dew_point ?? null,
+      shortwave_radiation: point.shortwave_radiation ?? null,
+      condition: point.condition ?? null,
       gap,
       source: point.source || '--',
       horizon: point.horizon || '--',
@@ -444,6 +514,7 @@ export function WeatherPanel({
     return new URLSearchParams(window.location.search).get('date') ?? ''
   })
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WeatherWorkbenchTab>('forecast')
+  const [continentFilter, setContinentFilter] = useState<(typeof CONTINENTS)[number]>('全部')
   const selected = selectedCity ?? internalSelected
   const setSelected = (cityKey: string) => {
     setInternalSelected(cityKey)
@@ -461,6 +532,16 @@ export function WeatherPanel({
       setSelected(cities[0].key)
     }
   }, [cities, selected])
+
+  const filteredCities = useMemo(() => {
+    if (continentFilter === '全部') return cities
+    const rows = cities.filter(city => cityContinent(city.key, city.name) === continentFilter)
+    if (selected && !rows.some(city => city.key === selected)) {
+      const current = cities.find(city => city.key === selected)
+      return current ? [current, ...rows] : rows
+    }
+    return rows
+  }, [cities, continentFilter, selected])
 
   const series = citySeries.find(row => row.city_key === selected) ?? citySeries[0]
   const forecastFallback = forecasts.find(row => row.city_key === selected) ?? forecasts[0]
@@ -522,6 +603,7 @@ export function WeatherPanel({
   const metarStatus = evidenceStatus(latestMetar?.timestamp, 45)
   const historyStatus = latestHistory ? 'fresh' : 'missing'
   const humidityAvailable = chartData.some(row => row.humidity_mean !== null && row.humidity_mean !== undefined)
+    || hourlyRows.some(row => row.cloud_cover !== null && row.cloud_cover !== undefined)
   const forecastRefreshStage = refreshStage(productionRefresh, ['forecast_backfill'])
   const signalRefreshStage = refreshStage(productionRefresh, ['signal_scan', 'signal_migration'])
   const orderbookRefreshStage = refreshStage(productionRefresh, ['orderbook_backfill'])
@@ -707,15 +789,25 @@ export function WeatherPanel({
   }
 
   return (
-    <div className="min-h-full space-y-2 p-3 text-[11px] text-neutral-400">
+    <div className="min-h-full space-y-2 bg-white p-3 text-[11px] text-gray-600">
       <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={continentFilter}
+          onChange={event => setContinentFilter(event.target.value as (typeof CONTINENTS)[number])}
+          className="min-w-[130px] border border-gray-200 bg-white px-2 py-1 text-gray-900 outline-none focus:border-gray-400"
+          aria-label="按大洲筛选"
+        >
+          {CONTINENTS.map(continent => (
+            <option key={continent} value={continent}>{continent}</option>
+          ))}
+        </select>
         <select
           value={cityKey}
           onChange={event => setSelected(event.target.value)}
-          className="min-w-[180px] flex-1 border border-neutral-800 bg-black px-2 py-1 text-neutral-200 outline-none focus:border-cyan-500/50"
+          className="min-w-[180px] flex-1 border border-gray-200 bg-white px-2 py-1 text-gray-900 outline-none focus:border-gray-400"
           aria-label="选择城市"
         >
-          {cities.map(row => (
+          {filteredCities.map(row => (
             <option key={row.key} value={row.key}>{row.name}</option>
           ))}
         </select>
@@ -903,14 +995,14 @@ export function WeatherPanel({
         <Metric icon={<Signal className="h-3.5 w-3.5" />} label="可操作信号" value={`${actionableSignals.length}/${citySignals.length}`} tone={actionableSignals.length > 0 ? 'green' : 'neutral'} sub={bestSignal ? `${signalBucketLabel(bestSignal, unit)} · ${(((bestSignal.probability_edge ?? bestSignal.edge) || 0) * 100).toFixed(1)}%` : '暂无'} />
       </div>
 
-      <section className="border border-neutral-800 bg-black">
-        <div className="border-b border-neutral-800">
+      <section className="border border-gray-200 bg-white">
+        <div className="border-b border-gray-200">
           <div className="flex flex-wrap items-center justify-between gap-2 px-2 py-1.5">
             <div className="flex flex-wrap items-center gap-1.5">
               <EvidenceBadge label="Forecast" status={forecastStatus} detail={freshnessLabel(latestForecast?.timestamp)} />
               <EvidenceBadge label="METAR" status={metarStatus} detail={freshnessLabel(latestMetar?.timestamp)} />
               <EvidenceBadge label="Historical" status={historyStatus} detail={latestHistory?.provider || 'no data'} />
-              <EvidenceBadge label="Cloud" status={humidityAvailable ? 'fresh' : 'missing'} detail={humidityAvailable ? 'humidity proxy ready' : 'cloud feed pending'} />
+            <EvidenceBadge label="Cloud" status={humidityAvailable ? 'fresh' : 'missing'} detail={humidityAvailable ? 'cloud/humidity ready' : 'cloud feed pending'} />
               <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">Hourly {hourlyRows.length}</span>
             </div>
             <div className="text-[10px] text-neutral-500">PolyWX-style city workbench · local time</div>
@@ -1030,10 +1122,10 @@ function WorkbenchTabButton({
     <button
       type="button"
       onClick={onClick}
-      className={`min-w-[120px] shrink-0 border px-2 py-1.5 text-left ${
+      className={`min-w-[120px] shrink-0 border px-2 py-1.5 text-left rounded-none ${
         active
-          ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200'
-          : 'border-neutral-800 bg-neutral-950/40 text-neutral-500 hover:border-neutral-700 hover:text-neutral-300'
+          ? 'border-gray-900 bg-gray-900 text-white'
+          : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 hover:text-gray-900'
       }`}
       title={tab.note}
     >
@@ -1087,14 +1179,14 @@ function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRo
                 <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
                   <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
                   <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.humidity)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-600">--</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-600">--</td>
+                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.cloud_cover)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPrecip(row.precipitation)} / {fmtPct(row.precipitation_probability)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
                   <td className="max-w-[140px] truncate px-2 py-1 text-neutral-400" title={`${row.source || '--'} · ${row.horizon || '--'}`}>
-                    {row.source || row.horizon || '--'}
+                    {row.condition || row.source || row.horizon || '--'}
                   </td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-600">--</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-600">--</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{row.archive ? 'archive' : row.member_count ? `n ${row.member_count}` : '--'}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.timestamp)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-500">{shortHour(row.timestamp)}</td>
@@ -1107,7 +1199,7 @@ function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRo
       <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
         <summary className="cursor-pointer select-none hover:text-neutral-400">Schema notes</summary>
         <div className="mt-1 leading-relaxed">
-          Cloud currently uses the collected humidity proxy when true cloud cover is unavailable. Precip, wind, pressure and dew point stay blank until the weather source stores those fields.
+          Cloud uses real cloud_cover when available and falls back to humidity for older rows. Precip shows amount / probability; wind shows direction degrees and speed.
         </div>
       </details>
     </section>
@@ -1258,6 +1350,14 @@ function DiffStatsPanel({
       observed: Number(row.metar),
       forecast: Number(row.forecast),
       delta: Number(row.metar) - Number(row.forecast),
+      cloud_cover: row.cloud_cover,
+      condition: row.condition,
+      wind_speed: row.wind_speed,
+      wind_direction: row.wind_direction,
+      pressure: row.pressure,
+      dew_point: row.dew_point,
+      fetched_sys: row.timestamp,
+      fetched_local: row.timestamp,
       source: row.source || 'METAR',
     }))
   const dailyPairs = chartData
@@ -1268,9 +1368,18 @@ function DiffStatsPanel({
       observed: Number(row.actual_high),
       forecast: Number(row.forecast_high),
       delta: Number(row.actual_high) - Number(row.forecast_high),
+      cloud_cover: row.humidity_mean,
+      condition: row.calibration_tier || row.historical_provider,
+      wind_speed: null,
+      wind_direction: null,
+      pressure: null,
+      dew_point: null,
+      fetched_sys: row.forecast_timestamp || row.date,
+      fetched_local: row.forecast_timestamp || row.date,
       source: row.historical_provider || row.forecast_source || 'history',
     }))
   const tableRows = hourlyPairs.length > 0 ? hourlyPairs : dailyPairs.slice(-30).reverse()
+  const diffColumns = ['Time', 'Temp', 'Cloud', 'Wx', 'Vis', 'Wind', 'Pres', 'Dew', 'Fetched (Sys)', 'Fetched (Local)']
   const deltas = tableRows.map(row => row.delta)
   const avgDelta = mean(deltas)
   const correlation = pearsonR(
@@ -1296,17 +1405,17 @@ function DiffStatsPanel({
       </div>
       {tableRows.length === 0 ? (
         <div className="max-h-[460px] overflow-auto">
-          <table className="min-w-[760px] w-full border-collapse text-left text-[10px]">
+          <table className="min-w-[980px] w-full border-collapse text-left text-[10px]">
             <thead className="sticky top-0 bg-black text-neutral-500">
               <tr className="border-b border-neutral-900">
-                {['Time', 'Observed', 'Forecast', 'Delta', 'Magnitude', 'Source'].map(column => (
+                {diffColumns.map(column => (
                   <th key={column} className="px-2 py-1 font-normal">{column}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td colSpan={6} className="px-2 py-12 text-center text-neutral-600">
+                <td colSpan={diffColumns.length} className="px-2 py-12 text-center text-neutral-600">
                   No paired observed/forecast rows yet.
                 </td>
               </tr>
@@ -1315,10 +1424,10 @@ function DiffStatsPanel({
         </div>
       ) : (
         <div className="max-h-[460px] overflow-auto">
-          <table className="min-w-[760px] w-full border-collapse text-left text-[10px]">
+          <table className="min-w-[980px] w-full border-collapse text-left text-[10px]">
             <thead className="sticky top-0 bg-black text-neutral-500">
               <tr className="border-b border-neutral-900">
-                {['Time', 'Observed', 'Forecast', 'Delta', 'Magnitude', 'Source'].map(column => (
+                {diffColumns.map(column => (
                   <th key={column} className="px-2 py-1 font-normal">{column}</th>
                 ))}
               </tr>
@@ -1331,15 +1440,23 @@ function DiffStatsPanel({
                 return (
                   <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
                     <td className="px-2 py-1 tabular-nums text-neutral-300">{row.time}</td>
-                    <td className="px-2 py-1 tabular-nums text-amber-300">{fmtTemp(row.observed, unit)}</td>
-                    <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
-                    <td className="px-2 py-1 tabular-nums text-neutral-200">{fmtSignedTemp(row.delta, unit)}</td>
-                    <td className="px-2 py-1">
-                      <div className="h-1.5 w-24 overflow-hidden bg-neutral-900">
+                    <td className="min-w-[160px] px-2 py-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="tabular-nums text-neutral-200">{fmtSignedTemp(row.delta, unit)}</span>
+                        <span className="tabular-nums text-neutral-500">{fmtTemp(row.observed, unit)} / {fmtTemp(row.forecast, unit)}</span>
+                      </div>
+                      <div className="mt-1 h-1.5 overflow-hidden bg-neutral-900">
                         <div className={`h-full ${barClass}`} style={{ width: `${width}%` }} />
                       </div>
                     </td>
-                    <td className="max-w-[180px] truncate px-2 py-1 text-neutral-500" title={row.source}>{row.source}</td>
+                    <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.cloud_cover)}</td>
+                    <td className="max-w-[120px] truncate px-2 py-1 text-neutral-400" title={row.condition || row.source}>{row.condition || row.source || '--'}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-500">--</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.fetched_sys)}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.fetched_local)}</td>
                   </tr>
                 )
               })}
@@ -1368,12 +1485,12 @@ function HourlyEvidencePanel({
 }) {
   const forecastValues = rows.map(row => row.forecast).filter((value): value is number => Number.isFinite(Number(value)))
   const metarValues = rows.map(row => row.metar).filter((value): value is number => Number.isFinite(Number(value)))
-  const humidityValues = rows.map(row => row.humidity).filter((value): value is number => Number.isFinite(Number(value)))
+  const cloudValues = rows.map(row => row.cloud_cover).filter((value): value is number => Number.isFinite(Number(value)))
   const gapValues = rows.map(row => row.gap).filter((value): value is number => Number.isFinite(Number(value)))
   const forecastMax = forecastValues.length > 0 ? Math.max(...forecastValues) : null
   const metarMax = metarValues.length > 0 ? Math.max(...metarValues) : null
   const avgGap = mean(gapValues)
-  const avgHumidity = mean(humidityValues)
+  const avgCloud = mean(cloudValues)
   const pairedRows = rows.filter(row => row.forecast !== null && row.forecast !== undefined && row.metar !== null && row.metar !== undefined)
   const pearson = pearsonR(
     pairedRows.map(row => Number(row.forecast)),
@@ -1386,6 +1503,13 @@ function HourlyEvidencePanel({
   const overlapLabel = actualMetarDelta === null
     ? (metarCoverage === null ? '--' : `${Math.round(metarCoverage * 100)}%`)
     : fmtSignedTemp(actualMetarDelta, unit)
+  const chartRows = rows.map(row => ({
+    ...row,
+    forecast_c: tempToC(row.forecast, unit),
+    metar_c: tempToC(row.metar, unit),
+    gap_c: deltaToC(row.gap, unit),
+  }))
+  const maxAbsGapC = Math.max(0.1, ...chartRows.map(row => Math.abs(Number(row.gap_c ?? 0))))
 
   if (rows.length === 0) {
     return (
@@ -1411,46 +1535,48 @@ function HourlyEvidencePanel({
         </div>
 
         <div
-          className="h-[300px] p-2"
+          className="p-2"
           role="img"
-          aria-label={`${cityName || '当前城市'}逐小时天气证据图。绿线为预报，橙线为 METAR，青线和蓝线分别是 ECMWF 与 HRRR，浅橙柱为云量或湿度百分比，虚线为峰值标记。`}
+          aria-label={`${cityName || '当前城市'} Hourly Temperature chart. Real METAR is a solid black line, Model Forecast is a dashed gray line, residual diff bars are red or blue at the bottom.`}
         >
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={rows} margin={{ top: 8, right: 18, bottom: 0, left: -8 }}>
-              <CartesianGrid stroke="#1f1f1f" strokeDasharray="3 3" />
-              <XAxis dataKey="label" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} minTickGap={12} />
-              <YAxis yAxisId="temp" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} />
-              <YAxis yAxisId="humidity" orientation="right" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
-              <Tooltip
-                contentStyle={{ background: '#050505', border: '1px solid #262626', color: '#e5e5e5', fontSize: 11 }}
-                formatter={(value: any, name: any) => {
-                  if (name === '云量/湿度 %') return [fmtPct(Number(value)), name]
-                  return [fmtTemp(Number(value), unit), name]
-                }}
-                labelFormatter={(_, payload) => payload?.[0]?.payload?.timestamp ? shortTime(payload[0].payload.timestamp) : ''}
-              />
-              <Bar yAxisId="humidity" dataKey="humidity" name="云量/湿度 %" fill="#f59e0b" fillOpacity={0.22} maxBarSize={12} radius={[1, 1, 0, 0]} />
-              {forecastMax !== null && (
-                <ReferenceLine yAxisId="temp" y={forecastMax} stroke="#22c55e" strokeDasharray="4 4" strokeOpacity={0.55} label={{ value: '预报峰值', fill: '#86efac', fontSize: 10 }} />
-              )}
-              {metarMax !== null && (
-                <ReferenceLine yAxisId="temp" y={metarMax} stroke="#f97316" strokeDasharray="4 4" strokeOpacity={0.55} label={{ value: 'METAR峰值', fill: '#fdba74', fontSize: 10 }} />
-              )}
-              {actualHigh !== null && actualHigh !== undefined && (
-                <ReferenceLine yAxisId="temp" y={Number(actualHigh)} stroke="#38bdf8" strokeDasharray="2 5" strokeOpacity={0.5} label={{ value: '历史最高', fill: '#7dd3fc', fontSize: 10 }} />
-              )}
-              <Line yAxisId="temp" type="monotone" dataKey="forecast" name="预报（本地时）" stroke="#22c55e" dot={false} strokeWidth={2.4} connectNulls={false} />
-              <Line yAxisId="temp" type="monotone" dataKey="metar" name="METAR（本地时）" stroke="#f97316" dot={false} strokeWidth={2} connectNulls={false} />
-              <Line yAxisId="temp" type="monotone" dataKey="ecmwf" name="ECMWF" stroke="#38bdf8" dot={false} strokeWidth={1.5} connectNulls={false} />
-              <Line yAxisId="temp" type="monotone" dataKey="hrrr" name="HRRR" stroke="#818cf8" dot={false} strokeWidth={1.5} connectNulls={false} />
-            </ComposedChart>
-          </ResponsiveContainer>
+          <div className="h-[280px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartRows} margin={{ top: 8, right: 18, bottom: 0, left: -8 }}>
+                <CartesianGrid stroke="#e5e7eb" strokeDasharray="3 3" />
+                <XAxis dataKey="label" stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} minTickGap={8} />
+                <YAxis yAxisId="temp" stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°C`} />
+                <YAxis yAxisId="diff" orientation="right" stroke="#9ca3af" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°C`} />
+                <Tooltip
+                  contentStyle={{ background: '#ffffff', border: '1px solid #e5e7eb', color: '#111827', fontSize: 11 }}
+                  formatter={(value: any, name: any) => [fmtC(Number(value)), name]}
+                  labelFormatter={(_, payload) => payload?.[0]?.payload?.timestamp ? shortTime(payload[0].payload.timestamp) : ''}
+                />
+                <Line yAxisId="temp" type="monotone" dataKey="metar_c" name="Real METAR" stroke="#000000" dot={false} strokeWidth={2.2} connectNulls={false} />
+                <Line yAxisId="temp" type="monotone" dataKey="forecast_c" name="Model Forecast" stroke="#6B7280" strokeDasharray="4 4" dot={false} strokeWidth={2} connectNulls={false} />
+                <Line yAxisId="diff" type="monotone" dataKey="gap_c" name="Diff" stroke="transparent" dot={false} activeDot={false} connectNulls={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="mt-1 grid h-9 grid-flow-col auto-cols-fr items-center gap-px border-t border-gray-200 pt-1" aria-label="Diff residual bars">
+            {chartRows.map(row => {
+              const diff = Number(row.gap_c ?? 0)
+              const height = Math.max(2, Math.min(32, Math.abs(diff) / maxAbsGapC * 32))
+              return (
+                <div key={`diff-${row.id}`} className="flex h-8 items-center justify-center" title={`${row.label} diff ${fmtC(diff)}`}>
+                  <div
+                    className={diff >= 0 ? 'w-full bg-red-500' : 'w-full bg-blue-500'}
+                    style={{ height: `${height}px`, opacity: row.gap_c === null || row.gap_c === undefined ? 0.12 : 0.72 }}
+                  />
+                </div>
+              )
+            })}
+          </div>
         </div>
 
         <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
           <summary className="cursor-pointer select-none hover:text-neutral-400">数据说明</summary>
           <div className="mt-1 leading-relaxed">
-            绿色为预报，橙色为 METAR，青/蓝为可用模型分量，柱状为云量或湿度百分比。中国天气实况与 PWS 实时源尚未接入时不伪造曲线，只在数据明细中保留接入位置。
+            绿色为预报，橙色为 METAR，青/蓝为可用模型分量，柱状优先使用云量，旧数据缺云量时回退湿度百分比。中国天气实况与 PWS 实时源尚未接入时不伪造曲线，只在数据明细中保留接入位置。
           </div>
         </details>
       </section>
@@ -1460,7 +1586,7 @@ function HourlyEvidencePanel({
           <MetricCard label="平均 Δ" value={fmtSignedTemp(avgGap, unit)} sub="实测 - 预报" />
           <MetricCard label="准确度" value={fmtPearson(pearson)} sub={`n=${pairedRows.length}`} />
           <MetricCard label="历史↔METAR" value={overlapLabel} sub={actualMetarDelta === null ? `覆盖 ${metarValues.length}/${rows.length}` : historyProvider || '日高温差'} />
-          <MetricCard label="云量/湿度" value={fmtPct(avgHumidity)} sub="样本均值" />
+          <MetricCard label="Cloud" value={fmtPct(avgCloud)} sub="cloud or humidity proxy" />
           <MetricCard label="预报高点" value={fmtTemp(forecastMax, unit)} sub="峰值标记" />
           <MetricCard label="METAR高点" value={fmtTemp(metarMax, unit)} sub="峰值标记" />
         </div>
@@ -1471,7 +1597,7 @@ function HourlyEvidencePanel({
                 <th className="px-2 py-1 font-normal">时间</th>
                 <th className="px-2 py-1 font-normal">预报</th>
                 <th className="px-2 py-1 font-normal">METAR</th>
-                <th className="px-2 py-1 font-normal">云量/湿度</th>
+                <th className="px-2 py-1 font-normal">Cloud</th>
                 <th className="px-2 py-1 font-normal">来源</th>
               </tr>
             </thead>
@@ -1481,7 +1607,7 @@ function HourlyEvidencePanel({
                   <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
                   <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
                   <td className="px-2 py-1 tabular-nums text-amber-300">{fmtTemp(row.metar, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.humidity)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.cloud_cover)}</td>
                   <td className="max-w-[90px] truncate px-2 py-1 text-neutral-500" title={`${row.source || '--'} · ${row.horizon || '--'} · n=${row.member_count ?? '--'} · ${shortTime(row.timestamp)}`}>
                     {row.archive ? 'archive' : row.source || '--'}
                   </td>
@@ -2012,7 +2138,7 @@ function TemperatureDistributionPanel({
                     return [`${Number(value).toFixed(1)}%`, name]
                   }}
                 />
-                <Bar dataKey="probabilityPct" name="模型概率" maxBarSize={36} radius={[2, 2, 0, 0]}>
+                <Bar dataKey="probabilityPct" name="模型概率" maxBarSize={36} radius={[0, 0, 0, 0]}>
                   {chartRows.map(row => (
                     <Cell key={row.market_id || row.label} fill={probabilityFill(row.probability, row.is_signal)} stroke={row.is_signal ? '#22d3ee' : 'transparent'} strokeWidth={row.is_signal ? 1.5 : 0} />
                   ))}
@@ -2206,7 +2332,7 @@ function SourcePulse({
   return (
     <div className={`min-w-0 border px-2 py-1.5 ${statusClass(status)}`}>
       <div className="mb-0.5 flex items-center gap-1 text-[9px]">
-        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${status === 'fresh' ? 'bg-green-300' : status === 'stale' ? 'bg-amber-300' : 'bg-neutral-600'}`} />
+        <span className={`h-1.5 w-1.5 shrink-0 ${status === 'fresh' ? 'bg-green-300' : status === 'stale' ? 'bg-amber-300' : 'bg-neutral-600'}`} />
         <span className="truncate text-neutral-300">{label}</span>
       </div>
       <div className="truncate text-xs tabular-nums text-neutral-100">{value}</div>
@@ -2249,7 +2375,7 @@ function SourcePulse({
 function EvidenceBadge({ label, status, detail }: { label: string; status: EvidenceStatus; detail: string }) {
   return (
     <span className={`inline-flex items-center gap-1 border px-1.5 py-0.5 text-[9px] ${statusClass(status)}`} title={detail}>
-      <span className={`h-1.5 w-1.5 rounded-full ${status === 'fresh' ? 'bg-green-300' : status === 'stale' ? 'bg-amber-300' : 'bg-neutral-600'}`} />
+      <span className={`h-1.5 w-1.5 ${status === 'fresh' ? 'bg-green-300' : status === 'stale' ? 'bg-amber-300' : 'bg-neutral-600'}`} />
       {label}
     </span>
   )

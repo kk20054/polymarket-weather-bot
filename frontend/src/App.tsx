@@ -36,6 +36,44 @@ import { WeatherPanel } from './components/WeatherPanel'
 import type { AutoSimulationStatus, BotStats, DataReadiness, ProductionActionRunResult, ProductionValidationAction, ProductionValidationReport } from './types'
 
 type TradeMode = 'paper' | 'live'
+type UiLanguage = 'zh' | 'en'
+
+const APP_VERSION = 'v6.0'
+
+const UI_COPY = {
+  zh: {
+    subtitle: '城市最高温交易工作台',
+    data: '数据',
+    manual: '手动刷新',
+    legacyRunning: '旧扫描运行中',
+    autoOn: '一键模拟运行中',
+    autoOff: '一键模拟关闭',
+    liveReady: '实盘可用',
+    liveLocked: '实盘锁定',
+    manualFetch: '手动抓取',
+    fetching: '抓取中',
+    refresh: '刷新',
+    stopLegacy: '停止旧扫描',
+    language: '语言',
+    theme: 'Light',
+  },
+  en: {
+    subtitle: 'city max-temperature trading workbench',
+    data: 'Data',
+    manual: 'Manual refresh',
+    legacyRunning: 'Legacy scan running',
+    autoOn: 'Auto paper running',
+    autoOff: 'Auto paper off',
+    liveReady: 'Live ready',
+    liveLocked: 'Live locked',
+    manualFetch: 'Manual fetch',
+    fetching: 'Fetching',
+    refresh: 'Refresh',
+    stopLegacy: 'Stop legacy scan',
+    language: 'Language',
+    theme: 'Light',
+  },
+} satisfies Record<UiLanguage, Record<string, string>>
 
 const EMPTY_STATS: BotStats = {
   is_running: false,
@@ -537,6 +575,70 @@ function SimulationCard({
   )
 }
 
+function ForecastOptionsCard({
+  cityName,
+  station,
+  selectedDate,
+  dataAgeLabel,
+  signals,
+  actionable,
+  refreshing,
+  language,
+  onRefresh,
+}: {
+  cityName: string
+  station: string
+  selectedDate: string
+  dataAgeLabel: string
+  signals: number
+  actionable: number
+  refreshing: boolean
+  language: UiLanguage
+  onRefresh: () => void
+}) {
+  const zh = language === 'zh'
+  return (
+    <div className="grid gap-2 border border-neutral-800 bg-black p-2 text-[10px] text-neutral-500">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <div className="text-xs text-neutral-200">Forecast Options</div>
+          <div className="mt-0.5 text-[9px] text-neutral-600">
+            {cityName || (zh ? '等待城市' : 'Waiting city')} {station ? `· ${station}` : ''}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={refreshing}
+          className="inline-flex items-center gap-1 border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-40"
+        >
+          <RefreshCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} />
+          {refreshing ? (zh ? '抓取中' : 'Fetching') : (zh ? '刷新' : 'Refresh')}
+        </button>
+      </div>
+      <div className="grid grid-cols-3 gap-1">
+        <StatusTile label={zh ? '日期' : 'Date'} value={selectedDate || '--'} />
+        <StatusTile label={zh ? '数据' : 'Data'} value={dataAgeLabel} />
+        <StatusTile label={zh ? '信号' : 'Signals'} value={`${actionable}/${signals}`} tone={actionable > 0 ? 'green' : 'neutral'} />
+      </div>
+      <div className="border border-neutral-800 bg-neutral-950/60 p-2">
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <span className="text-xs text-neutral-200">Alerts</span>
+          <span className={`border px-1.5 py-0.5 text-[9px] ${actionable > 0 ? 'border-green-500/30 text-green-300' : 'border-neutral-700 text-neutral-500'}`}>
+            {actionable > 0 ? (zh ? '有可行动信号' : 'Actionable') : (zh ? '观察中' : 'Watching')}
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-1">
+          <span className="border border-neutral-800 px-2 py-1">{zh ? '峰值温度' : 'Peak temp'}</span>
+          <span className="border border-neutral-800 px-2 py-1">{zh ? '信号队列' : 'Signal queue'}</span>
+          <span className="border border-neutral-800 px-2 py-1">{zh ? '盘口刷新' : 'Orderbook'}</span>
+          <span className="border border-neutral-800 px-2 py-1">{zh ? '结算样本' : 'Truth sample'}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const queryClient = useQueryClient()
   const [tradeMode, setTradeMode] = useState<TradeMode>('paper')
@@ -554,8 +656,13 @@ function App() {
   const [contractStatus, setContractStatus] = useState('mature-auto')
   const [citySearch, setCitySearch] = useState('')
   const [citySort, setCitySort] = useState<'signal' | 'alpha'>('signal')
+  const [uiLanguage, setUiLanguage] = useState<UiLanguage>(() => {
+    if (typeof window === 'undefined') return 'zh'
+    return window.localStorage.getItem('weatherbot-ui-language') === 'en' ? 'en' : 'zh'
+  })
   const [productionActionResult, setProductionActionResult] = useState<ProductionActionRunResult | null>(null)
   const balanceInitRef = useRef(false)
+  const copy = UI_COPY[uiLanguage]
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['dashboard'],
@@ -860,11 +967,17 @@ function App() {
     window.history.replaceState(null, '', nextUrl)
   }, [selectedDate])
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem('weatherbot-ui-language', uiLanguage)
+    document.documentElement.lang = uiLanguage === 'zh' ? 'zh-CN' : 'en'
+  }, [uiLanguage])
+
   if (isLoading) {
     return (
       <div className="flex h-screen items-center justify-center bg-black text-neutral-300">
         <div className="text-center">
-          <div className="mx-auto mb-4 h-9 w-9 animate-spin rounded-full border-2 border-neutral-800 border-t-green-400" />
+          <div className="mx-auto mb-4 h-9 w-9 animate-spin border-2 border-neutral-800 border-t-green-400" />
           <div className="text-xs text-neutral-500">正在连接本地看板 API...</div>
         </div>
       </div>
@@ -888,24 +1001,46 @@ function App() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-black text-neutral-200 xl:h-screen xl:overflow-hidden">
+    <div className="polywx-light flex min-h-screen flex-col bg-white text-gray-900 xl:h-screen xl:overflow-hidden">
       <header className="flex shrink-0 flex-wrap items-start gap-2 border-b border-neutral-800 px-3 py-2">
         <div className="min-w-0 flex-1 basis-[130px]">
-          <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot</h1>
-          <div className="text-[11px] text-neutral-600">城市最高温交易工作台</div>
+          <div className="flex items-baseline gap-2">
+            <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot</h1>
+            <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] tabular-nums text-neutral-500">{APP_VERSION}</span>
+          </div>
+          <div className="text-[11px] text-neutral-600">{copy.subtitle}</div>
         </div>
         <div className="order-last flex min-w-0 basis-full flex-nowrap items-center gap-1.5 overflow-x-auto text-[10px] xl:overflow-visible">
-          <span className="shrink-0 border border-neutral-800 px-2 py-1 text-neutral-400">数据 {dataAge(stats.data_age_minutes)}</span>
+          <span className="shrink-0 border border-neutral-800 px-2 py-1 text-neutral-400">{copy.data} {dataAge(stats.data_age_minutes)}</span>
           <span className={`shrink-0 border px-2 py-1 ${stats.is_running ? 'border-green-500/30 text-green-300' : 'border-neutral-800 text-neutral-500'}`}>
-            {stats.is_running ? '旧扫描运行中' : '手动刷新'}
+            {stats.is_running ? copy.legacyRunning : copy.manual}
           </span>
           <span className={`shrink-0 border px-2 py-1 ${autoSimulation.enabled ? 'border-cyan-500/30 text-cyan-300' : 'border-neutral-800 text-neutral-500'}`}>
-            {autoSimulation.enabled ? '一键模拟运行中' : '一键模拟关闭'}
+            {autoSimulation.enabled ? copy.autoOn : copy.autoOff}
           </span>
           <span className={`shrink-0 border px-2 py-1 ${liveAvailable ? 'border-green-500/30 text-green-300' : 'border-amber-500/30 text-amber-300'}`}>
-            {liveAvailable ? '实盘可用' : '实盘锁定'}
+            {liveAvailable ? copy.liveReady : copy.liveLocked}
           </span>
         </div>
+        <div className="inline-flex items-center border border-neutral-800 text-[11px]" aria-label={copy.language}>
+          <button
+            type="button"
+            onClick={() => setUiLanguage('zh')}
+            className={`px-2 py-1.5 ${uiLanguage === 'zh' ? 'bg-neutral-100 text-black' : 'text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200'}`}
+          >
+            中文
+          </button>
+          <button
+            type="button"
+            onClick={() => setUiLanguage('en')}
+            className={`border-l border-neutral-800 px-2 py-1.5 ${uiLanguage === 'en' ? 'bg-neutral-100 text-black' : 'text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200'}`}
+          >
+            English
+          </button>
+        </div>
+        <span className="inline-flex items-center whitespace-nowrap border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400">
+          {copy.theme}
+        </span>
         <button
           onClick={() => productionRefreshMutation.mutate({
             cities: selectedCity ? [selectedCity] : [],
@@ -917,7 +1052,7 @@ function App() {
           title="受控刷新：同步合约、预测快照和 CLOB 盘口；默认不启动旧版无限信号扫描。"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${productionRefreshMutation.isPending ? 'animate-spin' : ''}`} />
-          {productionRefreshMutation.isPending ? '抓取中' : '手动抓取'}
+          {productionRefreshMutation.isPending ? copy.fetching : copy.manualFetch}
         </button>
         {stats.is_running && (
           <button
@@ -927,7 +1062,7 @@ function App() {
             title="停止旧版 weatherbet.py 循环扫描。v3 数据刷新不依赖这个进程。"
           >
             <PauseCircle className="h-3.5 w-3.5" />
-            停止旧扫描
+            {copy.stopLegacy}
           </button>
         )}
         <button
@@ -935,7 +1070,7 @@ function App() {
           className="inline-flex items-center gap-1 whitespace-nowrap border border-neutral-700 px-2 py-1.5 text-[11px] text-neutral-300 hover:bg-neutral-900"
         >
           <RefreshCw className="h-3.5 w-3.5" />
-          刷新
+          {copy.refresh}
         </button>
       </header>
 
@@ -1182,6 +1317,21 @@ function App() {
               resetting={resetSimulationMutation.isPending}
               settling={settleMutation.isPending}
               autoPending={autoSimulationMutation.isPending}
+            />
+            <ForecastOptionsCard
+              cityName={selectedCityMeta?.name ?? ''}
+              station={selectedCityMeta?.station ?? ''}
+              selectedDate={selectedDate}
+              dataAgeLabel={dataAge(stats.data_age_minutes)}
+              signals={signals.length}
+              actionable={actionable}
+              refreshing={productionRefreshMutation.isPending}
+              language={uiLanguage}
+              onRefresh={() => productionRefreshMutation.mutate({
+                cities: selectedCity ? [selectedCity] : [],
+                days: refreshDaysForDate(selectedDate),
+                limit: 20,
+              })}
             />
           </div>
           <div className="grid grid-cols-2 border-b border-neutral-800" role="tablist" aria-label="行动与交易记录">

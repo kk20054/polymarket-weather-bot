@@ -658,6 +658,15 @@ export interface WeatherCityPoint {
   ensemble_mean?: number | null
   ensemble_std?: number | null
   humidity?: number | null
+  cloud_cover?: number | null
+  precipitation?: number | null
+  precipitation_probability?: number | null
+  wind_speed?: number | null
+  wind_direction?: number | null
+  pressure?: number | null
+  dew_point?: number | null
+  shortwave_radiation?: number | null
+  condition?: string | null
   source?: string
   member_count?: number
   archive?: boolean

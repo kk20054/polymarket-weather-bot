@@ -9,6 +9,40 @@ from typing import Any
 from .db import connect, init_v3_db
 from .forecast_archive import TEMPERATURE_KEYS
 
+FIELD_KEYS = {
+    "humidity": ("relative_humidity_2m", "humidity", "rh"),
+    "cloud_cover": ("cloud_cover", "cloudcover", "cloud_cover_total"),
+    "precipitation": ("precipitation", "rain", "showers"),
+    "precipitation_probability": ("precipitation_probability", "precip_probability", "pop"),
+    "wind_speed": ("wind_speed_10m", "windspeed_10m", "wind_speed", "wind"),
+    "wind_direction": ("wind_direction_10m", "winddirection_10m", "wind_direction"),
+    "pressure": ("pressure_msl", "surface_pressure", "pressure"),
+    "dew_point": ("dew_point_2m", "dewpoint_2m", "dew_point"),
+    "shortwave_radiation": ("shortwave_radiation", "solar_radiation"),
+}
+
+WEATHER_CODE_LABELS = {
+    0: "Clear",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Rime fog",
+    51: "Light drizzle",
+    53: "Drizzle",
+    55: "Heavy drizzle",
+    61: "Light rain",
+    63: "Rain",
+    65: "Heavy rain",
+    71: "Light snow",
+    73: "Snow",
+    75: "Heavy snow",
+    80: "Rain showers",
+    81: "Rain showers",
+    82: "Heavy showers",
+    95: "Thunderstorm",
+}
+
 
 def forecast_hourly_points(
     targets: dict[str, set[str]] | None = None,
@@ -123,7 +157,8 @@ def forecast_hourly_points(
                     "target_date": target_date,
                     "city": city,
                     "values": [],
-                    "humidity_values": [],
+                    **{f"{field}_values": [] for field in FIELD_KEYS},
+                    "condition_values": [],
                     "sources": set(),
                     "source_values": defaultdict(list),
                     "unit": unit,
@@ -133,9 +168,13 @@ def forecast_hourly_points(
             bucket["values"].append(float(temp))
             bucket["sources"].add(source)
             bucket["source_values"][source].append(float(temp))
-            humidity = _float(item.get("relative_humidity_2m") or item.get("humidity") or item.get("rh"))
-            if humidity is not None:
-                bucket["humidity_values"].append(humidity)
+            for field, keys in FIELD_KEYS.items():
+                value = _first_float(item, keys)
+                if value is not None:
+                    bucket[f"{field}_values"].append(value)
+            condition = _condition_label(item)
+            if condition:
+                bucket["condition_values"].append(condition)
 
     by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for (city, _target_date, _valid_at), bucket in buckets.items():
@@ -152,6 +191,15 @@ def forecast_hourly_points(
             "ensemble_mean": _mean(values),
             "ensemble_std": _std(values),
             "humidity": _mean(bucket["humidity_values"]),
+            "cloud_cover": _mean(bucket["cloud_cover_values"]),
+            "precipitation": _mean(bucket["precipitation_values"]),
+            "precipitation_probability": _mean(bucket["precipitation_probability_values"]),
+            "wind_speed": _mean(bucket["wind_speed_values"]),
+            "wind_direction": _circular_mean_degrees(bucket["wind_direction_values"]),
+            "pressure": _mean(bucket["pressure_values"]),
+            "dew_point": _mean(bucket["dew_point_values"]),
+            "shortwave_radiation": _mean(bucket["shortwave_radiation_values"]),
+            "condition": _mode(bucket["condition_values"]),
             "source": " + ".join(source_parts) if source_parts else "forecast_archive",
             "member_count": len(values),
             "ecmwf": _mean(_matching_source_values(source_values, "ecmwf")),
@@ -185,6 +233,14 @@ def _temperature_value(item: dict[str, Any]) -> float | None:
     return None
 
 
+def _first_float(item: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        value = _float(item.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def _float(value: Any) -> float | None:
     try:
         if value is None or value == "":
@@ -194,11 +250,42 @@ def _float(value: Any) -> float | None:
         return None
 
 
+def _condition_label(item: dict[str, Any]) -> str | None:
+    raw = item.get("condition") or item.get("weather") or item.get("weather_description")
+    if raw:
+        return str(raw)
+    code = _first_float(item, ("weather_code", "weathercode"))
+    if code is None:
+        return None
+    return WEATHER_CODE_LABELS.get(int(code), f"Code {int(code)}")
+
+
 def _mean(values: list[float]) -> float | None:
     valid = [value for value in values if math.isfinite(value)]
     if not valid:
         return None
     return sum(valid) / len(valid)
+
+
+def _mode(values: list[str]) -> str | None:
+    counts: dict[str, int] = {}
+    for value in values:
+        if value:
+            counts[value] = counts.get(value, 0) + 1
+    if not counts:
+        return None
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
+def _circular_mean_degrees(values: list[float]) -> float | None:
+    valid = [value % 360 for value in values if math.isfinite(value)]
+    if not valid:
+        return None
+    sin_sum = sum(math.sin(math.radians(value)) for value in valid)
+    cos_sum = sum(math.cos(math.radians(value)) for value in valid)
+    if sin_sum == 0 and cos_sum == 0:
+        return None
+    return (math.degrees(math.atan2(sin_sum, cos_sum)) + 360) % 360
 
 
 def _std(values: list[float]) -> float | None:

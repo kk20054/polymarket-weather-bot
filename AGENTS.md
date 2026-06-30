@@ -51,6 +51,19 @@ Do not claim or imply that the bot can reliably make money until the paper-tradi
 - Empty states must be useful and calm: show what is missing and which manual action can refresh it. Do not trigger automatic scans just because a panel is empty.
 - Desktop and mobile layouts must avoid horizontal overflow. Left, center, and right columns should scroll independently on desktop.
 
+## PolyWX Light Workbench Contract
+
+When the task is to align with PolyWX, use the current PolyWX page as the product baseline, but preserve WeatherBot trading controls and auditability.
+
+- Visual style: default to an ultra-light monochrome UI. Use `#FFFFFF` page/panel backgrounds, `#111827` primary text, `border-gray-200` borders, and restrained gray secondary text. Avoid decorative gradients, dark dashboard chrome, and high-saturation panels unless a specific data state requires them.
+- Corners: use straight edges everywhere. Containers, buttons, tabs, inputs, tables, and cards must be `rounded-none` or equivalent.
+- Top filter bar: must expose City switching, Continent filtering, and a date switcher with previous/next/today behavior. Keep these controls in the primary path, not hidden in details.
+- Tabs: the city workbench must include exactly these five primary data tabs, localized in Chinese when the surrounding UI is Chinese: `预报`, `METAR`, `历史`, `偏差统计`, `抓取日志`. Tabs are straight-edged segmented controls, not pill buttons.
+- Hourly Temperature chart: use Recharts `ResponsiveContainer` and a 24-hour chart from `00:00` to `23:00`. The production target is a dual-axis line chart: Real METAR as a solid black line `#000000`, Model Forecast as a gray dashed line `#6B7280` with `strokeDasharray="4 4"`, and Diff residuals as red/blue bars near the bottom.
+- Tables: tab interiors should use standard HTML tables. Header cells are bold with `#F9FAFB` background; rows use fixed `py-2 px-4` spacing and `hover:bg-gray-50`. Preserve horizontal scrolling for wide schemas instead of compressing text into unreadable cells.
+- PolyWX evidence to preserve: product/version placement, language toggle, light-mode indicator, manual refresh action, city list by continent, date controls, `Forecast / METAR / Historical / Diff Stats / Fetch Log` information architecture, hourly chart, forecast table schema, METAR/historical observation schemas, Diff Stats, and Fetch Log.
+- Do not copy PolyWX membership, voting, feedback, branding, or non-trading prompts. WeatherBot's right side remains the controlled paper/live execution workbench.
+
 ## Data And Algorithm Rules
 
 - Settlement truth is the foundation. Production calibration must use station-level or official/paid truth where possible.

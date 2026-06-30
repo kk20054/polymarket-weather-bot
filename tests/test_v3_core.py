@@ -1237,8 +1237,32 @@ class V3CoreTests(unittest.TestCase):
                 {"member_id": "old01", "high_temp": 70, "hourly": [{"valid_at": "2026-06-29T12:00:00+00:00", "temperature_2m": 70}]},
             ])
             insert_forecast_run(newer, [
-                {"member_id": "new01", "high_temp": 80, "hourly": [{"valid_at": "2026-06-29T12:00:00+00:00", "temperature_2m": 80, "relative_humidity_2m": 40}]},
-                {"member_id": "new02", "high_temp": 82, "hourly": [{"valid_at": "2026-06-29T12:00:00+00:00", "temperature_2m": 82, "relative_humidity_2m": 60}]},
+                {"member_id": "new01", "high_temp": 80, "hourly": [{
+                    "valid_at": "2026-06-29T12:00:00+00:00",
+                    "temperature_2m": 80,
+                    "relative_humidity_2m": 40,
+                    "cloud_cover": 70,
+                    "precipitation": 0.1,
+                    "precipitation_probability": 20,
+                    "wind_speed_10m": 8,
+                    "wind_direction_10m": 350,
+                    "pressure_msl": 1012,
+                    "dew_point_2m": 70,
+                    "weather_code": 0,
+                }]},
+                {"member_id": "new02", "high_temp": 82, "hourly": [{
+                    "valid_at": "2026-06-29T12:00:00+00:00",
+                    "temperature_2m": 82,
+                    "relative_humidity_2m": 60,
+                    "cloud_cover": 90,
+                    "precipitation": 0.3,
+                    "precipitation_probability": 40,
+                    "wind_speed_10m": 10,
+                    "wind_direction_10m": 10,
+                    "pressure_msl": 1014,
+                    "dew_point_2m": 72,
+                    "weather_code": 2,
+                }]},
             ])
             points = forecast_hourly_points({"chicago": {"2026-06-29"}}, db_path=db_path)
 
@@ -1248,6 +1272,14 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(point["timestamp"], "2026-06-29T12:00:00+00:00")
         self.assertEqual(point["best"], 81)
         self.assertEqual(point["humidity"], 50)
+        self.assertEqual(point["cloud_cover"], 80)
+        self.assertAlmostEqual(point["precipitation"], 0.2)
+        self.assertEqual(point["precipitation_probability"], 30)
+        self.assertEqual(point["wind_speed"], 9)
+        self.assertTrue(point["wind_direction"] < 1 or point["wind_direction"] > 359)
+        self.assertEqual(point["pressure"], 1013)
+        self.assertEqual(point["dew_point"], 71)
+        self.assertEqual(point["condition"], "Clear")
         self.assertEqual(point["member_count"], 2)
         self.assertTrue(point["archive"])
 

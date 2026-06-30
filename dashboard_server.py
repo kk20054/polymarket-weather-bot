@@ -2009,6 +2009,14 @@ def _build_weather_city_series(markets):
                 "ensemble_mean": snap.get("ensemble_mean"),
                 "ensemble_std": snap.get("ensemble_std"),
                 "humidity": snap.get("humidity") or snap.get("relative_humidity"),
+                "cloud_cover": snap.get("cloud_cover"),
+                "precipitation": snap.get("precipitation"),
+                "precipitation_probability": snap.get("precipitation_probability"),
+                "wind_speed": snap.get("wind_speed") or snap.get("wind_speed_10m"),
+                "wind_direction": snap.get("wind_direction") or snap.get("wind_direction_10m"),
+                "pressure": snap.get("pressure") or snap.get("pressure_msl") or snap.get("surface_pressure"),
+                "dew_point": snap.get("dew_point") or snap.get("dew_point_2m"),
+                "condition": snap.get("condition") or snap.get("weather") or snap.get("weather_description"),
                 "source": snap.get("best_source") or "",
             }
             city["forecast_points"].append(point)

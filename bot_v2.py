@@ -351,7 +351,11 @@ FORECAST_HOURLY_VARIABLES = (
     "dew_point_2m",
     "cloud_cover",
     "wind_speed_10m",
+    "wind_direction_10m",
     "precipitation",
+    "precipitation_probability",
+    "pressure_msl",
+    "weather_code",
     "shortwave_radiation",
 )
 

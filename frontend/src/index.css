@@ -51,6 +51,85 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+.polywx-light {
+  --background: #ffffff;
+  --foreground: #111827;
+  --card: #ffffff;
+  --card-hover: #f9fafb;
+  --border: #e5e7eb;
+  --border-light: #d1d5db;
+  background: #ffffff !important;
+  color: #111827 !important;
+}
+
+.polywx-light,
+.polywx-light * {
+  border-radius: 0 !important;
+}
+
+.polywx-light [class*="bg-black"],
+.polywx-light [class*="bg-neutral-950"],
+.polywx-light [class*="bg-neutral-900"],
+.polywx-light [class*="bg-neutral-800"] {
+  background-color: #ffffff !important;
+}
+
+.polywx-light [class*="border-neutral"],
+.polywx-light [class*="border-cyan"],
+.polywx-light [class*="border-green"],
+.polywx-light [class*="border-amber"],
+.polywx-light [class*="border-red"] {
+  border-color: #e5e7eb !important;
+}
+
+.polywx-light [class*="text-neutral-100"],
+.polywx-light [class*="text-neutral-200"],
+.polywx-light [class*="text-neutral-300"],
+.polywx-light [class*="text-cyan-"],
+.polywx-light [class*="text-green-"],
+.polywx-light [class*="text-amber-"] {
+  color: #111827 !important;
+}
+
+.polywx-light [class*="text-neutral-400"],
+.polywx-light [class*="text-neutral-500"],
+.polywx-light [class*="text-neutral-600"] {
+  color: #6b7280 !important;
+}
+
+.polywx-light input,
+.polywx-light select,
+.polywx-light button {
+  border-radius: 0 !important;
+}
+
+.polywx-light table {
+  background: #ffffff !important;
+  color: #111827 !important;
+}
+
+.polywx-light th {
+  background: #f9fafb !important;
+  color: #111827 !important;
+  font-weight: 600 !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+  padding: 0.5rem 1rem !important;
+}
+
+.polywx-light td {
+  padding: 0.5rem 1rem !important;
+  color: #111827 !important;
+}
+
+.polywx-light tbody tr:hover {
+  background: #f9fafb !important;
+}
+
+.polywx-light * {
+  scrollbar-color: #d1d5db #ffffff;
+}
+
 /* JetBrains Mono for all numeric/data content */
 .font-mono,
 .tabular-nums,
