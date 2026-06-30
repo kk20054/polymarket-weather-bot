@@ -152,6 +152,18 @@ function cityKeyFromParam(value: string | null) {
   return value.split('-').slice(0, -1).join('-') || value
 }
 
+const CONTINENT_FILTERS = ['全部', 'Americas', 'Europe', 'Asia', 'Pacific', 'Africa', 'Other'] as const
+
+function cityContinent(cityKey?: string, cityName?: string) {
+  const value = `${cityKey || ''} ${cityName || ''}`.toLowerCase()
+  if (/london|paris|munich|madrid|milan|amsterdam|warsaw|helsinki|moscow|istanbul|ankara/.test(value)) return 'Europe'
+  if (/tokyo|seoul|shanghai|beijing|wuhan|singapore|taipei|hong|busan|chengdu|chongqing|guangzhou|jakarta|jeddah|karachi|kuala|lucknow|manila|qingdao|tel-aviv/.test(value)) return 'Asia'
+  if (/sydney|wellington/.test(value)) return 'Pacific'
+  if (/cape|lagos/.test(value)) return 'Africa'
+  if (/new-york|nyc|chicago|miami|dallas|seattle|atlanta|toronto|sao|paulo|austin|denver|houston|los-angeles|san-francisco|mexico|panama|buenos/.test(value)) return 'Americas'
+  return 'Other'
+}
+
 function validationActionLimit(action: ProductionValidationAction) {
   const raw = Number(action.targets_count ?? action.count ?? 20)
   if (!Number.isFinite(raw) || raw <= 0) return 20
@@ -656,6 +668,7 @@ function App() {
   const [contractStatus, setContractStatus] = useState('mature-auto')
   const [citySearch, setCitySearch] = useState('')
   const [citySort, setCitySort] = useState<'signal' | 'alpha'>('signal')
+  const [continentFilter, setContinentFilter] = useState<(typeof CONTINENT_FILTERS)[number]>('全部')
   const [uiLanguage, setUiLanguage] = useState<UiLanguage>(() => {
     if (typeof window === 'undefined') return 'zh'
     return window.localStorage.getItem('weatherbot-ui-language') === 'en' ? 'en' : 'zh'
@@ -837,6 +850,7 @@ function App() {
       key: string
       name: string
       station?: string
+      continent: string
       unit: string
       latest?: number | null
       latestMetar?: number | null
@@ -852,6 +866,7 @@ function App() {
         key: row.city_key,
         name: row.city_name,
         station: row.station_id,
+        continent: cityContinent(row.city_key, row.city_name),
         unit: row.unit || 'F',
         latest: row.latest_best ?? null,
         latestMetar: row.latest_metar ?? null,
@@ -868,6 +883,7 @@ function App() {
         rows.set(row.city_key, {
           key: row.city_key,
           name: row.city_name,
+          continent: cityContinent(row.city_key, row.city_name),
           unit: 'F',
           latest: row.mean_high,
           latestMetar: null,
@@ -884,6 +900,7 @@ function App() {
       const row = rows.get(signal.city_key) ?? {
         key: signal.city_key,
         name: signal.city_name,
+        continent: cityContinent(signal.city_key, signal.city_name),
         unit: 'F',
         latest: null,
         latestMetar: null,
@@ -938,8 +955,10 @@ function App() {
   const selectedEvidenceReady = selectedEvidenceCount > 0
   const filteredCityOptions = cityOptions.filter(city => {
     const query = citySearch.trim().toLowerCase()
+    const continentOk = continentFilter === '全部' || city.continent === continentFilter
+    if (!continentOk) return false
     if (!query) return true
-    return `${city.name} ${city.station ?? ''} ${city.key}`.toLowerCase().includes(query)
+    return `${city.name} ${city.station ?? ''} ${city.key} ${city.continent}`.toLowerCase().includes(query)
   })
   const cityHref = (city: { key: string; station?: string }) => {
     const params = new URLSearchParams()
@@ -1117,14 +1136,26 @@ function App() {
               </div>
               <span className="border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">{cityOptions.length}</span>
             </div>
-            <div className="mb-2 grid grid-cols-[minmax(0,1fr)_92px] gap-1.5">
-              <input
-                value={citySearch}
-                onChange={event => setCitySearch(event.target.value)}
-                placeholder="搜索城市或机场"
-                className="w-full border-neutral-800 bg-black px-2 py-1.5 text-[11px]"
-                aria-label="搜索城市或机场"
-              />
+            <div className="mb-2 grid gap-1.5">
+              <div className="grid grid-cols-[minmax(0,1fr)_112px] gap-1.5">
+                <input
+                  value={citySearch}
+                  onChange={event => setCitySearch(event.target.value)}
+                  placeholder="搜索城市或机场"
+                  className="w-full border border-neutral-800 bg-black px-2 py-1.5 text-[11px]"
+                  aria-label="搜索城市或机场"
+                />
+                <select
+                  value={continentFilter}
+                  onChange={event => setContinentFilter(event.target.value as (typeof CONTINENT_FILTERS)[number])}
+                  className="border border-neutral-800 bg-black px-1.5 py-1.5 text-[11px] text-neutral-300"
+                  aria-label="按大洲筛选城市"
+                >
+                  {CONTINENT_FILTERS.map(continent => (
+                    <option key={continent} value={continent}>{continent}</option>
+                  ))}
+                </select>
+              </div>
               <select
                 value={citySort}
                 onChange={event => setCitySort(event.target.value as 'signal' | 'alpha')}

@@ -336,6 +336,46 @@ function shortHour(value?: string | null) {
   }
 }
 
+function rawHourIndex(value?: string | null) {
+  if (!value) return null
+  const match = String(value).match(/T(\d{2}):\d{2}/) ?? String(value).match(/\b(\d{2}):\d{2}\b/)
+  if (!match) return null
+  const hour = Number(match[1])
+  return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : null
+}
+
+function hourLabel(hour: number) {
+  return `${String(hour).padStart(2, '0')}:00`
+}
+
+function placeholderHourlyRow(targetDate: string, hour: number): HourlyWeatherRow {
+  const label = hourLabel(hour)
+  return {
+    id: `placeholder-${targetDate}-${label}`,
+    timestamp: `${targetDate}T${label}:00`,
+    target_date: targetDate,
+    label,
+    forecast: null,
+    metar: null,
+    ecmwf: null,
+    hrrr: null,
+    humidity: null,
+    cloud_cover: null,
+    precipitation: null,
+    precipitation_probability: null,
+    wind_speed: null,
+    wind_direction: null,
+    pressure: null,
+    dew_point: null,
+    shortwave_radiation: null,
+    condition: null,
+    gap: null,
+    source: '--',
+    horizon: '--',
+    archive: false,
+  }
+}
+
 function longDate(value?: string | null) {
   if (!value) return '--'
   try {
@@ -454,17 +494,20 @@ function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): Hou
   for (const point of sourcePoints) {
     if (selectedDate && point.target_date !== selectedDate) continue
     if (!point.timestamp) continue
+    const hour = rawHourIndex(point.timestamp)
+    if (hour === null) continue
     const forecast = point.best ?? point.ensemble_mean ?? null
     const metar = point.metar ?? null
     const gap = forecast !== null && forecast !== undefined && metar !== null && metar !== undefined
       ? Number(metar) - Number(forecast)
       : null
-    const key = `${point.timestamp}:${point.target_date}`
+    const label = hourLabel(hour)
+    const key = `${point.target_date}:${label}`
     rows.set(key, {
       id: key,
       timestamp: point.timestamp,
       target_date: point.target_date,
-      label: shortHour(point.timestamp),
+      label,
       forecast,
       metar,
       ecmwf: point.ecmwf ?? null,
@@ -486,9 +529,11 @@ function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): Hou
       archive: point.archive,
     })
   }
-  return [...rows.values()]
-    .sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))
-    .slice(-48)
+  const targetDate = selectedDate || [...rows.values()][0]?.target_date || localDateString()
+  return Array.from({ length: 24 }, (_, hour) => {
+    const label = hourLabel(hour)
+    return rows.get(`${targetDate}:${label}`) ?? placeholderHourlyRow(targetDate, hour)
+  })
 }
 
 export function WeatherPanel({
