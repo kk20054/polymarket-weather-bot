@@ -90,6 +90,16 @@ type EvidenceCardItem = {
   details?: Array<{ label: string; value: string; wide?: boolean }>
 }
 
+type WeatherWorkbenchTab = 'forecast' | 'metar' | 'historical' | 'diff' | 'fetch'
+
+const WORKBENCH_TABS: Array<{ id: WeatherWorkbenchTab; label: string; note: string }> = [
+  { id: 'forecast', label: 'Forecast', note: 'Hourly Temperature + DEB + Forecast Data' },
+  { id: 'metar', label: 'METAR', note: 'Station observations' },
+  { id: 'historical', label: 'Historical', note: 'Settlement-truth history' },
+  { id: 'diff', label: 'Diff Stats', note: 'Observed - Forecast' },
+  { id: 'fetch', label: 'Fetch Log', note: 'Last 100 events' },
+]
+
 function fmtTemp(value?: number | null, unit = 'F') {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   return `${Number(value).toFixed(1)}°${unit}`
@@ -433,6 +443,7 @@ export function WeatherPanel({
     if (typeof window === 'undefined') return ''
     return new URLSearchParams(window.location.search).get('date') ?? ''
   })
+  const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WeatherWorkbenchTab>('forecast')
   const selected = selectedCity ?? internalSelected
   const setSelected = (cityKey: string) => {
     setInternalSelected(cityKey)
@@ -693,7 +704,7 @@ export function WeatherPanel({
         <select
           value={cityKey}
           onChange={event => setSelected(event.target.value)}
-          className="min-w-[180px] flex-1 border border-neutral-800 bg-black px-2 py-1 text-neutral-200 outline-none focus:border-cyan-500/50 xl:hidden"
+          className="min-w-[180px] flex-1 border border-neutral-800 bg-black px-2 py-1 text-neutral-200 outline-none focus:border-cyan-500/50"
           aria-label="选择城市"
         >
           {cities.map(row => (
@@ -842,88 +853,109 @@ export function WeatherPanel({
       </div>
 
       <section className="border border-neutral-800 bg-black">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <EvidenceBadge label="预报" status={forecastStatus} detail={freshnessLabel(latestForecast?.timestamp)} />
-            <EvidenceBadge label="METAR" status={metarStatus} detail={freshnessLabel(latestMetar?.timestamp)} />
-            <EvidenceBadge label="历史观测" status={historyStatus} detail={latestHistory?.provider || '无数据'} />
-            <EvidenceBadge label="云量/湿度" status={humidityAvailable ? 'fresh' : 'missing'} detail={humidityAvailable ? '已采集' : '待接入云量'} />
-            <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">逐小时 {hourlyRows.length}</span>
+        <div className="border-b border-neutral-800">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-2 py-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <EvidenceBadge label="Forecast" status={forecastStatus} detail={freshnessLabel(latestForecast?.timestamp)} />
+              <EvidenceBadge label="METAR" status={metarStatus} detail={freshnessLabel(latestMetar?.timestamp)} />
+              <EvidenceBadge label="Historical" status={historyStatus} detail={latestHistory?.provider || 'no data'} />
+              <EvidenceBadge label="Cloud" status={humidityAvailable ? 'fresh' : 'missing'} detail={humidityAvailable ? 'humidity proxy ready' : 'cloud feed pending'} />
+              <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">Hourly {hourlyRows.length}</span>
+            </div>
+            <div className="text-[10px] text-neutral-500">PolyWX-style city workbench · local time</div>
           </div>
-          <div className="text-[10px] text-neutral-500">预报 · 本地时</div>
+          <div className="flex gap-1 overflow-x-auto px-2 pb-2">
+            {WORKBENCH_TABS.map(tab => (
+              <WorkbenchTabButton
+                key={tab.id}
+                tab={tab}
+                active={activeWorkbenchTab === tab.id}
+                onClick={() => setActiveWorkbenchTab(tab.id)}
+              />
+            ))}
+          </div>
         </div>
 
-        <HourlyEvidencePanel
-          rows={hourlyRows}
-          unit={unit}
-          cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
-          selectedDate={selectedDate}
-          actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
-          historyProvider={latestHistory?.provider || truthTier}
-        />
+        {activeWorkbenchTab === 'forecast' && (
+          <div className="space-y-2 p-2">
+            <HourlyEvidencePanel
+              rows={hourlyRows}
+              unit={unit}
+              cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
+              selectedDate={selectedDate}
+              actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
+              historyProvider={latestHistory?.provider || truthTier}
+            />
+            <TemperatureDistributionPanel
+              signal={distributionSignal}
+              items={distributionChartItems}
+              unit={unit}
+              selectedDate={selectedDate}
+              actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
+            />
+            <ForecastDataTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
+            <details className="border border-neutral-800 bg-neutral-950/30">
+              <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
+                Forecast snapshot cards · {forecastRows.length}
+              </summary>
+              <div className="border-t border-neutral-800">
+                <EvidenceCards empty="No forecast snapshots for this date" items={forecastCards} />
+              </div>
+            </details>
+          </div>
+        )}
+
+        {activeWorkbenchTab === 'metar' && (
+          <div className="grid gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <MetarObservationTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
+            <EvidenceCards empty="No METAR snapshots for this date" items={metarCards} />
+          </div>
+        )}
+
+        {activeWorkbenchTab === 'historical' && (
+          <div className="grid gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <HistoricalObservationTable rows={historyRows} unit={unit} stationId={series?.station_id} />
+            <EvidenceCards empty="No historical observations yet" items={historyCards} />
+          </div>
+        )}
+
+        {activeWorkbenchTab === 'diff' && (
+          <div className="space-y-2 p-2">
+            <DiffStatsPanel rows={hourlyRows} chartData={chartData} unit={unit} selectedDate={selectedDate} />
+            <details className="border border-neutral-800 bg-neutral-950/30">
+              <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
+                Calibration detail · average delta / Pearson R / truth
+              </summary>
+              <div className="border-t border-neutral-800">
+                <BiasPanel
+                  chartData={chartData}
+                  series={series}
+                  historyRows={historyRows}
+                  forecastRows={forecastRows}
+                  selectedDate={selectedDate}
+                  selectedDateRow={selectedDateRow}
+                  unit={unit}
+                  truthTier={truthTier}
+                  forecastStatus={forecastStatus}
+                  metarStatus={metarStatus}
+                  historyStatus={historyStatus}
+                  citySignals={citySignals}
+                  actionableSignals={actionableSignals}
+                  latestHistory={latestHistory}
+                  latestForecast={latestForecast}
+                />
+              </div>
+            </details>
+          </div>
+        )}
+
+        {activeWorkbenchTab === 'fetch' && (
+          <div className="grid gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_420px]">
+            <EventTimeline events={eventRows} />
+            <SignalCards signals={citySignals.slice(0, 18)} unit={unit} selectedDate={selectedDate} />
+          </div>
+        )}
       </section>
-
-      <TemperatureDistributionPanel
-        signal={distributionSignal}
-        items={distributionChartItems}
-        unit={unit}
-        selectedDate={selectedDate}
-        actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
-      />
-
-      <details className="border border-neutral-800 bg-black">
-        <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
-          预报数据明细 · {forecastRows.length} 行
-        </summary>
-        <div className="border-t border-neutral-800">
-          <EvidenceCards empty="该日期暂无预报快照" items={forecastCards} />
-        </div>
-      </details>
-
-      <details className="border border-neutral-800 bg-black">
-        <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
-          观测与历史明细 · METAR {metarRows.length} / 历史 {historyRows.length}
-        </summary>
-        <div className="grid gap-2 border-t border-neutral-800 p-2 xl:grid-cols-2">
-          <EvidenceCards empty="该日期暂无 METAR 快照" items={metarCards} />
-          <EvidenceCards empty="暂无历史观测" items={historyCards} />
-        </div>
-      </details>
-
-      <details className="border border-neutral-800 bg-black">
-        <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
-          偏差统计 · 平均Δ / Pearson R / truth
-        </summary>
-        <div className="border-t border-neutral-800">
-          <BiasPanel
-            chartData={chartData}
-            series={series}
-            historyRows={historyRows}
-            forecastRows={forecastRows}
-            selectedDate={selectedDate}
-            selectedDateRow={selectedDateRow}
-            unit={unit}
-            truthTier={truthTier}
-            forecastStatus={forecastStatus}
-            metarStatus={metarStatus}
-            historyStatus={historyStatus}
-            citySignals={citySignals}
-            actionableSignals={actionableSignals}
-            latestHistory={latestHistory}
-            latestForecast={latestForecast}
-          />
-        </div>
-      </details>
-
-      <details className="border border-neutral-800 bg-black">
-        <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
-          市场信号与抓取日志 · 信号 {citySignals.length} / 日志 {eventRows.length}
-        </summary>
-        <div className="grid gap-2 border-t border-neutral-800 p-2 xl:grid-cols-2">
-          <SignalCards signals={citySignals.slice(0, 18)} unit={unit} selectedDate={selectedDate} />
-          <EventTimeline events={eventRows} />
-        </div>
-      </details>
 
       {backfillResult && (
         <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 text-[10px] text-cyan-300">
@@ -931,6 +963,340 @@ export function WeatherPanel({
         </div>
       )}
     </div>
+  )
+}
+
+function WorkbenchTabButton({
+  tab,
+  active,
+  onClick,
+}: {
+  tab: (typeof WORKBENCH_TABS)[number]
+  active: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`min-w-[120px] shrink-0 border px-2 py-1.5 text-left ${
+        active
+          ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200'
+          : 'border-neutral-800 bg-neutral-950/40 text-neutral-500 hover:border-neutral-700 hover:text-neutral-300'
+      }`}
+      title={tab.note}
+    >
+      <div className="text-[11px] font-medium">{tab.label}</div>
+      <div className="truncate text-[9px] opacity-70">{tab.note}</div>
+    </button>
+  )
+}
+
+function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRow[]; unit: string; selectedDate: string }) {
+  return (
+    <section className="border border-neutral-800 bg-black">
+      <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+        <div>
+          <div className="text-[10px] text-neutral-500">Forecast Data</div>
+          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {rows.length} rows</div>
+        </div>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">PolyWX schema</span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="max-h-[360px] overflow-auto">
+          <table className="min-w-[980px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Time', 'Temp', 'Cloud', 'Precip', 'Wind', 'Condition', 'Pres', 'Dew', 'Changes', 'Fetched (Sys)', 'Fetched (Local)'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colSpan={11} className="px-2 py-12 text-center text-neutral-600">
+                  No hourly forecast rows for this date. Use manual fetch to populate this panel.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="max-h-[360px] overflow-auto">
+          <table className="min-w-[980px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Time', 'Temp', 'Cloud', 'Precip', 'Wind', 'Condition', 'Pres', 'Dew', 'Changes', 'Fetched (Sys)', 'Fetched (Local)'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row => (
+                <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                  <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
+                  <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.humidity)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-600">--</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-600">--</td>
+                  <td className="max-w-[140px] truncate px-2 py-1 text-neutral-400" title={`${row.source || '--'} · ${row.horizon || '--'}`}>
+                    {row.source || row.horizon || '--'}
+                  </td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-600">--</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-600">--</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{row.archive ? 'archive' : row.member_count ? `n ${row.member_count}` : '--'}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.timestamp)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortHour(row.timestamp)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
+        <summary className="cursor-pointer select-none hover:text-neutral-400">Schema notes</summary>
+        <div className="mt-1 leading-relaxed">
+          Cloud currently uses the collected humidity proxy when true cloud cover is unavailable. Precip, wind, pressure and dew point stay blank until the weather source stores those fields.
+        </div>
+      </details>
+    </section>
+  )
+}
+
+function MetarObservationTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRow[]; unit: string; selectedDate: string }) {
+  const metarRows = rows.filter(row => row.metar !== null && row.metar !== undefined)
+
+  return (
+    <section className="min-w-0 border border-neutral-800 bg-black">
+      <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+        <div>
+          <div className="text-[10px] text-neutral-500">METAR</div>
+          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {metarRows.length} observations</div>
+        </div>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">local station</span>
+      </div>
+      {metarRows.length === 0 ? (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="min-w-[760px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Time', 'Observed', 'Forecast', 'Delta', 'Humidity', 'Source', 'Fetched'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colSpan={7} className="px-2 py-12 text-center text-neutral-600">
+                  No METAR observations for this date yet.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="min-w-[760px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Time', 'Observed', 'Forecast', 'Delta', 'Humidity', 'Source', 'Fetched'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {metarRows.map(row => (
+                <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                  <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
+                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtTemp(row.metar, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-300">{fmtSignedTemp(row.gap, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.humidity)}</td>
+                  <td className="max-w-[140px] truncate px-2 py-1 text-neutral-500" title={`${row.source || '--'} · ${row.horizon || '--'}`}>{row.source || '--'}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.timestamp)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function HistoricalObservationTable({ rows, unit, stationId }: { rows: HistoricalWeatherPoint[]; unit: string; stationId?: string }) {
+  return (
+    <section className="min-w-0 border border-neutral-800 bg-black">
+      <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+        <div>
+          <div className="text-[10px] text-neutral-500">Historical</div>
+          <div className="text-xs text-neutral-100">{rows.length} settlement-truth rows</div>
+        </div>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">{stationId || 'station pending'}</span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="min-w-[900px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Date', 'Actual High', 'Humidity', 'Provider', 'Tier', 'Station', 'Fetched', 'Source'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colSpan={8} className="px-2 py-12 text-center text-neutral-600">
+                  No historical observations yet. Backfill history to compare forecast against actual highs.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="min-w-[900px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Date', 'Actual High', 'Humidity', 'Provider', 'Tier', 'Station', 'Fetched', 'Source'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row => (
+                <tr key={`${row.station_id || row.city}-${row.target_date}`} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                  <td className="px-2 py-1 tabular-nums text-neutral-300">{longDate(row.target_date)}</td>
+                  <td className="px-2 py-1 tabular-nums text-cyan-300">{fmtTemp(row.actual_high, row.unit || unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.humidity_mean)}</td>
+                  <td className="max-w-[160px] truncate px-2 py-1 text-neutral-400" title={row.provider || '--'}>{row.provider || '--'}</td>
+                  <td className="px-2 py-1 text-neutral-400">{row.calibration_tier || '--'}</td>
+                  <td className="px-2 py-1 text-neutral-500">{row.station_id || stationId || '--'}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.fetched_at)}</td>
+                  <td className="max-w-[180px] truncate px-2 py-1 text-neutral-500" title={row.source_url || '--'}>
+                    {row.source_url ? (
+                      <a href={row.source_url} target="_blank" rel="noreferrer" className="text-cyan-300 hover:text-cyan-100">source</a>
+                    ) : '--'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function DiffStatsPanel({
+  rows,
+  chartData,
+  unit,
+  selectedDate,
+}: {
+  rows: HourlyWeatherRow[]
+  chartData: WeatherChartRow[]
+  unit: string
+  selectedDate: string
+}) {
+  const hourlyPairs = rows
+    .filter(row => row.forecast !== null && row.forecast !== undefined && row.metar !== null && row.metar !== undefined)
+    .map(row => ({
+      id: row.id,
+      time: row.label,
+      observed: Number(row.metar),
+      forecast: Number(row.forecast),
+      delta: Number(row.metar) - Number(row.forecast),
+      source: row.source || 'METAR',
+    }))
+  const dailyPairs = chartData
+    .filter(row => row.actual_high !== null && row.actual_high !== undefined && row.forecast_high !== null && row.forecast_high !== undefined)
+    .map(row => ({
+      id: row.date,
+      time: longDate(row.date),
+      observed: Number(row.actual_high),
+      forecast: Number(row.forecast_high),
+      delta: Number(row.actual_high) - Number(row.forecast_high),
+      source: row.historical_provider || row.forecast_source || 'history',
+    }))
+  const tableRows = hourlyPairs.length > 0 ? hourlyPairs : dailyPairs.slice(-30).reverse()
+  const deltas = tableRows.map(row => row.delta)
+  const avgDelta = mean(deltas)
+  const correlation = pearsonR(
+    tableRows.map(row => row.forecast),
+    tableRows.map(row => row.observed)
+  )
+  const maxAbsDelta = Math.max(1, ...deltas.map(delta => Math.abs(delta)))
+
+  return (
+    <section className="border border-neutral-800 bg-black">
+      <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+        <div>
+          <div className="text-[10px] text-neutral-500">Diff Stats (Observed - Forecast)</div>
+          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {tableRows.length} paired rows</div>
+        </div>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">{hourlyPairs.length > 0 ? 'hourly' : 'daily history'}</span>
+      </div>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] gap-2 border-b border-neutral-900 p-2">
+        <MetricCard label="Average Delta" value={fmtSignedTemp(avgDelta, unit)} sub="Observed - Forecast" />
+        <MetricCard label="Accuracy" value={fmtPearson(correlation)} sub="Pearson R" />
+        <MetricCard label="Overlap" value={tableRows.length ? `${tableRows.length}` : '--'} sub="paired samples" />
+        <MetricCard label="Max Abs Delta" value={fmtTemp(Math.max(0, ...deltas.map(delta => Math.abs(delta))), unit)} sub="worst visible row" />
+      </div>
+      {tableRows.length === 0 ? (
+        <div className="max-h-[460px] overflow-auto">
+          <table className="min-w-[760px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Time', 'Observed', 'Forecast', 'Delta', 'Magnitude', 'Source'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colSpan={6} className="px-2 py-12 text-center text-neutral-600">
+                  No paired observed/forecast rows yet.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="max-h-[460px] overflow-auto">
+          <table className="min-w-[760px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Time', 'Observed', 'Forecast', 'Delta', 'Magnitude', 'Source'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {tableRows.map(row => {
+                const width = Math.max(4, Math.min(100, Math.abs(row.delta) / maxAbsDelta * 100))
+                const tone = errorTone(Math.abs(row.delta))
+                const barClass = tone === 'green' ? 'bg-green-400/70' : tone === 'amber' ? 'bg-amber-400/75' : 'bg-red-400/75'
+                return (
+                  <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                    <td className="px-2 py-1 tabular-nums text-neutral-300">{row.time}</td>
+                    <td className="px-2 py-1 tabular-nums text-amber-300">{fmtTemp(row.observed, unit)}</td>
+                    <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-200">{fmtSignedTemp(row.delta, unit)}</td>
+                    <td className="px-2 py-1">
+                      <div className="h-1.5 w-24 overflow-hidden bg-neutral-900">
+                        <div className={`h-full ${barClass}`} style={{ width: `${width}%` }} />
+                      </div>
+                    </td>
+                    <td className="max-w-[180px] truncate px-2 py-1 text-neutral-500" title={row.source}>{row.source}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -1409,23 +1775,42 @@ function DetailLine({ label, value, wide = false }: { label: string; value: stri
 }
 
 function EventTimeline({ events }: { events: DashboardEvent[] }) {
-  if (events.length === 0) {
-    return <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-neutral-600">暂无抓取或扫描日志</div>
+  const rows = events.slice(0, 100)
+  const durationLabel = (event: DashboardEvent) => {
+    const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data)
+      ? event.data as Record<string, unknown>
+      : {}
+    const raw = data.elapsed_ms ?? data.duration_ms ?? data.duration
+    if (typeof raw === 'number') return elapsedLabel(raw)
+    if (typeof raw === 'string') return raw
+    return '--'
   }
-
-  const toneClass = (tone: string) => {
-    if (tone === 'red') return 'border-red-500/30 bg-red-500/5 text-red-200'
-    if (tone === 'cyan') return 'border-cyan-500/30 bg-cyan-500/5 text-cyan-200'
-    if (tone === 'amber') return 'border-amber-500/30 bg-amber-500/5 text-amber-200'
-    if (tone === 'green') return 'border-green-500/30 bg-green-500/5 text-green-200'
-    return 'border-neutral-800 bg-neutral-950 text-neutral-400'
+  const statusLabel = (event: DashboardEvent) => {
+    const tone = eventTone(event)
+    if (tone === 'red') return 'ERR'
+    if (tone === 'amber') return 'WARN'
+    if (tone === 'green' || tone === 'cyan') return 'OK'
+    return 'INFO'
+  }
+  const statusClass = (status: string) => {
+    if (status === 'ERR') return 'text-red-300'
+    if (status === 'WARN') return 'text-amber-300'
+    if (status === 'OK') return 'text-green-300'
+    return 'text-neutral-400'
   }
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-2">
-      <div className="mb-2 grid grid-cols-[repeat(auto-fit,minmax(110px,1fr))] gap-1 text-[10px]">
+    <section className="min-w-0 border border-neutral-800 bg-black">
+      <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+        <div>
+          <div className="text-[10px] text-neutral-500">Fetch Log (last 100)</div>
+          <div className="text-xs text-neutral-100">{rows.length} events</div>
+        </div>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500"># / Time / Source / Status / Duration / Message</span>
+      </div>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(100px,1fr))] gap-1 border-b border-neutral-900 p-2 text-[10px]">
         {['天气', '观测', '盘口', '信号', '刷新'].map(stage => {
-          const count = events.filter(event => eventStage(event) === stage).length
+          const count = rows.filter(event => eventStage(event) === stage).length
           return (
             <div key={stage} className="border border-neutral-800 px-2 py-1 text-neutral-500">
               {stage} <span className="tabular-nums text-neutral-200">{count}</span>
@@ -1433,39 +1818,63 @@ function EventTimeline({ events }: { events: DashboardEvent[] }) {
           )
         })}
       </div>
-      <div className="space-y-1">
-        {events.map((event, index) => {
-          const tone = eventTone(event)
-          const data = compactData(event.data, 500)
-          return (
-            <div key={event.id ?? `${event.timestamp}-${index}`} className={`border px-2 py-1.5 ${toneClass(tone)}`}>
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="border border-current/20 px-1.5 py-0.5 text-[9px]">{eventStage(event)}</span>
-                    <span className="truncate text-[10px] text-neutral-200">{event.type || 'event'}</span>
-                  </div>
-                  <div className="mt-1 truncate text-[11px] text-neutral-100" title={event.message || '--'}>
-                    {event.message || '--'}
-                  </div>
-                </div>
-                <div className="shrink-0 text-right text-[9px] tabular-nums text-neutral-500">
-                  {shortTime(event.timestamp)}
-                </div>
-              </div>
-              {data && (
-                <details className="mt-1 border-t border-neutral-800/70 pt-1 text-[9px] text-neutral-500">
-                  <summary className="cursor-pointer select-none hover:text-neutral-300">数据</summary>
-                  <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap break-words font-mono text-[9px] leading-relaxed text-neutral-400">
-                    {data}
-                  </pre>
-                </details>
-              )}
-            </div>
-          )
-        })}
-      </div>
-    </div>
+      {rows.length === 0 ? (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="min-w-[860px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['#', 'Time', 'Source', 'Status', 'Duration', 'Message'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colSpan={6} className="px-2 py-12 text-center text-neutral-600">
+                  No fetch or scanner events yet.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="min-w-[860px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['#', 'Time', 'Source', 'Status', 'Duration', 'Message'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((event, index) => {
+                const status = statusLabel(event)
+                const data = compactData(event.data, 360)
+                const message = [event.message, data && `data: ${data}`].filter(Boolean).join(' · ') || '--'
+                return (
+                  <tr key={event.id ?? `${event.timestamp}-${index}`} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                    <td className="px-2 py-1 tabular-nums text-neutral-500">{index + 1}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-300">{shortTime(event.timestamp)}</td>
+                    <td className="px-2 py-1 text-neutral-400">{eventStage(event)}</td>
+                    <td className={`px-2 py-1 tabular-nums ${statusClass(status)}`}>{status}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-500">{durationLabel(event)}</td>
+                    <td className="max-w-[480px] px-2 py-1 text-neutral-400">
+                      <details>
+                        <summary className="cursor-pointer truncate hover:text-neutral-200" title={message}>{message}</summary>
+                        <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words border border-neutral-900 bg-neutral-950/60 p-2 font-mono text-[9px] leading-relaxed text-neutral-500">
+                          {data || event.type || '--'}
+                        </pre>
+                      </details>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   )
 }
 
