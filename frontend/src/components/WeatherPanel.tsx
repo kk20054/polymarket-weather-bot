@@ -1555,7 +1555,6 @@ function HourlyEvidencePanel({
     gap_c: deltaToC(row.gap, unit),
   }))
   const maxAbsGapC = Math.max(0.1, ...chartRows.map(row => Math.abs(Number(row.gap_c ?? 0))))
-
   if (rows.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-center text-neutral-600">
@@ -1584,7 +1583,7 @@ function HourlyEvidencePanel({
           role="img"
           aria-label={`${cityName || '当前城市'} Hourly Temperature chart. Real METAR is a solid black line, Model Forecast is a dashed gray line, residual diff bars are red or blue at the bottom.`}
         >
-          <div className="h-[280px]">
+          <div className="relative h-[280px]">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={chartRows} margin={{ top: 8, right: 18, bottom: 0, left: -8 }}>
                 <CartesianGrid stroke="#e5e7eb" strokeDasharray="3 3" />
@@ -1601,20 +1600,20 @@ function HourlyEvidencePanel({
                 <Line yAxisId="diff" type="monotone" dataKey="gap_c" name="Diff" stroke="transparent" dot={false} activeDot={false} connectNulls={false} />
               </LineChart>
             </ResponsiveContainer>
-          </div>
-          <div className="mt-1 grid h-9 grid-flow-col auto-cols-fr items-center gap-px border-t border-gray-200 pt-1" aria-label="Diff residual bars">
-            {chartRows.map(row => {
-              const diff = Number(row.gap_c ?? 0)
-              const height = Math.max(2, Math.min(32, Math.abs(diff) / maxAbsGapC * 32))
-              return (
-                <div key={`diff-${row.id}`} className="flex h-8 items-center justify-center" title={`${row.label} diff ${fmtC(diff)}`}>
-                  <div
-                    className={diff >= 0 ? 'w-full bg-red-500' : 'w-full bg-blue-500'}
-                    style={{ height: `${height}px`, opacity: row.gap_c === null || row.gap_c === undefined ? 0.12 : 0.72 }}
-                  />
-                </div>
-              )
-            })}
+            <div className="pointer-events-none absolute bottom-3 left-10 right-5 grid h-10 grid-flow-col auto-cols-fr items-end gap-px border-t border-gray-200/80 pt-1" aria-label="Diff residual bars">
+              {chartRows.map(row => {
+                const diff = Number(row.gap_c ?? 0)
+                const height = Math.max(2, Math.min(36, Math.abs(diff) / maxAbsGapC * 36))
+                return (
+                  <div key={`diff-${row.id}`} className="flex h-9 items-end justify-center" title={`${row.label} diff ${fmtC(diff)}`}>
+                    <div
+                      className={diff >= 0 ? 'w-full bg-red-500' : 'w-full bg-blue-500'}
+                      style={{ height: `${height}px`, opacity: row.gap_c === null || row.gap_c === undefined ? 0 : 0.72 }}
+                    />
+                  </div>
+                )
+              })}
+            </div>
           </div>
         </div>
 
