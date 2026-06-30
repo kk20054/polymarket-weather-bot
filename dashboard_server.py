@@ -810,6 +810,75 @@ def _event_to_payload(event):
     }
 
 
+def _json_compact(value) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        return str(value)
+
+
+def _event_fetch_stage(event_payload: dict) -> str:
+    text = " ".join([
+        str(event_payload.get("type") or ""),
+        str(event_payload.get("message") or ""),
+        _json_compact(event_payload.get("data") or {}),
+    ]).lower()
+    if any(key in text for key in ("orderbook", "clob", "market", "盘口")):
+        return "orderbook"
+    if any(key in text for key in ("signal", "buy", "trade", "order")):
+        return "signal"
+    if any(key in text for key in ("truth", "history", "settle", "actual", "observ")):
+        return "observation"
+    if any(key in text for key in ("forecast", "weather", "metar", "refresh", "scan")):
+        return "weather"
+    return "system"
+
+
+def _event_fetch_status(event_payload: dict) -> str:
+    text = " ".join([
+        str(event_payload.get("type") or ""),
+        str(event_payload.get("message") or ""),
+        _json_compact(event_payload.get("data") or {}),
+    ]).lower()
+    if any(key in text for key in ("error", "fail", "forbidden", "timeout", "exception", "err")):
+        return "ERR"
+    if any(key in text for key in ("warn", "skip", "blocked", "fallback")):
+        return "WARN"
+    if any(key in text for key in ("success", "ok", "done", "buy", "signal", "refresh")):
+        return "OK"
+    return "INFO"
+
+
+def _fetch_log_payload(events: list[dict], limit: int = 100) -> list[dict]:
+    rows: list[dict] = []
+    for index, event in enumerate(events[:limit], start=1):
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        raw_source = (
+            data.get("source")
+            or data.get("provider")
+            or data.get("stage")
+            or data.get("action")
+            or event.get("type")
+            or _event_fetch_stage(event)
+        )
+        raw_duration = data.get("elapsed_ms") or data.get("duration_ms") or data.get("duration")
+        message = _repair_display_text(event.get("message") or "")
+        compact = _json_compact(data) if data else ""
+        rows.append({
+            "index": index,
+            "time": event.get("timestamp"),
+            "source": str(raw_source or "--"),
+            "stage": _event_fetch_stage(event),
+            "status": _event_fetch_status(event),
+            "duration": raw_duration,
+            "message": message,
+            "details": compact,
+            "event_id": event.get("id"),
+            "event_type": event.get("type"),
+        })
+    return rows
+
+
 def _tail_log_lines(path, start_pos):
     if not path.exists():
         return start_pos, []
@@ -2808,6 +2877,7 @@ def build_dashboard_payload():
         "auto_simulation": _auto_simulation_state(),
     }
 
+    events = list_events(100)
     return {
         "stats": stats,
         "v3": v3_dashboard_summary(),
@@ -2826,12 +2896,14 @@ def build_dashboard_payload():
         "weather_signals": weather_signals,
         "weather_forecasts": list(weather_forecasts_by_city.values()),
         "weather_city_series": weather_city_series,
-        "events": list_events(100),
+        "events": events,
+        "fetch_log": _fetch_log_payload(events),
     }
 
 
 def _minimal_dashboard_payload(reason: str = "cache_warming"):
     now = datetime.now(timezone.utc).isoformat()
+    events = list_events(50)
     stats = {
         "bankroll": 0,
         "cash_balance": 0,
@@ -2878,7 +2950,8 @@ def _minimal_dashboard_payload(reason: str = "cache_warming"):
         "weather_signals": [],
         "weather_forecasts": [],
         "weather_city_series": _registry_city_series(),
-        "events": list_events(50),
+        "events": events,
+        "fetch_log": _fetch_log_payload(events, 50),
         "_meta": {"cache": "warming", "reason": reason, "generated_at": now},
     }
 

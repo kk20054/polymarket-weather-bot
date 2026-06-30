@@ -68,12 +68,23 @@ class PolyWXDashboardContractTests(unittest.TestCase):
 
     def test_tables_and_fetch_log_match_polywx_information_architecture(self):
         panel = read_text("frontend/src/components/WeatherPanel.tsx")
+        app = read_text("frontend/src/App.tsx")
+        types = read_text("frontend/src/types.ts")
+        server = read_text("dashboard_server.py")
         css = read_text("frontend/src/index.css")
 
         self.assertIn("Fetch Log (last 100)", panel)
         self.assertIn("# / Time / Source / Status / Duration / Message", panel)
+        self.assertIn("fetchLog?: FetchLogRow[]", panel)
+        self.assertIn("NormalizedFetchLogRow", panel)
         self.assertIn("sourceLabel", panel)
         self.assertIn("No log entries.", panel)
+        self.assertIn("const fetchLog = data?.fetch_log ?? []", app)
+        self.assertIn("fetchLog={fetchLog}", app)
+        self.assertIn("export interface FetchLogRow", types)
+        self.assertIn("fetch_log?: FetchLogRow[]", types)
+        self.assertIn("def _fetch_log_payload", server)
+        self.assertIn('"fetch_log": _fetch_log_payload(events)', server)
         self.assertIn(".polywx-light th", css)
         self.assertIn(".polywx-dark th", css)
         self.assertIn("background: #f9fafb", css)

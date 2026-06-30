@@ -12,13 +12,14 @@ import {
   YAxis,
 } from 'recharts'
 import { CloudSun, Database, ExternalLink, RefreshCw, Signal, ThermometerSun } from 'lucide-react'
-import type { DashboardEvent, DistributionItem, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { DashboardEvent, DistributionItem, FetchLogRow, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
   signals: WeatherSignal[]
   citySeries?: WeatherCitySeries[]
   events?: DashboardEvent[]
+  fetchLog?: FetchLogRow[]
   productionRefresh?: ProductionRefreshResult | null
   selectedCity?: string
   onSelectedCity?: (cityKey: string) => void
@@ -541,6 +542,7 @@ export function WeatherPanel({
   signals,
   citySeries = [],
   events = [],
+  fetchLog = [],
   productionRefresh,
   selectedCity,
   onSelectedCity,
@@ -1155,7 +1157,7 @@ export function WeatherPanel({
 
         {activeWorkbenchTab === 'fetch' && (
           <div className="grid gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_420px]">
-            <EventTimeline events={eventRows} />
+            <EventTimeline events={eventRows} fetchLog={fetchLog} />
             <SignalCards signals={citySignals.slice(0, 18)} unit={unit} selectedDate={selectedDate} />
           </div>
         )}
@@ -2011,8 +2013,19 @@ function DetailLine({ label, value, wide = false }: { label: string; value: stri
   )
 }
 
-function EventTimeline({ events }: { events: DashboardEvent[] }) {
-  const rows = events.slice(0, 100)
+type NormalizedFetchLogRow = {
+  index: number
+  key: string
+  time?: string
+  source: string
+  stage: string
+  status: string
+  duration: string
+  message: string
+  details: string
+}
+
+function EventTimeline({ events, fetchLog = [] }: { events: DashboardEvent[]; fetchLog?: FetchLogRow[] }) {
   const durationLabel = (event: DashboardEvent) => {
     const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data)
       ? event.data as Record<string, unknown>
@@ -2038,6 +2051,38 @@ function EventTimeline({ events }: { events: DashboardEvent[] }) {
     if (tone === 'green' || tone === 'cyan') return 'OK'
     return 'INFO'
   }
+  const rows: NormalizedFetchLogRow[] = fetchLog.length > 0
+    ? fetchLog.slice(0, 100).map((row, index) => {
+      const duration = typeof row.duration === 'number'
+        ? elapsedLabel(row.duration)
+        : (row.duration ? String(row.duration) : '--')
+      return {
+        index: row.index ?? index + 1,
+        key: String(row.event_id ?? `${row.time || 'fetch'}-${index}`),
+        time: row.time,
+        source: row.source || row.event_type || '--',
+        stage: row.stage || 'system',
+        status: row.status || 'INFO',
+        duration,
+        message: row.message || row.details || '--',
+        details: row.details || row.event_type || '--',
+      }
+    })
+    : events.slice(0, 100).map((event, index) => {
+      const data = compactData(event.data, 360)
+      const message = [event.message, data && `data: ${data}`].filter(Boolean).join(' / ') || '--'
+      return {
+        index: index + 1,
+        key: String(event.id ?? `${event.timestamp || 'event'}-${index}`),
+        time: event.timestamp,
+        source: sourceLabel(event),
+        stage: eventStage(event),
+        status: statusLabel(event),
+        duration: durationLabel(event),
+        message,
+        details: data || event.type || '--',
+      }
+    })
   const statusClass = (status: string) => {
     if (status === 'ERR') return 'text-red-300'
     if (status === 'WARN') return 'text-amber-300'
@@ -2055,11 +2100,17 @@ function EventTimeline({ events }: { events: DashboardEvent[] }) {
         <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500"># / Time / Source / Status / Duration / Message</span>
       </div>
       <div className="grid grid-cols-[repeat(auto-fit,minmax(100px,1fr))] gap-1 border-b border-neutral-900 p-2 text-[10px]">
-        {['天气', '观测', '盘口', '信号', '刷新'].map(stage => {
-          const count = rows.filter(event => eventStage(event) === stage).length
+        {[
+          ['weather', '天气'],
+          ['observation', '观测'],
+          ['orderbook', '盘口'],
+          ['signal', '信号'],
+          ['system', '系统'],
+        ].map(([stage, label]) => {
+          const count = rows.filter(row => row.stage === stage).length
           return (
             <div key={stage} className="border border-neutral-800 px-2 py-1 text-neutral-500">
-              {stage} <span className="tabular-nums text-neutral-200">{count}</span>
+              {label} <span className="tabular-nums text-neutral-200">{count}</span>
             </div>
           )
         })}
@@ -2094,28 +2145,23 @@ function EventTimeline({ events }: { events: DashboardEvent[] }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((event, index) => {
-                const status = statusLabel(event)
-                const data = compactData(event.data, 360)
-                const message = [event.message, data && `data: ${data}`].filter(Boolean).join(' · ') || '--'
-                return (
-                  <tr key={event.id ?? `${event.timestamp}-${index}`} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
-                    <td className="px-2 py-1 tabular-nums text-neutral-500">{index + 1}</td>
-                    <td className="px-2 py-1 tabular-nums text-neutral-300">{shortTime(event.timestamp)}</td>
-                    <td className="max-w-[160px] truncate px-2 py-1 text-neutral-400" title={eventStage(event)}>{sourceLabel(event)}</td>
-                    <td className={`px-2 py-1 tabular-nums ${statusClass(status)}`}>{status}</td>
-                    <td className="px-2 py-1 tabular-nums text-neutral-500">{durationLabel(event)}</td>
+              {rows.map(row => (
+                  <tr key={row.key} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                    <td className="px-2 py-1 tabular-nums text-neutral-500">{row.index}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-300">{shortTime(row.time)}</td>
+                    <td className="max-w-[160px] truncate px-2 py-1 text-neutral-400" title={row.stage}>{row.source}</td>
+                    <td className={`px-2 py-1 tabular-nums ${statusClass(row.status)}`}>{row.status}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-500">{row.duration}</td>
                     <td className="max-w-[480px] px-2 py-1 text-neutral-400">
                       <details>
-                        <summary className="cursor-pointer truncate hover:text-neutral-200" title={message}>{message}</summary>
+                        <summary className="cursor-pointer truncate hover:text-neutral-200" title={row.message}>{row.message}</summary>
                         <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words border border-neutral-900 bg-neutral-950/60 p-2 font-mono text-[9px] leading-relaxed text-neutral-500">
-                          {data || event.type || '--'}
+                          {row.details}
                         </pre>
                       </details>
                     </td>
                   </tr>
-                )
-              })}
+              ))}
             </tbody>
           </table>
         </div>

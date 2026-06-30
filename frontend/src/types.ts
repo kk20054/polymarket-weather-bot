@@ -893,6 +893,7 @@ export interface DashboardData {
   weather_forecasts: WeatherForecast[]
   weather_city_series?: WeatherCitySeries[]
   events?: DashboardEvent[]
+  fetch_log?: FetchLogRow[]
   _meta?: {
     cache?: string
     reason?: string
@@ -906,6 +907,19 @@ export interface DashboardEvent {
   type?: string
   message?: string
   data?: unknown
+}
+
+export interface FetchLogRow {
+  index?: number
+  time?: string
+  source?: string
+  stage?: string
+  status?: 'OK' | 'WARN' | 'ERR' | 'INFO' | string
+  duration?: number | string | null
+  message?: string
+  details?: string
+  event_id?: number
+  event_type?: string
 }
 
 export interface V3Summary {

@@ -822,6 +822,7 @@ function App() {
   const forecasts = data?.weather_forecasts ?? []
   const citySeries = data?.weather_city_series ?? []
   const events = data?.events ?? []
+  const fetchLog = data?.fetch_log ?? []
   const trades = data?.recent_trades ?? []
   const truthHealth = data?.truth_health ?? null
   const dataReadiness = data?.data_readiness ?? null
@@ -1316,6 +1317,7 @@ function App() {
               signals={signals}
               citySeries={citySeries}
               events={events}
+              fetchLog={fetchLog}
               productionRefresh={productionRefresh}
               selectedCity={selectedCity}
               onSelectedCity={setSelectedCity}
