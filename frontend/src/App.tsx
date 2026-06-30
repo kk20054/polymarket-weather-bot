@@ -1145,6 +1145,23 @@ function App() {
         </section>
 
         <aside className="order-3 flex h-[900px] min-h-0 flex-col border-t border-neutral-800 xl:h-auto xl:border-l xl:border-t-0">
+          <div className="shrink-0 border-b border-neutral-800 bg-black/95 px-3 py-2">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium text-neutral-100">Execution Workbench</div>
+                <div className="mt-0.5 text-[10px] text-neutral-600">paper account · signal queue · order log</div>
+              </div>
+              <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${liveAvailable ? 'border-green-500/30 text-green-300' : 'border-amber-500/30 text-amber-300'}`}>
+                {liveAvailable ? 'Live ready' : 'Live locked'}
+              </span>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-1 text-[10px]">
+              <StatusTile label="模式" value={tradeMode === 'paper' ? '模拟盘' : '实盘检查'} tone={tradeMode === 'paper' ? 'cyan' : 'amber'} />
+              <StatusTile label="一键模拟" value={autoSimulation.enabled ? '运行中' : '已停止'} active={autoSimulation.enabled} />
+              <StatusTile label="信号队列" value={`${actionable}/${signals.length}`} tone={actionable > 0 ? 'green' : 'neutral'} />
+              <StatusTile label="订单记录" value={`${stats.open_trades ?? 0}/${stats.settled_trades ?? 0}`} />
+            </div>
+          </div>
           <div className="space-y-3 border-b border-neutral-800 p-3">
             <TradeModeSwitch mode={tradeMode} liveAvailable={liveAvailable} onMode={setTradeMode} />
             <SimulationCard
@@ -1317,10 +1334,16 @@ function StatusTile({
   label: string
   value: string
   active?: boolean
-  tone?: 'neutral' | 'green' | 'amber'
+  tone?: 'neutral' | 'green' | 'amber' | 'cyan'
   icon?: ReactNode
 }) {
-  const valueClass = tone === 'green' || active ? 'text-green-300' : tone === 'amber' ? 'text-amber-300' : 'text-neutral-200'
+  const valueClass = tone === 'green' || active
+    ? 'text-green-300'
+    : tone === 'amber'
+      ? 'text-amber-300'
+      : tone === 'cyan'
+        ? 'text-cyan-300'
+        : 'text-neutral-200'
   return (
     <div className={`border p-2 ${active ? 'border-green-500/30 bg-green-500/10' : 'border-neutral-800'}`}>
       <div className="mb-1 flex items-center gap-1 text-neutral-500">

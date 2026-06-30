@@ -542,6 +542,14 @@ export function WeatherPanel({
   }, [availableDates, forecastFallback?.target_date, latestForecast?.target_date, selectedDate])
 
   const selectedDateIndex = availableDates.indexOf(selectedDate)
+  const latestDate = availableDates[availableDates.length - 1] ?? ''
+  const timelineDates = useMemo(() => {
+    if (availableDates.length === 0) return selectedDate ? [selectedDate] : [todayDate]
+    const anchor = selectedDateIndex >= 0 ? selectedDateIndex : Math.max(0, availableDates.length - 1)
+    const dates = availableDates.slice(Math.max(0, anchor - 3), Math.min(availableDates.length, anchor + 4))
+    if (selectedDate && !dates.includes(selectedDate)) dates.push(selectedDate)
+    return dates.sort((a, b) => a.localeCompare(b))
+  }, [availableDates, selectedDate, selectedDateIndex, todayDate])
   const selectedDateRow = chartData.find(row => row.date === selectedDate) ?? chartData[chartData.length - 1]
   const decisionLabel = bestSignal?.actionable ? 'BUY YES' : bestSignal ? '观察' : '等待信号'
   const decisionTone = bestSignal?.actionable ? 'green' : bestSignal ? 'amber' : 'neutral'
@@ -762,6 +770,49 @@ export function WeatherPanel({
           <RefreshCw className={`h-3 w-3 ${backfilling ? 'animate-spin' : ''}`} />
           {backfilling ? '补历史中' : '补历史数据'}
         </button>
+      </div>
+
+      <div className="flex items-center gap-1 overflow-x-auto border border-neutral-800 bg-black/60 p-1" aria-label="Date timeline">
+        <span className="shrink-0 px-1.5 text-[9px] uppercase tracking-wide text-neutral-600">Timeline</span>
+        <button
+          type="button"
+          onClick={() => setSelectedDate(todayDate)}
+          className={`shrink-0 border px-2 py-1 text-[10px] ${
+            selectedDate === todayDate
+              ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200'
+              : 'border-neutral-800 text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300'
+          }`}
+        >
+          Today
+        </button>
+        <button
+          type="button"
+          onClick={() => latestDate && setSelectedDate(latestDate)}
+          disabled={!latestDate}
+          className={`shrink-0 border px-2 py-1 text-[10px] disabled:cursor-not-allowed disabled:opacity-35 ${
+            selectedDate === latestDate && latestDate
+              ? 'border-green-500/40 bg-green-500/10 text-green-200'
+              : 'border-neutral-800 text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300'
+          }`}
+        >
+          Latest
+        </button>
+        <div className="h-4 w-px shrink-0 bg-neutral-800" />
+        {timelineDates.map(date => (
+          <button
+            key={date}
+            type="button"
+            onClick={() => setSelectedDate(date)}
+            className={`shrink-0 border px-2 py-1 text-[10px] tabular-nums ${
+              selectedDate === date
+                ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+                : 'border-neutral-800 text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300'
+            }`}
+            title={longDate(date)}
+          >
+            {shortDate(date)}
+          </button>
+        ))}
       </div>
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2">
