@@ -37,6 +37,7 @@ import type { AutoSimulationStatus, BotStats, DataReadiness, ProductionActionRun
 
 type TradeMode = 'paper' | 'live'
 type UiLanguage = 'zh' | 'en'
+type ThemeMode = 'light' | 'dark'
 
 const APP_VERSION = 'v6.0'
 
@@ -55,7 +56,7 @@ const UI_COPY = {
     refresh: '刷新',
     stopLegacy: '停止旧扫描',
     language: '语言',
-    theme: 'Light',
+    theme: '主题',
   },
   en: {
     subtitle: 'city max-temperature trading workbench',
@@ -71,7 +72,7 @@ const UI_COPY = {
     refresh: 'Refresh',
     stopLegacy: 'Stop legacy scan',
     language: 'Language',
-    theme: 'Light',
+    theme: 'Theme',
   },
 } satisfies Record<UiLanguage, Record<string, string>>
 
@@ -673,6 +674,10 @@ function App() {
     if (typeof window === 'undefined') return 'zh'
     return window.localStorage.getItem('weatherbot-ui-language') === 'en' ? 'en' : 'zh'
   })
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    if (typeof window === 'undefined') return 'light'
+    return window.localStorage.getItem('weatherbot-ui-theme') === 'dark' ? 'dark' : 'light'
+  })
   const [productionActionResult, setProductionActionResult] = useState<ProductionActionRunResult | null>(null)
   const balanceInitRef = useRef(false)
   const copy = UI_COPY[uiLanguage]
@@ -992,6 +997,12 @@ function App() {
     document.documentElement.lang = uiLanguage === 'zh' ? 'zh-CN' : 'en'
   }, [uiLanguage])
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem('weatherbot-ui-theme', themeMode)
+    document.documentElement.dataset.theme = themeMode
+  }, [themeMode])
+
   if (isLoading) {
     return (
       <div className="flex h-screen items-center justify-center bg-black text-neutral-300">
@@ -1020,7 +1031,7 @@ function App() {
   }
 
   return (
-    <div className="polywx-light flex min-h-screen flex-col bg-white text-gray-900 xl:h-screen xl:overflow-hidden">
+    <div className={`${themeMode === 'dark' ? 'polywx-dark bg-[#161A22] text-[#CBD2DC]' : 'polywx-light bg-white text-gray-900'} flex min-h-screen flex-col xl:h-screen xl:overflow-hidden`}>
       <header className="flex shrink-0 flex-wrap items-start gap-2 border-b border-neutral-800 px-3 py-2">
         <div className="min-w-0 flex-1 basis-[130px]">
           <div className="flex items-baseline gap-2">
@@ -1057,9 +1068,22 @@ function App() {
             English
           </button>
         </div>
-        <span className="inline-flex items-center whitespace-nowrap border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400">
-          {copy.theme}
-        </span>
+        <div className="inline-flex items-center border border-neutral-800 text-[11px]" aria-label={copy.theme}>
+          <button
+            type="button"
+            onClick={() => setThemeMode('light')}
+            className={`px-2 py-1.5 ${themeMode === 'light' ? 'bg-neutral-100 text-black' : 'text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200'}`}
+          >
+            {uiLanguage === 'zh' ? '浅色' : 'Light'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setThemeMode('dark')}
+            className={`border-l border-neutral-800 px-2 py-1.5 ${themeMode === 'dark' ? 'bg-[#2563EB] text-white' : 'text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200'}`}
+          >
+            {uiLanguage === 'zh' ? '深色' : 'Dark'}
+          </button>
+        </div>
         <button
           onClick={() => productionRefreshMutation.mutate({
             cities: selectedCity ? [selectedCity] : [],

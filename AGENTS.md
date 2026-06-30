@@ -51,11 +51,14 @@ Do not claim or imply that the bot can reliably make money until the paper-tradi
 - Empty states must be useful and calm: show what is missing and which manual action can refresh it. Do not trigger automatic scans just because a panel is empty.
 - Desktop and mobile layouts must avoid horizontal overflow. Left, center, and right columns should scroll independently on desktop.
 
-## PolyWX Light Workbench Contract
+## PolyWX Workbench Theme Contract
 
 When the task is to align with PolyWX, use the current PolyWX page as the product baseline, but preserve WeatherBot trading controls and auditability.
 
-- Visual style: default to an ultra-light monochrome UI. Use `#FFFFFF` page/panel backgrounds, `#111827` primary text, `border-gray-200` borders, and restrained gray secondary text. Avoid decorative gradients, dark dashboard chrome, and high-saturation panels unless a specific data state requires them.
+- Theme support: WeatherBot must support both PolyWX-style light and dark modes. Do not hard-code the page into one theme. Persist the user's theme choice locally.
+- Light visual style: use `#FFFFFF` page/panel backgrounds, `#111827` primary text, `border-gray-200` borders, and restrained gray secondary text.
+- Dark visual style: align with Firecrawl-extracted PolyWX branding: `#161A22` page background, `#1B212C` panels, `#222A37` raised/input surfaces, `#2C3445` borders, `#CBD2DC` primary text, `#7D8694` secondary text, and `#2563EB` primary accent.
+- Avoid decorative gradients, heavy dashboard chrome, and high-saturation panels unless a specific data state requires them.
 - Corners: use straight edges everywhere. Containers, buttons, tabs, inputs, tables, and cards must be `rounded-none` or equivalent.
 - Top filter bar: must expose City switching, Continent filtering, and a date switcher with previous/next/today behavior. Keep these controls in the primary path, not hidden in details.
 - Tabs: the city workbench must include exactly these five primary data tabs, localized in Chinese when the surrounding UI is Chinese: `预报`, `METAR`, `历史`, `偏差统计`, `抓取日志`. Tabs are straight-edged segmented controls, not pill buttons.
@@ -97,6 +100,7 @@ When the task is to align with PolyWX, use the current PolyWX page as the produc
 - Use `rg` / `rg --files` first for repo search.
 - Use `apply_patch` for manual tracked-file edits.
 - For UI/product work, use the Product Design and data-visualization skills when requested or relevant.
+- For PolyWX research, use Firecrawl in this order: `firecrawl_map` or `firecrawl_search` first, then a schema-scoped `firecrawl_scrape` for specific modules/fields. Avoid long `firecrawl_interact`, broad markdown scrapes, or feedback calls in the critical path when they are not necessary for the current edit.
 - Browser verification should use the in-app browser when available. Before spending time on browser debugging, quickly check `/api/dashboard` latency and runtime state.
 - Figma is a design baseline and communication tool. It does not replace code, runtime, or browser acceptance checks.
 - For GitHub work, keep local git state and remote branch aligned. Stage only intended files.

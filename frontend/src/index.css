@@ -130,6 +130,104 @@ body {
   scrollbar-color: #d1d5db #ffffff;
 }
 
+.polywx-dark {
+  --background: #161a22;
+  --foreground: #cbd2dc;
+  --card: #1b212c;
+  --card-hover: #222a37;
+  --border: #2c3445;
+  --border-light: #3a4558;
+  background: #161a22 !important;
+  color: #cbd2dc !important;
+}
+
+.polywx-dark,
+.polywx-dark * {
+  border-radius: 0 !important;
+}
+
+.polywx-dark [class*="bg-black"],
+.polywx-dark [class*="bg-neutral-950"],
+.polywx-dark [class*="bg-neutral-900"],
+.polywx-dark [class*="bg-neutral-800"] {
+  background-color: #1b212c !important;
+}
+
+.polywx-dark [class*="bg-white"],
+.polywx-dark [class*="bg-gray-50"],
+.polywx-dark [class*="bg-neutral-100"] {
+  background-color: #1b212c !important;
+}
+
+.polywx-dark [class*="border-neutral"],
+.polywx-dark [class*="border-gray"],
+.polywx-dark [class*="border-cyan"],
+.polywx-dark [class*="border-green"],
+.polywx-dark [class*="border-amber"],
+.polywx-dark [class*="border-red"] {
+  border-color: #2c3445 !important;
+}
+
+.polywx-dark [class*="text-gray-900"],
+.polywx-dark [class*="text-black"],
+.polywx-dark [class*="text-neutral-100"],
+.polywx-dark [class*="text-neutral-200"],
+.polywx-dark [class*="text-neutral-300"],
+.polywx-dark [class*="text-cyan-"],
+.polywx-dark [class*="text-green-"],
+.polywx-dark [class*="text-amber-"] {
+  color: #cbd2dc !important;
+}
+
+.polywx-dark [class*="text-gray-600"],
+.polywx-dark [class*="text-neutral-400"],
+.polywx-dark [class*="text-neutral-500"],
+.polywx-dark [class*="text-neutral-600"] {
+  color: #7d8694 !important;
+}
+
+.polywx-dark input,
+.polywx-dark select,
+.polywx-dark button {
+  border-radius: 0 !important;
+}
+
+.polywx-dark input,
+.polywx-dark select {
+  background: #222a37 !important;
+  color: #cbd2dc !important;
+  border-color: #2c3445 !important;
+}
+
+.polywx-dark table {
+  background: #1b212c !important;
+  color: #cbd2dc !important;
+}
+
+.polywx-dark th {
+  background: #222a37 !important;
+  color: #cbd2dc !important;
+  font-weight: 600 !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+  padding: 0.5rem 1rem !important;
+}
+
+.polywx-dark td {
+  padding: 0.5rem 1rem !important;
+  color: #cbd2dc !important;
+}
+
+.polywx-dark tbody tr:hover,
+.polywx-dark .hover\:bg-gray-50:hover,
+.polywx-dark .hover\:bg-neutral-900:hover {
+  background: #222a37 !important;
+}
+
+.polywx-dark * {
+  scrollbar-color: #3a4558 #161a22;
+}
+
 /* JetBrains Mono for all numeric/data content */
 .font-mono,
 .tabular-nums,
