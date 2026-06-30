@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   Bar,
   CartesianGrid,
+  Cell,
   ComposedChart,
   Line,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -33,7 +35,6 @@ interface Props {
 }
 
 type EvidenceStatus = 'fresh' | 'stale' | 'missing'
-type WeatherTab = 'hourly' | 'overview' | 'forecast' | 'metar' | 'history' | 'bias' | 'logs' | 'signals'
 
 type WeatherChartRow = {
   date: string
@@ -125,6 +126,35 @@ function mean(values: number[]) {
   const valid = values.filter(value => Number.isFinite(value))
   if (valid.length === 0) return null
   return valid.reduce((total, value) => total + value, 0) / valid.length
+}
+
+function pearsonR(xValues: number[], yValues: number[]) {
+  const pairs = xValues
+    .map((x, index) => [x, yValues[index]] as const)
+    .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y))
+  if (pairs.length < 2) return null
+  const xs = pairs.map(([x]) => x)
+  const ys = pairs.map(([, y]) => y)
+  const xMean = mean(xs)
+  const yMean = mean(ys)
+  if (xMean === null || yMean === null) return null
+  let numerator = 0
+  let xDenominator = 0
+  let yDenominator = 0
+  for (const [x, y] of pairs) {
+    const dx = x - xMean
+    const dy = y - yMean
+    numerator += dx * dy
+    xDenominator += dx * dx
+    yDenominator += dy * dy
+  }
+  const denominator = Math.sqrt(xDenominator * yDenominator)
+  return denominator === 0 ? null : numerator / denominator
+}
+
+function fmtPearson(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `r ${Number(value).toFixed(2)}`
 }
 
 function errorTone(absError: number) {
@@ -356,7 +386,7 @@ function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): Hou
     const forecast = point.best ?? point.ensemble_mean ?? null
     const metar = point.metar ?? null
     const gap = forecast !== null && forecast !== undefined && metar !== null && metar !== undefined
-      ? Number(forecast) - Number(metar)
+      ? Number(metar) - Number(forecast)
       : null
     const key = `${point.timestamp}:${point.target_date}`
     rows.set(key, {
@@ -399,7 +429,6 @@ export function WeatherPanel({
 }: Props) {
   const cities = useMemo(() => uniqueCities(citySeries, forecasts), [citySeries, forecasts])
   const [internalSelected, setInternalSelected] = useState(cities[0]?.key ?? '')
-  const [activeTab, setActiveTab] = useState<WeatherTab>('hourly')
   const [internalSelectedDate, setInternalSelectedDate] = useState(() => {
     if (typeof window === 'undefined') return ''
     return new URLSearchParams(window.location.search).get('date') ?? ''
@@ -447,14 +476,15 @@ export function WeatherPanel({
       return Math.abs((b.probability_edge ?? b.edge ?? 0)) - Math.abs((a.probability_edge ?? a.edge ?? 0))
     })[0]
   }, [citySignals, selectedDate])
-  const distributionItems = useMemo(() => {
+  const distributionChartItems = useMemo(() => {
     const items = [...(distributionSignal?.distribution?.items ?? [])]
     return items
       .sort((a, b) => {
-        if (Number(Boolean(b.is_signal)) !== Number(Boolean(a.is_signal))) return Number(Boolean(b.is_signal)) - Number(Boolean(a.is_signal))
-        return Number(b.probability ?? 0) - Number(a.probability ?? 0)
+        const lowDelta = Number(a.bucket_low ?? 0) - Number(b.bucket_low ?? 0)
+        if (lowDelta !== 0) return lowDelta
+        return Number(a.bucket_high ?? 0) - Number(b.bucket_high ?? 0)
       })
-      .slice(0, 8)
+      .slice(0, 18)
   }, [distributionSignal])
   const latestHistory = latestBy<HistoricalWeatherPoint>(
     series?.history_points ?? [],
@@ -658,7 +688,7 @@ export function WeatherPanel({
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_auto_auto_auto_auto_minmax(260px,1fr)_auto] gap-2 p-3 text-[11px] text-neutral-400">
+    <div className="min-h-full space-y-2 p-3 text-[11px] text-neutral-400">
       <div className="flex flex-wrap items-center gap-2">
         <select
           value={cityKey}
@@ -811,95 +841,60 @@ export function WeatherPanel({
         <Metric icon={<Signal className="h-3.5 w-3.5" />} label="可操作信号" value={`${actionableSignals.length}/${citySignals.length}`} tone={actionableSignals.length > 0 ? 'green' : 'neutral'} sub={bestSignal ? `${signalBucketLabel(bestSignal, unit)} · ${(((bestSignal.probability_edge ?? bestSignal.edge) || 0) * 100).toFixed(1)}%` : '暂无'} />
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 border border-neutral-800 bg-black px-2 py-1.5">
-        <div className="flex flex-wrap gap-1" role="tablist" aria-label="天气证据标签">
-          <TabButton active={activeTab === 'hourly'} onClick={() => setActiveTab('hourly')}>逐小时</TabButton>
-          <TabButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')}>趋势</TabButton>
-          <TabButton active={activeTab === 'forecast'} onClick={() => setActiveTab('forecast')}>预报</TabButton>
-          <TabButton active={activeTab === 'metar'} onClick={() => setActiveTab('metar')}>METAR</TabButton>
-          <TabButton active={activeTab === 'history'} onClick={() => setActiveTab('history')}>历史观测</TabButton>
-          <TabButton active={activeTab === 'bias'} onClick={() => setActiveTab('bias')}>偏差统计</TabButton>
-          <TabButton active={activeTab === 'logs'} onClick={() => setActiveTab('logs')}>抓取日志</TabButton>
-          <TabButton active={activeTab === 'signals'} onClick={() => setActiveTab('signals')}>市场信号</TabButton>
-        </div>
-        <div className="flex flex-wrap gap-1 text-[10px] text-neutral-500">
-          <span className="border border-neutral-800 px-1.5 py-0.5">逐小时 {hourlyRows.length}</span>
-          <span className="border border-neutral-800 px-1.5 py-0.5">预报 {forecastRows.length}</span>
-          <span className="border border-neutral-800 px-1.5 py-0.5">METAR {metarRows.length}</span>
-          <span className="border border-neutral-800 px-1.5 py-0.5">历史 {historyRows.length}</span>
-          <span className="border border-neutral-800 px-1.5 py-0.5">信号 {citySignals.length}</span>
-          <span className="border border-neutral-800 px-1.5 py-0.5">日志 {eventRows.length}</span>
-        </div>
-      </div>
-
-      <div className="flex min-h-0 flex-col border border-neutral-800 bg-black">
+      <section className="border border-neutral-800 bg-black">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
           <div className="flex flex-wrap items-center gap-1.5">
             <EvidenceBadge label="预报" status={forecastStatus} detail={freshnessLabel(latestForecast?.timestamp)} />
             <EvidenceBadge label="METAR" status={metarStatus} detail={freshnessLabel(latestMetar?.timestamp)} />
             <EvidenceBadge label="历史观测" status={historyStatus} detail={latestHistory?.provider || '无数据'} />
-            <EvidenceBadge label="湿度" status={humidityAvailable ? 'fresh' : 'missing'} detail={humidityAvailable ? '已采集' : '无数据'} />
+            <EvidenceBadge label="云量/湿度" status={humidityAvailable ? 'fresh' : 'missing'} detail={humidityAvailable ? '已采集' : '待接入云量'} />
+            <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">逐小时 {hourlyRows.length}</span>
           </div>
+          <div className="text-[10px] text-neutral-500">预报 · 本地时</div>
         </div>
 
-        {activeTab === 'hourly' ? (
-          <HourlyEvidencePanel rows={hourlyRows} unit={unit} cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey} selectedDate={selectedDate} />
-        ) : activeTab === 'overview' ? (
-          <div className="grid min-h-0 flex-1 gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_280px]">
-            {chartData.length > 0 ? (
-              <div
-                className="min-h-[220px]"
-                role="img"
-                aria-label={`${series?.city_name ?? '当前城市'}天气证据图。蓝线表示历史实际最高温，绿虚线表示预测最高温，橙线表示 METAR 观测，浅橙柱表示湿度。`}
-              >
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: -8 }}>
-                    <CartesianGrid stroke="#1f1f1f" strokeDasharray="3 3" />
-                    <XAxis dataKey="label" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} minTickGap={14} />
-                    <YAxis yAxisId="temp" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} />
-                    <YAxis yAxisId="humidity" orientation="right" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
-                    <Tooltip
-                      contentStyle={{ background: '#050505', border: '1px solid #262626', color: '#e5e5e5', fontSize: 11 }}
-                      formatter={(value: any, name: any) => {
-                        if (name === '日均湿度') return [fmtPct(Number(value)), name]
-                        return [fmtTemp(Number(value), unit), name]
-                      }}
-                      labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ''}
-                    />
-                    <Bar
-                      yAxisId="humidity"
-                      dataKey="humidity_mean"
-                      name="日均湿度"
-                      fill="#f59e0b"
-                      fillOpacity={0.24}
-                      maxBarSize={10}
-                      radius={[1, 1, 0, 0]}
-                    />
-                    <Line yAxisId="temp" type="monotone" dataKey="actual_high" name="历史实际最高温" stroke="#38bdf8" dot={false} strokeWidth={2.3} connectNulls={false} />
-                    <Line yAxisId="temp" type="monotone" dataKey="forecast_high" name="预测最高温" stroke="#22c55e" strokeDasharray="7 4" dot={false} strokeWidth={2.3} connectNulls={false} />
-                    <Line yAxisId="temp" type="monotone" dataKey="metar" name="METAR 实测" stroke="#f97316" dot={false} strokeWidth={1.8} connectNulls={false} />
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </div>
-            ) : (
-              <div className="flex min-h-[220px] items-center justify-center border border-neutral-900 p-4 text-center text-neutral-600">
-                该城市还没有历史或预测曲线。点击“手动抓取”同步预测和观测后，这里会显示最高温趋势。
-              </div>
-            )}
-            <TemperatureDistributionPanel
-              signal={distributionSignal}
-              items={distributionItems}
-              unit={unit}
-              selectedDate={selectedDate}
-            />
-          </div>
-        ) : activeTab === 'forecast' ? (
+        <HourlyEvidencePanel
+          rows={hourlyRows}
+          unit={unit}
+          cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
+          selectedDate={selectedDate}
+          actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
+          historyProvider={latestHistory?.provider || truthTier}
+        />
+      </section>
+
+      <TemperatureDistributionPanel
+        signal={distributionSignal}
+        items={distributionChartItems}
+        unit={unit}
+        selectedDate={selectedDate}
+        actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
+      />
+
+      <details className="border border-neutral-800 bg-black">
+        <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
+          预报数据明细 · {forecastRows.length} 行
+        </summary>
+        <div className="border-t border-neutral-800">
           <EvidenceCards empty="该日期暂无预报快照" items={forecastCards} />
-        ) : activeTab === 'metar' ? (
+        </div>
+      </details>
+
+      <details className="border border-neutral-800 bg-black">
+        <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
+          观测与历史明细 · METAR {metarRows.length} / 历史 {historyRows.length}
+        </summary>
+        <div className="grid gap-2 border-t border-neutral-800 p-2 xl:grid-cols-2">
           <EvidenceCards empty="该日期暂无 METAR 快照" items={metarCards} />
-        ) : activeTab === 'history' ? (
           <EvidenceCards empty="暂无历史观测" items={historyCards} />
-        ) : activeTab === 'bias' ? (
+        </div>
+      </details>
+
+      <details className="border border-neutral-800 bg-black">
+        <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
+          偏差统计 · 平均Δ / Pearson R / truth
+        </summary>
+        <div className="border-t border-neutral-800">
           <BiasPanel
             chartData={chartData}
             series={series}
@@ -917,44 +912,24 @@ export function WeatherPanel({
             latestHistory={latestHistory}
             latestForecast={latestForecast}
           />
-        ) : activeTab === 'logs' ? (
-          <EventTimeline events={eventRows} />
-        ) : (
+        </div>
+      </details>
+
+      <details className="border border-neutral-800 bg-black">
+        <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
+          市场信号与抓取日志 · 信号 {citySignals.length} / 日志 {eventRows.length}
+        </summary>
+        <div className="grid gap-2 border-t border-neutral-800 p-2 xl:grid-cols-2">
           <SignalCards signals={citySignals.slice(0, 18)} unit={unit} selectedDate={selectedDate} />
-        )}
-      </div>
-
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-2">
-        <div className="border border-neutral-800 p-2 leading-relaxed">
-          <div className="mb-1 text-neutral-500">当前城市信号</div>
-          <div className="text-neutral-300">
-            {bestSignal ? `${signalBucketLabel(bestSignal, unit)} · ${bestSignal.direction || 'YES'} · EV ${((bestSignal.edge ?? 0) * 100).toFixed(1)}%` : '暂无可排序信号'}
-          </div>
-          <div className="text-[10px] text-neutral-600">最新预测更新时间 {shortTime(latestForecast?.timestamp)}</div>
-          {bestSignal?.event_url && (
-            <a href={bestSignal.event_url} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-[10px] text-cyan-300 hover:text-cyan-100">
-              打开 Polymarket <ExternalLink className="h-3 w-3" />
-            </a>
-          )}
+          <EventTimeline events={eventRows} />
         </div>
+      </details>
 
-        <div className="border border-neutral-800 p-2 leading-relaxed">
-          <div className="mb-1 text-neutral-500">数据明细</div>
-          <div>历史点 {series?.history_count ?? series?.history_points?.length ?? 0} · 预测点 {series?.forecast_count ?? series?.forecast_points?.length ?? series?.points?.length ?? 0}</div>
-          <div className="text-[10px] text-neutral-600">truth 层级：{truthTier}；站点：{series?.station_id || '未映射'}</div>
-          <details className="mt-1 text-[10px] text-neutral-600">
-            <summary className="cursor-pointer select-none hover:text-neutral-300">读图方式</summary>
-            <div className="mt-1 leading-relaxed">
-              蓝线是实际最高温，绿虚线是预测最高温，橙线是 METAR 观测，浅橙柱是湿度。实盘校准只应使用高置信结算 truth。
-            </div>
-          </details>
-          {backfillResult && (
-            <div className="mt-1 text-[10px] text-cyan-300">
-              最近补历史：写入 {backfillResult.fetched} 条，错误 {backfillResult.errors.length} 个
-            </div>
-          )}
+      {backfillResult && (
+        <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 text-[10px] text-cyan-300">
+          最近补历史：写入 {backfillResult.fetched} 条，错误 {backfillResult.errors.length} 个
         </div>
-      </div>
+      )}
     </div>
   )
 }
@@ -964,11 +939,15 @@ function HourlyEvidencePanel({
   unit,
   cityName,
   selectedDate,
+  actualHigh,
+  historyProvider,
 }: {
   rows: HourlyWeatherRow[]
   unit: string
   cityName?: string
   selectedDate: string
+  actualHigh?: number | null
+  historyProvider?: string
 }) {
   const forecastValues = rows.map(row => row.forecast).filter((value): value is number => Number.isFinite(Number(value)))
   const metarValues = rows.map(row => row.metar).filter((value): value is number => Number.isFinite(Number(value)))
@@ -978,6 +957,18 @@ function HourlyEvidencePanel({
   const metarMax = metarValues.length > 0 ? Math.max(...metarValues) : null
   const avgGap = mean(gapValues)
   const avgHumidity = mean(humidityValues)
+  const pairedRows = rows.filter(row => row.forecast !== null && row.forecast !== undefined && row.metar !== null && row.metar !== undefined)
+  const pearson = pearsonR(
+    pairedRows.map(row => Number(row.forecast)),
+    pairedRows.map(row => Number(row.metar))
+  )
+  const metarCoverage = rows.length > 0 ? metarValues.length / rows.length : null
+  const actualMetarDelta = actualHigh !== null && actualHigh !== undefined && metarMax !== null
+    ? Number(metarMax) - Number(actualHigh)
+    : null
+  const overlapLabel = actualMetarDelta === null
+    ? (metarCoverage === null ? '--' : `${Math.round(metarCoverage * 100)}%`)
+    : fmtSignedTemp(actualMetarDelta, unit)
 
   if (rows.length === 0) {
     return (
@@ -1003,9 +994,9 @@ function HourlyEvidencePanel({
         </div>
 
         <div
-          className="h-[260px] p-2"
+          className="h-[300px] p-2"
           role="img"
-          aria-label={`${cityName || '当前城市'}逐小时天气证据图。绿线为预测最高温快照，橙线为 METAR 观测，青线和蓝线分别是 ECMWF 与 HRRR，浅橙柱为湿度。`}
+          aria-label={`${cityName || '当前城市'}逐小时天气证据图。绿线为预报，橙线为 METAR，青线和蓝线分别是 ECMWF 与 HRRR，浅橙柱为云量或湿度百分比，虚线为峰值标记。`}
         >
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={rows} margin={{ top: 8, right: 18, bottom: 0, left: -8 }}>
@@ -1016,14 +1007,23 @@ function HourlyEvidencePanel({
               <Tooltip
                 contentStyle={{ background: '#050505', border: '1px solid #262626', color: '#e5e5e5', fontSize: 11 }}
                 formatter={(value: any, name: any) => {
-                  if (name === '湿度') return [fmtPct(Number(value)), name]
+                  if (name === '云量/湿度 %') return [fmtPct(Number(value)), name]
                   return [fmtTemp(Number(value), unit), name]
                 }}
                 labelFormatter={(_, payload) => payload?.[0]?.payload?.timestamp ? shortTime(payload[0].payload.timestamp) : ''}
               />
-              <Bar yAxisId="humidity" dataKey="humidity" name="湿度" fill="#f59e0b" fillOpacity={0.22} maxBarSize={12} radius={[1, 1, 0, 0]} />
-              <Line yAxisId="temp" type="monotone" dataKey="forecast" name="预测" stroke="#22c55e" dot={false} strokeWidth={2.4} connectNulls={false} />
-              <Line yAxisId="temp" type="monotone" dataKey="metar" name="METAR" stroke="#f97316" dot={false} strokeWidth={2} connectNulls={false} />
+              <Bar yAxisId="humidity" dataKey="humidity" name="云量/湿度 %" fill="#f59e0b" fillOpacity={0.22} maxBarSize={12} radius={[1, 1, 0, 0]} />
+              {forecastMax !== null && (
+                <ReferenceLine yAxisId="temp" y={forecastMax} stroke="#22c55e" strokeDasharray="4 4" strokeOpacity={0.55} label={{ value: '预报峰值', fill: '#86efac', fontSize: 10 }} />
+              )}
+              {metarMax !== null && (
+                <ReferenceLine yAxisId="temp" y={metarMax} stroke="#f97316" strokeDasharray="4 4" strokeOpacity={0.55} label={{ value: 'METAR峰值', fill: '#fdba74', fontSize: 10 }} />
+              )}
+              {actualHigh !== null && actualHigh !== undefined && (
+                <ReferenceLine yAxisId="temp" y={Number(actualHigh)} stroke="#38bdf8" strokeDasharray="2 5" strokeOpacity={0.5} label={{ value: '历史最高', fill: '#7dd3fc', fontSize: 10 }} />
+              )}
+              <Line yAxisId="temp" type="monotone" dataKey="forecast" name="预报（本地时）" stroke="#22c55e" dot={false} strokeWidth={2.4} connectNulls={false} />
+              <Line yAxisId="temp" type="monotone" dataKey="metar" name="METAR（本地时）" stroke="#f97316" dot={false} strokeWidth={2} connectNulls={false} />
               <Line yAxisId="temp" type="monotone" dataKey="ecmwf" name="ECMWF" stroke="#38bdf8" dot={false} strokeWidth={1.5} connectNulls={false} />
               <Line yAxisId="temp" type="monotone" dataKey="hrrr" name="HRRR" stroke="#818cf8" dot={false} strokeWidth={1.5} connectNulls={false} />
             </ComposedChart>
@@ -1033,17 +1033,19 @@ function HourlyEvidencePanel({
         <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
           <summary className="cursor-pointer select-none hover:text-neutral-400">数据说明</summary>
           <div className="mt-1 leading-relaxed">
-            优先使用版本化 forecast archive 的成员级小时数据；若该城市/日期尚未导入 archive，则退回本地 forecast snapshots，等待后续接入 METAR/PWS 小时观测和结算 truth。
+            绿色为预报，橙色为 METAR，青/蓝为可用模型分量，柱状为云量或湿度百分比。中国天气实况与 PWS 实时源尚未接入时不伪造曲线，只在数据明细中保留接入位置。
           </div>
         </details>
       </section>
 
       <aside className="min-h-0 border border-neutral-900 bg-neutral-950/30">
         <div className="grid grid-cols-2 gap-1 border-b border-neutral-900 p-2 text-[10px]">
-          <MetricCard label="快照" value={`${rows.length}`} sub="当前日期" />
-          <MetricCard label="湿度" value={fmtPct(avgHumidity)} sub="样本均值" />
-          <MetricCard label="预报高点" value={fmtTemp(forecastMax, unit)} sub="预测线" />
-          <MetricCard label="METAR高点" value={fmtTemp(metarMax, unit)} sub="观测线" />
+          <MetricCard label="平均 Δ" value={fmtSignedTemp(avgGap, unit)} sub="实测 - 预报" />
+          <MetricCard label="准确度" value={fmtPearson(pearson)} sub={`n=${pairedRows.length}`} />
+          <MetricCard label="历史↔METAR" value={overlapLabel} sub={actualMetarDelta === null ? `覆盖 ${metarValues.length}/${rows.length}` : historyProvider || '日高温差'} />
+          <MetricCard label="云量/湿度" value={fmtPct(avgHumidity)} sub="样本均值" />
+          <MetricCard label="预报高点" value={fmtTemp(forecastMax, unit)} sub="峰值标记" />
+          <MetricCard label="METAR高点" value={fmtTemp(metarMax, unit)} sub="峰值标记" />
         </div>
         <div className="max-h-[360px] overflow-auto">
           <table className="w-full border-collapse text-left text-[10px]">
@@ -1052,7 +1054,7 @@ function HourlyEvidencePanel({
                 <th className="px-2 py-1 font-normal">时间</th>
                 <th className="px-2 py-1 font-normal">预报</th>
                 <th className="px-2 py-1 font-normal">METAR</th>
-                <th className="px-2 py-1 font-normal">湿度</th>
+                <th className="px-2 py-1 font-normal">云量/湿度</th>
                 <th className="px-2 py-1 font-normal">来源</th>
               </tr>
             </thead>
@@ -1142,6 +1144,10 @@ function BiasPanel({
   const absErrors = paired.map(point => Math.abs(point.error))
   const mae = mean(absErrors)
   const bias = mean(paired.map(point => point.error))
+  const correlation = pearsonR(
+    paired.map(point => point.forecast),
+    paired.map(point => point.actual)
+  )
   const maxAbsError = Math.max(1, ...absErrors)
   const latestPair = paired[paired.length - 1]
   const selectedPair = paired.find(point => point.date === selectedDate)
@@ -1174,8 +1180,9 @@ function BiasPanel({
     return (
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2">
+          <MetricCard label="平均 Δ" value="--" sub="实测 - 预报" />
+          <MetricCard label="准确度" value="--" sub="Pearson R" />
           <MetricCard label="MAE" value="--" sub="等待配对样本" />
-          <MetricCard label="Bias" value="--" sub="实际 - 预测" />
           <MetricCard label="配对样本" value="0" sub={`历史 ${historyTotal} · 预报 ${forecastTotal}`} />
           <MetricCard label="Truth 覆盖" value={truthCoverage === null ? '--' : fmtProb(truthCoverage)} sub={`live ${liveTruth} · research ${researchTruth}`} />
           <MetricCard label="数据状态" value={statusLabel} sub={`预报 ${forecastStatus} · METAR ${metarStatus} · 历史 ${historyStatus}`} />
@@ -1203,8 +1210,9 @@ function BiasPanel({
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-2">
       <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2">
+        <MetricCard label="平均 Δ" value={bias === null ? '--' : fmtSignedTemp(bias, unit)} sub="实测 - 预报" />
+        <MetricCard label="准确度" value={fmtPearson(correlation)} sub="Pearson R" />
         <MetricCard label="MAE" value={mae === null ? '--' : fmtTemp(mae, unit)} sub="平均绝对误差" />
-        <MetricCard label="Bias" value={bias === null ? '--' : fmtSignedTemp(bias, unit)} sub="实际 - 预测" />
         <MetricCard label="配对样本" value={`${paired.length}`} sub={`历史 ${historyTotal} · 预报 ${forecastTotal}`} />
         <MetricCard label="Truth 覆盖" value={truthCoverage === null ? '--' : fmtProb(truthCoverage)} sub={`live ${liveTruth} · research ${researchTruth}`} />
       </div>
@@ -1393,9 +1401,9 @@ function SignalStat({ label, value, tone = 'neutral' }: { label: string; value: 
 
 function DetailLine({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {
   return (
-    <div className={`grid grid-cols-[72px_minmax(0,1fr)] gap-1 ${wide ? 'md:col-span-2' : ''}`}>
+    <div className={`min-w-0 grid grid-cols-[72px_minmax(0,1fr)] gap-1 ${wide ? 'md:col-span-2' : ''}`}>
       <span className="text-neutral-600">{label}</span>
-      <span className="truncate text-neutral-400" title={value}>{value}</span>
+      <span className="min-w-0 break-words text-neutral-400" title={value}>{value}</span>
     </div>
   )
 }
@@ -1466,11 +1474,13 @@ function TemperatureDistributionPanel({
   items,
   unit,
   selectedDate,
+  actualHigh,
 }: {
   signal?: WeatherSignal
   items: DistributionItem[]
   unit: string
   selectedDate: string
+  actualHigh?: number | null
 }) {
   const distribution = signal?.distribution
   const maxProbability = Math.max(0.01, ...items.map(item => Number(item.probability || 0)))
@@ -1479,13 +1489,31 @@ function TemperatureDistributionPanel({
     : unit === 'C'
       ? (Number(distribution.forecast_f) - 32) * 5 / 9
       : Number(distribution.forecast_f)
+  const sigmaValue = distribution?.sigma_f === null || distribution?.sigma_f === undefined
+    ? null
+    : unit === 'C'
+      ? Number(distribution.sigma_f) * 5 / 9
+      : Number(distribution.sigma_f)
+  const chartRows = items.map(item => ({
+    ...item,
+    label: fmtBucket(item, unit),
+    probabilityPct: Number(item.probability ?? 0) * 100,
+    askPct: Number(item.ask ?? 0) * 100,
+    edgePct: Number(item.probability_edge ?? item.ev ?? 0) * 100,
+  }))
+
+  const probabilityFill = (probability?: number | null, selected = false) => {
+    const ratio = Math.max(0.18, Math.min(1, Number(probability ?? 0) / maxProbability))
+    if (selected) return `rgba(34, 211, 238, ${0.35 + ratio * 0.55})`
+    return `rgba(34, 197, 94, ${0.18 + ratio * 0.72})`
+  }
 
   return (
-    <aside className="flex min-h-[220px] flex-col border border-neutral-900 bg-neutral-950/30" aria-label="当日最高温概率分布">
+    <section className="border border-neutral-800 bg-black" aria-label="当日最高温概率分布">
       <div className="border-b border-neutral-900 px-2 py-1.5">
         <div className="flex items-center justify-between gap-2">
           <div>
-            <div className="text-[10px] text-neutral-500">当日最高温分布</div>
+            <div className="text-[10px] text-neutral-500">当日最高温预测（DEB）</div>
             <div className="text-xs text-neutral-100">
               {signal ? signal.city_name : '等待信号'} · {longDate(signal?.target_date ?? selectedDate)}
             </div>
@@ -1498,42 +1526,72 @@ function TemperatureDistributionPanel({
         </div>
         <div className="mt-1 flex flex-wrap gap-1 text-[9px] text-neutral-500">
           <span className="border border-neutral-800 px-1 py-0.5">μ {fmtTemp(forecastValue, unit)}</span>
-          <span className="border border-neutral-800 px-1 py-0.5">σ {distribution?.sigma_f?.toFixed?.(1) ?? '--'}F</span>
-          <span className="border border-neutral-800 px-1 py-0.5">{distribution?.normalized ? '已归一' : '未归一'}</span>
+          <span className="border border-neutral-800 px-1 py-0.5">±σ {fmtTemp(sigmaValue, unit)}</span>
+          <span className="border border-neutral-800 px-1 py-0.5">实测 {fmtTemp(actualHigh, unit)}</span>
+          <span className="border border-neutral-800 px-1 py-0.5">{distribution?.normalized ? '高斯归一' : '未归一'}</span>
         </div>
       </div>
 
       {items.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center px-3 text-center text-[10px] leading-relaxed text-neutral-600">
+        <div className="flex min-h-[220px] items-center justify-center px-3 text-center text-[10px] leading-relaxed text-neutral-600">
           暂无温度桶分布。手动抓取并生成市场信号后，这里会显示各温度桶的模型概率、盘口价格和可执行 edge。
         </div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {items.map(item => {
-            const edge = Number(item.probability_edge ?? 0)
-            const positive = edge > 0
-            const width = Math.max(4, Math.min(100, (Number(item.probability || 0) / maxProbability) * 100))
-            return (
-              <div key={item.market_id || `${item.bucket_low}-${item.bucket_high}`} className={`border-b border-neutral-900 px-2 py-1.5 ${item.is_signal ? 'bg-cyan-500/5' : ''}`}>
-                <div className="mb-1 flex items-center justify-between gap-2">
-                  <div className="truncate text-[10px] text-neutral-200" title={item.question}>
-                    {fmtBucket(item, unit)}
-                  </div>
-                  <span className={`shrink-0 text-[10px] tabular-nums ${positive ? 'text-green-300' : 'text-neutral-500'}`}>
-                    {fmtSignedPct(edge)}
-                  </span>
-                </div>
-                <div className="h-1.5 overflow-hidden bg-neutral-900">
-                  <div className={positive ? 'h-full bg-green-400/70' : 'h-full bg-neutral-600/70'} style={{ width: `${width}%` }} />
-                </div>
-                <div className="mt-1 grid grid-cols-3 gap-1 text-[9px] tabular-nums text-neutral-500">
-                  <span>模型 {fmtProb(item.probability)}</span>
-                  <span>卖一 {fmtPrice(item.ask)}</span>
-                  <span>EV {fmtSignedPct(item.ev)}</span>
-                </div>
-              </div>
-            )
-          })}
+        <div className="grid gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_280px]">
+          <div className="h-[260px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={chartRows} margin={{ top: 8, right: 14, bottom: 34, left: -8 }}>
+                <CartesianGrid stroke="#1f1f1f" strokeDasharray="3 3" />
+                <XAxis dataKey="label" stroke="#737373" fontSize={9} tickLine={false} axisLine={false} interval={0} angle={-28} textAnchor="end" height={54} />
+                <YAxis stroke="#737373" fontSize={10} tickLine={false} axisLine={false} />
+                <Tooltip
+                  contentStyle={{ background: '#050505', border: '1px solid #262626', color: '#e5e5e5', fontSize: 11 }}
+                  formatter={(value: any, name: any) => {
+                    if (name === '模型概率') return [`${Number(value).toFixed(1)}%`, name]
+                    if (name === '卖一') return [`${Number(value).toFixed(1)}¢`, name]
+                    return [`${Number(value).toFixed(1)}%`, name]
+                  }}
+                />
+                <Bar dataKey="probabilityPct" name="模型概率" maxBarSize={36} radius={[2, 2, 0, 0]}>
+                  {chartRows.map(row => (
+                    <Cell key={row.market_id || row.label} fill={probabilityFill(row.probability, row.is_signal)} stroke={row.is_signal ? '#22d3ee' : 'transparent'} strokeWidth={row.is_signal ? 1.5 : 0} />
+                  ))}
+                </Bar>
+                <Line type="monotone" dataKey="askPct" name="卖一" stroke="#f97316" dot={false} strokeWidth={1.4} connectNulls={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+
+          <aside className="border border-neutral-900 bg-neutral-950/30">
+            <div className="grid grid-cols-2 gap-1 border-b border-neutral-900 p-2 text-[10px]">
+              <MetricCard label="最高概率" value={fmtProb(Math.max(...items.map(item => Number(item.probability ?? 0))))} sub="柱色越深概率越高" />
+              <MetricCard label="信号桶" value={signal ? signalBucketLabel(signal, unit) : '--'} sub={signal?.actionable ? 'BUY YES' : '观察'} />
+              <MetricCard label="市场价格" value={fmtPrice(signal?.limit_price ?? signal?.market_probability)} sub="卖一/概率" />
+              <MetricCard label="Edge" value={fmtSignedPct(signal?.probability_edge ?? signal?.edge)} sub="模型 - 市场" />
+            </div>
+            <div className="max-h-[260px] overflow-auto">
+              <table className="w-full border-collapse text-left text-[10px]">
+                <thead className="sticky top-0 bg-black text-neutral-500">
+                  <tr className="border-b border-neutral-900">
+                    <th className="px-2 py-1 font-normal">桶</th>
+                    <th className="px-2 py-1 font-normal">概率</th>
+                    <th className="px-2 py-1 font-normal">卖一</th>
+                    <th className="px-2 py-1 font-normal">Edge</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map(item => (
+                    <tr key={item.market_id || `${item.bucket_low}-${item.bucket_high}`} className={`border-b border-neutral-900/80 ${item.is_signal ? 'bg-cyan-500/10 text-cyan-200' : 'hover:bg-neutral-900/50'}`}>
+                      <td className="max-w-[108px] truncate px-2 py-1" title={item.question}>{fmtBucket(item, unit)}</td>
+                      <td className="px-2 py-1 tabular-nums text-green-300">{fmtProb(item.probability)}</td>
+                      <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPrice(item.ask)}</td>
+                      <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtSignedPct(item.probability_edge ?? item.ev)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </aside>
         </div>
       )}
 
@@ -1543,25 +1601,7 @@ function TemperatureDistributionPanel({
           <div className="mt-1 leading-relaxed">{distribution?.notes?.join(' · ')}</div>
         </details>
       )}
-    </aside>
-  )
-}
-
-function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      className={`border px-2 py-1 text-[10px] transition ${
-        active
-          ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200'
-          : 'border-neutral-800 text-neutral-500 hover:border-neutral-700 hover:text-neutral-300'
-      }`}
-    >
-      {children}
-    </button>
+    </section>
   )
 }
 

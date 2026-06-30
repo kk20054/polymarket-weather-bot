@@ -207,16 +207,16 @@ export function SignalsTable({
             </button>
 
             {isExpanded && (
-              <div className="space-y-3 border-t border-neutral-900 px-3 py-3 text-neutral-400">
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="border border-neutral-800 p-2">
+              <div className="min-w-0 space-y-3 overflow-hidden border-t border-neutral-900 px-3 py-3 text-neutral-400">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="min-w-0 border border-neutral-800 p-2">
                     <div className="text-[9px] text-neutral-600">模型概率 / 市场价格</div>
                     <div className="tabular-nums text-neutral-100">{pct(signal.model_probability)} / {cents(signal.limit_price ?? signal.market_probability)}</div>
                     <div className="mt-1 text-[10px] text-neutral-600">
                       归一化概率 {pct(signal.distribution?.signal_probability)}，概率差 {pct(signal.probability_edge, true)}
                     </div>
                   </div>
-                  <div className="border border-neutral-800 p-2">
+                  <div className="min-w-0 border border-neutral-800 p-2">
                     <div className="text-[9px] text-neutral-600">盘口成本</div>
                     <div className="tabular-nums text-neutral-100">Bid {cents(signal.bid_price)} / Ask {cents(signal.limit_price)}</div>
                     <div className="mt-1 text-[10px] text-neutral-600">Spread {cents(signal.spread)}，买入后立即按 bid 估值会先显示浮亏。</div>
@@ -287,7 +287,7 @@ export function SignalsTable({
                 <div className="grid gap-2 md:grid-cols-2">
                   <div className="border border-neutral-800 p-2 leading-relaxed">
                     <div className="mb-1 text-[10px] text-neutral-500">为什么买/不买</div>
-                    <p className="break-words">{signal.reasoning}</p>
+                    <p className="min-w-0 break-words">{signal.reasoning}</p>
                     {allReasons.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1">
                         {allReasons.slice(0, 8).map(reason => (
@@ -304,7 +304,7 @@ export function SignalsTable({
                     <div>独立样本 {signal.fit_markets ?? 0} 天 / 快照 {signal.fit_samples ?? 0}</div>
                     <div>MAE {signal.fit_mae_f?.toFixed?.(1) ?? '--'}F / Bias {signal.fit_bias_f?.toFixed?.(1) ?? '--'}F</div>
                     <div>truth {signal.truth?.latest_provider || '缺失'} / 站点 {signal.truth?.station_id || '未映射'}</div>
-                    {signal.yes_token_id && <div className="mt-1 break-all text-neutral-600">YES token {shortToken(signal.yes_token_id)}</div>}
+                    {signal.yes_token_id && <div className="mt-1 min-w-0 break-all text-neutral-600">YES token {shortToken(signal.yes_token_id)}</div>}
                   </div>
                 </div>
 
@@ -317,7 +317,7 @@ export function SignalsTable({
                           key={item.market_id}
                           className={`border px-2 py-1 ${item.is_signal ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200' : 'border-neutral-800 text-neutral-400'}`}
                         >
-                          <div className="truncate">{bucketRange(item.bucket_low, item.bucket_high, unit)}</div>
+                          <div className="min-w-0 truncate">{bucketRange(item.bucket_low, item.bucket_high, unit)}</div>
                           <div className="tabular-nums text-[10px]">P {pct(item.probability)} / Ask {cents(item.ask)}</div>
                         </div>
                       ))}
