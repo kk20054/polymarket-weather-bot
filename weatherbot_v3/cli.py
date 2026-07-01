@@ -110,6 +110,20 @@ def run_forecast_backfill(cities_arg: str = "", days_arg: int = 4) -> dict:
     }
 
 
+def run_hourly_consensus_build(cities_arg: str = "", target_date: str = "") -> dict:
+    from .hourly import build_hourly_consensus
+
+    cities = [item.strip() for item in cities_arg.split(",") if item.strip()]
+    payload = build_hourly_consensus(cities or None, target_date=target_date or None)
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    payload["hourly_consensus_stage"] = next(
+        (stage for stage in readiness.get("stages", []) if stage.get("key") == "hourly_consensus"),
+        None,
+    )
+    return payload
+
+
 def run_orderbook_backfill(limit_arg: int = 50, start_date_arg: str = "", end_date_arg: str = "") -> dict:
     from .polymarket import PolymarketDataClient
 
@@ -371,6 +385,7 @@ def main() -> None:
             "data-readiness",
             "model-dataset-audit",
             "forecast-backfill",
+            "hourly-consensus-build",
             "forecast-archive-import",
             "forecast-archive-manifest",
             "orderbook-backfill",
@@ -457,6 +472,8 @@ def main() -> None:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "forecast-backfill":
         print(json.dumps(run_forecast_backfill(args.cities, args.days), ensure_ascii=False, indent=2))
+    elif args.command == "hourly-consensus-build":
+        print(json.dumps(run_hourly_consensus_build(args.cities, args.start_date), ensure_ascii=False, indent=2))
     elif args.command == "forecast-archive-import":
         if not args.archive_path:
             raise SystemExit("--archive-path is required")

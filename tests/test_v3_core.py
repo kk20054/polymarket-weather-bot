@@ -14,7 +14,7 @@ from weatherbot_v3.production_actions import list_production_actions, run_produc
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
 from weatherbot_v3.forecast import ingest_polywx_forecasts, forecast_run_from_polywx_rows
-from weatherbot_v3.hourly import build_metar_hourly_consensus, forecast_hourly_points, hourly_consensus_points
+from weatherbot_v3.hourly import build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
 from weatherbot_v3.mesonet import ingest_mesonet_observations, mesonet_observation_from_pws_row
 from weatherbot_v3.qualification import build_data_readiness
@@ -25,8 +25,8 @@ from weatherbot_v3.metar import fetch_awc_metars, refresh_metar_reports
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from weatherbot_v3.cli import default_orderbook_start_date, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
-from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
+from weatherbot_v3.cli import default_orderbook_start_date, run_hourly_consensus_build, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
+from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
 from dashboard_server import stations as stations_api
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timedelta, timezone
@@ -582,6 +582,13 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("parse_status", forecast_columns)
         self.assertIn("parse_warnings", forecast_columns)
         self.assertIn("source_unit", forecast_columns)
+        with connect(db_path) as conn:
+            hourly_columns = {row["name"] for row in conn.execute("PRAGMA table_info(hourly_consensus)").fetchall()}
+        self.assertIn("forecast_source", hourly_columns)
+        self.assertIn("observation_sources_json", hourly_columns)
+        self.assertIn("source_mix_json", hourly_columns)
+        self.assertIn("consensus_version", hourly_columns)
+        self.assertIn("build_status", hourly_columns)
         with connect(db_path) as conn:
             mesonet_columns = {row["name"] for row in conn.execute("PRAGMA table_info(mesonet_observations)").fetchall()}
         self.assertIn("parser_version", mesonet_columns)
@@ -1171,7 +1178,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(fetch_logs[0]["city"], "chicago")
 
     def test_production_action_executes_whitelisted_hourly_consensus_build(self):
-        with patch("weatherbot_v3.production_actions.build_metar_hourly_consensus") as mocked_build:
+        with patch("weatherbot_v3.production_actions.build_hourly_consensus") as mocked_build:
             mocked_build.return_value = {"ok": True, "rows_upserted": 4}
             with patch("weatherbot_v3.production_actions.build_data_readiness") as mocked_readiness:
                 mocked_readiness.return_value = {
@@ -1192,6 +1199,20 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(result["status"], "executed")
         mocked_build.assert_called_once_with(cities=["chicago"], target_date="2026-06-29")
         self.assertEqual(result["payload"]["rows_upserted"], 4)
+
+    def test_hourly_consensus_cli_runner_calls_layer4_builder(self):
+        with patch("weatherbot_v3.hourly.build_hourly_consensus") as mocked_build:
+            mocked_build.return_value = {"ok": True, "rows_upserted": 2}
+            with patch("weatherbot_v3.cli.build_data_readiness") as mocked_readiness:
+                mocked_readiness.return_value = {
+                    "stages": [{"key": "hourly_consensus", "status": "ready"}],
+                }
+                with patch("weatherbot_v3.cli.persist_data_readiness"):
+                    payload = run_hourly_consensus_build("chicago", "2026-07-01")
+
+        mocked_build.assert_called_once_with(["chicago"], target_date="2026-07-01")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["hourly_consensus_stage"]["status"], "ready")
 
     def test_production_action_requires_operator_confirmation_for_bulk_review(self):
         result = run_production_action(
@@ -1999,6 +2020,105 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(point["metar"], 91.94, places=2)
         self.assertAlmostEqual(point["best"], 92.0, places=2)
         self.assertTrue(point["hourly_consensus"])
+
+    def test_layer4_hourly_consensus_builds_forecast_observation_residual(self):
+        db_path = test_db_path("layer4_hourly_consensus")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        forecast_rows = [
+            {
+                "hour": "16:00",
+                "temperature_c": 31.0,
+                "cloud_cover_pct": 25,
+                "wind_kph": 18,
+                "wind_dir_deg": 220,
+                "pressure_hpa": 1010,
+                "dew_point_c": 19,
+                "fetched_at": "2026-07-01T12:00:00Z",
+            }
+        ]
+        forecast_run, forecast_members = forecast_run_from_polywx_rows(
+            "chicago",
+            "2026-07-01",
+            forecast_rows,
+            source_url="https://api.weather.polywx.xyz/api/forecast?city=chicago-kord&date=2026-07-01",
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            insert_forecast_run(forecast_run, forecast_members)
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": "2026-07-01T21:51:00Z",
+                "raw_text": "METAR KORD 012151Z 21012KT 10SM 33/23 A2987",
+                "temperature": 91.4,
+                "dew_point": 73.4,
+                "wind_direction": 210,
+                "wind_speed": 12,
+                "pressure": 1011,
+            })
+            upsert_mesonet_observation({
+                "observation_key": "pws:chicago:2026-07-01T21:20:00Z",
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KILROSEM4",
+                "network": "pws",
+                "observed_at": "2026-07-01T21:20:00Z",
+                "temperature": 90.0,
+                "humidity": 48,
+                "source_url": "https://api.weather.polywx.xyz/api/pws",
+                "quality_flags": ["nearby_station"],
+            })
+            result = build_hourly_consensus(["chicago"], target_date="2026-07-01", db_path=db_path)
+            summary = hourly_consensus_summary("chicago", "2026-07-01", db_path=db_path)
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT * FROM hourly_consensus WHERE city = ? AND target_date = ? AND local_hour = ?",
+                    ("chicago", "2026-07-01", "16:00"),
+                ).fetchone()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["forecast_points"], 1)
+        self.assertEqual(result["observation_points"], 1)
+        self.assertEqual(result["rows_upserted"], 1)
+        self.assertEqual(summary["rows"], 1)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["consensus_version"], "hourly-consensus-v2")
+        self.assertEqual(row["build_status"], "built")
+        self.assertEqual(row["forecast_source"], "polywx_forecast")
+        self.assertIn("metar", row["observation_sources_json"])
+        self.assertIn("pws", row["observation_sources_json"])
+        self.assertAlmostEqual(row["forecast_temp"], 87.8, places=1)
+        self.assertAlmostEqual(row["observed_temp"], 91.4, places=1)
+        self.assertAlmostEqual(row["residual"], 3.6, places=1)
+        self.assertEqual(summary["points"][0]["build_status"], "built")
+
+    def test_hourly_consensus_api_returns_layer4_rows_without_refreshing(self):
+        db_path = test_db_path("hourly_consensus_api")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            upsert_hourly_consensus({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "target_date": "2026-07-01",
+                "local_hour": "16:00",
+                "valid_time": "2026-07-01T16:00:00-05:00",
+                "station_id": "KORD",
+                "forecast_temp": 88,
+                "observed_temp": 91,
+                "observation_source": "metar",
+                "forecast_source": "ecmwf",
+                "consensus_version": "hourly-consensus-v2",
+                "build_status": "built",
+                "source_count": 2,
+            })
+            payload = asyncio.run(hourly_consensus_api(city="chicago", target_date="2026-07-01"))
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["city"], "chicago")
+        self.assertEqual(payload["target_date"], "2026-07-01")
+        self.assertEqual(payload["rows"], 1)
+        self.assertEqual(payload["points"][0]["forecast_source"], "ecmwf")
+        self.assertAlmostEqual(payload["points"][0]["diff"], 3.0)
 
     def test_hourly_merge_preserves_forecast_and_adds_metar(self):
         rows = _merge_hourly_points(

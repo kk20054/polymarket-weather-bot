@@ -57,6 +57,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         orderbooks = [dict(row) for row in conn.execute("SELECT * FROM orderbooks").fetchall()]
         metar_reports = [dict(row) for row in conn.execute("SELECT * FROM metar_reports").fetchall()]
         mesonet_observations = [dict(row) for row in conn.execute("SELECT * FROM mesonet_observations").fetchall()]
+        hourly_consensus = [dict(row) for row in conn.execute("SELECT * FROM hourly_consensus").fetchall()]
 
     rules_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     contracts_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -168,6 +169,26 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     fresh_forecast_cities = {str(row.get("city") or "") for row in fresh_forecast_runs}
     fresh_training_runs = [row for row in fresh_forecast_runs if row.get("training_eligible")]
     fresh_training_cities = {str(row.get("city") or "") for row in fresh_training_runs}
+    forecast_city_dates = {
+        (str(row.get("city") or ""), str(row.get("target_date") or ""))
+        for row in forecast_runs
+        if row.get("city") and row.get("target_date")
+    }
+    hourly_city_dates = {
+        (str(row.get("city") or ""), str(row.get("target_date") or ""))
+        for row in hourly_consensus
+        if row.get("city") and row.get("target_date")
+    }
+    hourly_cities = {city for city, _date in hourly_city_dates if city}
+    hourly_dates = {date for _city, date in hourly_city_dates if date}
+    hourly_rows_with_forecast = [row for row in hourly_consensus if row.get("forecast_temp") is not None]
+    hourly_rows_with_observed = [row for row in hourly_consensus if row.get("observed_temp") is not None]
+    hourly_rows_with_residual = [row for row in hourly_consensus if row.get("residual") is not None]
+    hourly_partial_rows = [
+        row for row in hourly_consensus
+        if str(row.get("build_status") or "built") not in {"built", "ready"}
+    ]
+    hourly_forecast_gap = max(0, len(forecast_city_dates - hourly_city_dates))
     expected_station_cities = len(SETTLEMENT_REGISTRY)
     station_city_keys = {str(row.get("city_key") or row.get("city") or "") for row in station_rows}
     missing_station_rows = max(0, expected_station_cities - len(station_city_keys))
@@ -352,6 +373,37 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             },
         ),
         _stage(
+            "hourly_consensus",
+            "逐小时共识",
+            (
+                len(hourly_consensus) > 0
+                and len(hourly_rows_with_forecast) > 0
+                and len(hourly_rows_with_observed) > 0
+                and len(hourly_rows_with_residual) > 0
+                and hourly_forecast_gap == 0
+            ),
+            [
+                ("hourly_consensus_missing", 1 if not hourly_consensus else 0),
+                ("hourly_forecast_rows_missing", 1 if not hourly_rows_with_forecast else 0),
+                ("hourly_observation_rows_missing", 1 if not hourly_rows_with_observed else 0),
+                ("hourly_residual_rows_missing", 1 if not hourly_rows_with_residual else 0),
+                ("hourly_forecast_city_date_gap", hourly_forecast_gap),
+                ("hourly_partial_rows", len(hourly_partial_rows)),
+            ],
+            {
+                "rows": len(hourly_consensus),
+                "cities": len(hourly_cities),
+                "dates": len(hourly_dates),
+                "city_dates": len(hourly_city_dates),
+                "forecast_city_dates": len(forecast_city_dates),
+                "rows_with_forecast": len(hourly_rows_with_forecast),
+                "rows_with_observed": len(hourly_rows_with_observed),
+                "rows_with_residual": len(hourly_rows_with_residual),
+                "partial_rows": len(hourly_partial_rows),
+                "consensus_version": "hourly-consensus-v2",
+            },
+        ),
+        _stage(
             "orderbooks",
             "盘口快照",
             len(fresh_clob_with_depth_orderbooks) >= cfg.min_fresh_clob_orderbooks,
@@ -403,6 +455,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             "eligible_truth_days": len(eligible_truth_days),
             "forecast_runs": len(forecast_runs),
             "forecast_members": forecast_member_count,
+            "hourly_consensus": len(hourly_consensus),
             "orderbook_snapshots": len(orderbooks),
         },
     }
@@ -634,6 +687,25 @@ def _build_next_actions(
             "command": command,
             "requires_operator": False,
             "targets": forecast_targets,
+        })
+
+    hourly_gap = max(
+        int(reason_counts.get("hourly_consensus_missing") or 0),
+        int(reason_counts.get("hourly_forecast_rows_missing") or 0),
+        int(reason_counts.get("hourly_observation_rows_missing") or 0),
+        int(reason_counts.get("hourly_residual_rows_missing") or 0),
+        int(reason_counts.get("hourly_forecast_city_date_gap") or 0),
+    )
+    if hourly_gap:
+        actions.append({
+            "key": "build_hourly_consensus",
+            "priority": 3,
+            "label": "构建逐小时共识",
+            "count": hourly_gap,
+            "impact": "把已落库的预测运行、METAR 和 mesonet 观测合成为城市/日期/小时证据路径，供 PolyWX 风格小时图和后续信号层读取。",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli hourly-consensus-build",
+            "requires_operator": False,
+            "targets": _city_targets(city_rows, {"versioned_forecast_runs_missing", "forecast_runs_stale"})[:20],
         })
 
     orderbook_gap = max(

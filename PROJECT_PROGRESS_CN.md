@@ -1,6 +1,6 @@
 # WeatherBot 项目进度台账
 
-最后更新：2026-07-01
+最后更新：2026-07-02
 
 这个文件是 WeatherBot 的事实台账。每轮开发、研究、验证或修复结束前，都要在这里追加一条记录，避免进度散落在聊天记录、上下文摘要和本地 `audits/` 目录里。
 
@@ -75,6 +75,41 @@
 - `MANIFEST.json` 记录抓取 URL、时间、文件数、工具、失败原因。
 
 ## 近期进度记录
+
+### 2026-07-02：Layer 4 hourly_consensus 逐小时共识层生产化
+
+- 目标：按 `AGENTS.md` Build Order 继续 Layer 4，只补 `hourly_consensus` 统一小时证据层的 schema、collector、API、readiness 和测试；不触碰 market bucket、signal decision、右侧执行台、自动抓取或实盘交易。
+- Build Order layer：Layer 4 — `hourly_consensus` view feeding charts and signal engine。
+- Layer 0 前置核验：
+  - 复核 `audits/polywx-firecrawl-2026-07-01/MANIFEST.json`：`generated_at=2026-07-01T20:51:44.375748+08:00`、当前约 `0.16` 天龄、`files=17`、`five_tabs=true`、`hourly_chart=true`、`xhr_response_bodies=true`、`api_endpoints=true`。
+  - 结论：manifest 少于 14 天且有代表性 XHR body，本轮复用现有 PolyWX corpus，不重复 Firecrawl。
+- 改动：
+  - `weatherbot_v3/db.py` 扩展 `hourly_consensus`，新增 `precipitation`、`wind_speed`、`wind_direction`、`pressure`、`dew_point`、`forecast_source`、`forecast_sources_json`、`observation_sources_json`、`source_mix_json`、`consensus_version`、`build_status`、`build_warnings`，并让 `upsert_hourly_consensus()` 持久化这些字段。
+  - `weatherbot_v3/hourly.py` 新增 `build_hourly_consensus()`：读取 Layer 3 `forecast_runs/forecast_members` 和 Layer 2 `metar_reports/mesonet_observations`，按城市/日期/本地小时合成 forecast、observed、residual、source mix、build status。
+  - `weatherbot_v3/hourly.py` 新增 `hourly_consensus_summary()`，并扩展 `hourly_consensus_points()` 输出更多天气字段和审计字段。
+  - `dashboard_server.py` 新增只读接口 `GET /api/hourly-consensus?city=...&target_date=...`，不会触发抓取、扫描或自动模拟。
+  - `weatherbot_v3/qualification.py` 新增 `hourly_consensus` readiness stage，暴露 rows、cities、dates、rows_with_forecast、rows_with_observed、rows_with_residual、partial_rows，并在 next actions 中提示显式执行 `hourly-consensus-build`。
+  - `weatherbot_v3/cli.py` 新增 `hourly-consensus-build` 命令；`weatherbot_v3/production_actions.py` 的 `build_hourly_consensus` action 从旧 METAR-only builder 切换到新的 Layer 4 builder。
+  - `tests/test_v3_core.py` 增加 Layer 4 测试：schema 字段、forecast+METAR+PWS 合成 residual、只读 API、CLI runner、production action、readiness gate。
+- 验证：
+  - Targeted Layer 4 tests 通过：8 tests OK。
+  - `python -m unittest tests.test_v3_core` 通过：98 tests OK；仍有既有 sqlite `ResourceWarning: unclosed database` 噪声。
+  - `python -m unittest tests.test_polywx_contract` 通过：7 tests OK。
+  - `npm run build` 通过；仍有既有 Browserslist 过期和 Vite chunk size warning。
+  - 当前 8765 `/api/dashboard` 运行态：约 `243.3ms` 返回，`scanner_status=stopped`、`is_running=false`、`production_running=false`、`auto_refresh_running=false`、`last_refresh_was_auto=false`。
+  - 临时启动 8766 验证新代码：`/api/dashboard` OK，未启动扫描/自动刷新；`/api/hourly-consensus?city=chicago` OK，当前库返回 `hourly_rows=2`；验证后已关闭临时进程。
+  - `git diff --check` 通过；仅有 Windows LF/CRLF 提示，没有 whitespace error。
+- 当前可用性结论：
+  - Layer 4 现在有一条明确的统一小时证据路径：后续小时图、偏差统计和信号层可以读取同一张 `hourly_consensus`，而不是各自临时拼 forecast/METAR/PWS。
+  - 该层可以帮助判断“预报与观测偏离多少、哪些小时有 residual、数据源混合情况”，但它仍是数据基座层，不证明策略有 edge，也不解锁自动实盘。
+- 剩余阻塞：
+  - 当前共识行质量依赖 Layer 2/3 输入覆盖；如果某城市没有 METAR/PWS 或 forecast runs，Layer 4 只能生成 partial/forecast-only 行。
+  - residual 只在同小时 forecast 与 observed 同时存在时产生；还需要更系统的历史 truth 和 station-local 独立样本来做校准。
+  - sqlite ResourceWarning 仍需后续单独治理。
+  - production-refresh 仍不会自动构建 hourly consensus，需显式运行 `hourly-consensus-build`，符合“不自动抓取/不自动扫描”的启动约束。
+- 下一步：
+  - 进入 Layer 5：`market_buckets`，把 Polymarket outcome/token/orderbook metadata 与城市/日期/温度桶严格匹配，记录 tick size、orderMinSize、negRisk、token id、bucket boundary 和 strict matching status。
+- 相关提交：待提交；提交后回填 hash。
 
 ### 2026-07-01：Layer 3 forecast_runs / forecast_members 预报层生产化
 

@@ -44,7 +44,7 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
-from weatherbot_v3.hourly import forecast_hourly_points, hourly_consensus_points
+from weatherbot_v3.hourly import forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary
 from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.notifier import FeishuNotifier
@@ -3804,6 +3804,11 @@ async def forecast_archive_manifest(limit: int = 200, sources: str = "ecmwf,gfs_
 @app.get("/api/forecasts")
 async def forecasts(city: str = "", target_date: str = ""):
     return forecast_summary(city or None, target_date or None)
+
+
+@app.get("/api/hourly-consensus")
+async def hourly_consensus(city: str = "", target_date: str = ""):
+    return hourly_consensus_summary(city or None, target_date or None)
 
 
 @app.get("/api/temperature-fit")
