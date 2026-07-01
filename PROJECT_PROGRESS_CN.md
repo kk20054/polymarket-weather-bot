@@ -109,7 +109,7 @@
   - production-refresh 仍不会自动构建 hourly consensus，需显式运行 `hourly-consensus-build`，符合“不自动抓取/不自动扫描”的启动约束。
 - 下一步：
   - 进入 Layer 5：`market_buckets`，把 Polymarket outcome/token/orderbook metadata 与城市/日期/温度桶严格匹配，记录 tick size、orderMinSize、negRisk、token id、bucket boundary 和 strict matching status。
-- 相关提交：待提交；提交后回填 hash。
+- 相关提交：`96fe9e6 Add hourly consensus data layer`；随后 ledger-hash 回填提交记录本行。
 
 ### 2026-07-01：Layer 3 forecast_runs / forecast_members 预报层生产化
 
