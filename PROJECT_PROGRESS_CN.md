@@ -76,6 +76,42 @@
 
 ## 近期进度记录
 
+### 2026-07-01：Layer 1 stations 站点基座落库
+
+- 目标：按 `AGENTS.md` Build Order 进入 Layer 1，只补 `stations` 站点基座：SQLite schema、registry collector、测试和 API surface；不触碰右侧执行台、不启动自动抓取、不做实盘。
+- Build Order layer：Layer 1 — `stations` table for target cities。
+- Layer 0 前置核验：
+  - 复核 `audits/polywx-firecrawl-2026-07-01/MANIFEST.json`：`five_tabs=true`、`hourly_chart=true`、`xhr_response_bodies=true`、`api_endpoints=true`、`files=17`、XHR scrape id `019f1db5-1419-77d7-b55c-297ac1227be9`。
+  - 结论：本轮无需重复 Firecrawl，可复用现有代表性 PolyWX rendered/XHR corpus。
+- 改动：
+  - `weatherbot_v3/db.py` 新增 `stations` 表，字段包括 `city_key`、`city_name`、`station_id`、`icao_id`、`wmo_id`、provider ids、station name、timezone、unit、lat/lon、region、settlement rule text、primary settlement source、nearby networks、confidence、verification status、registry version、raw JSON、updated_at。
+  - 新增 `weatherbot_v3/stations.py`，作为 Layer 1 collector：把 `SETTLEMENT_REGISTRY` 同步进 SQLite，提供 `sync_station_registry()`、`list_stations()`、`get_station()` 和 `station_row_from_profile()`。
+  - `weatherbot_v3/qualification.py` 新增 `stations` readiness stage；当前 20 个站点行、ICAO/timezone/unit/station_id 完整时该 stage ready；`wmo_id_missing=20` 作为 metrics 暴露，不伪造 WMO 号。
+  - `weatherbot_v3/cli.py` 新增 `stations-sync`、`stations-list`；`weatherbot_v3/README_CN.md` 初始化流程加入 `stations-sync`。
+  - `dashboard_server.py` 新增 `GET /api/stations`，支持 `city`、`region` 和 `sync_registry` 参数。
+  - `tests/test_v3_core.py` 新增 Layer 1 测试：站点同步落库、station row parser、`/api/stations` API、data readiness stations stage。
+  - `AGENTS.md` 保留原 PolyWX contract 测试关键词，避免文档结构整理导致合约测试无意义失败。
+- 验证：
+  - Targeted tests：4 个新增/相关 `tests.test_v3_core` 测试通过；2 个 `tests.test_polywx_contract` 文档合约测试通过。
+  - `python -m unittest tests.test_v3_core` 通过：91 tests OK；仍有既有 sqlite `ResourceWarning: unclosed database` 噪音。
+  - `python -m unittest tests.test_polywx_contract` 通过：7 tests OK。
+  - `npm run build` 通过；仍有既有 Browserslist 过期和 chunk size warning。
+  - `/api/dashboard` runtime check：当前 8765 约 `243ms` 返回；`scanner_status=stopped`、`is_running=false`、`production_running=false`、`auto_refresh_running=false`、`last_refresh_was_auto=false`。
+  - 当前 8765 `/api/stations` 返回 404，因为正在运行的是旧后端进程，尚未重启加载新路由。
+  - 临时启动新后端 `127.0.0.1:8766` 验证新代码：`/api/dashboard` OK，未启动扫描/自动刷新；`/api/stations?city=chicago` 返回 `KORD`、`America/Chicago`、`sync_synced=20`，验证后已关闭临时进程。
+  - CLI 验证：`python -m weatherbot_v3.cli stations-sync` 返回 `synced=20`、`total=20`，`stations` stage `ready`，regions 分布为 `asia=6`、`ca=1`、`eu=4`、`oc=1`、`sa=2`、`us=6`。
+- 当前可用性结论：
+  - Layer 1 站点基座已可用：站点注册表现在有 SQLite 主表、CLI 同步和 API 读取面。
+  - 这提升了后续 METAR、mesonet、forecast、truth、market bucket 的统一站点来源，减少 UI/算法各自猜站点的问题。
+  - 当前仍不能证明策略可赚钱，也不能解锁实盘；它只是把数据基座第一层钉稳。
+- 剩余阻塞：
+  - WMO id 尚未补权威映射，当前不伪造，作为 metrics 暴露。
+  - Layer 2 `metar_reports` / `mesonet_observations` 虽已有部分表和函数，但还需要按 Build Order 做 parser/collector/source URL/parse warnings 的完整生产验收。
+  - 当前 8765 需要手动重启后端才能暴露 `/api/stations` 新路由。
+- 下一步：
+  - 进入 Layer 2：补 METAR/SPECI 与 mesonet observations 的 parser/collector 测试和 API surface，优先保证 raw report、decoded fields、source URL、parser version、parse warnings 可复盘。
+- 相关提交：待本轮提交后回填。
+
 ### 2026-07-01：进度治理修复与 Layer 0 证据状态校准
 
 - 目标：回应“每轮工作没有稳定记录、Firecrawl 重复抓取、项目推进不透明”的问题，把记录规则写死到 `AGENTS.md`，并校准当前 PolyWX corpus 的真实状态。

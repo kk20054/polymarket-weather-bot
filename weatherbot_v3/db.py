@@ -116,6 +116,30 @@ def init_v3_db(path: Path | None = None) -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS stations (
+                city_key TEXT PRIMARY KEY,
+                city_name TEXT NOT NULL,
+                station_id TEXT NOT NULL,
+                icao_id TEXT,
+                wmo_id TEXT,
+                provider_station_ids_json TEXT,
+                station_name TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                unit TEXT NOT NULL,
+                latitude REAL,
+                longitude REAL,
+                region TEXT,
+                expected_metric TEXT,
+                settlement_rule_text TEXT,
+                primary_settlement_source TEXT,
+                nearby_observation_networks_json TEXT,
+                confidence REAL,
+                verification_status TEXT,
+                registry_version TEXT,
+                raw_json TEXT,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS ai_reviews (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 signal_id INTEGER,
@@ -561,6 +585,18 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "source_url": "TEXT",
             "raw_response_hash": "TEXT",
         },
+        "stations": {
+            "icao_id": "TEXT",
+            "wmo_id": "TEXT",
+            "provider_station_ids_json": "TEXT",
+            "expected_metric": "TEXT",
+            "settlement_rule_text": "TEXT",
+            "primary_settlement_source": "TEXT",
+            "nearby_observation_networks_json": "TEXT",
+            "confidence": "REAL",
+            "verification_status": "TEXT",
+            "registry_version": "TEXT",
+        },
     }
     for table, columns in ensure.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -581,6 +617,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_orderbooks_snapshot_key ON orderbooks(snapshot_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_stations_station_id ON stations(station_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_stations_region ON stations(region)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_metar_reports_city_time ON metar_reports(city, report_time)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_metar_reports_station_time ON metar_reports(station_id, report_time)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_mesonet_observations_city_time ON mesonet_observations(city, observed_at)")
@@ -2179,6 +2217,7 @@ def dashboard_summary() -> dict[str, Any]:
             "paper_orders": count("SELECT COUNT(*) FROM paper_orders"),
             "live_orders": count("SELECT COUNT(*) FROM live_orders"),
             "live_open_orders": count("SELECT COUNT(*) FROM live_orders WHERE status IN ('dry_run', 'submitted', 'open')"),
+            "stations": count("SELECT COUNT(*) FROM stations"),
             "risk_events": count("SELECT COUNT(*) FROM risk_events"),
             "notifications": count("SELECT COUNT(*) FROM notifications"),
             "metar_reports": count("SELECT COUNT(*) FROM metar_reports"),

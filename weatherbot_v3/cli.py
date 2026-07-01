@@ -12,6 +12,7 @@ from .migration import audit_market_files, migrate_legacy_signals, repair_truth_
 from .model_dataset import build_model_dataset_audit, is_settlement_pending
 from .notifier import FeishuNotifier
 from .qualification import build_data_readiness, persist_data_readiness
+from .stations import list_stations, sync_station_registry
 from .validation import build_production_validation_report
 
 
@@ -365,6 +366,8 @@ def main() -> None:
             "notify-daily",
             "production-refresh",
             "production-validation",
+            "stations-sync",
+            "stations-list",
             "data-readiness",
             "model-dataset-audit",
             "forecast-backfill",
@@ -427,6 +430,23 @@ def main() -> None:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "production-validation":
         payload = build_production_validation_report(include_action_targets=args.include_targets)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.command == "stations-sync":
+        payload = sync_station_registry()
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        payload["stations_stage"] = next(
+            (stage for stage in readiness["stages"] if stage["key"] == "stations"),
+            None,
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.command == "stations-list":
+        sync_station_registry()
+        stations = list_stations()
+        payload = {
+            "stations": stations,
+            "count": len(stations),
+        }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "data-readiness":
         payload = build_data_readiness()

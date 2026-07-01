@@ -50,6 +50,7 @@ from weatherbot_v3.polymarket import PolymarketDataClient
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
+from weatherbot_v3.stations import list_stations, sync_station_registry
 from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.cli import run_production_refresh
 from weatherbot_v3.validation import build_production_validation_report
@@ -3818,6 +3819,18 @@ async def data_readiness():
     persist_data_readiness(payload)
     _clear_production_validation_cache()
     return payload
+
+
+@app.get("/api/stations")
+async def stations(region: str = "", city: str = "", sync_registry: bool = True):
+    sync_result = sync_station_registry() if sync_registry else None
+    rows = list_stations(region=region, city=city)
+    return {
+        "ok": True,
+        "sync": sync_result,
+        "count": len(rows),
+        "stations": rows,
+    }
 
 
 @app.get("/api/production-validation")

@@ -73,7 +73,7 @@ Before any dashboard, schema, or "align with PolyWX" task, verify a fresh PolyWX
 
 1. `firecrawl_map` on `https://polywx.xyz` to enumerate reachable routes and query-parameter permutations. Save raw output.
 2. `firecrawl_search` for module-level keywords: `Forecast`, `METAR`, `Historical`, `Diff Stats`, `Fetch Log`, `Hourly Temperature`, `Daily Max Prediction`, `Probability buckets`.
-3. `firecrawl_scrape` with JavaScript rendering for each of the five tabs and the hourly chart. Capture rendered DOM, visible network calls, and inline JSON when available.
+3. Use a schema-scoped `firecrawl_scrape` with JavaScript rendering for each of the five tabs and the hourly chart. Capture rendered DOM, visible network calls, and inline JSON when available.
 4. For at least 3 cities x 3 dates, scrape city/date URLs and store outputs under `audits/polywx-firecrawl-<YYYY-MM-DD>/<city>/<date>/`.
 5. Write `MANIFEST.json` with crawl start/end time, Firecrawl ids, sha256 file list, discovered API endpoints, JS-rendered/static status, unresolved gaps, and per-tab coverage counts.
 6. Write `SCHEMA_MAP_CN.md` mapping each PolyWX field to a WeatherBot SQLite column and dashboard component.
@@ -88,7 +88,7 @@ Use external repositories as design inputs, not code to copy blindly. Every borr
 
 - `punkpeye/awesome-mcp-servers`: discovery index for research and data-acquisition tools. MCPs are supporting adapters, not core trading dependencies. Firecrawl is allowed for PolyWX/GitHub/source research; production decisions must still use typed collectors and persisted database rows. Layer 0 only.
 - `python-metar/python-metar`: METAR/SPECI decoding model. Store raw report plus decoded temperature, dew point, wind, gust, visibility, cloud layers, altimeter/pressure, precipitation, sea-level pressure, peak wind, station id, report time, source URL, parser version, and parse warnings. Layer 2.
-- `Polymarket/*`: official market and CLOB references define execution boundaries. Keep order creation behind a `PolymarketExecutor` adapter with token id, tick size, `negRisk`, `orderMinSize`, best bid/ask, book timestamp, allowance/balance state, idempotency key, and exact API response. Layer 5 boundary plus Layer 8 execution.
+- `Polymarket/*`: official market and CLOB references define execution boundaries. Keep order creation behind a `PolymarketExecutor` adapter with token id, tick size, `negRisk`, `orderMinSize`, best bid/ask, book timestamp, allowance/balance state, idempotency key, and exact API response. First production shape remains BUY YES limit-only GTC/dry-run/canary. Layer 5 boundary plus Layer 8 execution.
 - `yangyuan-zhen/PolyWeather`: borrow the city terminal shape, observation-driven chart updates, aviation METAR/TAF, nearby official network layers, DEB/hourly consensus, full bucket distribution, strict market-bucket matching, SSE/event replay, health endpoints, and public/private trading boundary. Layers 4-7.
 - PolyWX corpus: dashboard visual evidence and signal evidence surface. Layers 6-7.
 
@@ -153,14 +153,14 @@ Use external repositories as design inputs, not code to copy blindly. Every borr
 - Empty states should show what is missing and which manual action can refresh it. Do not trigger automatic scans because a panel is empty.
 - Desktop and mobile layouts must avoid horizontal overflow. Left, center, and right columns should scroll independently on desktop.
 
-## PolyWX Theme Contract
+## PolyWX Workbench Theme Contract
 
 - Support both PolyWX-style light and dark modes. Persist the user's theme choice locally.
 - Light style: `#FFFFFF` page/panel backgrounds, `#111827` primary text, `border-gray-200` borders, restrained gray secondary text.
-- Dark style: `#161A22` page background, `#1B212C` panels, `#222A37` raised/input surfaces, `#2C3445` borders, `#CBD2DC` primary text, `#7D8694` secondary text, `#2563EB` accent.
+- Dark style: align with Firecrawl-extracted PolyWX branding: `#161A22` page background, `#1B212C` panels, `#222A37` raised/input surfaces, `#2C3445` borders, `#CBD2DC` primary text, `#7D8694` secondary text, `#2563EB` accent.
 - Avoid decorative gradients, heavy chrome, and high-saturation panels unless a specific data state requires them.
 - Use straight edges. Containers, buttons, tabs, inputs, tables, and cards should be `rounded-none` or equivalent.
-- Top filter bar exposes city switching, continent filtering, and previous/next/today date controls.
+- Top filter bar exposes City switching, Continent filtering, and a date switcher with previous/next/today controls.
 - City workbench tabs are exactly: `预报`, `METAR`, `历史`, `偏差统计`, `抓取日志`.
 - Hourly chart target: Recharts `ResponsiveContainer`, 24-hour chart from `00:00` to `23:00`, METAR/real observation solid line, model forecast dashed line, residual bars near the bottom.
 - Tables use standard HTML tables with horizontal scrolling for wide schemas.

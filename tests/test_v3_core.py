@@ -17,6 +17,7 @@ from weatherbot_v3.hourly import build_metar_hourly_consensus, forecast_hourly_p
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
+from weatherbot_v3.stations import list_stations, station_row_from_profile, sync_station_registry
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.metar import fetch_awc_metars, refresh_metar_reports
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
@@ -24,6 +25,7 @@ from weatherbot_v3.validation import _compact_action, build_production_validatio
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import default_orderbook_start_date, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
+from dashboard_server import stations as stations_api
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timedelta, timezone
 
@@ -775,6 +777,49 @@ class V3CoreTests(unittest.TestCase):
             self.assertNotEqual(profile.timezone, "UTC")
             self.assertIn(profile.unit, {"F", "C"})
 
+    def test_station_registry_sync_persists_layer1_station_rows(self):
+        db_path = test_db_path("stations_registry")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            result = sync_station_registry(db_path)
+            rows = list_stations(db_path)
+            summary = dashboard_summary()
+
+        chicago = next(row for row in rows if row["city_key"] == "chicago")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["synced"], 20)
+        self.assertEqual(len(rows), 20)
+        self.assertEqual(summary["stations"], 20)
+        self.assertEqual(chicago["station_id"], "KORD")
+        self.assertEqual(chicago["icao_id"], "KORD")
+        self.assertEqual(chicago["timezone"], "America/Chicago")
+        self.assertEqual(chicago["provider_station_ids"]["aviationweather"], "KORD")
+        self.assertIn("METAR", chicago["nearby_observation_networks"])
+        self.assertIn("requires rule/source verification", chicago["settlement_rule_text"])
+
+    def test_station_row_parser_keeps_wmo_field_without_fabricating_ids(self):
+        row = station_row_from_profile(SETTLEMENT_REGISTRY["tokyo"])
+        provider_ids = json.loads(row["provider_station_ids_json"])
+        networks = json.loads(row["nearby_observation_networks_json"])
+
+        self.assertEqual(row["station_id"], "RJTT")
+        self.assertEqual(row["icao_id"], "RJTT")
+        self.assertEqual(row["wmo_id"], "")
+        self.assertEqual(provider_ids["metar"], "RJTT")
+        self.assertIn("AviationWeather", networks)
+
+    def test_stations_api_exposes_layer1_station_surface(self):
+        db_path = test_db_path("stations_api")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            payload = asyncio.run(stations_api(city="chicago", sync_registry=True))
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["stations"][0]["city_key"], "chicago")
+        self.assertEqual(payload["stations"][0]["station_id"], "KORD")
+        self.assertEqual(payload["sync"]["synced"], 20)
+
     def test_settlement_rule_infers_station_and_wunderground_confidence(self):
         rule = infer_settlement_rule(
             {
@@ -866,7 +911,11 @@ class V3CoreTests(unittest.TestCase):
             upsert_settlement_contracts([settlement_contract_from_rule(rule)])
             readiness = build_data_readiness(db_path)
         self.assertFalse(readiness["live_allowed"])
+        stations_stage = next(stage for stage in readiness["stages"] if stage["key"] == "stations")
+        self.assertEqual(stations_stage["status"], "ready")
+        self.assertEqual(stations_stage["metrics"]["stations"], 20)
         self.assertEqual(readiness["summary"]["market_rules"], 1)
+        self.assertEqual(readiness["summary"]["station_rows"], 20)
         self.assertEqual(readiness["production_phase"]["id"], "phase1_5")
         blocker_codes = {item["code"] for item in readiness["blockers"]}
         self.assertIn("settlement_rule_not_manually_verified", blocker_codes)

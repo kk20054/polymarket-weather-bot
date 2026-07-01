@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .config import load_config
 from .db import connect, init_v3_db
 from .registry import REGISTRY_VERSION, SETTLEMENT_REGISTRY
+from .stations import list_stations, sync_station_registry
 
 
 AUDIT_VERSION = "data-readiness-v1"
@@ -25,6 +26,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     init_v3_db(path)
     cfg = load_config()
     now = datetime.now(timezone.utc)
+    station_sync = sync_station_registry(path)
+    station_rows = list_stations(path)
     with connect(path) as conn:
         rules = [dict(row) for row in conn.execute("SELECT * FROM market_rules").fetchall()]
         contracts = [dict(row) for row in conn.execute("SELECT * FROM settlement_contracts").fetchall()]
@@ -67,7 +70,9 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         runs_by_city[str(row.get("city") or "")].append(row)
 
     city_rows = []
-    for city, profile in SETTLEMENT_REGISTRY.items():
+    stations_by_city = {str(row.get("city_key") or row.get("city") or ""): row for row in station_rows}
+    for city, station_row in stations_by_city.items():
+        profile = SETTLEMENT_REGISTRY.get(city)
         city_rules = rules_by_city.get(city, [])
         city_contracts = contracts_by_city.get(city, [])
         city_truth = truths_by_city.get(city, [])
@@ -87,11 +92,11 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         providers = Counter(str(row.get("provider") or "unknown") for row in city_truth)
         station_mismatch = sum(
             1 for row in city_contracts
-            if str(row.get("station_id") or "").upper() != profile.station_id
+            if str(row.get("station_id") or "").upper() != str(station_row.get("station_id") or "").upper()
         )
         timezone_mismatch = sum(
             1 for row in city_contracts
-            if str(row.get("timezone") or "") != profile.timezone
+            if str(row.get("timezone") or "") != str(station_row.get("timezone") or "")
         )
         verified_rules = sum(1 for row in city_contracts if row.get("manual_verified_at"))
         auto_verified_rules = sum(1 for row in city_contracts if row.get("auto_verified_at"))
@@ -111,7 +116,13 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         elif not fresh_city_runs:
             reasons.append("forecast_runs_stale")
         city_rows.append({
-            **profile.to_dict(),
+            **station_row,
+            "city": city,
+            "expected_resolution_provider": (
+                profile.expected_resolution_provider
+                if profile
+                else station_row.get("primary_settlement_source")
+            ),
             "market_rules": len(city_rules),
             "settlement_contracts": len(city_contracts),
             "verified_rules": verified_rules,
@@ -155,6 +166,14 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     fresh_forecast_cities = {str(row.get("city") or "") for row in fresh_forecast_runs}
     fresh_training_runs = [row for row in fresh_forecast_runs if row.get("training_eligible")]
     fresh_training_cities = {str(row.get("city") or "") for row in fresh_training_runs}
+    expected_station_cities = len(SETTLEMENT_REGISTRY)
+    station_city_keys = {str(row.get("city_key") or row.get("city") or "") for row in station_rows}
+    missing_station_rows = max(0, expected_station_cities - len(station_city_keys))
+    station_id_missing = sum(1 for row in station_rows if not row.get("station_id"))
+    icao_missing = sum(1 for row in station_rows if not row.get("icao_id"))
+    timezone_missing = sum(1 for row in station_rows if not row.get("timezone"))
+    unit_missing = sum(1 for row in station_rows if row.get("unit") not in {"F", "C"})
+    wmo_missing = sum(1 for row in station_rows if not row.get("wmo_id"))
     utc_rules = sum(1 for row in contracts if str(row.get("timezone") or "") == "UTC")
     unverified_rules = sum(1 for row in contracts if not row.get("manual_verified_at"))
     auto_verified_rules = sum(1 for row in contracts if row.get("auto_verified_at"))
@@ -183,6 +202,33 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     fresh_clob_gap = max(0, cfg.min_fresh_clob_orderbooks - len(fresh_clob_with_depth_orderbooks))
 
     stages = [
+        _stage(
+            "stations",
+            "站点基座",
+            (
+                len(station_city_keys) >= expected_station_cities
+                and missing_station_rows == 0
+                and station_id_missing == 0
+                and icao_missing == 0
+                and timezone_missing == 0
+                and unit_missing == 0
+            ),
+            [
+                ("station_rows_missing", missing_station_rows),
+                ("station_id_missing", station_id_missing),
+                ("icao_id_missing", icao_missing),
+                ("timezone_missing", timezone_missing),
+                ("unit_missing", unit_missing),
+            ],
+            {
+                "expected_cities": expected_station_cities,
+                "stations": len(station_rows),
+                "regions": dict(Counter(str(row.get("region") or "unknown") for row in station_rows)),
+                "wmo_id_missing": wmo_missing,
+                "registry_version": REGISTRY_VERSION,
+                "sync": station_sync,
+            },
+        ),
         _stage(
             "settlement_contracts",
             "结算合同",
@@ -239,7 +285,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             (
                 len(forecast_runs) > 0
                 and forecast_member_count > 0
-                and len(fresh_training_cities) == len(SETTLEMENT_REGISTRY)
+                and len(fresh_training_cities) == len(station_rows)
                 and forecast_source_counts.get("ecmwf", 0) > 0
                 and forecast_source_counts.get("gfs_ensemble", 0) > 0
             ),
@@ -248,7 +294,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 ("forecast_members_missing", 1 if forecast_member_count == 0 else 0),
                 (
                     "forecast_city_coverage_incomplete",
-                    max(0, len(SETTLEMENT_REGISTRY) - len(fresh_training_cities)),
+                    max(0, len(station_rows) - len(fresh_training_cities)),
                 ),
                 ("ecmwf_runs_missing", 1 if forecast_source_counts.get("ecmwf", 0) == 0 else 0),
                 ("gfs_ensemble_runs_missing", 1 if forecast_source_counts.get("gfs_ensemble", 0) == 0 else 0),
@@ -309,7 +355,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         "next_actions": next_actions,
         "cities": city_rows,
         "summary": {
-            "registered_cities": len(SETTLEMENT_REGISTRY),
+            "registered_cities": len(station_rows),
+            "station_rows": len(station_rows),
             "eligible_cities": sum(1 for row in city_rows if row["status"] == "eligible"),
             "market_rules": len(rules),
             "settlement_contracts": len(contracts),
