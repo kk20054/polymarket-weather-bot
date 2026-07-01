@@ -98,7 +98,7 @@
   - full-page screenshot/html 抓取非常慢，不适合逐页串行重跑。
   - Firecrawl search feedback 返回 `INVALID_BODY`，未成功提交反馈。
 - 下一步：先补 Layer 0 的网络响应捕获方案，可用 Firecrawl `interact` 或浏览器网络记录作辅助证据；补齐后再进入 Layer 1 `stations`。
-- 相关提交：待提交。
+- 相关提交：`969a106 Record PolyWX Firecrawl corpus status`。
 
 ### 2026-07-01：market bucket 执行摘要接入
 
