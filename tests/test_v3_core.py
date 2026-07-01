@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.db import bulk_settlement_contract_verification, connect, init_v3_db, insert_forecast_run, insert_orderbook, list_settlement_contracts, set_settlement_contract_verification, upsert_market_rule, upsert_market_rules, upsert_settlement_contracts
+from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_settlement_contracts, set_settlement_contract_verification, upsert_hourly_consensus, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
@@ -481,6 +481,82 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("data_qualification_audits", tables)
         self.assertIn("settlement_contracts", tables)
         self.assertIn("truth_observation_versions", tables)
+        self.assertIn("metar_reports", tables)
+        self.assertIn("mesonet_observations", tables)
+        self.assertIn("hourly_consensus", tables)
+
+    def test_weather_evidence_tables_upsert_and_summarize_polywx_core_sources(self):
+        db_path = test_db_path("weather_evidence_sources")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            metar_id = upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_type": "METAR",
+                "report_time": "2026-06-29T16:00:00",
+                "raw_text": "METAR KORD 292051Z 18014G25KT 10SM FEW042 SCT200 BKN250 33/23 A2988",
+                "temperature": 91.94,
+                "dew_point": 73.0,
+                "wind_direction": 180,
+                "wind_speed": 14,
+                "wind_gust": 25,
+                "visibility": 10,
+                "cloud_layers": [{"cover": "FEW", "base_ft": 4200}],
+                "altimeter": 29.88,
+                "parse_warnings": [],
+            })
+            same_metar_id = upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_type": "METAR",
+                "report_time": "2026-06-29T16:00:00",
+                "raw_text": "METAR KORD 292051Z 18014G25KT 10SM FEW042 SCT200 BKN250 33/23 A2988",
+                "temperature": 91.94,
+                "parse_status": "parsed",
+            })
+            mesonet_id = upsert_mesonet_observation({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "network": "pws",
+                "station_id": "KILROSEM4",
+                "station_name": "Rosemont PWS",
+                "observed_at": "2026-06-29T16:04:48",
+                "temperature": 90.2,
+                "humidity": 52,
+                "quality_flags": ["nearby_station"],
+            })
+            consensus_id = upsert_hourly_consensus({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "target_date": "2026-06-29",
+                "local_hour": "16:00",
+                "valid_time": "2026-06-29T16:00:00",
+                "station_id": "KORD",
+                "forecast_temp": 92.9,
+                "observed_temp": 91.94,
+                "observation_source": "metar",
+                "cloud_cover": 75,
+                "humidity": 50,
+                "source_count": 3,
+                "source_weights": {"metar": 0.6, "pws": 0.2, "forecast": 0.2},
+                "peak_marker": "observed_peak",
+            })
+            evidence = weather_evidence_summary("chicago", "2026-06-29")
+            summary = dashboard_summary()
+
+        self.assertGreater(metar_id, 0)
+        self.assertEqual(metar_id, same_metar_id)
+        self.assertGreater(mesonet_id, 0)
+        self.assertGreater(consensus_id, 0)
+        self.assertEqual(evidence["metar_reports"], 1)
+        self.assertEqual(evidence["mesonet_observations"], 1)
+        self.assertEqual(evidence["hourly_consensus"], 1)
+        self.assertAlmostEqual(evidence["latest_hourly_consensus"][0]["residual"], -0.96, places=2)
+        self.assertEqual(summary["metar_reports"], 1)
+        self.assertEqual(summary["mesonet_observations"], 1)
+        self.assertEqual(summary["hourly_consensus"], 1)
 
     def test_settlement_registry_has_station_and_timezone_for_all_cities(self):
         self.assertEqual(len(SETTLEMENT_REGISTRY), 20)

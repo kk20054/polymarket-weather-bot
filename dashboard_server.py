@@ -3114,9 +3114,13 @@ def _minimal_dashboard_payload(reason: str = "cache_warming"):
         "scanner_status": "running" if _bot_running() else "stopped",
         "auto_simulation": _auto_simulation_state(),
     }
+    try:
+        v3_summary = v3_dashboard_summary()
+    except Exception as exc:
+        v3_summary = {"error": str(exc)}
     return {
         "stats": stats,
-        "v3": {},
+        "v3": v3_summary,
         "data_readiness": None,
         "production_refresh": _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None)),
         "model_dataset_audit": None,
