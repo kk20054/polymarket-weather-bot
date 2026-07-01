@@ -29,6 +29,15 @@ Do not claim or imply that the bot can reliably make money until the paper-tradi
 - If a future turn creates a real reference corpus, it should include at minimum: fixed city/date sample list, rendered DOM snapshots, screenshots, discovered static assets, visible network/API responses, Firecrawl job ids, and a `MANIFEST.json` with counts and timestamps.
 - Keep all PolyWX reference corpus files under `audits/`; they are local research artifacts and must not be committed to GitHub.
 
+## Progress Ledger
+
+- `PROJECT_PROGRESS_CN.md` is the authoritative human-readable progress ledger.
+- At the end of every non-trivial development, research, Firecrawl, UI, data, algorithm, test, or deployment turn, update `PROJECT_PROGRESS_CN.md` before the final response.
+- Each entry must state: goal, concrete changes, verification run, current usability conclusion, remaining blockers, next step, and commit hash if one exists.
+- Do not rely on chat history, context summaries, or `audits/` folders as the only record of progress. They may help, but they are not the project ledger.
+- If a turn uses Firecrawl, record what was actually fetched, job ids if available, what failed, and whether the result changed architecture or code. Avoid repeating the same crawl unless the ledger shows a new question that requires it.
+- When the user asks "where are we" or "can I use it", answer from `PROJECT_PROGRESS_CN.md` plus current runtime evidence, not from memory.
+
 ## Reference Fusion Architecture
 
 Use these external repositories as design inputs, not as code to copy blindly. Every borrowed idea must be mapped into WeatherBot's data, audit, paper-trading, and risk-control model.
