@@ -91,7 +91,7 @@
   - `npm run build` 通过；仍有既有 Browserslist/chunk size warning。
 - 结论：概率桶现在更接近 PolyWX 的“城市/日期证据模块”，但仍需要更多真实分布样本和盘口回放来证明策略收益。
 - 下一步：补 market bucket 严格匹配和盘口回放，让 probability summary 不只是展示概率，还能解释“为什么可以买/为什么不能买”。
-- 相关提交：`c60de8f Surface probability bucket evidence summary`。
+- 相关提交：`2314323 Surface probability bucket evidence summary`。
 
 ### 2026-07-01：建立进度台账和每轮记录规则
 
