@@ -76,6 +76,30 @@
 
 ## 近期进度记录
 
+### 2026-07-01：Layer 0 PolyWX Firecrawl corpus 重新生成
+
+- 目标：按 AGENTS.md 的 Build Order 先补 Layer 0，确认 `audits/polywx-firecrawl-2026-07-01/` 是否存在；不存在则先用 Firecrawl 生成语料，停止在 Layer 0，不触碰上层 schema/API/UI。
+- Build Order layer：Layer 0 — PolyWX reference corpus (Firecrawl)。
+- 改动：
+  - 新增本地研究目录 `audits/polywx-firecrawl-2026-07-01/`（按规则不提交 GitHub）。
+  - Firecrawl `map`：`https://polywx.xyz`，发现 6 个公开入口，确认 PolyWX 是 query-param SPA。
+  - Firecrawl `search`：关键词 `Forecast / METAR / Historical / Diff Stats / Fetch Log / Hourly Temperature / Daily Max Prediction / Probability buckets`，只返回首页；feedback 调用失败，Firecrawl 返回 `INVALID_BODY`。
+  - Firecrawl `scrape`：完成 3 城市 × 3 日期样本矩阵：`chicago-kord`、`tokyo-rjtt`、`atlanta-katl` × `2026-07-01`、`2026-06-30`、`2026-06-24`。
+  - 生成 `MANIFEST.json`、`SCHEMA_MAP_CN.md`、`firecrawl_map_raw.json`、`firecrawl_search_raw.json` 和每页 `structure.json`。
+  - 下载 2 张 Firecrawl screenshot 到本地；其余页面为 JSON-only，因为 full screenshot scrape 单页耗时最高超过 10 分钟。
+- 验证：
+  - Manifest check：`captured_pages=9`、`js_rendered_pages=9`、`five_tabs=true`、`hourly_chart=true`、`schema_map_exists=true`、`pages_with_screenshot=2`、`xhr_response_bodies=false`。
+  - `python -m unittest tests.test_v3_core` 通过；仍有既有 sqlite `ResourceWarning` 噪音。
+  - `npm run build` 通过；仍有既有 Browserslist 和 chunk size warning。
+  - 重启本地后端后 `/api/dashboard` 约 `177ms`；`scanner_status=stopped`、`is_running=false`、`production_running=false`、`auto_refresh_running=false`、`last_refresh_was_auto=false`。
+- 当前可用性结论：Layer 0 现在有一个可审计的 PolyWX 信息架构参考 corpus，可用于后续讨论字段映射；但它不是 AGENTS 定义的完全有效 corpus，因为缺少每个 tab 至少一个 XHR response body，不能作为继续 Layer 1+ 的完全解锁依据。
+- 剩余阻塞：
+  - Firecrawl MCP `scrape` 没有直接返回 XHR response body。
+  - full-page screenshot/html 抓取非常慢，不适合逐页串行重跑。
+  - Firecrawl search feedback 返回 `INVALID_BODY`，未成功提交反馈。
+- 下一步：先补 Layer 0 的网络响应捕获方案，可用 Firecrawl `interact` 或浏览器网络记录作辅助证据；补齐后再进入 Layer 1 `stations`。
+- 相关提交：待提交。
+
 ### 2026-07-01：market bucket 执行摘要接入
 
 - 目标：把“概率分桶看起来有 edge”进一步落到“盘口桶是否严格匹配、paper/live 为什么允许或阻塞”的城市/日期 evidence 摘要，减少只看 EV 或柱状图的误判。
