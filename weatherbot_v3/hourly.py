@@ -168,6 +168,75 @@ def build_metar_hourly_consensus(
     }
 
 
+def hourly_consensus_points(
+    targets: dict[str, set[str]] | None = None,
+    db_path: Path | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Read persisted hourly consensus rows in the dashboard point shape."""
+    init_v3_db(db_path)
+    normalized_targets = {
+        str(city or "").strip().lower(): {str(date) for date in dates if date}
+        for city, dates in (targets or {}).items()
+        if city
+    }
+    with connect(db_path) as conn:
+        where: list[str] = []
+        params: list[Any] = []
+        if normalized_targets:
+            cities = sorted(normalized_targets)
+            dates = sorted({date for dates_for_city in normalized_targets.values() for date in dates_for_city})
+            where.append(f"city IN ({','.join('?' for _ in cities)})")
+            where.append(f"target_date IN ({','.join('?' for _ in dates)})")
+            params.extend(cities)
+            params.extend(dates)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM hourly_consensus
+                {clause}
+                ORDER BY city, target_date, local_hour, valid_time
+                """,
+                params,
+            ).fetchall()
+        ]
+
+    by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        city = str(row.get("city") or "").strip().lower()
+        target_date = str(row.get("target_date") or "")
+        if not city or not target_date:
+            continue
+        if normalized_targets and target_date not in normalized_targets.get(city, set()):
+            continue
+        forecast_temp = _float(row.get("forecast_temp"))
+        observed_temp = _float(row.get("observed_temp"))
+        residual = _float(row.get("residual"))
+        by_city[city].append({
+            "timestamp": row.get("valid_time") or row.get("local_hour") or "",
+            "target_date": target_date,
+            "local_hour": row.get("local_hour"),
+            "best": forecast_temp,
+            "ensemble_mean": forecast_temp,
+            "metar": observed_temp,
+            "humidity": _float(row.get("humidity")),
+            "cloud_cover": _float(row.get("cloud_cover")),
+            "diff": residual,
+            "source": row.get("observation_source") or "hourly_consensus",
+            "member_count": int(row.get("source_count") or 0),
+            "station_id": row.get("station_id"),
+            "peak_marker": row.get("peak_marker"),
+            "hourly_consensus": True,
+        })
+
+    return {
+        city: sorted(points, key=lambda point: str(point.get("timestamp") or ""))
+        for city, points in by_city.items()
+    }
+
+
 def forecast_hourly_points(
     targets: dict[str, set[str]] | None = None,
     db_path: Path | None = None,

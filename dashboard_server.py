@@ -41,7 +41,7 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
-from weatherbot_v3.hourly import forecast_hourly_points
+from weatherbot_v3.hourly import forecast_hourly_points, hourly_consensus_points
 from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.notifier import FeishuNotifier
@@ -2037,6 +2037,32 @@ def _build_temperature_fit(markets):
     }
 
 
+def _hourly_merge_key(point: dict) -> str:
+    target_date = str(point.get("target_date") or "")
+    local_hour = point.get("local_hour")
+    if not local_hour:
+        timestamp = str(point.get("timestamp") or "")
+        local_hour = timestamp[11:16] if len(timestamp) >= 16 and "T" in timestamp else timestamp
+    return f"{target_date}:{local_hour}"
+
+
+def _merge_hourly_points(forecast_points: list[dict], consensus_points: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for point in forecast_points:
+        merged[_hourly_merge_key(point)] = dict(point)
+    for point in consensus_points:
+        key = _hourly_merge_key(point)
+        base = merged.setdefault(key, {})
+        base.update({k: v for k, v in point.items() if v is not None or k not in base})
+        for field in ("best", "ensemble_mean", "ecmwf", "hrrr"):
+            if base.get(field) is None and key in merged:
+                base[field] = merged[key].get(field)
+    return sorted(
+        [point for point in merged.values() if point.get("target_date")],
+        key=lambda point: (str(point.get("target_date") or ""), str(point.get("timestamp") or point.get("local_hour") or "")),
+    )
+
+
 def _build_weather_city_series(markets):
     """Compact chart-friendly forecast history by city for the dashboard."""
     by_city = {}
@@ -2048,6 +2074,7 @@ def _build_weather_city_series(markets):
         if city_key and target_date:
             hourly_targets.setdefault(city_key, set()).add(target_date)
     hourly_cache = forecast_hourly_points(hourly_targets) if hourly_targets else {}
+    consensus_cache = hourly_consensus_points(hourly_targets) if hourly_targets else {}
     for market in markets:
         city_key = market.get("city") or ""
         if not city_key:
@@ -2060,7 +2087,10 @@ def _build_weather_city_series(markets):
             "unit": unit,
             "forecast_points": [],
             "history_points": list(history_cache.get(city_key) or []),
-            "hourly_points": list(hourly_cache.get(city_key) or []),
+            "hourly_points": _merge_hourly_points(
+                list(hourly_cache.get(city_key) or []),
+                list(consensus_cache.get(city_key) or []),
+            ),
             "humidity_status": "not_collected",
         })
         for snap in market.get("forecast_snapshots") or []:
@@ -2098,14 +2128,16 @@ def _build_weather_city_series(markets):
             deduped[f"{point.get('timestamp')}:{point.get('target_date')}"] = point
         points = list(deduped.values())[-80:]
         history_points = sorted(city.get("history_points") or [], key=lambda p: p.get("target_date") or "")[-120:]
-        if not points and not history_points:
+        hourly_points = sorted(city.get("hourly_points") or [], key=lambda p: p.get("timestamp") or "")[-120:]
+        if not points and not history_points and not hourly_points:
             continue
-        latest = points[-1] if points else {}
+        latest = points[-1] if points else (hourly_points[-1] if hourly_points else {})
         humidity_values = [p.get("humidity") for p in points if p.get("humidity") is not None]
+        humidity_values += [p.get("humidity") for p in hourly_points if p.get("humidity") is not None]
         humidity_values += [p.get("humidity_mean") for p in history_points if p.get("humidity_mean") is not None]
         city["forecast_points"] = points
         city["history_points"] = history_points
-        city["hourly_points"] = sorted(city.get("hourly_points") or [], key=lambda p: p.get("timestamp") or "")[-120:]
+        city["hourly_points"] = hourly_points
         city["points"] = points
         city["latest_best"] = latest.get("best")
         city["latest_metar"] = latest.get("metar")
