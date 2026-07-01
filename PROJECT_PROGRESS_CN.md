@@ -92,7 +92,7 @@
   - 本地 `/api/dashboard` 快速返回；`scanner_status=stopped`、`production_refresh.running=false`、`signal_count=0`，说明后端未误开自动抓取或自动模拟。
 - 结论：看板现在能更直接回答“为什么这个信号不能买/只能 paper/被 live gate 阻塞”，但当前本地运行态没有新信号样本，真实策略收益仍需后续盘口回放和 paper 样本验证。
 - 下一步：补 orderbook replay/成交可复现链路，让 paper buy/skip 不只看当前字段，而能按历史盘口快照重放。
-- 相关提交：待提交。
+- 相关提交：`b1022d3 Add market bucket evidence summary`。
 
 ### 2026-07-01：概率分桶 evidence summary 接入
 
