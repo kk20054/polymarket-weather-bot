@@ -110,7 +110,7 @@
   - 当前 8765 需要手动重启后端才能暴露 `/api/stations` 新路由。
 - 下一步：
   - 进入 Layer 2：补 METAR/SPECI 与 mesonet observations 的 parser/collector 测试和 API surface，优先保证 raw report、decoded fields、source URL、parser version、parse warnings 可复盘。
-- 相关提交：待本轮提交后回填。
+- 相关提交：`cfc85ae Add stations data foundation layer`；随后 ledger-hash 回填提交记录本行。
 
 ### 2026-07-01：进度治理修复与 Layer 0 证据状态校准
 
