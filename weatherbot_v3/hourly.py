@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import math
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from .db import connect, init_v3_db
+from .db import connect, init_v3_db, upsert_hourly_consensus
 from .forecast_archive import TEMPERATURE_KEYS
+from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 
 FIELD_KEYS = {
     "humidity": ("relative_humidity_2m", "humidity", "rh"),
@@ -42,6 +45,127 @@ WEATHER_CODE_LABELS = {
     82: "Heavy showers",
     95: "Thunderstorm",
 }
+
+
+def build_metar_hourly_consensus(
+    cities: list[str] | None = None,
+    target_date: str | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Aggregate persisted METAR reports into station-local hourly evidence rows."""
+    init_v3_db(db_path)
+    profiles = _select_profiles(cities)
+    if not profiles:
+        return {
+            "ok": False,
+            "reason": "no_supported_cities",
+            "requested_cities": cities or [],
+            "rows_built": 0,
+            "rows_upserted": 0,
+        }
+    station_to_profile = {profile.station_id.upper(): profile for profile in profiles}
+    with connect(db_path) as conn:
+        placeholders = ",".join("?" for _ in station_to_profile)
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM metar_reports
+                WHERE station_id IN ({placeholders})
+                ORDER BY station_id, report_time
+                """,
+                tuple(station_to_profile),
+            ).fetchall()
+        ]
+
+    buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
+    skipped = 0
+    for row in rows:
+        profile = station_to_profile.get(str(row.get("station_id") or "").upper())
+        if not profile:
+            skipped += 1
+            continue
+        report_dt = _parse_report_time(row.get("report_time"))
+        if not report_dt:
+            skipped += 1
+            continue
+        local_dt = report_dt.astimezone(ZoneInfo(profile.timezone))
+        local_date = local_dt.date().isoformat()
+        if target_date and local_date != str(target_date):
+            continue
+        temperature = _float(row.get("temperature"))
+        if temperature is None:
+            skipped += 1
+            continue
+        local_hour = f"{local_dt.hour:02d}:00"
+        key = (profile.city, local_date, local_hour)
+        bucket = buckets.setdefault(
+            key,
+            {
+                "profile": profile,
+                "target_date": local_date,
+                "local_hour": local_hour,
+                "valid_time": local_dt.replace(minute=0, second=0, microsecond=0).isoformat(),
+                "temperatures": [],
+                "dew_points": [],
+                "source_reports": [],
+                "latest_report_time": "",
+            },
+        )
+        bucket["temperatures"].append(temperature)
+        dew_point = _float(row.get("dew_point"))
+        if dew_point is not None:
+            bucket["dew_points"].append(dew_point)
+        bucket["source_reports"].append({
+            "id": row.get("id"),
+            "report_time": row.get("report_time"),
+            "temperature": temperature,
+            "raw_text": row.get("raw_text"),
+        })
+        if str(row.get("report_time") or "") > str(bucket.get("latest_report_time") or ""):
+            bucket["latest_report_time"] = str(row.get("report_time") or "")
+
+    upserted = 0
+    for (city, target, hour), bucket in sorted(buckets.items()):
+        profile = bucket["profile"]
+        temperatures = bucket["temperatures"]
+        observed_temp = max(temperatures) if temperatures else None
+        upsert_hourly_consensus({
+            "consensus_key": f"metar:{profile.station_id}:{target}:{hour}",
+            "city": city,
+            "city_name": profile.city_name,
+            "target_date": target,
+            "local_hour": hour,
+            "valid_time": bucket["valid_time"],
+            "station_id": profile.station_id,
+            "observed_temp": observed_temp,
+            "observation_source": "metar",
+            "source_count": len(temperatures),
+            "source_weights": {"metar": 1.0},
+            "peak_marker": "hourly_metar_max",
+            "raw_json": {
+                "builder": "metar_hourly_consensus_v1",
+                "unit": profile.unit,
+                "latest_report_time": bucket["latest_report_time"],
+                "sample_count": len(temperatures),
+                "dew_point_mean": _mean(bucket["dew_points"]),
+                "source_reports": bucket["source_reports"],
+            },
+        })
+        upserted += 1
+
+    return {
+        "ok": True,
+        "source": "metar_reports",
+        "cities": [profile.city for profile in profiles],
+        "stations": sorted(station_to_profile),
+        "target_date": target_date or "",
+        "reports_seen": len(rows),
+        "rows_built": len(buckets),
+        "rows_upserted": upserted,
+        "reports_skipped": skipped,
+    }
 
 
 def forecast_hourly_points(
@@ -248,6 +372,40 @@ def _float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _select_profiles(cities: list[str] | None) -> list[CitySettlementProfile]:
+    if not cities:
+        return list(SETTLEMENT_REGISTRY.values())
+    selected: list[CitySettlementProfile] = []
+    for city in cities:
+        key = str(city or "").strip().lower()
+        profile = SETTLEMENT_REGISTRY.get(key)
+        if profile:
+            selected.append(profile)
+    return selected
+
+
+def _parse_report_time(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        numeric = float(text)
+        if numeric > 10_000_000_000:
+            numeric /= 1000.0
+        return datetime.fromtimestamp(numeric, tz=timezone.utc)
+    except Exception:
+        pass
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _condition_label(item: dict[str, Any]) -> str | None:

@@ -13,7 +13,7 @@ from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payloa
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
-from weatherbot_v3.hourly import forecast_hourly_points
+from weatherbot_v3.hourly import build_metar_hourly_consensus, forecast_hourly_points
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
@@ -559,6 +559,72 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(summary["mesonet_observations"], 1)
         self.assertEqual(summary["hourly_consensus"], 1)
 
+    def test_metar_reports_build_station_local_hourly_consensus(self):
+        db_path = test_db_path("metar_hourly_consensus")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": "2026-06-29T21:20:00Z",
+                "raw_text": "METAR KORD 292120Z 19012KT 10SM 32/23 A2988",
+                "temperature": 89.6,
+                "dew_point": 73.4,
+            })
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": "2026-06-29T21:51:00Z",
+                "raw_text": "METAR KORD 292151Z 20017G26KT 10SM 33/23 A2987",
+                "temperature": 91.94,
+                "dew_point": 73.0,
+            })
+            result = build_metar_hourly_consensus(["chicago"], target_date="2026-06-29")
+            evidence = weather_evidence_summary("chicago", "2026-06-29")
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT * FROM hourly_consensus WHERE city = ? AND target_date = ? AND local_hour = ?",
+                    ("chicago", "2026-06-29", "16:00"),
+                ).fetchone()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reports_seen"], 2)
+        self.assertEqual(result["rows_built"], 1)
+        self.assertEqual(result["rows_upserted"], 1)
+        self.assertEqual(evidence["hourly_consensus"], 1)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["station_id"], "KORD")
+        self.assertEqual(row["observation_source"], "metar")
+        self.assertEqual(row["source_count"], 2)
+        self.assertIsNone(row["forecast_temp"])
+        self.assertIsNone(row["residual"])
+        self.assertAlmostEqual(row["observed_temp"], 91.94, places=2)
+        self.assertEqual(row["local_hour"], "16:00")
+
+    def test_metar_hourly_consensus_accepts_epoch_report_time(self):
+        db_path = test_db_path("metar_hourly_epoch")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": "1782874260",
+                "raw_text": "METAR KORD 010251Z 22010G20KT 10SM CLR 31/24 A2992",
+                "temperature": 87.08,
+            })
+            result = build_metar_hourly_consensus(["chicago"])
+            evidence = weather_evidence_summary("chicago", "2026-06-30")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reports_seen"], 1)
+        self.assertEqual(result["rows_built"], 1)
+        self.assertEqual(evidence["hourly_consensus"], 1)
+        self.assertEqual(evidence["latest_hourly_consensus"][0]["local_hour"], "21:00")
+        self.assertAlmostEqual(evidence["latest_hourly_consensus"][0]["observed_temp"], 87.08, places=2)
+
     def test_settlement_registry_has_station_and_timezone_for_all_cities(self):
         self.assertEqual(len(SETTLEMENT_REGISTRY), 20)
         for city, profile in SETTLEMENT_REGISTRY.items():
@@ -716,6 +782,7 @@ class V3CoreTests(unittest.TestCase):
         actions = {action["key"] for action in list_production_actions()}
         self.assertIn("refresh_clob_orderbooks", actions)
         self.assertIn("refresh_metar_reports", actions)
+        self.assertIn("build_hourly_consensus", actions)
         self.assertIn("backfill_official_truth", actions)
         self.assertIn("backfill_forecast_members", actions)
 
@@ -777,7 +844,7 @@ class V3CoreTests(unittest.TestCase):
                 return [
                     {
                         "stationId": "KORD",
-                        "obsTime": "2026-06-29T16:00:00Z",
+                        "obsTime": "1782874260",
                         "reportType": "METAR",
                         "rawOb": "METAR KORD 291600Z 18014KT 10SM 33/23 A2988",
                         "temp": 33,
@@ -805,6 +872,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(result["reports_upserted"], 1)
         self.assertEqual(evidence["metar_reports"], 1)
         self.assertEqual(evidence["latest_metar_reports"][0]["station_id"], "KORD")
+        self.assertIn("+00:00", evidence["latest_metar_reports"][0]["report_time"])
         self.assertAlmostEqual(evidence["latest_metar_reports"][0]["temperature"], 91.4, places=1)
 
     def test_production_action_executes_whitelisted_metar_refresh(self):
@@ -829,6 +897,29 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(result["status"], "executed")
         mocked_refresh.assert_called_once_with(cities=["chicago"], hours=48.0)
         self.assertEqual(result["payload"]["reports_upserted"], 2)
+
+    def test_production_action_executes_whitelisted_hourly_consensus_build(self):
+        with patch("weatherbot_v3.production_actions.build_metar_hourly_consensus") as mocked_build:
+            mocked_build.return_value = {"ok": True, "rows_upserted": 4}
+            with patch("weatherbot_v3.production_actions.build_data_readiness") as mocked_readiness:
+                mocked_readiness.return_value = {
+                    "status": "blocked",
+                    "score": 0.35,
+                    "live_allowed": False,
+                    "production_phase": {"blocked_keys": ["hourly_consensus"]},
+                }
+                with patch("weatherbot_v3.production_actions.persist_data_readiness"):
+                    result = run_production_action(
+                        "build_hourly_consensus",
+                        apply=True,
+                        cities=["chicago"],
+                        start_date="2026-06-29",
+                    )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "executed")
+        mocked_build.assert_called_once_with(cities=["chicago"], target_date="2026-06-29")
+        self.assertEqual(result["payload"]["rows_upserted"], 4)
 
     def test_production_action_requires_operator_confirmation_for_bulk_review(self):
         result = run_production_action(

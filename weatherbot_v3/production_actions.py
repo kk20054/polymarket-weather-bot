@@ -6,6 +6,7 @@ from typing import Any
 from .cli import run_forecast_backfill, run_orderbook_backfill, run_production_refresh, run_truth_backfill
 from .db import bulk_settlement_contract_verification
 from .forecast_archive import import_forecast_archive
+from .hourly import build_metar_hourly_consensus
 from .metar import refresh_metar_reports
 from .qualification import build_data_readiness, persist_data_readiness
 
@@ -26,6 +27,12 @@ ACTION_CATALOG: dict[str, dict[str, Any]] = {
     "refresh_metar_reports": {
         "label": "Refresh METAR reports",
         "description": "Fetch recent AviationWeather METAR/SPECI reports for registry airport stations.",
+        "requires_operator": False,
+        "mutates": True,
+    },
+    "build_hourly_consensus": {
+        "label": "Build hourly consensus",
+        "description": "Aggregate persisted METAR observations into PolyWX-style hourly evidence rows.",
         "requires_operator": False,
         "mutates": True,
     },
@@ -167,6 +174,11 @@ def _execute_action(action_key: str, params: dict[str, Any]) -> dict[str, Any]:
         return refresh_metar_reports(
             cities=params["cities"],
             hours=max(1.0, min(float(params["days"] or 1) * 24.0, 96.0)),
+        )
+    if action_key == "build_hourly_consensus":
+        return build_metar_hourly_consensus(
+            cities=params["cities"],
+            target_date=params["start_date"] or None,
         )
     if action_key == "production_refresh":
         return run_production_refresh(

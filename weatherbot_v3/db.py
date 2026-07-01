@@ -1630,10 +1630,10 @@ def upsert_hourly_consensus(row: dict[str, Any]) -> int:
         row.get("consensus_key")
         or _stable_key("hourly_consensus", city, target_date, local_hour, valid_time)
     )
-    forecast_temp = _num(row.get("forecast_temp"), 0.0)
-    observed_temp = _num(row.get("observed_temp"), 0.0)
+    forecast_temp = _nullable_num(row.get("forecast_temp"))
+    observed_temp = _nullable_num(row.get("observed_temp"))
     residual = row.get("residual")
-    if residual is None and (row.get("observed_temp") is not None and row.get("forecast_temp") is not None):
+    if residual is None and observed_temp is not None and forecast_temp is not None:
         residual = observed_temp - forecast_temp
     with connect() as conn:
         conn.execute(
@@ -1675,9 +1675,9 @@ def upsert_hourly_consensus(row: dict[str, Any]) -> int:
                 forecast_temp,
                 observed_temp,
                 row.get("observation_source"),
-                _num(row.get("humidity"), 0.0),
-                _num(row.get("cloud_cover"), 0.0),
-                _num(residual, 0.0),
+                _nullable_num(row.get("humidity")),
+                _nullable_num(row.get("cloud_cover")),
+                _nullable_num(residual),
                 int(row.get("source_count") or 0),
                 dump_json(row.get("source_weights", {})),
                 row.get("peak_marker"),
@@ -2107,3 +2107,12 @@ def _num(value: Any, default: float) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _nullable_num(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None

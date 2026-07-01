@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -105,7 +106,7 @@ def metar_report_from_awc(item: dict[str, Any], profile: CitySettlementProfile) 
         "city_name": profile.city_name,
         "station_id": profile.station_id,
         "report_type": item.get("reportType") or item.get("report_type") or "METAR",
-        "report_time": item.get("obsTime") or item.get("reportTime") or item.get("receiptTime") or "",
+        "report_time": _report_time(item),
         "raw_text": item.get("rawOb") or item.get("raw_text") or "",
         "temperature": _convert_temp(raw_temp_c, profile.unit),
         "dew_point": _convert_temp(raw_dew_c, profile.unit),
@@ -149,10 +150,38 @@ def _select_profiles(cities: list[str] | None) -> list[CitySettlementProfile]:
 
 def _report_key(item: dict[str, Any]) -> str:
     station_id = str(item.get("stationId") or item.get("icaoId") or "").upper()
-    observed_at = str(item.get("obsTime") or item.get("reportTime") or item.get("receiptTime") or "")
+    observed_at = _report_time(item)
     raw_text = str(item.get("rawOb") or "")
     raw_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()[:16]
     return f"awc:{station_id}:{observed_at}:{raw_hash}"
+
+
+def _report_time(item: dict[str, Any]) -> str:
+    raw = item.get("obsTime") or item.get("reportTime") or item.get("receiptTime") or ""
+    parsed = _parse_epoch_or_iso(raw)
+    return parsed.isoformat() if parsed else str(raw or "")
+
+
+def _parse_epoch_or_iso(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        numeric = float(text)
+        if numeric > 10_000_000_000:
+            numeric /= 1000.0
+        return datetime.fromtimestamp(numeric, tz=timezone.utc)
+    except Exception:
+        pass
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _convert_temp(value_c: float | None, unit: str) -> float | None:
