@@ -65,11 +65,25 @@ class V3CoreTests(unittest.TestCase):
             "id": 101,
             "market_id": "market-101",
             "actionable": True,
+            "limit_price": 0.34,
+            "bid_price": 0.31,
+            "spread": 0.03,
+            "probability_edge": 0.10,
+            "event_url": "https://polymarket.com/event/highest-temperature-in-chicago-on-june-29-2026",
+            "decision": {
+                "paper_allowed": True,
+                "live_allowed": False,
+                "reasons": [],
+                "cautions": ["spread_watch"],
+            },
+            "live_allowed": False,
+            "live_block_reasons": ["truth_independent_days_low"],
             "distribution": {
                 "normalized": True,
                 "items": [
                     {"bucket": "80-81", "probability": 0.32, "ask": 0.25, "probability_edge": 0.07},
                     {"bucket": "82-83", "probability": 0.44, "ask": 0.34, "probability_edge": 0.10, "is_signal": True},
+                    {"bucket": "84 or above", "bucket_low": 84, "bucket_high": 999, "probability": 0.05, "ask": 0.07, "probability_edge": -0.02},
                 ],
             },
         }]
@@ -92,9 +106,9 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(modules["diff_stats"]["summary"]["count"], 1)
         self.assertEqual(modules["diff_stats"]["summary"]["avg_delta"], -2.0)
         self.assertEqual(modules["diff_stats"]["summary"]["mae"], 2.0)
-        self.assertEqual(modules["probability_buckets"]["rows"], 2)
+        self.assertEqual(modules["probability_buckets"]["rows"], 3)
         probability_summary = modules["probability_buckets"]["probability_summary"]
-        self.assertEqual(probability_summary["bucket_count"], 2)
+        self.assertEqual(probability_summary["bucket_count"], 3)
         self.assertEqual(probability_summary["signal_count"], 1)
         self.assertEqual(probability_summary["normalized_count"], 1)
         self.assertEqual(probability_summary["actionable_signal_count"], 1)
@@ -103,6 +117,15 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(probability_summary["top_buckets"][0]["edge"], 0.10)
         self.assertEqual(modules["fetch_log"]["rows"], 1)
         self.assertTrue(modules["market_buckets"]["strict_matching_required"])
+        market_summary = modules["market_buckets"]["market_summary"]
+        self.assertEqual(market_summary["bucket_count"], 3)
+        self.assertEqual(market_summary["matched_bucket_count"], 1)
+        self.assertEqual(market_summary["open_tail_count"], 1)
+        self.assertEqual(market_summary["low_price_tail_count"], 1)
+        self.assertEqual(market_summary["paper_allowed_count"], 1)
+        self.assertEqual(market_summary["live_allowed_count"], 0)
+        self.assertEqual(market_summary["reason_counts"][0]["reason"], "truth_independent_days_low")
+        self.assertEqual(market_summary["top_blocked"][0]["bucket"], "82-83")
         self.assertTrue(_city_evidence_matches(payload[0], "chicago-kord"))
         self.assertTrue(_city_evidence_matches(payload[0], "chicago"))
 

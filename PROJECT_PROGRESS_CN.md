@@ -76,6 +76,24 @@
 
 ## 近期进度记录
 
+### 2026-07-01：market bucket 执行摘要接入
+
+- 目标：把“概率分桶看起来有 edge”进一步落到“盘口桶是否严格匹配、paper/live 为什么允许或阻塞”的城市/日期 evidence 摘要，减少只看 EV 或柱状图的误判。
+- 改动：
+  - 后端新增 `market_summary`，挂在 `city_evidence.dates[].modules.market_buckets` 下。
+  - 摘要统计匹配桶、低价尾桶、开放尾桶、缺价、价差问题、过期盘口线索、paper 允许数、live 允许数、阻塞原因和代表样例。
+  - 前端 `TemperatureDistributionPanel` 增加“盘口 / 执行摘要”，显示匹配桶、Paper OK、低价尾桶、盘口问题、主要阻塞原因，以及可执行/被阻塞样例。
+  - TypeScript 增加 `CityEvidenceMarketBucketSummary`、`CityEvidenceMarketSignal` 和 `CityEvidenceMarketReason`。
+  - 合约测试要求后端和前端持续暴露 `market_summary`，防止后续 UI 重构把交易审计能力删掉。
+- 验证：
+  - `python -m unittest tests.test_v3_core` 通过；仍有既有 sqlite `ResourceWarning` 噪音。
+  - `python -m unittest tests.test_polywx_contract` 通过。
+  - `npm run build` 通过；仍有既有 Browserslist 和 chunk size warning。
+  - 本地 `/api/dashboard` 快速返回；`scanner_status=stopped`、`production_refresh.running=false`、`signal_count=0`，说明后端未误开自动抓取或自动模拟。
+- 结论：看板现在能更直接回答“为什么这个信号不能买/只能 paper/被 live gate 阻塞”，但当前本地运行态没有新信号样本，真实策略收益仍需后续盘口回放和 paper 样本验证。
+- 下一步：补 orderbook replay/成交可复现链路，让 paper buy/skip 不只看当前字段，而能按历史盘口快照重放。
+- 相关提交：待提交。
+
 ### 2026-07-01：概率分桶 evidence summary 接入
 
 - 目标：把 PolyWX 的“当日最高温预测 / 概率分桶”从单个信号的前端图表，推进为城市/日期 evidence payload 的可复盘摘要。

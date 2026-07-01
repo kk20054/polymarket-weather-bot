@@ -2291,6 +2291,140 @@ def _probability_bucket_summary(city_signals: list[dict]) -> dict:
     }
 
 
+def _bucket_is_open_tail(low, high, label: str = "") -> bool:
+    text = str(label or "").lower()
+    if any(term in text for term in ("or below", "or above", "below", "above", "999", "-999")):
+        return True
+    return (low is not None and low <= -900) or (high is not None and high >= 900)
+
+
+def _market_bucket_summary(city_signals: list[dict]) -> dict:
+    reason_counter: Counter[str] = Counter()
+    top_executable: list[dict] = []
+    top_blocked: list[dict] = []
+    signal_count = len(city_signals)
+    bucket_count = 0
+    matched_bucket_count = 0
+    open_tail_count = 0
+    low_price_tail_count = 0
+    missing_price_count = 0
+    high_spread_count = 0
+    stale_book_count = 0
+    actionable_signal_count = 0
+    paper_allowed_count = 0
+    live_allowed_count = 0
+
+    for signal in city_signals:
+        distribution = signal.get("distribution")
+        items = _distribution_items(distribution)
+        bucket_count += len(items)
+        if signal.get("actionable"):
+            actionable_signal_count += 1
+
+        price = _float_or_none(signal.get("limit_price"))
+        if price is None:
+            price = _float_or_none(signal.get("market_probability"))
+        bid = _float_or_none(signal.get("bid_price"))
+        spread = _float_or_none(signal.get("spread"))
+        if spread is None and price is not None and bid is not None:
+            spread = max(0.0, price - bid)
+        edge = _float_or_none(signal.get("probability_edge"))
+        if edge is None:
+            edge = _float_or_none(signal.get("edge"))
+
+        decision = signal.get("decision") or {}
+        decision_reasons = list(decision.get("reasons") or [])
+        live_reasons = list(signal.get("live_block_reasons") or [])
+        cautions = list(decision.get("cautions") or []) + list(signal.get("live_cautions") or [])
+        reasons = []
+        for reason in decision_reasons + live_reasons:
+            if reason and reason not in reasons:
+                reasons.append(str(reason))
+        if not signal.get("actionable"):
+            reasons.append(f"status_{signal.get('status') or 'inactive'}")
+        if price is None:
+            reasons.append("price_missing")
+        if spread is not None and (spread > 0.03 or (price is not None and price <= 0.10 and (spread >= 0.02 or spread / max(price, 0.001) >= 0.25))):
+            reasons.append("spread_cost_too_high")
+
+        paper_allowed = bool(decision.get("paper_allowed")) and signal.get("actionable") and price is not None
+        live_allowed = bool(signal.get("live_allowed") or decision.get("live_allowed"))
+        if paper_allowed:
+            paper_allowed_count += 1
+        if live_allowed:
+            live_allowed_count += 1
+
+        if price is None:
+            missing_price_count += 1
+        if spread is not None and (spread > 0.03 or "spread_above_limit" in reasons or "spread_cost_too_high" in reasons):
+            high_spread_count += 1
+        if any("stale" in reason or "orderbook" in reason for reason in reasons + cautions):
+            stale_book_count += 1
+        for reason in reasons:
+            reason_counter[reason] += 1
+
+        signal_bucket_label = str(signal.get("bucket_label") or "")
+        matched_item = None
+        for item in items:
+            label = _distribution_bucket_label(item)
+            low = _float_or_none(item.get("bucket_low"))
+            high = _float_or_none(item.get("bucket_high"))
+            item_price = _float_or_none(item.get("ask"))
+            if _bucket_is_open_tail(low, high, label):
+                open_tail_count += 1
+            if item_price is not None and item_price < 0.10:
+                low_price_tail_count += 1
+            if item.get("is_signal"):
+                matched_bucket_count += 1
+                matched_item = item
+        if not items and _bucket_is_open_tail(None, None, signal_bucket_label):
+            open_tail_count += 1
+        if price is not None and price < 0.10:
+            low_price_tail_count += 1
+
+        row = {
+            "signal_id": signal.get("id"),
+            "market_id": signal.get("market_id"),
+            "event_url": signal.get("event_url"),
+            "bucket": _distribution_bucket_label(matched_item) if matched_item else signal_bucket_label,
+            "price": price,
+            "bid": bid,
+            "spread": spread,
+            "edge": edge,
+            "paper_allowed": paper_allowed,
+            "live_allowed": live_allowed,
+            "reasons": reasons[:5],
+        }
+        if paper_allowed and not reasons:
+            top_executable.append(row)
+        elif reasons:
+            top_blocked.append(row)
+
+    top_executable.sort(key=lambda row: (row.get("edge") is not None, row.get("edge") or -999), reverse=True)
+    return {
+        "signal_count": signal_count,
+        "bucket_count": bucket_count,
+        "matched_bucket_count": matched_bucket_count,
+        "actionable_signal_count": actionable_signal_count,
+        "paper_allowed_count": paper_allowed_count,
+        "live_allowed_count": live_allowed_count,
+        "blocked_signal_count": max(0, signal_count - paper_allowed_count),
+        "open_tail_count": open_tail_count,
+        "low_price_tail_count": low_price_tail_count,
+        "missing_price_count": missing_price_count,
+        "high_spread_count": high_spread_count,
+        "stale_book_count": stale_book_count,
+        "strict_matching_required": True,
+        "ready": bucket_count > 0 or signal_count > 0,
+        "reason_counts": [
+            {"reason": reason, "count": count}
+            for reason, count in reason_counter.most_common(10)
+        ],
+        "top_executable": top_executable[:5],
+        "top_blocked": top_blocked[:5],
+    }
+
+
 def _row_matches_text(row: dict, terms: list[str]) -> bool:
     text = _json_compact(row).lower()
     return any(term and term.lower() in text for term in terms)
@@ -2436,6 +2570,7 @@ def _city_date_evidence_modules(city: dict, target_date: str, signals: list[dict
     bucket_count = sum(_distribution_item_count(signal.get("distribution")) for signal in city_signals)
     diff_summary = _diff_stats_summary(chart_points, history_points)
     probability_summary = _probability_bucket_summary(city_signals)
+    market_summary = _market_bucket_summary(city_signals)
 
     return {
         "hourly_temperature": {
@@ -2495,6 +2630,7 @@ def _city_date_evidence_modules(city: dict, target_date: str, signals: list[dict
             "buckets": bucket_count,
             "strict_matching_required": True,
             "probability_summary": probability_summary,
+            "market_summary": market_summary,
             "ready": bucket_count > 0,
         },
     }

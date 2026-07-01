@@ -11,7 +11,7 @@ import {
   YAxis,
 } from 'recharts'
 import { CloudSun, Database, ExternalLink, Signal, ThermometerSun } from 'lucide-react'
-import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, CityEvidenceProbabilitySummary, DashboardEvent, DistributionItem, FetchLogRow, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, CityEvidenceMarketBucketSummary, CityEvidenceProbabilitySummary, DashboardEvent, DistributionItem, FetchLogRow, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -986,6 +986,7 @@ export function WeatherPanel({
               selectedDate={selectedDate}
               actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
               evidenceSummary={selectedDateEvidence?.modules?.probability_buckets?.probability_summary}
+              marketSummary={selectedDateEvidence?.modules?.market_buckets?.market_summary}
             />
             <ForecastDataTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
             <details className="border border-[#2C3445] bg-[#161A22]">
@@ -2091,6 +2092,7 @@ function TemperatureDistributionPanel({
   selectedDate,
   actualHigh,
   evidenceSummary,
+  marketSummary,
 }: {
   signal?: WeatherSignal
   items: DistributionItem[]
@@ -2098,6 +2100,7 @@ function TemperatureDistributionPanel({
   selectedDate: string
   actualHigh?: number | null
   evidenceSummary?: CityEvidenceProbabilitySummary
+  marketSummary?: CityEvidenceMarketBucketSummary
 }) {
   const distribution = signal?.distribution
   const maxProbability = Math.max(0.01, ...items.map(item => Number(item.probability || 0)))
@@ -2121,6 +2124,9 @@ function TemperatureDistributionPanel({
   const evidenceTopBuckets = evidenceSummary?.top_buckets ?? []
   const evidenceHighestProbability = evidenceSummary?.highest_probability
   const evidenceHighestBucket = evidenceSummary?.highest_bucket
+  const reasonCounts = marketSummary?.reason_counts ?? []
+  const blockedSignals = marketSummary?.top_blocked ?? []
+  const executableSignals = marketSummary?.top_executable ?? []
 
   const probabilityFill = (probability?: number | null, selected = false) => {
     const ratio = Math.max(0.18, Math.min(1, Number(probability ?? 0) / maxProbability))
@@ -2222,6 +2228,47 @@ function TemperatureDistributionPanel({
                     </div>
                   ))}
                 </div>
+              </details>
+            )}
+            {marketSummary && (
+              <details className="border-t border-[#2C3445] px-2 py-1 text-[9px] text-[#7D8694]" open>
+                <summary className="cursor-pointer select-none hover:text-[#CBD2DC]">盘口 / 执行摘要</summary>
+                <div className="mt-1 grid grid-cols-2 gap-1">
+                  <MetricCard label="匹配桶" value={`${marketSummary.matched_bucket_count ?? 0}/${marketSummary.bucket_count ?? 0}`} sub={marketSummary.strict_matching_required ? '严格匹配' : '观察'} />
+                  <MetricCard label="Paper OK" value={`${marketSummary.paper_allowed_count ?? 0}`} sub={`阻塞 ${marketSummary.blocked_signal_count ?? 0}`} />
+                  <MetricCard label="低价尾桶" value={`${marketSummary.low_price_tail_count ?? 0}`} sub={`开放 ${marketSummary.open_tail_count ?? 0}`} />
+                  <MetricCard label="盘口问题" value={`${marketSummary.high_spread_count ?? 0}`} sub={`缺价 ${marketSummary.missing_price_count ?? 0} / 过期 ${marketSummary.stale_book_count ?? 0}`} />
+                </div>
+                {reasonCounts.length > 0 && (
+                  <div className="mt-1 space-y-1">
+                    {reasonCounts.slice(0, 4).map(reason => (
+                      <div key={reason.reason} className="flex items-center justify-between gap-2 border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
+                        <span className="min-w-0 truncate" title={reason.reason}>{reason.reason}</span>
+                        <span className="shrink-0 tabular-nums text-amber-300">{reason.count}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {executableSignals.length > 0 && (
+                  <div className="mt-1 space-y-1">
+                    {executableSignals.slice(0, 2).map(row => (
+                      <a key={`${row.signal_id}-${row.market_id}`} href={row.event_url || undefined} target="_blank" rel="noreferrer" className="block border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-1 text-emerald-200 hover:bg-emerald-500/15">
+                        <span className="block truncate" title={row.bucket}>{row.bucket || '--'}</span>
+                        <span className="tabular-nums text-emerald-300">{fmtPrice(row.price)} / edge {fmtSignedPct(row.edge)}</span>
+                      </a>
+                    ))}
+                  </div>
+                )}
+                {blockedSignals.length > 0 && executableSignals.length === 0 && (
+                  <div className="mt-1 space-y-1">
+                    {blockedSignals.slice(0, 2).map(row => (
+                      <div key={`${row.signal_id}-${row.market_id}`} className="border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
+                        <div className="truncate text-[#CBD2DC]" title={row.bucket}>{row.bucket || '--'}</div>
+                        <div className="truncate text-[#7D8694]" title={(row.reasons || []).join(', ')}>{(row.reasons || []).slice(0, 2).join(', ') || 'blocked'}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </details>
             )}
           </aside>

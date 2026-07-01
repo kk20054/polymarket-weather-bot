@@ -721,6 +721,7 @@ export interface CityEvidenceModule {
   strict_matching_required?: boolean
   summary?: CityEvidenceDiffStatsSummary
   probability_summary?: CityEvidenceProbabilitySummary
+  market_summary?: CityEvidenceMarketBucketSummary
 }
 
 export interface CityEvidenceProbabilityBucket {
@@ -745,6 +746,45 @@ export interface CityEvidenceProbabilitySummary {
   strict_matching_required?: boolean
   source?: string
   top_buckets?: CityEvidenceProbabilityBucket[]
+}
+
+export interface CityEvidenceMarketReason {
+  reason: string
+  count: number
+}
+
+export interface CityEvidenceMarketSignal {
+  signal_id?: number
+  market_id?: string
+  event_url?: string | null
+  bucket?: string
+  price?: number | null
+  bid?: number | null
+  spread?: number | null
+  edge?: number | null
+  paper_allowed?: boolean
+  live_allowed?: boolean
+  reasons?: string[]
+}
+
+export interface CityEvidenceMarketBucketSummary {
+  signal_count?: number
+  bucket_count?: number
+  matched_bucket_count?: number
+  actionable_signal_count?: number
+  paper_allowed_count?: number
+  live_allowed_count?: number
+  blocked_signal_count?: number
+  open_tail_count?: number
+  low_price_tail_count?: number
+  missing_price_count?: number
+  high_spread_count?: number
+  stale_book_count?: number
+  strict_matching_required?: boolean
+  ready?: boolean
+  reason_counts?: CityEvidenceMarketReason[]
+  top_executable?: CityEvidenceMarketSignal[]
+  top_blocked?: CityEvidenceMarketSignal[]
 }
 
 export interface CityEvidenceDiffStatsRow {
