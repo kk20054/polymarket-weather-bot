@@ -23,6 +23,40 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("firecrawl_map", agents)
         self.assertIn("schema-scoped `firecrawl_scrape`", agents)
 
+    def test_agents_records_reference_fusion_architecture(self):
+        agents = read_text("AGENTS.md")
+
+        self.assertIn("Reference Fusion Architecture", agents)
+        for reference in (
+            "punkpeye/awesome-mcp-servers",
+            "python-metar/python-metar",
+            "Polymarket/*",
+            "yangyuan-zhen/PolyWeather",
+        ):
+            self.assertIn(reference, agents)
+
+        for table in (
+            "stations",
+            "metar_reports",
+            "mesonet_observations",
+            "forecast_runs",
+            "forecast_members",
+            "hourly_consensus",
+            "market_buckets",
+            "signal_decisions",
+        ):
+            self.assertIn(table, agents)
+
+        for contract in (
+            "METAR/SPECI",
+            "TAF",
+            "DEB/hourly consensus",
+            "BUY YES limit-only GTC",
+            "strict market-bucket matching",
+            "observed minus forecast",
+        ):
+            self.assertIn(contract, agents)
+
     def test_theme_toggle_preserves_polywx_light_and_dark_modes(self):
         app = read_text("frontend/src/App.tsx")
         css = read_text("frontend/src/index.css")

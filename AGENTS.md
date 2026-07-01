@@ -20,6 +20,38 @@ Do not claim or imply that the bot can reliably make money until the paper-tradi
 - Use `suislanchez/polymarket-kalshi-weather-bot` only as a reference for FastAPI + SQLite + React dashboard structure and simulation ergonomics. Do not reintroduce BTC modules, Kalshi-first assumptions, or simple `edge > 8%` auto-trading logic.
 - Treat `alteregoeth-ai/weatherbot` as the airport-station and multi-source weather baseline, not as a production trading architecture.
 
+## Reference Fusion Architecture
+
+Use these external repositories as design inputs, not as code to copy blindly. Every borrowed idea must be mapped into WeatherBot's data, audit, paper-trading, and risk-control model.
+
+- `punkpeye/awesome-mcp-servers`: treat as a discovery index for research and data-acquisition tools. MCPs are supporting adapters, not core trading dependencies. Record whether each tool is local or cloud, whether it needs credentials, whether it can mutate state, and what evidence it produced. Firecrawl is allowed for PolyWX/GitHub/source research; production weather and trading decisions must still use typed WeatherBot collectors and persisted database rows.
+- `python-metar/python-metar`: use as the METAR/SPECI decoding model. WeatherBot needs a first-class METAR ingestion layer that stores the raw report plus decoded temperature, dew point, wind, gust, visibility, cloud layers, altimeter/pressure, precipitation, sea-level pressure, peak wind, station id, report time, source URL, parser version, and parse warnings. NOAA current station TXT and 24-hour cycle files are valid collection targets. METAR supports D+0 and intraday evidence; it is not automatically final settlement truth unless the market rule says the airport METAR station is the settlement source.
+- `Polymarket/*`: official market and CLOB references define execution boundaries. Prefer the current official unified SDK or documented CLOB flow for new execution work, and keep legacy client quirks isolated behind a `PolymarketExecutor` adapter. Every order path must fetch or persist token id, tick size, negRisk, orderMinSize, best bid/ask, book timestamp, allowance/balance state, idempotency key, and exact API response. First production shape remains BUY YES limit-only GTC/dry-run/canary; market orders, FOK/FAK, automated size escalation, and deposit-wallet auth workarounds are forbidden until explicitly validated.
+- `yangyuan-zhen/PolyWeather`: borrow the production weather-intelligence shape: city terminal, observation-driven chart updates, aviation METAR/TAF, official nearby-network layers, DEB/hourly consensus, full bucket distribution, strict market-bucket matching, SSE/event replay, health/metrics endpoints, and a clear public/private trading boundary. Do not copy subscription/payment/growth code or private strategy thresholds. The useful product idea is a city/date evidence terminal where observations, forecasts, settlement station, probability buckets, and market quotes are generated from one auditable core.
+
+### WeatherBot Target Data Foundation
+
+The next architecture pass should make these data layers explicit in SQLite and API payloads:
+
+- `stations`: city key, display name, ICAO/WMO/provider station ids, timezone, settlement rule text, primary settlement source, nearby observation networks, and confidence.
+- `metar_reports`: raw METAR/SPECI text, decoded fields, parser version, report time, station id, source URL, fetch time, parse status, and parse warnings.
+- `mesonet_observations`: non-METAR official/local networks such as JMA AMeDAS, HKO, CWA, AMOS, NWS/NOAA, airport runway sensors, and other rule-relevant station feeds. These rows must be labeled as observation evidence, not settlement truth by default.
+- `forecast_runs` and `forecast_members`: ECMWF/GFS/HRRR/Open-Meteo/DEB inputs with run time, valid time, horizon, member values, and source quality.
+- `hourly_consensus`: one city/date/hour path used by the chart and signal engine; it must separate real observations, forecast consensus, TAF timing markers, cloud/humidity, and residuals.
+- `market_buckets`: all Polymarket outcomes for a city/date event, with exact/range/or-higher/or-lower direction, token id, quote, tick size, orderMinSize, and strict matching status.
+- `signal_decisions`: distribution, model-market edge, execution gate, AI review, paper/live decision, skip reason, and source evidence links.
+
+### PolyWX / PolyWeather Dashboard Generation Rules
+
+- The dashboard should be generated from the same city/date evidence payload that powers signals. Do not build separate visual-only mock data paths.
+- Each city page should show one primary hourly chart, one probability/market bucket module, then five tabbed evidence tables: Forecast, METAR, Historical, Diff Stats, Fetch Log.
+- The hourly chart must make observation provenance clear: Real METAR or official observation lines are solid; model/DEB forecasts are dashed; residuals are red/blue bars; humidity/cloud can be secondary bars only when real data exists.
+- The METAR tab must show raw report, decoded temperature/dew point/wind/cloud/pressure/precipitation, report age, parser warnings, and station-local time.
+- The Historical tab must distinguish settlement truth, METAR history, official nearby-network history, and Open-Meteo fallback. Fallback rows must not unlock live gates.
+- The Diff Stats tab must compute observed minus forecast, MAE/bias/Pearson R, overlap count, source coverage, and whether the sample is independent by settlement day.
+- The Fetch Log tab must use structured backend rows (`source`, `stage`, `status`, `duration`, `message`, `details`) rather than guessing from raw UI events.
+- The recommendation/focus area should highlight cities with fresh observations, market liquidity, clean bucket matching, high evidence coverage, and actionable but still gated paper signals.
+
 ## Technology Stack
 
 - Backend: Python, FastAPI, SQLite, `weatherbot_v3`.
