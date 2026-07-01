@@ -107,7 +107,7 @@
   - 现有完整测试仍有 sqlite ResourceWarning，需要后续做连接关闭治理，减少噪声。
 - 下一步：
   - 进入 Layer 3：`forecast_runs` 与 `forecast_members`，把预报数据从“展示/快照”升级成可追踪 run、member、source、issued_at、valid_time 的无泄漏训练/推理基座。
-- 相关提交：待提交；提交后回填 hash。
+- 相关提交：`9320b60 Add observations data foundation layer`；随后 ledger-hash 回填提交记录本行。
 
 ### 2026-07-01：Layer 1 stations 站点基座落库
 
