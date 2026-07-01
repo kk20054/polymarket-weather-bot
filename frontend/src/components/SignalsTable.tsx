@@ -24,6 +24,48 @@ function cents(value?: number | null) {
   return `${(Number(value) * 100).toFixed(1)}c`
 }
 
+function temp(value?: number | null, unit = '') {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${Number(value).toFixed(1)}°${unit}`
+}
+
+function bucketRange(low?: number | null, high?: number | null, unit = '') {
+  if (low === null || low === undefined || high === null || high === undefined) return '--'
+  if (Number(low) <= -900) return `${temp(high, unit)} 或以下`
+  if (Number(high) >= 900) return `${temp(low, unit)} 或以上`
+  return `${temp(low, unit)} - ${temp(high, unit)}`
+}
+
+function unitFromSignal(signal: WeatherSignal) {
+  const raw = `${signal.bucket_label ?? ''} ${signal.question ?? ''}`
+  if (/°?\s*C\b|celsius/i.test(raw)) return 'C'
+  if (/°?\s*F\b|fahrenheit/i.test(raw)) return 'F'
+  return 'F'
+}
+
+function signalBucketText(signal: WeatherSignal) {
+  const unit = unitFromSignal(signal)
+  const raw = String(signal.bucket_label ?? '').trim()
+  const match = raw.match(/^\s*(-?\d+(?:\.\d+)?)\s*°?\s*([CF])?\s*-\s*(-?\d+(?:\.\d+)?)\s*°?\s*([CF])?\s*$/i)
+  if (match) {
+    const low = Number(match[1])
+    const high = Number(match[3])
+    const labelUnit = (match[4] || match[2] || unit).toUpperCase()
+    return bucketRange(low, high, labelUnit)
+  }
+  if (raw) return raw.replace(/掳/g, '°')
+  if (Number.isFinite(Number(signal.threshold_f))) {
+    const value = unit === 'C' ? (Number(signal.threshold_f) - 32) * 5 / 9 : Number(signal.threshold_f)
+    return temp(value, unit)
+  }
+  return signal.question || signal.market_id
+}
+
+function isOpenTailSignal(signal: WeatherSignal) {
+  const raw = String(signal.bucket_label ?? '')
+  return /(?:^|-)999(?:\.0+)?[CF]?$/i.test(raw) || /^-999(?:\.0+)?-/i.test(raw)
+}
+
 function money(value?: number | null) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   return `$${Number(value).toFixed(2)}`
@@ -72,6 +114,7 @@ function reasonLabel(reason: string) {
     truth_independent_days_low: '高置信结算日不足',
     strategy_score_low: '综合策略评分不足',
     fit_sample_low: '拟合样本偏少',
+    open_tail_bucket: '开放尾桶需严控',
   }
   return map[reason] ?? reason
 }
@@ -105,7 +148,7 @@ export function SignalsTable({
     return (
       <div className="flex h-full flex-col items-center justify-center gap-1 p-6 text-center text-neutral-600">
         <div className="text-sm text-neutral-400">暂无天气信号</div>
-        <div className="text-[11px]">启动扫描器后，符合日期和盘口条件的信号会出现在这里。</div>
+        <div className="text-[11px]">点击“手动抓取”后，符合日期、盘口和风控条件的信号会出现在这里。</div>
       </div>
     )
   }
@@ -124,6 +167,9 @@ export function SignalsTable({
         const qualityFlags = signal.quality_flags ?? []
         const decisionReasons = signal.decision?.reasons ?? []
         const allReasons = [...new Set([...decisionReasons, ...liveReasons, ...qualityFlags])]
+        const unit = unitFromSignal(signal)
+        const bucketText = signalBucketText(signal)
+        const openTail = isOpenTailSignal(signal)
 
         return (
           <div key={key} className="bg-black text-[11px] hover:bg-neutral-950">
@@ -134,7 +180,14 @@ export function SignalsTable({
             >
               <ChevronDown className={`mt-0.5 h-3.5 w-3.5 text-neutral-600 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
               <div className="min-w-0">
-                <div className="break-words leading-snug text-neutral-200">{signal.question || signal.market_id}</div>
+                <div className="flex flex-wrap items-center gap-1 leading-snug">
+                  <span className="text-neutral-100">{bucketText}</span>
+                  <span className="text-neutral-600">YES</span>
+                  {openTail && <span className="border border-red-500/25 px-1 py-0.5 text-[9px] text-red-300">尾桶</span>}
+                </div>
+                <div className="mt-0.5 truncate text-[10px] text-neutral-600" title={signal.question || signal.market_id}>
+                  {signal.question || signal.market_id}
+                </div>
                 <div className="mt-1 flex flex-wrap items-center gap-1">
                   <span className={`border px-1.5 py-0.5 text-[9px] ${statusClass(signal)}`}>{statusText(signal)}</span>
                   <span className="text-[9px] text-neutral-600">{signal.city_name} / {signal.target_date}</span>
@@ -154,16 +207,16 @@ export function SignalsTable({
             </button>
 
             {isExpanded && (
-              <div className="space-y-3 border-t border-neutral-900 px-3 py-3 text-neutral-400">
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="border border-neutral-800 p-2">
+              <div className="min-w-0 space-y-3 overflow-hidden border-t border-neutral-900 px-3 py-3 text-neutral-400">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="min-w-0 border border-neutral-800 p-2">
                     <div className="text-[9px] text-neutral-600">模型概率 / 市场价格</div>
                     <div className="tabular-nums text-neutral-100">{pct(signal.model_probability)} / {cents(signal.limit_price ?? signal.market_probability)}</div>
                     <div className="mt-1 text-[10px] text-neutral-600">
                       归一化概率 {pct(signal.distribution?.signal_probability)}，概率差 {pct(signal.probability_edge, true)}
                     </div>
                   </div>
-                  <div className="border border-neutral-800 p-2">
+                  <div className="min-w-0 border border-neutral-800 p-2">
                     <div className="text-[9px] text-neutral-600">盘口成本</div>
                     <div className="tabular-nums text-neutral-100">Bid {cents(signal.bid_price)} / Ask {cents(signal.limit_price)}</div>
                     <div className="mt-1 text-[10px] text-neutral-600">Spread {cents(signal.spread)}，买入后立即按 bid 估值会先显示浮亏。</div>
@@ -234,7 +287,7 @@ export function SignalsTable({
                 <div className="grid gap-2 md:grid-cols-2">
                   <div className="border border-neutral-800 p-2 leading-relaxed">
                     <div className="mb-1 text-[10px] text-neutral-500">为什么买/不买</div>
-                    <p className="break-words">{signal.reasoning}</p>
+                    <p className="min-w-0 break-words">{signal.reasoning}</p>
                     {allReasons.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1">
                         {allReasons.slice(0, 8).map(reason => (
@@ -251,7 +304,7 @@ export function SignalsTable({
                     <div>独立样本 {signal.fit_markets ?? 0} 天 / 快照 {signal.fit_samples ?? 0}</div>
                     <div>MAE {signal.fit_mae_f?.toFixed?.(1) ?? '--'}F / Bias {signal.fit_bias_f?.toFixed?.(1) ?? '--'}F</div>
                     <div>truth {signal.truth?.latest_provider || '缺失'} / 站点 {signal.truth?.station_id || '未映射'}</div>
-                    {signal.yes_token_id && <div className="mt-1 break-all text-neutral-600">YES token {shortToken(signal.yes_token_id)}</div>}
+                    {signal.yes_token_id && <div className="mt-1 min-w-0 break-all text-neutral-600">YES token {shortToken(signal.yes_token_id)}</div>}
                   </div>
                 </div>
 
@@ -264,7 +317,7 @@ export function SignalsTable({
                           key={item.market_id}
                           className={`border px-2 py-1 ${item.is_signal ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200' : 'border-neutral-800 text-neutral-400'}`}
                         >
-                          <div className="truncate">{item.bucket_low}-{item.bucket_high}</div>
+                          <div className="min-w-0 truncate">{bucketRange(item.bucket_low, item.bucket_high, unit)}</div>
                           <div className="tabular-nums text-[10px]">P {pct(item.probability)} / Ask {cents(item.ask)}</div>
                         </div>
                       ))}

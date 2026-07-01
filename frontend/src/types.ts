@@ -125,6 +125,8 @@ export interface AutoSimulationStatus {
     spent: number
     skipped: number
     remaining: number
+    orderbooks_refreshed?: number
+    orderbook_refresh_failed?: number
   } | null
   last_error?: string | null
 }
@@ -152,6 +154,253 @@ export interface TruthHealth {
   open_meteo_fallback_rate: number
   legacy_unknown?: number
   cities: TruthCityHealth[]
+}
+
+export interface DataReadinessReason {
+  code: string
+  count: number
+}
+
+export interface DataReadinessStage {
+  key: string
+  label: string
+  status: 'ready' | 'blocked'
+  reasons: DataReadinessReason[]
+  metrics: Record<string, unknown>
+}
+
+export interface DataReadinessAction {
+  key: string
+  priority: number
+  label: string
+  count: number
+  impact: string
+  command: string
+  apply_command?: string
+  requires_operator: boolean
+  targets: Array<Record<string, string>>
+}
+
+export interface DataReadiness {
+  audit_version: string
+  generated_at: string
+  status: 'ready' | 'blocked'
+  score: number
+  live_allowed: boolean
+  production_phase?: {
+    id: string
+    label: string
+    name: string
+    status: 'active' | 'ready_for_next'
+    next: string
+    operator_action: string
+    blocked_keys: string[]
+  }
+  stages: DataReadinessStage[]
+  blockers: DataReadinessReason[]
+  next_actions?: DataReadinessAction[]
+  cities: Array<{
+    city: string
+    city_name: string
+    station_id: string
+    station_name: string
+    timezone: string
+    unit: string
+    market_rules: number
+    verified_rules: number
+    truth_days: number
+    eligible_truth_days: number
+    forecast_runs: number
+    status: 'eligible' | 'blocked'
+    reasons: string[]
+  }>
+  summary: {
+    registered_cities: number
+    eligible_cities: number
+    market_rules: number
+    settlement_contracts?: number
+    eligible_truth_days: number
+    forecast_runs: number
+    forecast_members: number
+    orderbook_snapshots: number
+  }
+}
+
+export interface ProductionRefreshStage {
+  name: string
+  ok: boolean
+  elapsed_ms?: number
+  skipped?: boolean
+  reason?: string
+  error?: string
+  payload?: Record<string, unknown>
+}
+
+export interface ProductionRefreshResult {
+  refresh_version: string
+  ok: boolean
+  running?: boolean
+  production_refresh_running?: boolean
+  auto_refresh_enabled?: boolean
+  auto_refresh_running?: boolean
+  last_refresh_was_auto?: boolean
+  message?: string
+  failed_stages: string[]
+  scan_signals: boolean
+  stages: ProductionRefreshStage[]
+  requested_at?: string
+  request?: {
+    cities: string[]
+    days: number
+    limit: number
+    start_date: string
+    end_date: string
+    skip_signal_scan: boolean
+  }
+  readiness?: {
+    status?: 'ready' | 'blocked'
+    score?: number
+    live_allowed?: boolean
+    production_phase?: DataReadiness['production_phase']
+    blocked_keys?: string[]
+    next_actions?: DataReadinessAction[]
+  }
+  history?: Array<{
+    requested_at?: string
+    ok: boolean
+    failed_stages: string[]
+    stage_count: number
+    ok_stage_count: number
+    blocked_keys: string[]
+    scan_signals: boolean
+  }>
+}
+
+export interface ProductionValidationAction {
+  key?: string
+  label?: string
+  count?: number
+  command?: string
+  apply_command?: string
+  requires_operator?: boolean
+  layer?: string
+  [key: string]: unknown
+}
+
+export interface ProductionValidationLayer {
+  key: string
+  label: string
+  ready: boolean
+  status: string
+  blockers: string[]
+  next_actions: ProductionValidationAction[]
+  metrics: Record<string, unknown>
+}
+
+export interface ProductionValidationReport {
+  validation_version: string
+  generated_at: string
+  status: string
+  score: number
+  ready_layers: number
+  total_layers: number
+  live_allowed: boolean
+  hard_blockers: string[]
+  layers: ProductionValidationLayer[]
+  next_actions: ProductionValidationAction[]
+}
+
+export interface ProductionActionRequest {
+  actionKey: string
+  apply?: boolean
+  operatorConfirmed?: boolean
+  cities?: string[]
+  days?: number
+  limit?: number
+  startDate?: string
+  endDate?: string
+  skipSignalScan?: boolean
+  note?: string
+  archivePath?: string
+}
+
+export interface ProductionActionRunResult {
+  ok: boolean
+  status: string
+  action_key: string
+  reason?: string
+  message?: string
+  action?: {
+    label?: string
+    description?: string
+    requires_operator?: boolean
+    mutates?: boolean
+  }
+  params?: Record<string, unknown>
+  payload?: Record<string, unknown>
+  readiness?: {
+    status?: string
+    score?: number
+    live_allowed?: boolean
+    blocked_keys?: string[]
+  }
+}
+
+export interface SettlementContract {
+  contract_id: string
+  event_slug: string
+  city: string
+  city_name: string
+  target_local_date: string
+  station_id: string
+  station_name: string
+  timezone: string
+  unit: string
+  metric: string
+  rounding_rule: string
+  bucket_boundary: string
+  resolution_source_text?: string | null
+  source_url?: string | null
+  truth_provider_priority?: string[]
+  rule_version?: string | null
+  registry_version?: string | null
+  parse_confidence?: number | null
+  confidence_reason?: string | null
+  auto_verified_at?: string | null
+  manual_verified_at?: string | null
+  manual_verified_by?: string | null
+  manual_verification_note?: string | null
+  manual_verification_snapshot?: Record<string, unknown> | null
+  verification_evidence?: string[]
+  review_status?: 'verified' | 'mature-auto' | 'future-auto' | 'manual-required'
+  review_tags?: string[]
+}
+
+export interface SettlementContractList {
+  status: string
+  city: string
+  limit: number
+  offset: number
+  total: number
+  summary: {
+    contracts: number
+    manual_verified: number
+    unverified: number
+    auto_verified: number
+    manual_progress: number
+  }
+  contracts: SettlementContract[]
+}
+
+export interface BulkContractVerificationResult {
+  ok: boolean
+  applied: boolean
+  selected: number
+  verified: number
+  skipped_requested: string[]
+  require_auto_verified: boolean
+  mature_only: boolean
+  contracts: SettlementContract[]
 }
 
 export interface DistributionItem {
@@ -409,7 +658,18 @@ export interface WeatherCityPoint {
   ensemble_mean?: number | null
   ensemble_std?: number | null
   humidity?: number | null
+  cloud_cover?: number | null
+  precipitation?: number | null
+  precipitation_probability?: number | null
+  wind_speed?: number | null
+  wind_direction?: number | null
+  pressure?: number | null
+  dew_point?: number | null
+  shortwave_radiation?: number | null
+  condition?: string | null
   source?: string
+  member_count?: number
+  archive?: boolean
 }
 
 export interface HistoricalWeatherPoint {
@@ -424,6 +684,7 @@ export interface HistoricalWeatherPoint {
   source_confidence?: number
   calibration_tier?: 'live_truth' | 'research_truth' | string
   source_url?: string
+  fetched_at?: string | null
 }
 
 export interface WeatherCitySeries {
@@ -438,9 +699,135 @@ export interface WeatherCitySeries {
   humidity_status?: 'available' | 'not_collected' | string
   history_count?: number
   forecast_count?: number
+  hourly_count?: number
   history_points?: HistoricalWeatherPoint[]
   forecast_points?: WeatherCityPoint[]
+  hourly_points?: WeatherCityPoint[]
   points: WeatherCityPoint[]
+}
+
+export interface CityEvidenceModule {
+  rows?: number
+  signals?: number
+  buckets?: number
+  ready?: boolean
+  chart?: string
+  table?: string
+  engine?: string
+  formula?: string
+  source?: string
+  series?: string[]
+  empty_state?: string
+  strict_matching_required?: boolean
+  summary?: CityEvidenceDiffStatsSummary
+  probability_summary?: CityEvidenceProbabilitySummary
+  market_summary?: CityEvidenceMarketBucketSummary
+}
+
+export interface CityEvidenceProbabilityBucket {
+  bucket?: string
+  probability?: number | null
+  ask?: number | null
+  bid?: number | null
+  edge?: number | null
+  market_id?: string
+  signal_id?: number
+  is_signal?: boolean
+  actionable?: boolean
+}
+
+export interface CityEvidenceProbabilitySummary {
+  signal_count?: number
+  bucket_count?: number
+  normalized_count?: number
+  actionable_signal_count?: number
+  highest_bucket?: string | null
+  highest_probability?: number | null
+  strict_matching_required?: boolean
+  source?: string
+  top_buckets?: CityEvidenceProbabilityBucket[]
+}
+
+export interface CityEvidenceMarketReason {
+  reason: string
+  count: number
+}
+
+export interface CityEvidenceMarketSignal {
+  signal_id?: number
+  market_id?: string
+  event_url?: string | null
+  bucket?: string
+  price?: number | null
+  bid?: number | null
+  spread?: number | null
+  edge?: number | null
+  paper_allowed?: boolean
+  live_allowed?: boolean
+  reasons?: string[]
+}
+
+export interface CityEvidenceMarketBucketSummary {
+  signal_count?: number
+  bucket_count?: number
+  matched_bucket_count?: number
+  actionable_signal_count?: number
+  paper_allowed_count?: number
+  live_allowed_count?: number
+  blocked_signal_count?: number
+  open_tail_count?: number
+  low_price_tail_count?: number
+  missing_price_count?: number
+  high_spread_count?: number
+  stale_book_count?: number
+  strict_matching_required?: boolean
+  ready?: boolean
+  reason_counts?: CityEvidenceMarketReason[]
+  top_executable?: CityEvidenceMarketSignal[]
+  top_blocked?: CityEvidenceMarketSignal[]
+}
+
+export interface CityEvidenceDiffStatsRow {
+  timestamp?: string
+  local_hour?: string
+  observed?: number | null
+  forecast?: number | null
+  delta?: number | null
+  source?: string
+}
+
+export interface CityEvidenceDiffStatsSummary {
+  count?: number
+  avg_delta?: number | null
+  mae?: number | null
+  pearson_r?: number | null
+  metar_hours?: number
+  forecast_hours?: number
+  overlap_count?: number
+  overlap_ratio?: number | null
+  historical_metar_overlap_count?: number
+  historical_metar_overlap_ratio?: number | null
+  rows?: CityEvidenceDiffStatsRow[]
+}
+
+export interface CityEvidenceDate {
+  target_date: string
+  ready_modules: number
+  module_count: number
+  tabs: string[]
+  modules: Record<string, CityEvidenceModule>
+}
+
+export interface CityEvidence {
+  city_key: string
+  city_name: string
+  station_id?: string
+  unit: string
+  generated_from: string
+  data_sources: string[]
+  dates: CityEvidenceDate[]
+  latest_date?: string | null
+  latest_ready_modules?: number
 }
 
 export interface WeatherSignal {
@@ -528,9 +915,95 @@ export interface BulkSimulateResult {
   examples: BulkSimulateSkipExample[]
 }
 
+export interface ModelDatasetAudit {
+  audit_version: string
+  generated_at: string
+  status: 'ready' | 'blocked'
+  required_samples: number
+  summary: {
+    event_days: number
+    mature_event_days: number
+    pending_settlement_samples: number
+    training_eligible_samples: number
+    baseline_ready_samples: number
+    replay_ready_samples: number
+    blocked_samples: number
+    cities: number
+    eligible_cities: number
+    baseline_ready_cities: number
+  }
+  reason_counts: Record<string, number>
+  training_reason_counts: Record<string, number>
+  operational_counts: {
+    unverified_contract_event_days: number
+    auto_verified_unreviewed_contracts: number
+    mature_auto_verified_unreviewed_contracts: number
+    pending_settlement_samples: number
+  }
+  leakage_flags: Record<string, number>
+  source_counts: Record<string, number>
+  horizon_counts: Record<string, number>
+  next_actions: Array<{
+    key: string
+    priority: number
+    label: string
+    count: number
+    impact: string
+    command: string
+    apply_command?: string
+    requires_operator: boolean
+    targets: Array<Record<string, string>>
+  }>
+  cities: Array<{
+    city: string
+    city_name: string
+    samples: number
+    training_eligible: number
+    baseline_ready: number
+    replay_ready: number
+    eligible_truth: number
+    no_leak_forecast_runs: number
+    warnings: Record<string, number>
+    reasons: Record<string, number>
+  }>
+}
+
+export interface ForecastArchiveManifest {
+  manifest_version: string
+  generated_at: string
+  record_count: number
+  by_city: Record<string, number>
+  by_source: Record<string, number>
+  records: Array<{
+    city: string
+    city_name?: string
+    target_date?: string
+    timezone?: string
+    station_id?: string
+    station_name?: string
+    unit?: string
+    source: string
+    provider?: string
+    model?: string
+    model_version?: string
+    archive_gap_reasons?: string[]
+    no_leak_rule?: string
+  }>
+  sources: string[]
+  schema_doc: string
+  template_command: string
+  import_dry_run_command: string
+  import_apply_command: string
+  audit_summary?: ModelDatasetAudit['summary']
+  reason_counts?: Record<string, number>
+}
+
 export interface DashboardData {
   stats: BotStats
   v3?: V3Summary
+  data_readiness?: DataReadiness
+  production_refresh?: ProductionRefreshResult | null
+  model_dataset_audit?: ModelDatasetAudit
   truth_health?: TruthHealth
   btc_price: BtcPrice | null
   microstructure: Microstructure | null
@@ -543,6 +1016,35 @@ export interface DashboardData {
   weather_signals: WeatherSignal[]
   weather_forecasts: WeatherForecast[]
   weather_city_series?: WeatherCitySeries[]
+  city_evidence?: CityEvidence[]
+  events?: DashboardEvent[]
+  fetch_log?: FetchLogRow[]
+  _meta?: {
+    cache?: string
+    reason?: string
+    generated_at?: string
+  }
+}
+
+export interface DashboardEvent {
+  id?: number
+  timestamp?: string
+  type?: string
+  message?: string
+  data?: unknown
+}
+
+export interface FetchLogRow {
+  index?: number
+  time?: string
+  source?: string
+  stage?: string
+  status?: 'OK' | 'WARN' | 'ERR' | 'INFO' | string
+  duration?: number | string | null
+  message?: string
+  details?: string
+  event_id?: number
+  event_type?: string
 }
 
 export interface V3Summary {

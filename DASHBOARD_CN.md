@@ -13,6 +13,13 @@ cd C:\Users\Administrator\Documents\polymarket\weatherbot
 .\.venv\Scripts\python.exe -m uvicorn dashboard_server:app --host 127.0.0.1 --port 8765
 ```
 
+如果 `8765` 端口被占用、看板一直连接中，或不确定是不是用了 `.venv`，直接用：
+
+```powershell
+cd C:\Users\Administrator\Documents\polymarket\weatherbot
+.\scripts\restart_dashboard.ps1
+```
+
 第二个 PowerShell：
 
 ```powershell

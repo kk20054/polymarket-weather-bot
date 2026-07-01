@@ -8,13 +8,14 @@ import math
 import os
 import subprocess
 import sys
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,15 +34,28 @@ from dashboard_db import (
 )
 from weatherbot_v3.config import load_config as load_v3_config
 from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
+from weatherbot_v3.db import forecast_summary
 from weatherbot_v3.db import init_v3_db
 from weatherbot_v3.db import insert_event_distribution, latest_event_distribution, latest_signal_decision
-from weatherbot_v3.db import truth_coverage_summary, upsert_market_rules, upsert_signal_decision, upsert_truth_observation
+from weatherbot_v3.db import list_data_fetch_logs
+from weatherbot_v3.db import weather_evidence_summary
+from weatherbot_v3.db import bulk_settlement_contract_verification, list_settlement_contracts, set_settlement_contract_verification, truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
+from weatherbot_v3.forecast_archive import build_forecast_archive_manifest
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
+from weatherbot_v3.hourly import forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary
 from weatherbot_v3.migration import migrate_legacy_signals
+from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.notifier import FeishuNotifier
-from weatherbot_v3.truth import infer_settlement_rule
+from weatherbot_v3.polymarket import PolymarketDataClient
+from weatherbot_v3.production_actions import list_production_actions, run_production_action
+from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
+from weatherbot_v3.registry import SETTLEMENT_REGISTRY
+from weatherbot_v3.stations import list_stations, sync_station_registry
+from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_rule
+from weatherbot_v3.cli import run_production_refresh
+from weatherbot_v3.validation import build_production_validation_report
 
 
 ROOT = Path(__file__).resolve().parent
@@ -51,10 +65,30 @@ DASHBOARD_DIR = ROOT / "dashboard"
 BOT_LOG_PATH = DATA_DIR / "weatherbet-dashboard.log"
 BOT_PID_PATH = DATA_DIR / "weatherbet-dashboard.pid"
 AUTO_SIMULATION_PATH = DATA_DIR / "auto-simulation.json"
+PRODUCTION_REFRESH_PATH = DATA_DIR / "production-refresh.json"
 bot_process: subprocess.Popen | None = None
 auto_simulation_task: asyncio.Task | None = None
+dashboard_refresh_task: asyncio.Task | None = None
+auto_refresh_task: asyncio.Task | None = None
 bulk_simulation_lock = asyncio.Lock()
+production_refresh_lock = asyncio.Lock()
 _market_rule_sync_signature: tuple[tuple[str, float], ...] | None = None
+AUTO_START_SCANNER = os.getenv("WEATHERBOT_AUTO_START_SCANNER", "false").strip().lower() not in {"0", "false", "no", "off"}
+AUTO_REFRESH_ENABLED = os.getenv("WEATHERBOT_AUTO_REFRESH", "false").strip().lower() not in {"0", "false", "no", "off"}
+AUTO_REFRESH_INTERVAL_SECONDS = max(900, int(os.getenv("WEATHERBOT_AUTO_REFRESH_INTERVAL", "1800") or "1800"))
+AUTO_REFRESH_INITIAL_DELAY_SECONDS = max(0, int(os.getenv("WEATHERBOT_AUTO_REFRESH_INITIAL_DELAY", "30") or "30"))
+AUTO_REFRESH_DAYS = max(1, min(int(os.getenv("WEATHERBOT_AUTO_REFRESH_DAYS", "1") or "1"), 3))
+AUTO_REFRESH_LIMIT = max(1, min(int(os.getenv("WEATHERBOT_AUTO_REFRESH_LIMIT", "20") or "20"), 100))
+AUTO_REFRESH_CITIES = os.getenv("WEATHERBOT_AUTO_REFRESH_CITIES", "").strip()
+AUTO_REFRESH_SIGNAL_SCAN = os.getenv("WEATHERBOT_AUTO_REFRESH_SIGNAL_SCAN", "false").strip().lower() not in {"0", "false", "no", "off"}
+RESUME_AUTO_SIMULATION = os.getenv("WEATHERBOT_RESUME_AUTO_SIMULATION", "false").strip().lower() not in {"0", "false", "no", "off"}
+dashboard_payload_cache: dict | None = None
+dashboard_payload_cache_at: datetime | None = None
+DASHBOARD_CACHE_TTL_SECONDS = int(os.getenv("WEATHERBOT_DASHBOARD_CACHE_TTL", "20") or "20")
+production_validation_cache: dict[tuple[bool], tuple[float, dict]] = {}
+PRODUCTION_VALIDATION_CACHE_TTL_SECONDS = int(os.getenv("WEATHERBOT_PRODUCTION_VALIDATION_CACHE_TTL", "60") or "60")
+DASHBOARD_AUTO_BUILD = os.getenv("WEATHERBOT_DASHBOARD_AUTO_BUILD", "false").strip().lower() not in {"0", "false", "no", "off"}
+STARTUP_MAINTENANCE = os.getenv("WEATHERBOT_STARTUP_MAINTENANCE", "false").strip().lower() not in {"0", "false", "no", "off"}
 
 app = FastAPI(title="WeatherBot Dashboard", version="1.0")
 app.add_middleware(
@@ -88,6 +122,44 @@ class AutoSimulationUpdate(BaseModel):
     interval_seconds: int = 300
 
 
+class ContractVerificationRequest(BaseModel):
+    verified: bool = True
+    reviewer: str = "local-operator"
+    note: str | None = None
+
+
+class BulkContractVerificationRequest(BaseModel):
+    contract_ids: list[str] | None = None
+    limit: int = 5
+    reviewer: str = "dashboard"
+    note: str | None = None
+    mature_only: bool = False
+    apply: bool = False
+
+
+class ProductionRefreshRequest(BaseModel):
+    cities: list[str] | None = None
+    days: int = 1
+    limit: int = 20
+    start_date: str = ""
+    end_date: str = ""
+    skip_signal_scan: bool = True
+
+
+class ProductionActionRequest(BaseModel):
+    action_key: str
+    apply: bool = False
+    operator_confirmed: bool = False
+    cities: list[str] | None = None
+    days: int = 1
+    limit: int = 20
+    start_date: str = ""
+    end_date: str = ""
+    skip_signal_scan: bool = True
+    note: str = ""
+    archive_path: str = ""
+
+
 class LiveOrderUpdate(BaseModel):
     signal_id: int
     amount: float | None = None
@@ -108,6 +180,42 @@ def _read_json(path, fallback):
 def _write_json(path, payload):
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _production_refresh_summary(payload):
+    stages = payload.get("stages") or []
+    return {
+        "requested_at": payload.get("requested_at"),
+        "ok": bool(payload.get("ok")),
+        "failed_stages": list(payload.get("failed_stages") or []),
+        "stage_count": len(stages),
+        "ok_stage_count": sum(1 for stage in stages if stage.get("ok")),
+        "blocked_keys": list(((payload.get("readiness") or {}).get("blocked_keys") or [])),
+        "scan_signals": bool(payload.get("scan_signals")),
+    }
+
+
+def _save_production_refresh_result(payload):
+    previous = _read_json(PRODUCTION_REFRESH_PATH, None) or {}
+    history = list(previous.get("history") or [])
+    current_summary = _production_refresh_summary(payload)
+    if current_summary.get("requested_at"):
+        history = [current_summary, *history]
+    payload["history"] = history[:7]
+    _write_json(PRODUCTION_REFRESH_PATH, payload)
+    return payload
+
+
+def _production_refresh_runtime_state(payload):
+    if not payload:
+        return None
+    state = dict(payload)
+    state["last_refresh_was_auto"] = bool(state.pop("auto_refresh", False))
+    state["auto_refresh_enabled"] = AUTO_REFRESH_ENABLED
+    state["auto_refresh_running"] = bool(auto_refresh_task and not auto_refresh_task.done())
+    state["production_refresh_running"] = production_refresh_lock.locked()
+    state["running"] = production_refresh_lock.locked()
+    return state
 
 
 def _auto_simulation_state():
@@ -312,11 +420,6 @@ def _market_calibration_eligible(market):
 
 
 def _build_truth_health(markets):
-    by_city = {}
-    total = 0
-    eligible = 0
-    open_meteo = 0
-    legacy = 0
     for market in markets:
         obs = _market_truth_observation(market)
         if not obs:
@@ -325,69 +428,58 @@ def _build_truth_health(markets):
             upsert_truth_observation(obs)
         except Exception:
             pass
-        total += 1
-        if obs["calibration_eligible"]:
-            eligible += 1
-        if obs["provider"] == "open_meteo_archive":
-            open_meteo += 1
-        if obs["provider"] == "legacy_unknown":
-            legacy += 1
-        city = obs["city"]
-        item = by_city.setdefault(
-            city,
-            {
-                "city": city,
-                "city_name": obs["city_name"],
-                "station_id": obs["station_id"],
-                "total_observations": 0,
-                "eligible_observations": 0,
-                "open_meteo_fallbacks": 0,
-                "legacy_unknown": 0,
-                "latest_provider": "",
-                "latest_date": "",
-                "latest_confidence": 0.0,
-                "status": "blocked",
-                "reasons": [],
-            },
-        )
-        item["total_observations"] += 1
-        if obs["calibration_eligible"]:
-            item["eligible_observations"] += 1
-        if obs["provider"] == "open_meteo_archive":
-            item["open_meteo_fallbacks"] += 1
-        if obs["provider"] == "legacy_unknown":
-            item["legacy_unknown"] += 1
-        if not item["latest_date"] or obs["target_date"] > item["latest_date"]:
-            item["latest_date"] = obs["target_date"]
-            item["latest_provider"] = obs["provider"]
-            item["latest_confidence"] = obs["source_confidence"]
 
+    summary = truth_coverage_summary()
     cfg = load_v3_config()
-    for item in by_city.values():
+    for item in summary.get("cities", []):
         reasons = []
+        cautions = []
         if item["eligible_observations"] < cfg.min_independent_settlement_days:
             reasons.append("truth_independent_days_low")
         if item["open_meteo_fallbacks"]:
-            reasons.append("open_meteo_truth_fallback_present")
+            cautions.append("open_meteo_truth_fallback_present")
         if item["legacy_unknown"]:
-            reasons.append("legacy_truth_unknown")
+            cautions.append("legacy_truth_unknown_excluded")
         item["status"] = "eligible" if not reasons else "blocked"
         item["reasons"] = reasons
-
-    cities = sorted(by_city.values(), key=lambda row: (row["eligible_observations"], row["total_observations"]), reverse=True)
-    return {
-        "total_observations": total,
-        "eligible_observations": eligible,
-        "coverage_rate": round((eligible / total) if total else 0.0, 4),
-        "open_meteo_fallbacks": open_meteo,
-        "open_meteo_fallback_rate": round((open_meteo / total) if total else 0.0, 4),
-        "legacy_unknown": legacy,
-        "cities": cities,
-    }
+        item["cautions"] = cautions
+    return summary
 
 
 def _truth_city_lookup(truth_health):
     return {row.get("city"): row for row in truth_health.get("cities", [])}
+
+
+def _forecast_archive_manifest_payload(limit=200, sources=None, include_jsonl=False):
+    try:
+        limit = max(1, min(int(limit or 200), 1000))
+    except Exception:
+        limit = 200
+    source_list = [
+        str(source).strip()
+        for source in (sources or ["ecmwf", "gfs_ensemble"])
+        if str(source).strip()
+    ]
+    audit = build_model_dataset_audit()
+    manifest = build_forecast_archive_manifest(audit, sources=source_list, limit=limit)
+    payload = {
+        "manifest_version": manifest["manifest_version"],
+        "generated_at": manifest["generated_at"],
+        "record_count": manifest["record_count"],
+        "by_city": manifest["by_city"],
+        "by_source": manifest["by_source"],
+        "records": manifest["records"],
+        "sources": source_list,
+        "schema_doc": "FORECAST_ARCHIVE_IMPORT_CN.md",
+        "template_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli forecast-archive-manifest --output-path data\\forecast_archive\\historical_forecasts.template.jsonl",
+        "import_dry_run_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli forecast-archive-import --archive-path data\\forecast_archive\\historical_forecasts.jsonl",
+        "import_apply_command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli forecast-archive-import --archive-path data\\forecast_archive\\historical_forecasts.jsonl --apply",
+        "audit_summary": audit.get("summary", {}),
+        "reason_counts": audit.get("reason_counts", {}),
+    }
+    if include_jsonl:
+        payload["jsonl"] = manifest["jsonl"]
+    return payload
 
 
 def _sync_v4_market_rules(markets):
@@ -401,6 +493,7 @@ def _sync_v4_market_rules(markets):
     if signature == _market_rule_sync_signature:
         return
     rules = []
+    contracts = {}
     for market in markets:
         outcomes = market.get("all_outcomes") or []
         for outcome in outcomes:
@@ -413,9 +506,13 @@ def _sync_v4_market_rules(markets):
             try:
                 rule = infer_settlement_rule(payload).to_dict()
                 rules.append(rule)
+                contract = settlement_contract_from_rule(rule)
+                if contract.get("event_slug"):
+                    contracts[str(contract["event_slug"])] = contract
             except Exception:
                 continue
     upsert_market_rules(rules)
+    upsert_settlement_contracts(list(contracts.values()))
     _market_rule_sync_signature = signature
 
 
@@ -494,12 +591,18 @@ def _market_path_for_signal(signal):
     return MARKETS_DIR / f"{city}_{date}.json"
 
 
-def _position_from_signal(signal, amount, opened_at):
+def _position_from_signal(signal, amount, opened_at, execution=None):
     raw = _read_json_from_text(signal.get("raw_json"), {})
+    execution = execution or {}
     low, high = _bucket_bounds(signal)
-    entry_price = float(signal.get("limit_price") or raw.get("entry_price") or 0)
+    entry_price = float(
+        execution.get("average_fill_price")
+        or signal.get("limit_price")
+        or raw.get("entry_price")
+        or 0
+    )
     bid_price = float(signal.get("bid_price") or raw.get("bid_at_entry") or entry_price)
-    shares = round(amount / entry_price, 2) if entry_price > 0 else 0
+    shares = float(execution.get("shares") or (round(amount / entry_price, 2) if entry_price > 0 else 0))
     return {
         "market_id": signal.get("market_id") or raw.get("market_id"),
         "event_url": signal.get("event_url") or raw.get("event_url"),
@@ -513,6 +616,11 @@ def _position_from_signal(signal, amount, opened_at):
         "spread": signal.get("spread") if signal.get("spread") is not None else raw.get("spread"),
         "shares": shares,
         "cost": round(amount, 2),
+        "requested_cost": execution.get("fill", {}).get("filled_amount", amount)
+        + execution.get("fill", {}).get("remaining_amount", 0),
+        "unfilled_amount": execution.get("fill", {}).get("remaining_amount", 0),
+        "fill_status": execution.get("status") or "legacy_fill",
+        "fill_levels": execution.get("fill", {}).get("fills", []),
         "p": signal.get("probability") if signal.get("probability") is not None else raw.get("p"),
         "ev": signal.get("ev") if signal.get("ev") is not None else raw.get("ev"),
         "kelly": signal.get("kelly") if signal.get("kelly") is not None else raw.get("kelly"),
@@ -530,7 +638,7 @@ def _position_from_signal(signal, amount, opened_at):
     }
 
 
-def _open_paper_position(signal, amount, simulation_start, opened_at):
+def _open_paper_position(signal, amount, simulation_start, opened_at, execution=None):
     path = _market_path_for_signal(signal)
     if not path or amount <= 0:
         return False
@@ -551,7 +659,7 @@ def _open_paper_position(signal, amount, simulation_start, opened_at):
         history.append(archived)
         market["position_history"] = history
 
-    market["position"] = _position_from_signal(signal, amount, opened_at)
+    market["position"] = _position_from_signal(signal, amount, opened_at, execution)
     market["status"] = "open"
     market["pnl"] = None
     market["resolved_outcome"] = None
@@ -662,6 +770,40 @@ def _cleanup_stale_bot_process():
     return cleaned
 
 
+def _start_bot_process(source: str = "dashboard") -> dict:
+    global bot_process
+    if _bot_running():
+        return {"status": "running", "is_running": True, "already_running": True}
+    _cleanup_stale_bot_process()
+    DATA_DIR.mkdir(exist_ok=True)
+    log_file = BOT_LOG_PATH.open("a", encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
+    for proxy_key in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        env.pop(proxy_key, None)
+    env["NO_PROXY"] = "*"
+    env["no_proxy"] = "*"
+    bot_process = subprocess.Popen(
+        [sys.executable, "-u", "weatherbet.py"],
+        cwd=ROOT,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    )
+    BOT_PID_PATH.write_text(str(bot_process.pid), encoding="utf-8")
+    log_event("success", f"Scanner started by {source}; logs write to data/weatherbet-dashboard.log")
+    return {"status": "running", "is_running": True, "pid": bot_process.pid}
+
+
 def _event_to_payload(event):
     return {
         "id": event.get("id"),
@@ -670,6 +812,104 @@ def _event_to_payload(event):
         "message": _repair_display_text(event.get("message")),
         "data": json.loads(event.get("raw_json") or "{}"),
     }
+
+
+def _json_compact(value) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        return str(value)
+
+
+def _event_fetch_stage(event_payload: dict) -> str:
+    text = " ".join([
+        str(event_payload.get("type") or ""),
+        str(event_payload.get("message") or ""),
+        _json_compact(event_payload.get("data") or {}),
+    ]).lower()
+    if any(key in text for key in ("orderbook", "clob", "market", "盘口")):
+        return "orderbook"
+    if any(key in text for key in ("signal", "buy", "trade", "order")):
+        return "signal"
+    if any(key in text for key in ("truth", "history", "settle", "actual", "observ")):
+        return "observation"
+    if any(key in text for key in ("forecast", "weather", "metar", "refresh", "scan")):
+        return "weather"
+    return "system"
+
+
+def _event_fetch_status(event_payload: dict) -> str:
+    text = " ".join([
+        str(event_payload.get("type") or ""),
+        str(event_payload.get("message") or ""),
+        _json_compact(event_payload.get("data") or {}),
+    ]).lower()
+    if any(key in text for key in ("error", "fail", "forbidden", "timeout", "exception", "err")):
+        return "ERR"
+    if any(key in text for key in ("warn", "skip", "blocked", "fallback")):
+        return "WARN"
+    if any(key in text for key in ("success", "ok", "done", "buy", "signal", "refresh")):
+        return "OK"
+    return "INFO"
+
+
+def _fetch_log_payload(events: list[dict], limit: int = 100) -> list[dict]:
+    rows: list[dict] = []
+    for index, event in enumerate(events[:limit], start=1):
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        raw_source = (
+            data.get("source")
+            or data.get("provider")
+            or data.get("stage")
+            or data.get("action")
+            or event.get("type")
+            or _event_fetch_stage(event)
+        )
+        raw_duration = data.get("elapsed_ms") or data.get("duration_ms") or data.get("duration")
+        message = _repair_display_text(event.get("message") or "")
+        compact = _json_compact(data) if data else ""
+        rows.append({
+            "index": index,
+            "time": event.get("timestamp"),
+            "source": str(raw_source or "--"),
+            "stage": _event_fetch_stage(event),
+            "status": _event_fetch_status(event),
+            "duration": raw_duration,
+            "message": message,
+            "details": compact,
+            "event_id": event.get("id"),
+            "event_type": event.get("type"),
+        })
+    return rows
+
+
+def _data_fetch_log_payload(limit: int = 100) -> list[dict]:
+    rows: list[dict] = []
+    for index, row in enumerate(list_data_fetch_logs(limit), start=1):
+        rows.append({
+            "index": index,
+            "time": row.get("finished_at") or row.get("created_at") or row.get("started_at"),
+            "source": row.get("source") or "--",
+            "stage": row.get("stage") or row.get("source") or "weather",
+            "status": row.get("status") or "INFO",
+            "duration": row.get("duration_ms"),
+            "message": _repair_display_text(row.get("message") or ""),
+            "details": row.get("details_json") or "",
+            "event_id": row.get("id"),
+            "event_type": "data_fetch_log",
+            "city": row.get("city") or "",
+            "target_date": row.get("target_date") or "",
+        })
+    return rows
+
+
+def _combined_fetch_log_payload(events: list[dict], limit: int = 100) -> list[dict]:
+    persisted = _data_fetch_log_payload(limit)
+    transient = _fetch_log_payload(events, limit)
+    rows = (persisted + transient)[:limit]
+    for index, row in enumerate(rows, start=1):
+        row["index"] = index
+    return rows
 
 
 def _tail_log_lines(path, start_pos):
@@ -1830,10 +2070,44 @@ def _build_temperature_fit(markets):
     }
 
 
+def _hourly_merge_key(point: dict) -> str:
+    target_date = str(point.get("target_date") or "")
+    local_hour = point.get("local_hour")
+    if not local_hour:
+        timestamp = str(point.get("timestamp") or "")
+        local_hour = timestamp[11:16] if len(timestamp) >= 16 and "T" in timestamp else timestamp
+    return f"{target_date}:{local_hour}"
+
+
+def _merge_hourly_points(forecast_points: list[dict], consensus_points: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for point in forecast_points:
+        merged[_hourly_merge_key(point)] = dict(point)
+    for point in consensus_points:
+        key = _hourly_merge_key(point)
+        base = merged.setdefault(key, {})
+        base.update({k: v for k, v in point.items() if v is not None or k not in base})
+        for field in ("best", "ensemble_mean", "ecmwf", "hrrr"):
+            if base.get(field) is None and key in merged:
+                base[field] = merged[key].get(field)
+    return sorted(
+        [point for point in merged.values() if point.get("target_date")],
+        key=lambda point: (str(point.get("target_date") or ""), str(point.get("timestamp") or point.get("local_hour") or "")),
+    )
+
+
 def _build_weather_city_series(markets):
     """Compact chart-friendly forecast history by city for the dashboard."""
     by_city = {}
     history_cache = merge_history_points(market_history_points(markets))
+    hourly_targets = {}
+    for market in markets:
+        city_key = market.get("city") or ""
+        target_date = market.get("date") or ""
+        if city_key and target_date:
+            hourly_targets.setdefault(city_key, set()).add(target_date)
+    hourly_cache = forecast_hourly_points(hourly_targets) if hourly_targets else {}
+    consensus_cache = hourly_consensus_points(hourly_targets) if hourly_targets else {}
     for market in markets:
         city_key = market.get("city") or ""
         if not city_key:
@@ -1846,6 +2120,10 @@ def _build_weather_city_series(markets):
             "unit": unit,
             "forecast_points": [],
             "history_points": list(history_cache.get(city_key) or []),
+            "hourly_points": _merge_hourly_points(
+                list(hourly_cache.get(city_key) or []),
+                list(consensus_cache.get(city_key) or []),
+            ),
             "humidity_status": "not_collected",
         })
         for snap in market.get("forecast_snapshots") or []:
@@ -1863,6 +2141,14 @@ def _build_weather_city_series(markets):
                 "ensemble_mean": snap.get("ensemble_mean"),
                 "ensemble_std": snap.get("ensemble_std"),
                 "humidity": snap.get("humidity") or snap.get("relative_humidity"),
+                "cloud_cover": snap.get("cloud_cover"),
+                "precipitation": snap.get("precipitation"),
+                "precipitation_probability": snap.get("precipitation_probability"),
+                "wind_speed": snap.get("wind_speed") or snap.get("wind_speed_10m"),
+                "wind_direction": snap.get("wind_direction") or snap.get("wind_direction_10m"),
+                "pressure": snap.get("pressure") or snap.get("pressure_msl") or snap.get("surface_pressure"),
+                "dew_point": snap.get("dew_point") or snap.get("dew_point_2m"),
+                "condition": snap.get("condition") or snap.get("weather") or snap.get("weather_description"),
                 "source": snap.get("best_source") or "",
             }
             city["forecast_points"].append(point)
@@ -1875,13 +2161,16 @@ def _build_weather_city_series(markets):
             deduped[f"{point.get('timestamp')}:{point.get('target_date')}"] = point
         points = list(deduped.values())[-80:]
         history_points = sorted(city.get("history_points") or [], key=lambda p: p.get("target_date") or "")[-120:]
-        if not points and not history_points:
+        hourly_points = sorted(city.get("hourly_points") or [], key=lambda p: p.get("timestamp") or "")[-120:]
+        if not points and not history_points and not hourly_points:
             continue
-        latest = points[-1] if points else {}
+        latest = points[-1] if points else (hourly_points[-1] if hourly_points else {})
         humidity_values = [p.get("humidity") for p in points if p.get("humidity") is not None]
+        humidity_values += [p.get("humidity") for p in hourly_points if p.get("humidity") is not None]
         humidity_values += [p.get("humidity_mean") for p in history_points if p.get("humidity_mean") is not None]
         city["forecast_points"] = points
         city["history_points"] = history_points
+        city["hourly_points"] = hourly_points
         city["points"] = points
         city["latest_best"] = latest.get("best")
         city["latest_metar"] = latest.get("metar")
@@ -1890,8 +2179,535 @@ def _build_weather_city_series(markets):
         city["humidity_status"] = "available" if humidity_values else "not_collected"
         city["history_count"] = len(history_points)
         city["forecast_count"] = len(points)
+        city["hourly_count"] = len(city["hourly_points"])
         rows.append(city)
     return sorted(rows, key=lambda row: row.get("city_name") or "")
+
+
+def _registry_city_series():
+    """Lightweight city index used before the first manual data refresh."""
+    rows = []
+    for profile in SETTLEMENT_REGISTRY.values():
+        rows.append({
+            "city_key": profile.city,
+            "city_name": profile.city_name,
+            "station_id": profile.station_id,
+            "station_name": profile.station_name,
+            "unit": profile.unit,
+            "latest_best": None,
+            "latest_metar": None,
+            "latest_source": None,
+            "latest_timestamp": None,
+            "humidity_status": "not_collected",
+            "history_count": 0,
+            "forecast_count": 0,
+            "hourly_count": 0,
+            "history_points": [],
+            "forecast_points": [],
+            "hourly_points": [],
+            "points": [],
+        })
+    return sorted(rows, key=lambda row: (row.get("city_name") or "").lower())
+
+
+def _distribution_item_count(distribution) -> int:
+    if not isinstance(distribution, dict):
+        return 0
+    for key in ("items", "buckets", "distribution"):
+        value = distribution.get(key)
+        if isinstance(value, list):
+            return len(value)
+    return 0
+
+
+def _distribution_items(distribution) -> list[dict]:
+    if not isinstance(distribution, dict):
+        return []
+    for key in ("items", "buckets", "distribution"):
+        value = distribution.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _distribution_bucket_label(item: dict) -> str:
+    for key in ("label", "bucket", "bucket_label", "question"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    low = _float_or_none(item.get("bucket_low"))
+    high = _float_or_none(item.get("bucket_high"))
+    if low is None and high is None:
+        return "--"
+    if low is not None and low <= -900 and high is not None:
+        return f"{high:g} or below"
+    if high is not None and high >= 900 and low is not None:
+        return f"{low:g} or above"
+    if low is not None and high is not None:
+        return f"{low:g}-{high:g}"
+    return str(low if low is not None else high)
+
+
+def _probability_bucket_summary(city_signals: list[dict]) -> dict:
+    top_buckets: list[dict] = []
+    total_items = 0
+    normalized_count = 0
+    actionable_count = 0
+    signal_count = len(city_signals)
+
+    for signal in city_signals:
+        distribution = signal.get("distribution")
+        items = _distribution_items(distribution)
+        if items and isinstance(distribution, dict) and distribution.get("normalized"):
+            normalized_count += 1
+        if signal.get("actionable"):
+            actionable_count += 1
+        total_items += len(items)
+        for item in items:
+            probability = _float_or_none(item.get("probability"))
+            if probability is None:
+                probability = _float_or_none(item.get("probability_raw"))
+            top_buckets.append({
+                "bucket": _distribution_bucket_label(item),
+                "probability": probability,
+                "ask": _float_or_none(item.get("ask")),
+                "bid": _float_or_none(item.get("bid")),
+                "edge": _float_or_none(item.get("probability_edge") if item.get("probability_edge") is not None else item.get("ev")),
+                "market_id": item.get("market_id") or signal.get("market_id"),
+                "signal_id": signal.get("id"),
+                "is_signal": bool(item.get("is_signal")),
+                "actionable": bool(signal.get("actionable")),
+            })
+
+    top_buckets.sort(key=lambda row: (row.get("probability") is not None, row.get("probability") or -1), reverse=True)
+    best = top_buckets[0] if top_buckets else {}
+    return {
+        "signal_count": signal_count,
+        "bucket_count": total_items,
+        "normalized_count": normalized_count,
+        "actionable_signal_count": actionable_count,
+        "highest_bucket": best.get("bucket"),
+        "highest_probability": best.get("probability"),
+        "strict_matching_required": True,
+        "source": "signal.distribution",
+        "top_buckets": top_buckets[:10],
+    }
+
+
+def _bucket_is_open_tail(low, high, label: str = "") -> bool:
+    text = str(label or "").lower()
+    if any(term in text for term in ("or below", "or above", "below", "above", "999", "-999")):
+        return True
+    return (low is not None and low <= -900) or (high is not None and high >= 900)
+
+
+def _market_bucket_summary(city_signals: list[dict]) -> dict:
+    reason_counter: Counter[str] = Counter()
+    top_executable: list[dict] = []
+    top_blocked: list[dict] = []
+    signal_count = len(city_signals)
+    bucket_count = 0
+    matched_bucket_count = 0
+    open_tail_count = 0
+    low_price_tail_count = 0
+    missing_price_count = 0
+    high_spread_count = 0
+    stale_book_count = 0
+    actionable_signal_count = 0
+    paper_allowed_count = 0
+    live_allowed_count = 0
+
+    for signal in city_signals:
+        distribution = signal.get("distribution")
+        items = _distribution_items(distribution)
+        bucket_count += len(items)
+        if signal.get("actionable"):
+            actionable_signal_count += 1
+
+        price = _float_or_none(signal.get("limit_price"))
+        if price is None:
+            price = _float_or_none(signal.get("market_probability"))
+        bid = _float_or_none(signal.get("bid_price"))
+        spread = _float_or_none(signal.get("spread"))
+        if spread is None and price is not None and bid is not None:
+            spread = max(0.0, price - bid)
+        edge = _float_or_none(signal.get("probability_edge"))
+        if edge is None:
+            edge = _float_or_none(signal.get("edge"))
+
+        decision = signal.get("decision") or {}
+        decision_reasons = list(decision.get("reasons") or [])
+        live_reasons = list(signal.get("live_block_reasons") or [])
+        cautions = list(decision.get("cautions") or []) + list(signal.get("live_cautions") or [])
+        reasons = []
+        for reason in decision_reasons + live_reasons:
+            if reason and reason not in reasons:
+                reasons.append(str(reason))
+        if not signal.get("actionable"):
+            reasons.append(f"status_{signal.get('status') or 'inactive'}")
+        if price is None:
+            reasons.append("price_missing")
+        if spread is not None and (spread > 0.03 or (price is not None and price <= 0.10 and (spread >= 0.02 or spread / max(price, 0.001) >= 0.25))):
+            reasons.append("spread_cost_too_high")
+
+        paper_allowed = bool(decision.get("paper_allowed")) and signal.get("actionable") and price is not None
+        live_allowed = bool(signal.get("live_allowed") or decision.get("live_allowed"))
+        if paper_allowed:
+            paper_allowed_count += 1
+        if live_allowed:
+            live_allowed_count += 1
+
+        if price is None:
+            missing_price_count += 1
+        if spread is not None and (spread > 0.03 or "spread_above_limit" in reasons or "spread_cost_too_high" in reasons):
+            high_spread_count += 1
+        if any("stale" in reason or "orderbook" in reason for reason in reasons + cautions):
+            stale_book_count += 1
+        for reason in reasons:
+            reason_counter[reason] += 1
+
+        signal_bucket_label = str(signal.get("bucket_label") or "")
+        matched_item = None
+        for item in items:
+            label = _distribution_bucket_label(item)
+            low = _float_or_none(item.get("bucket_low"))
+            high = _float_or_none(item.get("bucket_high"))
+            item_price = _float_or_none(item.get("ask"))
+            if _bucket_is_open_tail(low, high, label):
+                open_tail_count += 1
+            if item_price is not None and item_price < 0.10:
+                low_price_tail_count += 1
+            if item.get("is_signal"):
+                matched_bucket_count += 1
+                matched_item = item
+        if not items and _bucket_is_open_tail(None, None, signal_bucket_label):
+            open_tail_count += 1
+        if price is not None and price < 0.10:
+            low_price_tail_count += 1
+
+        row = {
+            "signal_id": signal.get("id"),
+            "market_id": signal.get("market_id"),
+            "event_url": signal.get("event_url"),
+            "bucket": _distribution_bucket_label(matched_item) if matched_item else signal_bucket_label,
+            "price": price,
+            "bid": bid,
+            "spread": spread,
+            "edge": edge,
+            "paper_allowed": paper_allowed,
+            "live_allowed": live_allowed,
+            "reasons": reasons[:5],
+        }
+        if paper_allowed and not reasons:
+            top_executable.append(row)
+        elif reasons:
+            top_blocked.append(row)
+
+    top_executable.sort(key=lambda row: (row.get("edge") is not None, row.get("edge") or -999), reverse=True)
+    return {
+        "signal_count": signal_count,
+        "bucket_count": bucket_count,
+        "matched_bucket_count": matched_bucket_count,
+        "actionable_signal_count": actionable_signal_count,
+        "paper_allowed_count": paper_allowed_count,
+        "live_allowed_count": live_allowed_count,
+        "blocked_signal_count": max(0, signal_count - paper_allowed_count),
+        "open_tail_count": open_tail_count,
+        "low_price_tail_count": low_price_tail_count,
+        "missing_price_count": missing_price_count,
+        "high_spread_count": high_spread_count,
+        "stale_book_count": stale_book_count,
+        "strict_matching_required": True,
+        "ready": bucket_count > 0 or signal_count > 0,
+        "reason_counts": [
+            {"reason": reason, "count": count}
+            for reason, count in reason_counter.most_common(10)
+        ],
+        "top_executable": top_executable[:5],
+        "top_blocked": top_blocked[:5],
+    }
+
+
+def _row_matches_text(row: dict, terms: list[str]) -> bool:
+    text = _json_compact(row).lower()
+    return any(term and term.lower() in text for term in terms)
+
+
+def _float_or_none(value):
+    try:
+        if value is None or value == "":
+            return None
+        number = float(value)
+        if math.isnan(number) or math.isinf(number):
+            return None
+        return number
+    except Exception:
+        return None
+
+
+def _point_forecast_value(point: dict) -> float | None:
+    for key in ("best", "ensemble_mean", "ecmwf", "hrrr"):
+        number = _float_or_none(point.get(key))
+        if number is not None:
+            return number
+    return None
+
+
+def _pearson_r(pairs: list[tuple[float, float]]) -> float | None:
+    if len(pairs) < 2:
+        return None
+    observed = [pair[0] for pair in pairs]
+    forecast = [pair[1] for pair in pairs]
+    mean_observed = sum(observed) / len(observed)
+    mean_forecast = sum(forecast) / len(forecast)
+    numerator = sum((o - mean_observed) * (f - mean_forecast) for o, f in pairs)
+    observed_var = sum((o - mean_observed) ** 2 for o in observed)
+    forecast_var = sum((f - mean_forecast) ** 2 for f in forecast)
+    denominator = math.sqrt(observed_var * forecast_var)
+    if denominator <= 0:
+        return None
+    return max(-1.0, min(1.0, numerator / denominator))
+
+
+def _diff_stats_summary(chart_points: list[dict], history_points: list[dict]) -> dict:
+    def hour_bucket(point: dict, *timestamp_keys: str) -> str:
+        hour = str(point.get("local_hour") or "")
+        if hour:
+            return hour[:2] + ":00" if len(hour) >= 2 and hour[:2].isdigit() else hour
+        for key in timestamp_keys:
+            timestamp = str(point.get(key) or "")
+            if len(timestamp) >= 13 and "T" in timestamp:
+                return f"{timestamp[11:13]}:00"
+            if timestamp:
+                return timestamp
+        return ""
+
+    pairs: list[tuple[float, float]] = []
+    deltas: list[float] = []
+    rows: list[dict] = []
+    metar_hours = set()
+    forecast_hours = set()
+    historical_hours = set()
+    for point in chart_points:
+        hour = hour_bucket(point, "timestamp")
+        observed = _float_or_none(point.get("metar"))
+        forecast = _point_forecast_value(point)
+        if observed is not None:
+            metar_hours.add(hour)
+        if forecast is not None:
+            forecast_hours.add(hour)
+        if observed is None or forecast is None:
+            continue
+        delta = observed - forecast
+        pairs.append((observed, forecast))
+        deltas.append(delta)
+        rows.append({
+            "timestamp": point.get("timestamp"),
+            "local_hour": hour,
+            "observed": observed,
+            "forecast": forecast,
+            "delta": round(delta, 3),
+            "source": point.get("source") or "hourly",
+        })
+    for point in history_points:
+        hour = hour_bucket(point, "timestamp", "observed_at")
+        if hour:
+            historical_hours.add(hour)
+    count = len(deltas)
+    mae = (sum(abs(delta) for delta in deltas) / count) if count else None
+    bias = (sum(deltas) / count) if count else None
+    pearson = _pearson_r(pairs)
+    overlap_count = len(metar_hours & forecast_hours)
+    possible_overlap = max(len(metar_hours), len(forecast_hours), 1)
+    hist_metar_overlap = len(historical_hours & metar_hours) if historical_hours and metar_hours else 0
+    hist_metar_possible = max(len(historical_hours), len(metar_hours), 1) if (historical_hours or metar_hours) else 0
+    return {
+        "count": count,
+        "avg_delta": round(bias, 3) if bias is not None else None,
+        "mae": round(mae, 3) if mae is not None else None,
+        "pearson_r": round(pearson, 4) if pearson is not None else None,
+        "metar_hours": len(metar_hours),
+        "forecast_hours": len(forecast_hours),
+        "overlap_count": overlap_count,
+        "overlap_ratio": round(overlap_count / possible_overlap, 4) if possible_overlap else None,
+        "historical_metar_overlap_count": hist_metar_overlap,
+        "historical_metar_overlap_ratio": (
+            round(hist_metar_overlap / hist_metar_possible, 4)
+            if hist_metar_possible
+            else None
+        ),
+        "rows": rows[:100],
+    }
+
+
+def _city_date_evidence_modules(city: dict, target_date: str, signals: list[dict], fetch_log: list[dict]) -> dict:
+    hourly_points = [p for p in city.get("hourly_points") or [] if str(p.get("target_date") or "") == target_date]
+    forecast_points = [p for p in city.get("forecast_points") or [] if str(p.get("target_date") or "") == target_date]
+    history_points = [p for p in city.get("history_points") or [] if str(p.get("target_date") or "") == target_date]
+    chart_points = hourly_points or forecast_points
+    metar_rows = [p for p in chart_points if p.get("metar") is not None]
+    forecast_rows = [
+        p for p in chart_points
+        if p.get("best") is not None
+        or p.get("ecmwf") is not None
+        or p.get("hrrr") is not None
+        or p.get("ensemble_mean") is not None
+    ]
+    diff_rows = [
+        p for p in chart_points
+        if p.get("metar") is not None
+        and (
+            p.get("best") is not None
+            or p.get("ecmwf") is not None
+            or p.get("hrrr") is not None
+            or p.get("ensemble_mean") is not None
+        )
+    ]
+    city_signals = [
+        signal for signal in signals
+        if str(signal.get("city_key") or "") == str(city.get("city_key") or "")
+        and str(signal.get("target_date") or "") == target_date
+    ]
+    terms = [str(city.get("city_key") or ""), str(city.get("city_name") or ""), target_date]
+    log_rows = [row for row in fetch_log if _row_matches_text(row, terms)]
+    bucket_count = sum(_distribution_item_count(signal.get("distribution")) for signal in city_signals)
+    diff_summary = _diff_stats_summary(chart_points, history_points)
+    probability_summary = _probability_bucket_summary(city_signals)
+    market_summary = _market_bucket_summary(city_signals)
+
+    return {
+        "hourly_temperature": {
+            "chart": "LineChart",
+            "rows": len(chart_points),
+            "series": ["Real METAR", "Model Forecast", "Diff", "Cloud Cover %"],
+            "empty_state": "No hourly forecast rows for this city/date.",
+            "ready": bool(chart_points),
+        },
+        "daily_max_prediction": {
+            "engine": "DEB/Gaussian-compatible",
+            "signals": len(city_signals),
+            "probability_summary": probability_summary,
+            "empty_state": "No prediction yet.",
+            "ready": bool(city_signals),
+        },
+        "probability_buckets": {
+            "rows": bucket_count,
+            "source": "signal.distribution",
+            "probability_summary": probability_summary,
+            "empty_state": "No probability buckets yet.",
+            "ready": bucket_count > 0,
+        },
+        "forecast": {
+            "rows": len(forecast_rows),
+            "table": "Forecast Data",
+            "empty_state": "No forecast data for this date.",
+            "ready": bool(forecast_rows),
+        },
+        "metar": {
+            "rows": len(metar_rows),
+            "table": "METAR Observations",
+            "empty_state": "No METAR observations for this date.",
+            "ready": bool(metar_rows),
+        },
+        "historical": {
+            "rows": len(history_points),
+            "table": "Historical Observations",
+            "empty_state": "No historical observations for this date.",
+            "ready": bool(history_points),
+        },
+        "diff_stats": {
+            "rows": len(diff_rows),
+            "formula": "Observed - Forecast",
+            "summary": diff_summary,
+            "empty_state": "No diff stats for this date.",
+            "ready": bool(diff_rows),
+        },
+        "fetch_log": {
+            "rows": len(log_rows),
+            "table": "Fetch Log (last 100)",
+            "empty_state": "No log entries.",
+            "ready": bool(log_rows),
+        },
+        "market_buckets": {
+            "signals": len(city_signals),
+            "buckets": bucket_count,
+            "strict_matching_required": True,
+            "probability_summary": probability_summary,
+            "market_summary": market_summary,
+            "ready": bucket_count > 0,
+        },
+    }
+
+
+def _build_city_evidence_payload(city_series: list[dict], weather_signals: list[dict], fetch_log: list[dict]) -> list[dict]:
+    """PolyWX-style city/date evidence contract shared by dashboard and signals."""
+    signals_by_city: dict[str, list[dict]] = {}
+    for signal in weather_signals:
+        signals_by_city.setdefault(str(signal.get("city_key") or ""), []).append(signal)
+
+    payload = []
+    for city in city_series:
+        city_key = str(city.get("city_key") or "")
+        if not city_key:
+            continue
+        date_keys = set()
+        for collection, field in (
+            ("hourly_points", "target_date"),
+            ("forecast_points", "target_date"),
+            ("history_points", "target_date"),
+        ):
+            for row in city.get(collection) or []:
+                value = row.get(field)
+                if value:
+                    date_keys.add(str(value))
+        for signal in signals_by_city.get(city_key, []):
+            if signal.get("target_date"):
+                date_keys.add(str(signal.get("target_date")))
+
+        date_payloads = []
+        for target_date in sorted(date_keys, reverse=True)[:14]:
+            modules = _city_date_evidence_modules(
+                city,
+                target_date,
+                signals_by_city.get(city_key, []),
+                fetch_log,
+            )
+            ready_count = sum(1 for module in modules.values() if module.get("ready"))
+            date_payloads.append({
+                "target_date": target_date,
+                "ready_modules": ready_count,
+                "module_count": len(modules),
+                "tabs": ["Forecast", "METAR", "Historical", "Diff Stats", "Fetch Log"],
+                "modules": modules,
+            })
+
+        payload.append({
+            "city_key": city_key,
+            "city_name": city.get("city_name") or city_key,
+            "station_id": city.get("station_id") or "",
+            "unit": city.get("unit") or "F",
+            "generated_from": "weather_city_series + weather_signals + fetch_log",
+            "data_sources": ["Forecast", "METAR", "Historical", "Market", "Fetch Log"],
+            "dates": date_payloads,
+            "latest_date": date_payloads[0]["target_date"] if date_payloads else None,
+            "latest_ready_modules": date_payloads[0]["ready_modules"] if date_payloads else 0,
+        })
+    return sorted(payload, key=lambda row: row.get("city_name") or "")
+
+
+def _city_evidence_matches(row: dict, city: str) -> bool:
+    city_lower = city.lower().strip()
+    city_key = str(row.get("city_key") or "").lower()
+    city_name = str(row.get("city_name") or "").lower().replace(" ", "-")
+    station_id = str(row.get("station_id") or "").lower()
+    candidates = {
+        city_key,
+        city_name,
+        station_id,
+        f"{city_key}-{station_id}" if station_id else city_key,
+        f"{city_name}-{station_id}" if station_id else city_name,
+    }
+    return city_lower in candidates
 
 
 def _strategy_diagnostics(signal, raw_signal, market, fit):
@@ -2026,6 +2842,9 @@ def _live_gate(signal, quality_flags, strategy):
     reasons = []
     cautions = []
     tags = set(strategy.get("strategy_tags") or [])
+    low, high = _bucket_bounds(signal)
+    if (low is not None and low <= -900) or (high is not None and high >= 900):
+        cautions.append("open_tail_bucket")
 
     if "fit_missing" in quality_flags:
         reasons.append("fit_missing")
@@ -2239,6 +3058,7 @@ def build_dashboard_payload():
     weather_forecasts_by_city = {}
     weather_city_series = _build_weather_city_series(markets)
     truth_health = _build_truth_health(markets)
+    data_readiness = build_data_readiness()
     truth_by_city = _truth_city_lookup(truth_health)
     temperature_fit = _build_temperature_fit(markets)
     fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
@@ -2405,17 +3225,6 @@ def build_dashboard_payload():
             signal_distribution,
             truth_by_city.get(signal.get("city")),
         )
-        try:
-            if signal_distribution.get("items"):
-                insert_event_distribution(
-                    str(signal.get("market_id") or ""),
-                    _event_slug_from_url(signal.get("event_url")) or "",
-                    signal_distribution,
-                    int(signal.get("id") or 0) or None,
-                )
-            upsert_signal_decision(int(signal.get("id") or 0), decision_payload)
-        except Exception:
-            pass
         weather_signals.append({
             "id": signal.get("id"),
             "market_id": signal.get("market_id"),
@@ -2571,15 +3380,18 @@ def build_dashboard_payload():
         "brier_score": (sum(brier_values) / len(brier_values)) if brier_values else 0,
     }
     backtest_summary = _build_backtest_summary(markets)
+    model_dataset_audit = None
     strategy_readiness = backtest_summary.get("strategy_readiness") or {}
     cfg = load_v3_config()
     readiness_reasons = list(strategy_readiness.get("reasons") or [])
     if truth_health.get("eligible_observations", 0) < cfg.min_independent_settlement_days:
         readiness_reasons.append("truth_observations_below_min")
-    if truth_health.get("open_meteo_fallback_rate", 0) > 0:
-        readiness_reasons.append("open_meteo_truth_fallback_present")
-    if truth_health.get("legacy_unknown", 0) > 0:
-        readiness_reasons.append("legacy_truth_unknown")
+    if not data_readiness.get("live_allowed"):
+        readiness_reasons.extend(
+            str(reason.get("code") or "")
+            for reason in data_readiness.get("blockers", [])
+            if reason.get("code")
+        )
     if readiness_reasons:
         strategy_readiness = {
             **strategy_readiness,
@@ -2630,9 +3442,15 @@ def build_dashboard_payload():
         "auto_simulation": _auto_simulation_state(),
     }
 
+    events = list_events(100)
+    fetch_log = _combined_fetch_log_payload(events)
+    city_evidence = _build_city_evidence_payload(weather_city_series, weather_signals, fetch_log)
     return {
         "stats": stats,
         "v3": v3_dashboard_summary(),
+        "data_readiness": data_readiness,
+        "production_refresh": _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None)),
+        "model_dataset_audit": model_dataset_audit,
         "truth_health": truth_health,
         "btc_price": None,
         "microstructure": None,
@@ -2645,8 +3463,168 @@ def build_dashboard_payload():
         "weather_signals": weather_signals,
         "weather_forecasts": list(weather_forecasts_by_city.values()),
         "weather_city_series": weather_city_series,
-        "events": list_events(100),
+        "city_evidence": city_evidence,
+        "events": events,
+        "fetch_log": fetch_log,
     }
+
+
+def _minimal_dashboard_payload(reason: str = "cache_warming"):
+    now = datetime.now(timezone.utc).isoformat()
+    events = list_events(50)
+    fetch_log = _combined_fetch_log_payload(events, 50)
+    city_series = _registry_city_series()
+    stats = {
+        "bankroll": 0,
+        "cash_balance": 0,
+        "reserved_capital": 0,
+        "realized_pnl": 0,
+        "unrealized_pnl": 0,
+        "total_trades": 0,
+        "open_trades": 0,
+        "settled_trades": 0,
+        "winning_trades": 0,
+        "win_rate": 0,
+        "total_pnl": 0,
+        "is_running": _bot_running(),
+        "last_run": None,
+        "latest_market_update": None,
+        "data_age_minutes": None,
+        "expired_signal_count": 0,
+        "signal_count": 0,
+        "actionable_count": 0,
+        "live_candidate_count": 0,
+        "live_blocked_count": 0,
+        "strategy_live_ready": False,
+        "strategy_readiness_status": "warming",
+        "strategy_readiness_reasons": [reason],
+        "simulation_started_at": None,
+        "scanner_status": "running" if _bot_running() else "stopped",
+        "auto_simulation": _auto_simulation_state(),
+    }
+    try:
+        v3_summary = v3_dashboard_summary()
+    except Exception as exc:
+        v3_summary = {"error": str(exc)}
+    return {
+        "stats": stats,
+        "v3": v3_summary,
+        "data_readiness": None,
+        "production_refresh": _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None)),
+        "model_dataset_audit": None,
+        "truth_health": None,
+        "btc_price": None,
+        "microstructure": None,
+        "windows": [],
+        "active_signals": [],
+        "recent_trades": [],
+        "equity_curve": [],
+        "calibration": None,
+        "backtest": None,
+        "weather_signals": [],
+        "weather_forecasts": [],
+        "weather_city_series": city_series,
+        "city_evidence": _build_city_evidence_payload(city_series, [], fetch_log),
+        "events": events,
+        "fetch_log": fetch_log,
+        "_meta": {"cache": "warming", "reason": reason, "generated_at": now},
+    }
+
+
+async def _refresh_dashboard_cache_once():
+    global dashboard_payload_cache, dashboard_payload_cache_at
+    try:
+        payload = await asyncio.to_thread(build_dashboard_payload)
+        dashboard_payload_cache_at = datetime.now(timezone.utc)
+        payload["_meta"] = {
+            "cache": "fresh",
+            "generated_at": dashboard_payload_cache_at.isoformat(),
+        }
+        dashboard_payload_cache = payload
+    except Exception as exc:
+        log_event("error", f"Dashboard cache refresh failed: {exc}")
+
+
+def _ensure_dashboard_refresh(force: bool = False):
+    global dashboard_refresh_task
+    stale = True
+    if dashboard_payload_cache_at:
+        stale = (datetime.now(timezone.utc) - dashboard_payload_cache_at).total_seconds() > DASHBOARD_CACHE_TTL_SECONDS
+    if not force and not stale:
+        return
+    if dashboard_refresh_task is None or dashboard_refresh_task.done():
+        dashboard_refresh_task = asyncio.create_task(_refresh_dashboard_cache_once())
+
+
+def _clear_production_validation_cache():
+    production_validation_cache.clear()
+
+
+def _production_validation_runtime() -> dict:
+    return {
+        "scanner_status": "running" if _bot_running() else "stopped",
+        "is_running": _bot_running(),
+        "auto_simulation_enabled": _auto_simulation_state()["enabled"],
+        "production_refresh_running": production_refresh_lock.locked(),
+    }
+
+
+async def _auto_refresh_loop():
+    global auto_refresh_task
+    try:
+        if AUTO_REFRESH_INITIAL_DELAY_SECONDS:
+            await asyncio.sleep(AUTO_REFRESH_INITIAL_DELAY_SECONDS)
+        while True:
+            try:
+                async with production_refresh_lock:
+                    result = await asyncio.to_thread(
+                        run_production_refresh,
+                        cities=AUTO_REFRESH_CITIES,
+                        days=AUTO_REFRESH_DAYS,
+                        limit=AUTO_REFRESH_LIMIT,
+                        start_date="",
+                        end_date="",
+                        scan_signals=AUTO_REFRESH_SIGNAL_SCAN,
+                    )
+                    result = {
+                        **result,
+                        "requested_at": datetime.now(timezone.utc).isoformat(),
+                        "auto_refresh": True,
+                    }
+                    _save_production_refresh_result(result)
+                    log_event(
+                        "success" if result.get("ok") else "warning",
+                        "Auto data refresh completed" if result.get("ok") else "Auto data refresh finished with failed stages",
+                        _production_refresh_summary(result),
+                    )
+                await _refresh_dashboard_cache_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_event("error", f"Auto refresh failed: {exc}")
+            await asyncio.sleep(AUTO_REFRESH_INTERVAL_SECONDS)
+    finally:
+        auto_refresh_task = None
+
+
+def _ensure_auto_refresh_task():
+    global auto_refresh_task
+    if not AUTO_REFRESH_ENABLED:
+        return
+    if auto_refresh_task is None or auto_refresh_task.done():
+        auto_refresh_task = asyncio.create_task(_auto_refresh_loop())
+
+
+async def _stop_auto_refresh_task():
+    global auto_refresh_task
+    task = auto_refresh_task
+    auto_refresh_task = None
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 async def _auto_simulation_loop():
@@ -2666,6 +3644,8 @@ async def _auto_simulation_loop():
                         "spent": result.get("spent", 0),
                         "skipped": result.get("skipped", 0),
                         "remaining": result.get("remaining", 0),
+                        "orderbooks_refreshed": result.get("orderbooks_refreshed", 0),
+                        "orderbook_refresh_failed": result.get("orderbook_refresh_failed", 0),
                     },
                     last_error=None,
                 )
@@ -2690,6 +3670,13 @@ def _ensure_auto_simulation_task():
         auto_simulation_task = asyncio.create_task(_auto_simulation_loop())
 
 
+def _disable_persisted_auto_simulation_on_startup():
+    state = _auto_simulation_state()
+    if not state["enabled"]:
+        return state
+    return _save_auto_simulation_state(enabled=False, last_error=None)
+
+
 async def _stop_auto_simulation_task():
     global auto_simulation_task
     task = auto_simulation_task
@@ -2706,15 +3693,42 @@ async def _stop_auto_simulation_task():
 async def startup():
     init_db()
     init_v3_db()
-    migrate_legacy_signals(500)
+    if STARTUP_MAINTENANCE:
+        migrate_legacy_signals(500)
+        persist_data_readiness(build_data_readiness())
     _cleanup_stale_bot_process()
-    _ensure_auto_simulation_task()
-    log_event("info", "Dashboard started")
+    if AUTO_START_SCANNER:
+        try:
+            _start_bot_process("dashboard startup")
+        except Exception as exc:
+            log_event("error", f"Scanner auto-start failed: {exc}")
+    _ensure_auto_refresh_task()
+    if RESUME_AUTO_SIMULATION:
+        _ensure_auto_simulation_task()
+    else:
+        _disable_persisted_auto_simulation_on_startup()
+    global dashboard_payload_cache
+    dashboard_payload_cache = _minimal_dashboard_payload("manual_refresh_required")
+    if DASHBOARD_AUTO_BUILD:
+        _ensure_dashboard_refresh(force=True)
+    log_event("info", "Dashboard started", {
+        "auto_refresh_enabled": AUTO_REFRESH_ENABLED,
+        "auto_refresh_initial_delay_seconds": AUTO_REFRESH_INITIAL_DELAY_SECONDS,
+        "auto_refresh_interval_seconds": AUTO_REFRESH_INTERVAL_SECONDS,
+        "auto_refresh_signal_scan": AUTO_REFRESH_SIGNAL_SCAN,
+        "auto_simulation_resume": RESUME_AUTO_SIMULATION,
+        "legacy_scanner_auto_start": AUTO_START_SCANNER,
+        "dashboard_auto_build": DASHBOARD_AUTO_BUILD,
+        "startup_maintenance": STARTUP_MAINTENANCE,
+    })
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    await _stop_auto_refresh_task()
     await _stop_auto_simulation_task()
+    if _bot_running():
+        _terminate_pid_tree(bot_process.pid)
 
 
 @app.get("/")
@@ -2724,7 +3738,31 @@ async def index():
 
 @app.get("/api/dashboard")
 async def dashboard():
-    return build_dashboard_payload()
+    if DASHBOARD_AUTO_BUILD:
+        _ensure_dashboard_refresh()
+    if dashboard_payload_cache is not None:
+        return dashboard_payload_cache
+    return _minimal_dashboard_payload()
+
+
+@app.get("/api/city-evidence")
+async def city_evidence(city: str | None = None, date: str | None = None):
+    payload = dashboard_payload_cache or _minimal_dashboard_payload()
+    rows = list(payload.get("city_evidence") or [])
+    if city:
+        rows = [row for row in rows if _city_evidence_matches(row, city)]
+    if date:
+        filtered = []
+        for row in rows:
+            dates = [item for item in row.get("dates") or [] if str(item.get("target_date") or "") == date]
+            if dates:
+                filtered.append({**row, "dates": dates, "latest_date": dates[0].get("target_date"), "latest_ready_modules": dates[0].get("ready_modules", 0)})
+        rows = filtered
+    return {
+        "cities": rows,
+        "count": len(rows),
+        "source": "dashboard_payload_cache" if dashboard_payload_cache is not None else "minimal_dashboard_payload",
+    }
 
 
 @app.get("/api/signals")
@@ -2752,6 +3790,27 @@ async def backtest_policies():
     }
 
 
+@app.get("/api/model-dataset/audit")
+async def model_dataset_audit():
+    return build_model_dataset_audit()
+
+
+@app.get("/api/forecast-archive/manifest")
+async def forecast_archive_manifest(limit: int = 200, sources: str = "ecmwf,gfs_ensemble", include_jsonl: bool = False):
+    source_list = [source.strip() for source in sources.split(",") if source.strip()]
+    return _forecast_archive_manifest_payload(limit=limit, sources=source_list, include_jsonl=include_jsonl)
+
+
+@app.get("/api/forecasts")
+async def forecasts(city: str = "", target_date: str = ""):
+    return forecast_summary(city or None, target_date or None)
+
+
+@app.get("/api/hourly-consensus")
+async def hourly_consensus(city: str = "", target_date: str = ""):
+    return hourly_consensus_summary(city or None, target_date or None)
+
+
 @app.get("/api/temperature-fit")
 async def temperature_fit():
     return _build_temperature_fit(load_markets())
@@ -2764,6 +3823,228 @@ async def truth_coverage():
         "local": _build_truth_health(markets),
         "db": truth_coverage_summary(),
     }
+
+
+@app.get("/api/data-readiness")
+async def data_readiness():
+    payload = build_data_readiness()
+    persist_data_readiness(payload)
+    _clear_production_validation_cache()
+    return payload
+
+
+@app.get("/api/stations")
+async def stations(region: str = "", city: str = "", sync_registry: bool = True):
+    sync_result = sync_station_registry() if sync_registry else None
+    rows = list_stations(region=region, city=city)
+    return {
+        "ok": True,
+        "sync": sync_result,
+        "count": len(rows),
+        "stations": rows,
+    }
+
+
+@app.get("/api/observations")
+async def observations(city: str = "", target_date: str = ""):
+    return {
+        "ok": True,
+        "city": city,
+        "target_date": target_date,
+        "evidence": weather_evidence_summary(city or None, target_date or None),
+    }
+
+
+@app.get("/api/production-validation")
+async def production_validation(include_targets: bool = False, refresh: bool = False):
+    cache_key = (bool(include_targets),)
+    now = time.monotonic()
+    cached = production_validation_cache.get(cache_key)
+    if (
+        not refresh
+        and cached is not None
+        and now - cached[0] <= PRODUCTION_VALIDATION_CACHE_TTL_SECONDS
+    ):
+        return cached[1]
+
+    payload = await asyncio.to_thread(
+        build_production_validation_report,
+        dashboard_runtime=_production_validation_runtime(),
+        include_action_targets=include_targets,
+    )
+    production_validation_cache[cache_key] = (now, payload)
+    return payload
+
+
+@app.get("/api/production-actions")
+async def production_actions():
+    return {"actions": list_production_actions()}
+
+
+@app.post("/api/production-actions/run")
+async def production_actions_run(request: ProductionActionRequest):
+    if request.action_key == "run_paper_validation":
+        result = await _run_paper_validation_action(request)
+    else:
+        result = await asyncio.to_thread(
+            run_production_action,
+            request.action_key,
+            apply=request.apply,
+            operator_confirmed=request.operator_confirmed,
+            cities=request.cities or [],
+            days=request.days,
+            limit=request.limit,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            skip_signal_scan=request.skip_signal_scan,
+            note=request.note,
+            archive_path=request.archive_path,
+        )
+    if request.apply and result.get("status") == "executed":
+        _clear_production_validation_cache()
+        await _refresh_dashboard_cache_once()
+    return result
+
+
+async def _run_paper_validation_action(request: ProductionActionRequest):
+    action = {
+        "label": "Run paper validation",
+        "description": "Use the dashboard paper executor to simulate eligible current signals.",
+        "requires_operator": True,
+        "mutates": True,
+    }
+    bounded_limit = max(1, min(int(request.limit or 20), 500))
+    params = {
+        "limit": bounded_limit,
+        "note": request.note or "",
+    }
+    if not request.apply:
+        return {
+            "ok": True,
+            "status": "dry_run",
+            "action_key": request.action_key,
+            "action": action,
+            "params": params,
+            "message": "Set apply=true and confirm operator approval to run one controlled paper validation pass.",
+        }
+    if not request.operator_confirmed:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "operator_confirmation_required",
+            "action_key": request.action_key,
+            "action": action,
+            "params": params,
+        }
+    if bulk_simulation_lock.locked():
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "paper_validation_already_running",
+            "action_key": request.action_key,
+            "action": action,
+            "params": params,
+        }
+    async with bulk_simulation_lock:
+        payload = await asyncio.to_thread(_bulk_simulate_signals_once, False, bounded_limit)
+    return {
+        "ok": bool(payload.get("ok", True)),
+        "status": "executed",
+        "action_key": request.action_key,
+        "action": action,
+        "params": params,
+        "payload": payload,
+    }
+
+
+@app.post("/api/production-refresh")
+async def production_refresh(request: ProductionRefreshRequest):
+    if production_refresh_lock.locked():
+        current = _read_json(PRODUCTION_REFRESH_PATH, {}) or {}
+        return {
+            **current,
+            "ok": False,
+            "running": True,
+            "failed_stages": list(dict.fromkeys([*(current.get("failed_stages") or []), "already_running"])),
+            "message": "production-refresh is already running",
+        }
+    cities = ",".join(item.strip() for item in (request.cities or []) if item.strip())
+    async with production_refresh_lock:
+        payload = await asyncio.to_thread(
+            run_production_refresh,
+            cities=cities,
+            days=max(1, min(int(request.days or 1), 7)),
+            limit=max(1, min(int(request.limit or 20), 500)),
+            start_date=request.start_date or "",
+            end_date=request.end_date or "",
+            scan_signals=not request.skip_signal_scan,
+        )
+        saved = {
+            **payload,
+            "running": False,
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "request": {
+                "cities": request.cities or [],
+                "days": request.days,
+                "limit": request.limit,
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "skip_signal_scan": request.skip_signal_scan,
+            },
+        }
+        saved = _save_production_refresh_result(saved)
+        log_event(
+            "success" if saved.get("ok") else "warning",
+            "production-refresh completed" if saved.get("ok") else "production-refresh finished with failed stages",
+            {
+                "failed_stages": saved.get("failed_stages", []),
+                "readiness": saved.get("readiness", {}),
+            },
+        )
+        await _refresh_dashboard_cache_once()
+        _clear_production_validation_cache()
+    return saved
+
+
+@app.get("/api/contracts")
+async def contracts(status: str = "unverified", city: str = "", limit: int = 25, offset: int = 0):
+    return list_settlement_contracts(status=status, city=city, limit=limit, offset=offset)
+
+
+@app.post("/api/contracts/{contract_id}/verification")
+async def verify_contract(contract_id: str, request: ContractVerificationRequest):
+    try:
+        contract = set_settlement_contract_verification(
+            contract_id,
+            verified=request.verified,
+            reviewer=request.reviewer,
+            note=request.note or "",
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="contract_not_found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    _clear_production_validation_cache()
+    return {"ok": True, "contract": contract, "data_readiness": readiness}
+
+
+@app.post("/api/contracts/bulk-verification")
+async def verify_contracts_bulk(request: BulkContractVerificationRequest):
+    result = bulk_settlement_contract_verification(
+        contract_ids=request.contract_ids,
+        limit=request.limit,
+        reviewer=request.reviewer,
+        note=request.note or "dashboard bulk review",
+        require_auto_verified=True,
+        mature_only=request.mature_only,
+        apply=request.apply,
+    )
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    _clear_production_validation_cache()
+    return {"ok": True, **result, "data_readiness": readiness}
 
 
 @app.post("/api/weather/backfill-history")
@@ -2876,6 +4157,7 @@ async def settle_trades():
     if result["errors"]:
         message += f"，错误 {len(result['errors'])} 个"
     log_event("info" if not result["errors"] else "warning", message, result)
+    _clear_production_validation_cache()
     return {
         "ok": True,
         "checked": result["checked"],
@@ -2956,6 +4238,7 @@ async def reset_simulation(update: SimulationReset):
         cleared_positions = _clear_dashboard_positions(started_at)
     payload = update.model_dump()
     payload["cleared_positions"] = cleared_positions
+    _clear_production_validation_cache()
     log_event("warning", f"模拟账户已重置为 ${balance:.2f}", payload)
     return {
         "ok": True,
@@ -2965,7 +4248,7 @@ async def reset_simulation(update: SimulationReset):
     }
 
 
-def _bulk_simulate_signals_once(log_when_idle=True):
+def _bulk_simulate_signals_once(log_when_idle=True, limit=None):
     today = _today_str()
     count = 0
     spent = 0.0
@@ -2973,6 +4256,11 @@ def _bulk_simulate_signals_once(log_when_idle=True):
     state = _read_json(DATA_DIR / "state.json", {})
     simulation_start = _parse_iso(state.get("simulation_started_at"))
     opened_at = datetime.now(timezone.utc).isoformat()
+    current_signals = [
+        s for s in list_signals(500)
+        if (s.get("date") or "") >= today and not _is_dashboard_position_import(s)
+    ]
+    quote_refresh = _refresh_signal_orderbooks(current_signals)
     dashboard = build_dashboard_payload()
     remaining = max(
         0.0,
@@ -2983,10 +4271,6 @@ def _bulk_simulate_signals_once(log_when_idle=True):
         for s in dashboard.get("weather_signals", [])
         if s.get("id") is not None
     }
-    current_signals = [
-        s for s in list_signals(500)
-        if (s.get("date") or "") >= today and not _is_dashboard_position_import(s)
-    ]
 
     def skip(signal, reason):
         skipped.append({
@@ -3010,6 +4294,8 @@ def _bulk_simulate_signals_once(log_when_idle=True):
         key=sort_edge,
         reverse=True,
     )
+    if limit is not None:
+        candidates = candidates[:max(1, min(int(limit or 1), 500))]
     for signal in candidates:
         signal_id = int(signal.get("id") or 0)
         dashboard_signal = dashboard_by_id.get(signal_id) or {}
@@ -3035,13 +4321,22 @@ def _bulk_simulate_signals_once(log_when_idle=True):
             update_signal_status(signal["id"], "skipped", f"v3 paper rejected: {result.reason}", amount)
             skip(signal, f"paper_rejected:{result.reason or 'unknown'}")
             continue
-        if not _open_paper_position(signal, amount, simulation_start, opened_at):
+        filled_amount = float(result.payload.get("amount") or 0)
+        if filled_amount <= 0:
+            skip(signal, "paper_fill_zero")
+            continue
+        if not _open_paper_position(signal, filled_amount, simulation_start, opened_at, result.payload):
             skip(signal, "position_write_failed")
             continue
-        update_signal_status(signal["id"], "simulated", f"Bulk paper amount ${amount:.2f}", amount)
+        update_signal_status(
+            signal["id"],
+            "simulated",
+            f"Bulk paper {result.status} ${filled_amount:.2f}",
+            filled_amount,
+        )
         count += 1
-        spent += amount
-        remaining -= amount
+        spent += filled_amount
+        remaining -= filled_amount
     if spent > 0:
         state["balance"] = round(max(0.0, remaining), 2)
         state["total_trades"] = int(state.get("total_trades", 0) or 0) + count
@@ -3062,16 +4357,48 @@ def _bulk_simulate_signals_once(log_when_idle=True):
         "skipped": len(skipped),
         "reason_counts": reason_counts,
         "examples": skipped[:10],
+        "orderbooks_refreshed": quote_refresh["refreshed"],
+        "orderbook_refresh_failed": quote_refresh["failed"],
     }
     if count or log_when_idle:
         log_event("success" if count else "warning", message, payload)
     return {"ok": True, **payload}
 
 
+def _refresh_signal_orderbooks(signals, limit=50):
+    market_ids = []
+    seen = set()
+    for signal in signals:
+        market_id = str(signal.get("market_id") or "")
+        if not market_id or market_id in seen:
+            continue
+        market_ids.append(market_id)
+        seen.add(market_id)
+        if len(market_ids) >= limit:
+            break
+    if not market_ids:
+        return {"requested": 0, "refreshed": 0, "failed": 0}
+    client = PolymarketDataClient()
+    refreshed = 0
+    failed = 0
+    for market_id in market_ids:
+        try:
+            quote = client.quote(market_id)
+            if quote.book_source == "clob":
+                refreshed += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    return {"requested": len(market_ids), "refreshed": refreshed, "failed": failed}
+
+
 @app.post("/api/signals/bulk-simulate")
 async def bulk_simulate_signals():
     async with bulk_simulation_lock:
-        return await asyncio.to_thread(_bulk_simulate_signals_once)
+        result = await asyncio.to_thread(_bulk_simulate_signals_once)
+    _clear_production_validation_cache()
+    return result
 
 
 @app.get("/api/simulation/auto")
@@ -3093,6 +4420,8 @@ async def update_auto_simulation(update: AutoSimulationUpdate):
     else:
         await _stop_auto_simulation_task()
         log_event("warning", "自动模拟已停止")
+    _clear_production_validation_cache()
+    await _refresh_dashboard_cache_once()
     return {"ok": True, **state}
 
 
@@ -3117,14 +4446,23 @@ async def signal_status(signal_id: int, update: StatusUpdate):
             log_event("warning", f"Signal {signal_id} v3 paper rejected: {result.reason}", result.payload)
             return {"ok": False, "error": result.reason or "paper_rejected"}
         opened_at = datetime.now(timezone.utc).isoformat()
-        if _open_paper_position(signal, amount, _parse_iso(state.get("simulation_started_at")), opened_at):
-            state["balance"] = round(cash - amount, 2)
+        filled_amount = float(result.payload.get("amount") or 0)
+        if _open_paper_position(
+            signal,
+            filled_amount,
+            _parse_iso(state.get("simulation_started_at")),
+            opened_at,
+            result.payload,
+        ):
+            amount = filled_amount
+            state["balance"] = round(cash - filled_amount, 2)
             state["total_trades"] = int(state.get("total_trades", 0) or 0) + 1
             _write_json(DATA_DIR / "state.json", state)
     if amount is not None:
         note = note or f"Paper amount ${amount:.2f}"
     update_signal_status(signal_id, update.status, note, amount)
     log_event("info", f"Signal {signal_id} marked {update.status}", update.model_dump())
+    _clear_production_validation_cache()
     return {"ok": True}
 
 
@@ -3171,6 +4509,7 @@ async def canary_dry_run(update: CanaryDryRunUpdate):
         f"canary dry-run {result.status}: {result.reason or 'ok'}",
         result.payload,
     )
+    _clear_production_validation_cache()
     return {
         "ok": result.status == "dry_run",
         "mode": result.mode,
@@ -3243,6 +4582,7 @@ async def v3_live_order(update: LiveOrderUpdate):
         }
     result = LiveExecutor().place_order(signal, update.amount)
     log_event("info" if result.ok else "warning", f"v3 live order {result.status}: {result.reason or 'ok'}", result.payload)
+    _clear_production_validation_cache()
     return {
         "ok": result.ok,
         "mode": result.mode,

@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AutoSimulationStatus, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData } from './types'
+import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -103,6 +103,78 @@ export async function settleTradesApi(): Promise<{ ok: boolean; checked: number;
 
 export async function fetchTemperatureFit(): Promise<TemperatureFitData> {
   const { data } = await api.get<TemperatureFitData>('/temperature-fit')
+  return data
+}
+
+export async function fetchForecastArchiveManifest(): Promise<ForecastArchiveManifest> {
+  const { data } = await api.get<ForecastArchiveManifest>('/forecast-archive/manifest', {
+    params: { limit: 80 },
+  })
+  return data
+}
+
+export async function fetchProductionValidation(): Promise<ProductionValidationReport> {
+  const { data } = await api.get<ProductionValidationReport>('/production-validation')
+  return data
+}
+
+export async function runProductionAction(options: ProductionActionRequest): Promise<ProductionActionRunResult> {
+  const { data } = await api.post<ProductionActionRunResult>('/production-actions/run', {
+    action_key: options.actionKey,
+    apply: options.apply ?? false,
+    operator_confirmed: options.operatorConfirmed ?? false,
+    cities: options.cities ?? [],
+    days: options.days ?? 1,
+    limit: options.limit ?? 20,
+    start_date: options.startDate ?? '',
+    end_date: options.endDate ?? '',
+    skip_signal_scan: options.skipSignalScan ?? true,
+    note: options.note ?? '',
+    archive_path: options.archivePath ?? '',
+  })
+  return data
+}
+
+export async function fetchSettlementContracts(status = 'unverified', limit = 12): Promise<SettlementContractList> {
+  const { data } = await api.get<SettlementContractList>('/contracts', {
+    params: { status, limit },
+  })
+  return data
+}
+
+export async function verifySettlementContract(contractId: string, verified = true, note = 'dashboard manual review'): Promise<{ ok: boolean }> {
+  const { data } = await api.post(`/contracts/${encodeURIComponent(contractId)}/verification`, {
+    verified,
+    reviewer: 'dashboard',
+    note,
+  })
+  return data
+}
+
+export async function verifySettlementContractsBulk(contractIds: string[], apply = true, matureOnly = false, note = 'dashboard visible batch review'): Promise<BulkContractVerificationResult> {
+  const { data } = await api.post<BulkContractVerificationResult>('/contracts/bulk-verification', {
+    contract_ids: contractIds,
+    limit: contractIds.length,
+    reviewer: 'dashboard',
+    note,
+    mature_only: matureOnly,
+    apply,
+  })
+  return data
+}
+
+export async function runProductionRefresh(options: {
+  cities?: string[]
+  days?: number
+  limit?: number
+  skipSignalScan?: boolean
+} = {}): Promise<ProductionRefreshResult> {
+  const { data } = await api.post<ProductionRefreshResult>('/production-refresh', {
+    cities: options.cities ?? [],
+    days: options.days ?? 1,
+    limit: options.limit ?? 20,
+    skip_signal_scan: options.skipSignalScan ?? true,
+  })
   return data
 }
 

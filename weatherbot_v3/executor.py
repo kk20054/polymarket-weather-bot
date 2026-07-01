@@ -9,7 +9,7 @@ from .ai_review import AIReviewer
 from .config import load_config
 from .db import insert_order, log_risk, upsert_signal
 from .notifier import FeishuNotifier
-from .polymarket import PolymarketDataClient, MarketQuote, round_price_to_tick, validate_order_constraints
+from .polymarket import PolymarketDataClient, MarketQuote, estimate_buy_fill, round_price_to_tick, validate_order_constraints
 
 
 @dataclass(frozen=True)
@@ -49,6 +49,8 @@ class BaseExecutor:
             "failure_reason": None,
         }
         errors = validate_order_constraints(quote, requested, limit)
+        if quote.book_source != "clob":
+            errors.append("orderbook_not_clob")
         return signal_id, quote, order, errors
 
 
@@ -63,7 +65,19 @@ class PaperExecutor(BaseExecutor):
             order_id = insert_order("paper_orders", order)
             log_risk("paper_order_rejected", order["failure_reason"], payload=order)
             return ExecutionResult(False, self.mode, "rejected", order_id, order["failure_reason"], order)
-        order["status"] = "paper_filled"
+        fill = estimate_buy_fill(quote, order["amount"], order["limit_price"])
+        if fill["filled_shares"] <= 0:
+            order["status"] = "rejected"
+            order["failure_reason"] = "insufficient_ask_depth"
+            order["fill"] = fill
+            order_id = insert_order("paper_orders", order)
+            log_risk("paper_order_rejected", order["failure_reason"], payload=order)
+            return ExecutionResult(False, self.mode, "rejected", order_id, order["failure_reason"], order)
+        order["status"] = "paper_filled" if fill["fully_filled"] else "paper_partial"
+        order["amount"] = round(fill["filled_amount"], 2)
+        order["shares"] = round(fill["filled_shares"], 4)
+        order["average_fill_price"] = fill["average_price"]
+        order["fill"] = fill
         order["raw_quote"] = quote.raw
         order_id = insert_order("paper_orders", order)
         FeishuNotifier().send(
@@ -77,7 +91,7 @@ class PaperExecutor(BaseExecutor):
             ],
             order,
         )
-        return ExecutionResult(True, self.mode, "paper_filled", order_id, None, order)
+        return ExecutionResult(True, self.mode, order["status"], order_id, None, order)
 
 
 class LiveExecutor(BaseExecutor):
@@ -186,4 +200,3 @@ def _num(value: Any, default: float) -> float:
         return float(value)
     except Exception:
         return default
-

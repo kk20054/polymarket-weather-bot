@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   Bar,
   CartesianGrid,
+  Cell,
   ComposedChart,
   Line,
   ResponsiveContainer,
@@ -9,12 +10,23 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import type { WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import { CloudSun, Database, ExternalLink, Signal, ThermometerSun } from 'lucide-react'
+import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, CityEvidenceMarketBucketSummary, CityEvidenceProbabilitySummary, DashboardEvent, DistributionItem, FetchLogRow, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
   signals: WeatherSignal[]
   citySeries?: WeatherCitySeries[]
+  events?: DashboardEvent[]
+  fetchLog?: FetchLogRow[]
+  productionRefresh?: ProductionRefreshResult | null
+  selectedCity?: string
+  onSelectedCity?: (cityKey: string) => void
+  selectedDate?: string
+  selectedDateEvidence?: CityEvidenceDate
+  onSelectedDate?: (date: string) => void
+  onRefreshWeather?: () => void
+  weatherRefreshing?: boolean
   onBackfillHistory?: () => void
   backfilling?: boolean
   backfillResult?: {
@@ -23,9 +35,268 @@ interface Props {
   }
 }
 
-function fmt(value?: number | null, unit = 'F') {
+type EvidenceStatus = 'fresh' | 'stale' | 'missing'
+
+type WeatherChartRow = {
+  date: string
+  label: string
+  actual_high?: number | null
+  humidity_mean?: number | null
+  historical_provider?: string
+  calibration_tier?: string
+  forecast_high?: number | null
+  metar?: number | null
+  ecmwf?: number | null
+  hrrr?: number | null
+  forecast_source?: string
+  forecast_timestamp?: string
+}
+
+type HourlyWeatherRow = {
+  id: string
+  timestamp: string
+  target_date: string
+  label: string
+  forecast?: number | null
+  metar?: number | null
+  ecmwf?: number | null
+  hrrr?: number | null
+  humidity?: number | null
+  cloud_cover?: number | null
+  precipitation?: number | null
+  precipitation_probability?: number | null
+  wind_speed?: number | null
+  wind_direction?: number | null
+  pressure?: number | null
+  dew_point?: number | null
+  shortwave_radiation?: number | null
+  condition?: string | null
+  gap?: number | null
+  source?: string
+  horizon?: string
+  member_count?: number
+  archive?: boolean
+}
+
+type SourceSampleTone = 'green' | 'amber' | 'red' | 'cyan' | 'neutral'
+
+type SourceSample = {
+  label: string
+  value: string
+  meta?: string
+  tone?: SourceSampleTone
+}
+
+type EvidenceCardTone = SourceSampleTone
+
+type EvidenceCardItem = {
+  id: string
+  eyebrow: string
+  title: string
+  value: string
+  meta?: string
+  tone?: EvidenceCardTone
+  badges?: Array<{ label: string; tone?: EvidenceCardTone }>
+  details?: Array<{ label: string; value: string; wide?: boolean }>
+}
+
+type WeatherWorkbenchTab = 'forecast' | 'metar' | 'historical' | 'diff' | 'fetch'
+
+const WORKBENCH_TABS: Array<{ id: WeatherWorkbenchTab; label: string; note: string }> = [
+  { id: 'forecast', label: '预报', note: '逐小时气温 + DEB + 分桶' },
+  { id: 'metar', label: 'METAR', note: '机场实况观测' },
+  { id: 'historical', label: '历史观测', note: '结算/站点历史' },
+  { id: 'diff', label: '偏差统计', note: '实测 - 预报' },
+  { id: 'fetch', label: '抓取日志', note: '最近数据任务' },
+]
+
+const CONTINENTS = ['全部', 'Americas', 'Europe', 'Asia', 'Pacific', 'Africa', 'Other'] as const
+
+function cityContinent(cityKey?: string, cityName?: string) {
+  const value = `${cityKey || ''} ${cityName || ''}`.toLowerCase()
+  if (/london|paris|munich|madrid|milan|amsterdam|warsaw|helsinki|moscow|istanbul|ankara/.test(value)) return 'Europe'
+  if (/tokyo|seoul|shanghai|beijing|wuhan|singapore|taipei|hong|busan|chengdu|chongqing|guangzhou|jakarta|jeddah|karachi|kuala|lucknow|manila|qingdao|tel-aviv/.test(value)) return 'Asia'
+  if (/sydney|wellington/.test(value)) return 'Pacific'
+  if (/cape|lagos/.test(value)) return 'Africa'
+  if (/new-york|nyc|chicago|miami|dallas|seattle|atlanta|toronto|sao|paulo|austin|denver|houston|los-angeles|san-francisco|mexico|panama|buenos/.test(value)) return 'Americas'
+  return 'Other'
+}
+
+function fmtTemp(value?: number | null, unit = 'F') {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   return `${Number(value).toFixed(1)}°${unit}`
+}
+
+function fmtPct(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${Number(value).toFixed(0)}%`
+}
+
+function fmtPrecip(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${Number(value).toFixed(2)}`
+}
+
+function fmtPressure(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return Number(value).toFixed(0)
+}
+
+function fmtWind(speed?: number | null, direction?: number | null) {
+  if ((speed === null || speed === undefined || Number.isNaN(Number(speed))) && (direction === null || direction === undefined || Number.isNaN(Number(direction)))) return '--'
+  const speedText = speed === null || speed === undefined || Number.isNaN(Number(speed)) ? '--' : Number(speed).toFixed(0)
+  if (direction === null || direction === undefined || Number.isNaN(Number(direction))) return `-- ${speedText}`
+  const degrees = Number(direction)
+  return `${windCompass(degrees)} ${degrees.toFixed(0)}° ${speedText}`
+}
+
+function windCompass(direction: number) {
+  const labels = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
+  return labels[Math.round((((direction % 360) + 360) % 360) / 22.5) % 16]
+}
+
+function fmtProb(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${(Number(value) * 100).toFixed(1)}%`
+}
+
+function fmtPrice(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${(Number(value) * 100).toFixed(1)}¢`
+}
+
+function fmtSignedPct(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  const pct = Number(value) * 100
+  return `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`
+}
+
+function fmtSignedTemp(value?: number | null, unit = 'F') {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  const temp = Number(value)
+  return `${temp >= 0 ? '+' : ''}${temp.toFixed(1)}°${unit}`
+}
+
+function tempToC(value?: number | null, unit = 'F') {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return null
+  const numeric = Number(value)
+  return unit === 'C' ? numeric : (numeric - 32) * 5 / 9
+}
+
+function deltaToC(value?: number | null, unit = 'F') {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return null
+  const numeric = Number(value)
+  return unit === 'C' ? numeric : numeric * 5 / 9
+}
+
+function fmtC(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `${Number(value).toFixed(1)}°C`
+}
+
+function mean(values: number[]) {
+  const valid = values.filter(value => Number.isFinite(value))
+  if (valid.length === 0) return null
+  return valid.reduce((total, value) => total + value, 0) / valid.length
+}
+
+function pearsonR(xValues: number[], yValues: number[]) {
+  const pairs = xValues
+    .map((x, index) => [x, yValues[index]] as const)
+    .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y))
+  if (pairs.length < 2) return null
+  const xs = pairs.map(([x]) => x)
+  const ys = pairs.map(([, y]) => y)
+  const xMean = mean(xs)
+  const yMean = mean(ys)
+  if (xMean === null || yMean === null) return null
+  let numerator = 0
+  let xDenominator = 0
+  let yDenominator = 0
+  for (const [x, y] of pairs) {
+    const dx = x - xMean
+    const dy = y - yMean
+    numerator += dx * dy
+    xDenominator += dx * dx
+    yDenominator += dy * dy
+  }
+  const denominator = Math.sqrt(xDenominator * yDenominator)
+  return denominator === 0 ? null : numerator / denominator
+}
+
+function fmtPearson(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return `r ${Number(value).toFixed(2)}`
+}
+
+function errorTone(absError: number) {
+  if (absError <= 1.5) return 'green'
+  if (absError <= 3) return 'amber'
+  return 'red'
+}
+
+function compactData(value: unknown, max = 180) {
+  if (value === null || value === undefined) return ''
+  try {
+    const raw = typeof value === 'string' ? value : JSON.stringify(value)
+    return raw.length > max ? `${raw.slice(0, max)}...` : raw
+  } catch {
+    return String(value)
+  }
+}
+
+function eventTone(event: DashboardEvent) {
+  const text = `${event.type ?? ''} ${event.message ?? ''} ${compactData(event.data, 120)}`.toLowerCase()
+  if (/error|fail|forbidden|timeout|exception|err/.test(text)) return 'red'
+  if (/buy|signal|order|clob|market|盘口/.test(text)) return 'cyan'
+  if (/truth|history|settle|actual|observ/.test(text)) return 'amber'
+  if (/forecast|weather|metar|refresh|scan/.test(text)) return 'green'
+  return 'neutral'
+}
+
+function eventStage(event: DashboardEvent) {
+  const text = `${event.type ?? ''} ${event.message ?? ''} ${compactData(event.data, 120)}`.toLowerCase()
+  if (/orderbook|clob|market|盘口/.test(text)) return '盘口'
+  if (/signal|buy|trade|order/.test(text)) return '信号'
+  if (/truth|history|settle|actual|observ/.test(text)) return '观测'
+  if (/forecast|weather|metar/.test(text)) return '天气'
+  if (/refresh|scan|scanner/.test(text)) return '刷新'
+  return event.type || '事件'
+}
+
+function fmtBucket(item: DistributionItem, unit: string) {
+  if (item.bucket_low <= -900) return `${fmtTemp(item.bucket_high, unit)} 或以下`
+  if (item.bucket_high >= 900) return `${fmtTemp(item.bucket_low, unit)} 或以上`
+  return `${fmtTemp(item.bucket_low, unit)} - ${fmtTemp(item.bucket_high, unit)}`
+}
+
+function fmtBucketLabel(raw?: string | null, fallback?: number | null, unit = 'F') {
+  const fallbackNative =
+    fallback === null || fallback === undefined || Number.isNaN(Number(fallback))
+      ? null
+      : unit === 'C'
+        ? (Number(fallback) - 32) * 5 / 9
+        : Number(fallback)
+  if (!raw) return fmtTemp(fallbackNative, unit)
+  const normalized = String(raw).trim()
+  const match = normalized.match(/^\s*(-?\d+(?:\.\d+)?)\s*°?\s*([CF])?\s*-\s*(-?\d+(?:\.\d+)?)\s*°?\s*([CF])?\s*$/i)
+  if (!match) return normalized.replace(/掳/g, '°')
+  const low = Number(match[1])
+  const high = Number(match[3])
+  const labelUnit = (match[4] || match[2] || unit).toUpperCase()
+  if (low <= -900) return `${fmtTemp(high, labelUnit)} 或以下`
+  if (high >= 900) return `${fmtTemp(low, labelUnit)} 或以上`
+  return `${fmtTemp(low, labelUnit)} - ${fmtTemp(high, labelUnit)}`
+}
+
+function signalBucketLabel(signal: WeatherSignal | undefined, unit = 'F') {
+  if (!signal) return '--'
+  return fmtBucketLabel(signal.bucket_label, signal.threshold_f, unit)
+}
+
+function isOpenTailBucket(signal?: WeatherSignal) {
+  if (!signal?.bucket_label) return false
+  return /(?:^|-)999(?:\.0+)?[CF]?$/i.test(signal.bucket_label) || /^-999(?:\.0+)?-/i.test(signal.bucket_label)
 }
 
 function shortDate(value?: string | null) {
@@ -53,198 +324,2153 @@ function shortTime(value?: string | null) {
   }
 }
 
-function pct(value?: number | null) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
-  return `${Number(value).toFixed(0)}%`
+function shortHour(value?: string | null) {
+  if (!value) return '--'
+  try {
+    return new Date(value).toLocaleTimeString('zh-CN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
+  } catch {
+    return value
+  }
+}
+
+function rawHourIndex(value?: string | null) {
+  if (!value) return null
+  const match = String(value).match(/T(\d{2}):\d{2}/) ?? String(value).match(/\b(\d{2}):\d{2}\b/)
+  if (!match) return null
+  const hour = Number(match[1])
+  return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : null
+}
+
+function hourLabel(hour: number) {
+  return `${String(hour).padStart(2, '0')}:00`
+}
+
+function placeholderHourlyRow(targetDate: string, hour: number): HourlyWeatherRow {
+  const label = hourLabel(hour)
+  return {
+    id: `placeholder-${targetDate}-${label}`,
+    timestamp: `${targetDate}T${label}:00`,
+    target_date: targetDate,
+    label,
+    forecast: null,
+    metar: null,
+    ecmwf: null,
+    hrrr: null,
+    humidity: null,
+    cloud_cover: null,
+    precipitation: null,
+    precipitation_probability: null,
+    wind_speed: null,
+    wind_direction: null,
+    pressure: null,
+    dew_point: null,
+    shortwave_radiation: null,
+    condition: null,
+    gap: null,
+    source: '--',
+    horizon: '--',
+    archive: false,
+  }
+}
+
+function longDate(value?: string | null) {
+  if (!value) return '--'
+  try {
+    const date = new Date(value.includes('T') ? value : `${value}T00:00:00`)
+    return date.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+  } catch {
+    return value
+  }
+}
+
+function minutesSince(value?: string | null) {
+  if (!value) return null
+  const time = new Date(value).getTime()
+  if (Number.isNaN(time)) return null
+  return Math.max(0, (Date.now() - time) / 60000)
+}
+
+function freshnessLabel(value?: string | null) {
+  const minutes = minutesSince(value)
+  if (minutes === null) return '无数据'
+  if (minutes < 60) return `${minutes.toFixed(0)} 分钟前`
+  if (minutes < 1440) return `${(minutes / 60).toFixed(1)} 小时前`
+  return `${(minutes / 1440).toFixed(1)} 天前`
+}
+
+function localDateString(date = new Date()) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function elapsedLabel(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return ''
+  if (value < 1000) return `${Math.round(Number(value))}ms`
+  return `${(Number(value) / 1000).toFixed(1)}s`
+}
+
+function refreshStage(productionRefresh: ProductionRefreshResult | null | undefined, names: string[]) {
+  return (productionRefresh?.stages ?? []).find(stage => names.includes(stage.name))
+}
+
+function refreshStageLabel(stage?: { ok?: boolean; elapsed_ms?: number | null; error?: string | null }) {
+  if (!stage) return '未运行'
+  return [stage.ok ? 'ok' : 'err', elapsedLabel(stage.elapsed_ms), stage.error].filter(Boolean).join(' · ')
+}
+
+function evidenceStatus(value?: string | null, staleAfterMinutes = 180): EvidenceStatus {
+  const minutes = minutesSince(value)
+  if (minutes === null) return 'missing'
+  return minutes <= staleAfterMinutes ? 'fresh' : 'stale'
+}
+
+function statusClass(status: EvidenceStatus) {
+  if (status === 'fresh') return 'border-green-500/25 bg-green-500/5 text-green-200'
+  if (status === 'stale') return 'border-amber-500/25 bg-amber-500/5 text-amber-200'
+  return 'border-red-500/25 bg-red-500/5 text-red-200'
+}
+
+function latestBy<T>(items: T[], predicate: (item: T) => boolean, getter: (item: T) => string | undefined | null): T | undefined {
+  return [...items]
+    .filter(predicate)
+    .sort((a, b) => String(getter(b) ?? '').localeCompare(String(getter(a) ?? '')))[0]
+}
+
+function uniqueCities(citySeries: WeatherCitySeries[], forecasts: WeatherForecast[]) {
+  const rows = new Map<string, { key: string; name: string }>()
+  for (const row of citySeries) rows.set(row.city_key, { key: row.city_key, name: row.city_name })
+  for (const row of forecasts) rows.set(row.city_key, { key: row.city_key, name: row.city_name })
+  return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+function buildChartData(series?: WeatherCitySeries): WeatherChartRow[] {
+  const byDate = new Map<string, WeatherChartRow>()
+  for (const point of series?.history_points ?? []) {
+    const key = point.target_date
+    byDate.set(key, {
+      date: key,
+      label: shortDate(key),
+      actual_high: point.actual_high ?? null,
+      humidity_mean: point.humidity_mean ?? null,
+      historical_provider: point.provider,
+      calibration_tier: point.calibration_tier,
+    })
+  }
+
+  const latestForecastByDate = new Map<string, WeatherCityPoint>()
+  for (const point of series?.forecast_points ?? series?.points ?? []) {
+    if (!point.target_date) continue
+    const existing = latestForecastByDate.get(point.target_date)
+    if (!existing || String(point.timestamp) > String(existing.timestamp)) {
+      latestForecastByDate.set(point.target_date, point)
+    }
+  }
+
+  for (const [targetDate, point] of latestForecastByDate.entries()) {
+    const row = byDate.get(targetDate) ?? { date: targetDate, label: shortDate(targetDate) }
+    row.forecast_high = point.best ?? point.ensemble_mean ?? null
+    row.metar = point.metar ?? null
+    row.ecmwf = point.ecmwf ?? null
+    row.hrrr = point.hrrr ?? null
+    row.forecast_source = point.source
+    row.forecast_timestamp = point.timestamp
+    if (point.humidity !== null && point.humidity !== undefined) row.humidity_mean = point.humidity
+    byDate.set(targetDate, row)
+  }
+
+  return [...byDate.values()]
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+    .slice(-60)
+}
+
+function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): HourlyWeatherRow[] {
+  const rows = new Map<string, HourlyWeatherRow>()
+  const sourcePoints = (series?.hourly_points?.length ? series.hourly_points : (series?.forecast_points ?? series?.points ?? []))
+  for (const point of sourcePoints) {
+    if (selectedDate && point.target_date !== selectedDate) continue
+    if (!point.timestamp) continue
+    const hour = rawHourIndex(point.timestamp)
+    if (hour === null) continue
+    const forecast = point.best ?? point.ensemble_mean ?? null
+    const metar = point.metar ?? null
+    const gap = forecast !== null && forecast !== undefined && metar !== null && metar !== undefined
+      ? Number(metar) - Number(forecast)
+      : null
+    const label = hourLabel(hour)
+    const key = `${point.target_date}:${label}`
+    rows.set(key, {
+      id: key,
+      timestamp: point.timestamp,
+      target_date: point.target_date,
+      label,
+      forecast,
+      metar,
+      ecmwf: point.ecmwf ?? null,
+      hrrr: point.hrrr ?? null,
+      humidity: point.humidity ?? null,
+      cloud_cover: point.cloud_cover ?? point.humidity ?? null,
+      precipitation: point.precipitation ?? null,
+      precipitation_probability: point.precipitation_probability ?? null,
+      wind_speed: point.wind_speed ?? null,
+      wind_direction: point.wind_direction ?? null,
+      pressure: point.pressure ?? null,
+      dew_point: point.dew_point ?? null,
+      shortwave_radiation: point.shortwave_radiation ?? null,
+      condition: point.condition ?? null,
+      gap,
+      source: point.source || '--',
+      horizon: point.horizon || '--',
+      member_count: point.member_count,
+      archive: point.archive,
+    })
+  }
+  const targetDate = selectedDate || [...rows.values()][0]?.target_date || localDateString()
+  return Array.from({ length: 24 }, (_, hour) => {
+    const label = hourLabel(hour)
+    return rows.get(`${targetDate}:${label}`) ?? placeholderHourlyRow(targetDate, hour)
+  })
 }
 
 export function WeatherPanel({
   forecasts,
   signals,
   citySeries = [],
-  onBackfillHistory,
-  backfilling = false,
+  events = [],
+  fetchLog = [],
+  productionRefresh,
+  selectedCity,
+  onSelectedCity,
+  selectedDate: controlledSelectedDate,
+  selectedDateEvidence,
+  onSelectedDate,
   backfillResult,
 }: Props) {
-  const [selected, setSelected] = useState(citySeries[0]?.city_key ?? forecasts[0]?.city_key ?? '')
+  const cities = useMemo(() => uniqueCities(citySeries, forecasts), [citySeries, forecasts])
+  const [internalSelected, setInternalSelected] = useState(cities[0]?.key ?? '')
+  const [internalSelectedDate, setInternalSelectedDate] = useState(() => {
+    if (typeof window === 'undefined') return ''
+    return new URLSearchParams(window.location.search).get('date') ?? ''
+  })
+  const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WeatherWorkbenchTab>('forecast')
+  const [continentFilter, setContinentFilter] = useState<(typeof CONTINENTS)[number]>('全部')
+  const selected = selectedCity ?? internalSelected
+  const setSelected = (cityKey: string) => {
+    setInternalSelected(cityKey)
+    onSelectedCity?.(cityKey)
+  }
+  const selectedDate = controlledSelectedDate ?? internalSelectedDate
+  const setSelectedDate = (date: string) => {
+    setInternalSelectedDate(date)
+    onSelectedDate?.(date)
+  }
+
+  useEffect(() => {
+    if (!selected && cities[0]?.key) setSelected(cities[0].key)
+    if (selected && cities.length > 0 && !cities.some(city => city.key === selected)) {
+      setSelected(cities[0].key)
+    }
+  }, [cities, selected])
+
+  const filteredCities = useMemo(() => {
+    if (continentFilter === '全部') return cities
+    const rows = cities.filter(city => cityContinent(city.key, city.name) === continentFilter)
+    if (selected && !rows.some(city => city.key === selected)) {
+      const current = cities.find(city => city.key === selected)
+      return current ? [current, ...rows] : rows
+    }
+    return rows
+  }, [cities, continentFilter, selected])
+
   const series = citySeries.find(row => row.city_key === selected) ?? citySeries[0]
   const forecastFallback = forecasts.find(row => row.city_key === selected) ?? forecasts[0]
+  const cityKey = series?.city_key ?? forecastFallback?.city_key ?? selected
+  const unit = series?.unit ?? 'F'
+  const todayDate = localDateString()
 
-  const citySignals = useMemo(() => {
-    const key = series?.city_key ?? forecastFallback?.city_key
-    return signals.filter(signal => signal.city_key === key)
-  }, [signals, series?.city_key, forecastFallback?.city_key])
-
-  const chartData = useMemo(() => {
-    const byDate = new Map<string, any>()
-    for (const point of series?.history_points ?? []) {
-      const key = point.target_date
-      byDate.set(key, {
-        date: key,
-        label: shortDate(key),
-        actual_high: point.actual_high ?? null,
-        humidity_mean: point.humidity_mean ?? null,
-        historical_provider: point.provider,
-        calibration_tier: point.calibration_tier,
+  const citySignals = useMemo(() => signals.filter(signal => signal.city_key === cityKey), [signals, cityKey])
+  const actionableSignals = citySignals.filter(signal => signal.actionable)
+  const selectedDateSignals = citySignals.filter(signal => !selectedDate || signal.target_date === selectedDate)
+  const bestSignal = [...(selectedDateSignals.length > 0 ? selectedDateSignals : citySignals)]
+    .sort((a, b) => {
+      const actionDelta = Number(Boolean(b.actionable)) - Number(Boolean(a.actionable))
+      if (actionDelta !== 0) return actionDelta
+      return Math.abs((b.probability_edge ?? b.edge ?? 0)) - Math.abs((a.probability_edge ?? a.edge ?? 0))
+    })[0]
+  const distributionSignal = useMemo(() => {
+    const dated = citySignals.filter(signal => !selectedDate || signal.target_date === selectedDate)
+    const withDistribution = dated.filter(signal => (signal.distribution?.items?.length ?? 0) > 0)
+    const candidates = withDistribution.length > 0 ? withDistribution : citySignals.filter(signal => (signal.distribution?.items?.length ?? 0) > 0)
+    return [...candidates].sort((a, b) => {
+      const actionDelta = Number(Boolean(b.actionable)) - Number(Boolean(a.actionable))
+      if (actionDelta !== 0) return actionDelta
+      return Math.abs((b.probability_edge ?? b.edge ?? 0)) - Math.abs((a.probability_edge ?? a.edge ?? 0))
+    })[0]
+  }, [citySignals, selectedDate])
+  const distributionChartItems = useMemo(() => {
+    const items = [...(distributionSignal?.distribution?.items ?? [])]
+    return items
+      .sort((a, b) => {
+        const lowDelta = Number(a.bucket_low ?? 0) - Number(b.bucket_low ?? 0)
+        if (lowDelta !== 0) return lowDelta
+        return Number(a.bucket_high ?? 0) - Number(b.bucket_high ?? 0)
       })
-    }
+      .slice(0, 18)
+  }, [distributionSignal])
+  const latestHistory = latestBy<HistoricalWeatherPoint>(
+    series?.history_points ?? [],
+    point => point.actual_high !== null && point.actual_high !== undefined,
+    point => point.target_date
+  )
+  const latestForecast = latestBy<WeatherCityPoint>(
+    series?.forecast_points ?? series?.points ?? [],
+    point => point.best !== null && point.best !== undefined,
+    point => point.timestamp
+  )
+  const latestMetar = latestBy<WeatherCityPoint>(
+    series?.forecast_points ?? series?.points ?? [],
+    point => point.metar !== null && point.metar !== undefined,
+    point => point.timestamp
+  )
+  const chartData = useMemo(() => buildChartData(series), [series])
+  const hourlyRows = useMemo(() => buildHourlyRows(series, selectedDate), [series, selectedDate])
+  const availableDates = useMemo(() => {
+    return [...new Set(chartData.map(row => String(row.date)).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b))
+  }, [chartData])
+  const forecastStatus = evidenceStatus(latestForecast?.timestamp)
+  const metarStatus = evidenceStatus(latestMetar?.timestamp, 45)
+  const historyStatus = latestHistory ? 'fresh' : 'missing'
+  const forecastRefreshStage = refreshStage(productionRefresh, ['forecast_backfill'])
+  const latestHistoryFetch = latestHistory?.fetched_at
+  const truthTier = latestHistory?.calibration_tier === 'live_truth'
+    ? '实盘 truth'
+    : latestHistory?.calibration_tier === 'research_truth'
+      ? '研究 truth'
+      : 'truth 待补'
 
-    const latestForecastByDate = new Map<string, any>()
-    for (const point of series?.forecast_points ?? series?.points ?? []) {
-      if (!point.target_date) continue
-      const existing = latestForecastByDate.get(point.target_date)
-      if (!existing || String(point.timestamp) > String(existing.timestamp)) {
-        latestForecastByDate.set(point.target_date, point)
-      }
+  useEffect(() => {
+    const fallbackDate = availableDates[availableDates.length - 1] ?? forecastFallback?.target_date ?? latestForecast?.target_date ?? ''
+    if (!selectedDate && fallbackDate) {
+      setSelectedDate(fallbackDate)
+    } else if (selectedDate && availableDates.length > 0 && !availableDates.includes(selectedDate)) {
+      setSelectedDate(fallbackDate)
     }
+  }, [availableDates, forecastFallback?.target_date, latestForecast?.target_date, selectedDate])
 
-    for (const [targetDate, point] of latestForecastByDate.entries()) {
-      const row = byDate.get(targetDate) ?? { date: targetDate, label: shortDate(targetDate) }
-      row.forecast_high = point.best ?? point.ensemble_mean ?? null
-      row.metar = point.metar ?? null
-      row.ecmwf = point.ecmwf ?? null
-      row.hrrr = point.hrrr ?? null
-      row.forecast_source = point.source
-      row.forecast_timestamp = point.timestamp
-      if (point.humidity !== null && point.humidity !== undefined) row.humidity_mean = point.humidity
-      byDate.set(targetDate, row)
+  const selectedDateIndex = availableDates.indexOf(selectedDate)
+  const selectedDateRow = chartData.find(row => row.date === selectedDate) ?? chartData[chartData.length - 1]
+  const decisionLabel = bestSignal?.actionable ? 'BUY YES' : bestSignal ? '观察' : '等待信号'
+  const decisionTone = bestSignal?.actionable ? 'green' : bestSignal ? 'amber' : 'neutral'
+  const decisionReason = bestSignal?.decision?.reasons?.[0] ?? bestSignal?.status ?? (bestSignal ? '未通过可执行闸门' : '自动抓取后生成')
+  const selectedForecast = selectedDateRow?.forecast_high ?? latestForecast?.best ?? latestForecast?.ensemble_mean ?? forecastFallback?.mean_high
+  const selectedMetar = selectedDateRow?.metar ?? latestMetar?.metar
+  const metarGap = selectedForecast !== null && selectedForecast !== undefined && selectedMetar !== null && selectedMetar !== undefined
+    ? Number(selectedForecast) - Number(selectedMetar)
+    : null
+  const forecastRows = [...(series?.forecast_points ?? series?.points ?? [])]
+    .filter(point => !selectedDate || point.target_date === selectedDate)
+    .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
+    .slice(0, 18)
+  const metarRows = forecastRows
+    .filter(point => point.metar !== null && point.metar !== undefined)
+    .slice(0, 18)
+  const historyRows = [...(series?.history_points ?? [])]
+    .sort((a, b) => String(b.target_date).localeCompare(String(a.target_date)))
+    .slice(0, 18)
+  const eventRows = events
+    .filter(event => {
+      const text = `${event.message ?? ''} ${JSON.stringify(event.data ?? {})}`.toLowerCase()
+      return !cityKey || text.includes(cityKey.toLowerCase()) || text.includes(String(series?.city_name ?? '').toLowerCase()) || /scan|forecast|orderbook|truth|refresh|scanner|weather/i.test(text)
+    })
+    .slice(0, 18)
+  const forecastSamples: SourceSample[] = forecastRows.slice(0, 4).map(point => ({
+    label: `${shortDate(point.target_date)} · ${shortTime(point.timestamp)}`,
+    value: fmtTemp(point.best ?? point.ensemble_mean, unit),
+    meta: `ECMWF ${fmtTemp(point.ecmwf, unit)} · HRRR ${fmtTemp(point.hrrr, unit)} · METAR ${fmtTemp(point.metar, unit)} · ${point.source || '--'}`,
+    tone: point.target_date === selectedDate ? 'green' : 'neutral',
+  }))
+  const metarSamples: SourceSample[] = metarRows.slice(0, 4).map(point => ({
+    label: `${shortDate(point.target_date)} · ${shortTime(point.timestamp)}`,
+    value: fmtTemp(point.metar, unit),
+    meta: `best ${fmtTemp(point.best ?? point.ensemble_mean, unit)} · humidity ${fmtPct(point.humidity)} · ${point.source || '--'}`,
+    tone: point.target_date === selectedDate ? 'amber' : 'neutral',
+  }))
+  const historySamples: SourceSample[] = historyRows.slice(0, 4).map(point => ({
+    label: longDate(point.target_date),
+    value: fmtTemp(point.actual_high, point.unit || unit),
+    meta: `${point.provider || '--'} · ${point.calibration_tier || '--'} · ${point.station_id || series?.station_id || '--'}`,
+    tone: point.calibration_tier === 'live_truth' ? 'green' : point.calibration_tier === 'research_truth' ? 'amber' : 'neutral',
+  }))
+  const forecastCards: EvidenceCardItem[] = forecastRows.map((point, index) => ({
+    id: `forecast-${point.timestamp}-${point.target_date}-${index}`,
+    eyebrow: shortTime(point.timestamp),
+    title: longDate(point.target_date),
+    value: fmtTemp(point.best ?? point.ensemble_mean, unit),
+    meta: point.source || 'forecast',
+    tone: point.target_date === selectedDate ? 'green' : 'neutral',
+    badges: [
+      { label: `ECMWF ${fmtTemp(point.ecmwf, unit)}`, tone: 'cyan' },
+      { label: `HRRR ${fmtTemp(point.hrrr, unit)}`, tone: 'green' },
+      { label: `METAR ${fmtTemp(point.metar, unit)}`, tone: 'amber' },
+      { label: `湿度 ${fmtPct(point.humidity)}`, tone: 'neutral' },
+    ],
+    details: [
+      { label: '更新时间', value: shortTime(point.timestamp) },
+      { label: '目标日期', value: longDate(point.target_date) },
+      { label: 'best / ensemble', value: `${fmtTemp(point.best, unit)} / ${fmtTemp(point.ensemble_mean, unit)}` },
+      { label: 'ensemble std', value: point.ensemble_std === null || point.ensemble_std === undefined ? '--' : point.ensemble_std.toFixed(2) },
+      { label: 'ECMWF', value: fmtTemp(point.ecmwf, unit) },
+      { label: 'HRRR', value: fmtTemp(point.hrrr, unit) },
+      { label: 'METAR', value: fmtTemp(point.metar, unit) },
+      { label: '湿度', value: fmtPct(point.humidity) },
+      { label: 'horizon', value: point.horizon || '--' },
+      { label: '来源', value: point.source || '--', wide: true },
+    ],
+  }))
+  const metarCards: EvidenceCardItem[] = metarRows.map((point, index) => {
+    const forecastValue = point.best ?? point.ensemble_mean
+    const gap = forecastValue !== null && forecastValue !== undefined && point.metar !== null && point.metar !== undefined
+      ? Number(forecastValue) - Number(point.metar)
+      : null
+    return {
+      id: `metar-${point.timestamp}-${point.target_date}-${index}`,
+      eyebrow: shortTime(point.timestamp),
+      title: longDate(point.target_date),
+      value: fmtTemp(point.metar, unit),
+      meta: `预测差 ${fmtSignedTemp(gap, unit)}`,
+      tone: gap === null ? 'neutral' : Math.abs(gap) <= 1.5 ? 'green' : Math.abs(gap) <= 3 ? 'amber' : 'red',
+      badges: [
+        { label: `best ${fmtTemp(forecastValue, unit)}`, tone: 'cyan' },
+        { label: `差值 ${fmtSignedTemp(gap, unit)}`, tone: gap === null ? 'neutral' : Math.abs(gap) <= 1.5 ? 'green' : Math.abs(gap) <= 3 ? 'amber' : 'red' },
+        { label: `湿度 ${fmtPct(point.humidity)}`, tone: 'neutral' },
+      ],
+      details: [
+        { label: '观测时间', value: shortTime(point.timestamp) },
+        { label: '目标日期', value: longDate(point.target_date) },
+        { label: 'METAR', value: fmtTemp(point.metar, unit) },
+        { label: 'best', value: fmtTemp(forecastValue, unit) },
+        { label: 'ECMWF', value: fmtTemp(point.ecmwf, unit) },
+        { label: 'HRRR', value: fmtTemp(point.hrrr, unit) },
+        { label: '湿度', value: fmtPct(point.humidity) },
+        { label: '来源', value: point.source || '--', wide: true },
+      ],
     }
+  })
+  const historyCards: EvidenceCardItem[] = historyRows.map((point, index) => {
+    const confidence = point.source_confidence
+    const confidenceLabel = confidence === null || confidence === undefined
+      ? '--'
+      : Number(confidence) <= 1
+        ? fmtProb(confidence)
+        : `${Number(confidence).toFixed(0)}%`
+    return {
+      id: `history-${point.station_id || cityKey}-${point.target_date}-${index}`,
+      eyebrow: point.provider || 'history',
+      title: longDate(point.target_date),
+      value: fmtTemp(point.actual_high, point.unit || unit),
+      meta: `${point.calibration_tier || '--'} / ${point.station_id || series?.station_id || '--'}`,
+      tone: point.calibration_tier === 'live_truth' ? 'green' : point.calibration_tier === 'research_truth' ? 'amber' : 'neutral',
+      badges: [
+        { label: point.calibration_tier || 'truth 待补', tone: point.calibration_tier === 'live_truth' ? 'green' : point.calibration_tier === 'research_truth' ? 'amber' : 'neutral' },
+        { label: `湿度 ${fmtPct(point.humidity_mean)}`, tone: 'neutral' },
+        { label: `置信 ${confidenceLabel}`, tone: 'cyan' },
+      ],
+      details: [
+        { label: '日期', value: longDate(point.target_date) },
+        { label: '实际最高', value: fmtTemp(point.actual_high, point.unit || unit) },
+        { label: '湿度', value: fmtPct(point.humidity_mean) },
+        { label: 'provider', value: point.provider || '--' },
+        { label: 'truth 层级', value: point.calibration_tier || '--' },
+        { label: '站点', value: point.station_id || series?.station_id || '--' },
+        { label: '抓取时间', value: shortTime(point.fetched_at) },
+        { label: '来源链接', value: point.source_url || '--', wide: true },
+      ],
+    }
+  })
 
-    return [...byDate.values()]
-      .sort((a, b) => String(a.date).localeCompare(String(b.date)))
-      .slice(-60)
-  }, [series])
+  useEffect(() => {
+    if (!selectedDate || typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('date') === selectedDate) return
+    params.set('date', selectedDate)
+    window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`)
+  }, [selectedDate])
 
   if (forecasts.length === 0 && citySeries.length === 0 && signals.length === 0) {
     return (
       <div className="flex h-full items-center justify-center p-4 text-center text-[11px] leading-relaxed text-neutral-600">
-        暂无天气快照。请先启动扫描器，或等待下一轮 forecast_snapshots 写入本地数据。
+        暂无天气快照。点击顶部“自动抓取”，系统会同步预测、METAR、历史观测和盘口快照。
       </div>
     )
   }
 
-  const unit = series?.unit ?? 'F'
-  const actionable = citySignals.filter(signal => signal.actionable)
-  const bestSignal = [...citySignals].sort((a, b) => Math.abs((b.edge ?? 0)) - Math.abs((a.edge ?? 0)))[0]
-  const humidityText = series?.humidity_status === 'available' ? '已采集' : '尚未采集'
-  const latestHistory = [...(series?.history_points ?? [])].reverse().find(point => point.actual_high !== null && point.actual_high !== undefined)
-  const latestForecast = [...(series?.forecast_points ?? series?.points ?? [])].reverse().find(point => point.best !== null && point.best !== undefined)
-
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(190px,1fr)_auto] gap-2 p-3 text-[11px] text-neutral-400">
+    <div className="min-h-full space-y-2 bg-white p-3 text-[11px] text-gray-600">
       <div className="flex flex-wrap items-center gap-2">
         <select
-          value={series?.city_key ?? forecastFallback?.city_key ?? ''}
-          onChange={event => setSelected(event.target.value)}
-          className="min-w-[180px] flex-1 border border-neutral-800 bg-black px-2 py-1 text-neutral-200"
-          aria-label="选择城市"
+          value={continentFilter}
+          onChange={event => setContinentFilter(event.target.value as (typeof CONTINENTS)[number])}
+          className="min-w-[130px] border border-gray-200 bg-white px-2 py-1 text-gray-900 outline-none focus:border-gray-400"
+          aria-label="按大洲筛选"
         >
-          {citySeries.map(row => (
-            <option key={row.city_key} value={row.city_key}>{row.city_name}</option>
-          ))}
-          {citySeries.length === 0 && forecasts.map(row => (
-            <option key={row.city_key} value={row.city_key}>{row.city_name}</option>
+          {CONTINENTS.map(continent => (
+            <option key={continent} value={continent}>{continent}</option>
           ))}
         </select>
-        <div className="shrink-0 border border-neutral-800 px-2 py-1 text-[10px] text-neutral-500">
-          站点 {series?.station_id || '未映射'}
-        </div>
-        <button
-          onClick={onBackfillHistory}
-          disabled={backfilling || !onBackfillHistory}
-          className="shrink-0 border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-40"
-          title="补最近 30 天研究级历史天气。不会开启实盘，也不会解锁实盘门槛。"
+        <select
+          value={cityKey}
+          onChange={event => setSelected(event.target.value)}
+          className="min-w-[180px] flex-1 border border-gray-200 bg-white px-2 py-1 text-gray-900 outline-none focus:border-gray-400"
+          aria-label="选择城市"
         >
-          {backfilling ? '补历史中...' : '补历史数据'}
-        </button>
-      </div>
-
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(88px,1fr))] gap-2">
-        <Metric label="历史点" value={`${series?.history_count ?? series?.history_points?.length ?? 0}`} tone="neutral" />
-        <Metric label="预测点" value={`${series?.forecast_count ?? series?.forecast_points?.length ?? series?.points?.length ?? 0}`} tone="neutral" />
-        <Metric label="最新实际" value={fmt(latestHistory?.actual_high, unit)} tone="cyan" />
-        <Metric label="最新预测" value={fmt(latestForecast?.best ?? forecastFallback?.mean_high, unit)} tone="green" />
-        <Metric label="湿度" value={humidityText} tone={humidityText === '已采集' ? 'green' : 'amber'} />
-      </div>
-
-      <div className="flex min-h-0 flex-col border border-neutral-800 bg-black p-2">
-        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-neutral-400" aria-hidden="true">
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-0.5 w-5 bg-sky-400" />
-            历史实际最高温
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="w-5 border-t-2 border-dashed border-green-400" />
-            预测最高温
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-3 bg-amber-400/45" />
-            日均湿度
-          </span>
-        </div>
-        {chartData.length > 0 ? (
-          <div
-            className="min-h-0 flex-1"
-            role="img"
-            aria-label={`${series?.city_name ?? '当前城市'}最近 ${series?.history_count ?? 0} 个历史天气点与未来预测趋势。蓝色实线表示历史实际最高温，绿色虚线表示预测最高温，琥珀色柱表示日均湿度。`}
+          {filteredCities.map(row => (
+            <option key={row.key} value={row.key}>{row.name}</option>
+          ))}
+        </select>
+        <div className="inline-flex shrink-0 items-center border border-neutral-800">
+          <button
+            type="button"
+            onClick={() => selectedDateIndex > 0 && setSelectedDate(availableDates[selectedDateIndex - 1])}
+            disabled={selectedDateIndex <= 0}
+            className="px-2 py-1 text-[10px] text-neutral-400 hover:bg-neutral-900 disabled:opacity-30"
           >
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: -8 }}>
-                <CartesianGrid stroke="#1f1f1f" strokeDasharray="3 3" />
-                <XAxis dataKey="label" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} minTickGap={14} />
-                <YAxis yAxisId="temp" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} />
-                <YAxis yAxisId="humidity" orientation="right" stroke="#737373" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
-                <Tooltip
-                  contentStyle={{ background: '#050505', border: '1px solid #262626', color: '#e5e5e5', fontSize: 11 }}
-                  formatter={(value: any, name: any) => {
-                    if (name === '日均湿度') return [pct(Number(value)), name]
-                    return [fmt(Number(value), unit), name]
-                  }}
-                  labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ''}
-                />
-                <Bar
-                  yAxisId="humidity"
-                  dataKey="humidity_mean"
-                  name="日均湿度"
-                  fill="#f59e0b"
-                  fillOpacity={0.28}
-                  maxBarSize={10}
-                  radius={[1, 1, 0, 0]}
-                />
-                <Line yAxisId="temp" type="monotone" dataKey="actual_high" name="历史实际最高温" stroke="#38bdf8" dot={false} strokeWidth={2.4} connectNulls={false} />
-                <Line yAxisId="temp" type="monotone" dataKey="forecast_high" name="预测最高温" stroke="#22c55e" strokeDasharray="7 4" dot={false} strokeWidth={2.4} connectNulls={false} />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-        ) : (
-          <div className="flex h-full items-center justify-center text-center text-neutral-600">
-            该城市还没有历史或预测曲线。可以先点击“补历史数据”，再启动扫描器获取预测线。
-          </div>
+            前一天
+          </button>
+          <input
+            type="date"
+            value={selectedDate || todayDate}
+            onChange={event => setSelectedDate(event.target.value)}
+            className="w-[136px] border-x border-neutral-800 bg-black px-2 py-1 text-center text-[10px] tabular-nums text-neutral-200 outline-none"
+            aria-label="选择日期"
+          />
+          <button
+            type="button"
+            onClick={() => selectedDateIndex >= 0 && selectedDateIndex < availableDates.length - 1 && setSelectedDate(availableDates[selectedDateIndex + 1])}
+            disabled={selectedDateIndex < 0 || selectedDateIndex >= availableDates.length - 1}
+            className="px-2 py-1 text-[10px] text-neutral-400 hover:bg-neutral-900 disabled:opacity-30"
+          >
+            后一天
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedDate(todayDate)}
+            className="border-l border-neutral-800 px-2 py-1 text-[10px] text-neutral-400 hover:bg-neutral-900"
+          >
+            今天
+          </button>
+        </div>
+        {bestSignal?.event_url && (
+          <a href={bestSignal.event_url} target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-1 border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-300 hover:bg-cyan-500/10">
+            Polymarket <ExternalLink className="h-3 w-3" />
+          </a>
         )}
       </div>
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-2">
-        <div className="border border-neutral-800 p-2 leading-relaxed">
-          <div className="mb-1 text-neutral-500">当前城市信号</div>
-          <div>可操作 {actionable.length} 条；最强信号 {bestSignal ? `${bestSignal.bucket_label || bestSignal.threshold_f} / 概率差 ${((bestSignal.probability_edge ?? bestSignal.edge) * 100).toFixed(1)}%` : '暂无'}</div>
-          <div className="text-[10px] text-neutral-600">最新预测更新时间 {shortTime(latestForecast?.timestamp)}</div>
-          {backfillResult && (
-            <div className="mt-1 text-[10px] text-cyan-300">
-              最近补历史：写入 {backfillResult.fetched} 条，错误 {backfillResult.errors.length} 个。
-            </div>
-          )}
+        <SourcePulse
+          label="预报"
+          status={forecastStatus}
+          value={freshnessLabel(latestForecast?.timestamp)}
+          meta={elapsedLabel(forecastRefreshStage?.elapsed_ms) || latestForecast?.source || '等待抓取'}
+          details={[
+            { label: '更新时间', value: shortTime(latestForecast?.timestamp) },
+            { label: '目标日', value: longDate(latestForecast?.target_date ?? selectedDate) },
+            { label: '最佳 / ECMWF / HRRR', value: `${fmtTemp(latestForecast?.best ?? latestForecast?.ensemble_mean, unit)} / ${fmtTemp(latestForecast?.ecmwf, unit)} / ${fmtTemp(latestForecast?.hrrr, unit)}` },
+            { label: '来源', value: latestForecast?.source || '等待抓取' },
+            { label: '刷新阶段', value: refreshStageLabel(forecastRefreshStage) },
+          ]}
+          samples={forecastSamples}
+        />
+        <SourcePulse
+          label="METAR"
+          status={metarStatus}
+          value={freshnessLabel(latestMetar?.timestamp)}
+          meta={latestMetar?.metar !== null && latestMetar?.metar !== undefined ? fmtTemp(latestMetar.metar, unit) : '等待观测'}
+          details={[
+            { label: '观测时间', value: shortTime(latestMetar?.timestamp) },
+            { label: '目标日', value: longDate(latestMetar?.target_date ?? selectedDate) },
+            { label: 'METAR / best', value: `${fmtTemp(latestMetar?.metar, unit)} / ${fmtTemp(latestMetar?.best ?? latestMetar?.ensemble_mean, unit)}` },
+            { label: '湿度', value: fmtPct(latestMetar?.humidity) },
+            { label: '来源', value: latestMetar?.source || '等待观测' },
+          ]}
+          samples={metarSamples}
+        />
+        <SourcePulse
+          label="历史观测"
+          status={historyStatus}
+          value={latestHistoryFetch ? freshnessLabel(latestHistoryFetch) : latestHistory ? shortDate(latestHistory.target_date) : '无数据'}
+          meta={latestHistory?.provider || truthTier}
+          details={[
+            { label: '日期', value: longDate(latestHistory?.target_date ?? selectedDate) },
+            { label: '实际最高', value: fmtTemp(latestHistory?.actual_high, latestHistory?.unit || unit) },
+            { label: 'provider', value: latestHistory?.provider || '无数据' },
+            { label: '站点', value: latestHistory?.station_id || series?.station_id || '未映射' },
+            { label: 'truth 层级', value: truthTier },
+            { label: '抓取时间', value: shortTime(latestHistoryFetch) },
+          ]}
+          samples={historySamples}
+        />
+      </div>
+
+      <div className={`grid gap-2 border px-2 py-2 md:grid-cols-[1.2fr_repeat(4,minmax(0,1fr))_auto] ${decisionTone === 'green' ? 'border-green-500/30 bg-green-500/5' : decisionTone === 'amber' ? 'border-amber-500/30 bg-amber-500/5' : 'border-neutral-800 bg-black'}`}>
+        <div className="min-w-0">
+          <div className="text-[10px] text-neutral-500">选中日期判断</div>
+          <div className={`truncate text-sm font-medium ${decisionTone === 'green' ? 'text-green-300' : decisionTone === 'amber' ? 'text-amber-300' : 'text-neutral-200'}`}>
+            {decisionLabel}
+          </div>
+          <div className="truncate text-[10px] text-neutral-600" title={decisionReason}>{decisionReason}</div>
         </div>
+        <DecisionMetric label="推荐合约" value={signalBucketLabel(bestSignal, unit)} sub={bestSignal ? (isOpenTailBucket(bestSignal) ? '开放尾桶，需严控' : longDate(bestSignal.target_date)) : longDate(selectedDate)} />
+        <DecisionMetric label="盘口" value={bestSignal?.limit_price !== undefined && bestSignal?.limit_price !== null ? fmtPrice(bestSignal.limit_price) : '--'} sub={bestSignal?.spread !== undefined && bestSignal?.spread !== null ? `spread ${fmtPrice(bestSignal.spread)}` : '等待盘口'} />
+        <DecisionMetric label="模型 / Edge" value={bestSignal ? fmtProb(bestSignal.calibrated_probability ?? bestSignal.model_probability) : '--'} sub={bestSignal ? fmtSignedPct(bestSignal.probability_edge ?? bestSignal.edge) : '无概率'} />
+        <DecisionMetric label="预测-METAR" value={metarGap === null ? '--' : fmtTemp(metarGap, unit)} sub={`预测 ${fmtTemp(selectedForecast, unit)}`} />
+        {bestSignal?.event_url ? (
+          <a href={bestSignal.event_url} target="_blank" rel="noreferrer" className="inline-flex min-h-9 items-center justify-center gap-1 border border-cyan-500/30 px-2 text-[10px] text-cyan-300 hover:bg-cyan-500/10">
+            Polymarket <ExternalLink className="h-3 w-3" />
+          </a>
+        ) : (
+          <span className="inline-flex min-h-9 items-center justify-center border border-neutral-800 px-2 text-[10px] text-neutral-600">无链接</span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(92px,1fr))] gap-2">
+        <Metric icon={<ThermometerSun className="h-3.5 w-3.5" />} label="最新预测" value={fmtTemp(latestForecast?.best ?? forecastFallback?.mean_high, unit)} tone="green" sub={freshnessLabel(latestForecast?.timestamp)} />
+        <Metric icon={<CloudSun className="h-3.5 w-3.5" />} label="METAR 实测" value={fmtTemp(latestMetar?.metar, unit)} tone="amber" sub={freshnessLabel(latestMetar?.timestamp)} />
+        <Metric icon={<Database className="h-3.5 w-3.5" />} label="历史最高" value={fmtTemp(latestHistory?.actual_high, unit)} tone="cyan" sub={latestHistory?.provider || truthTier} />
+        <Metric icon={<Signal className="h-3.5 w-3.5" />} label="可操作信号" value={`${actionableSignals.length}/${citySignals.length}`} tone={actionableSignals.length > 0 ? 'green' : 'neutral'} sub={bestSignal ? `${signalBucketLabel(bestSignal, unit)} · ${(((bestSignal.probability_edge ?? bestSignal.edge) || 0) * 100).toFixed(1)}%` : '暂无'} />
+      </div>
+
+      <section className="border border-[#2C3445] bg-[#1B212C]">
+        <div className="border-b border-[#2C3445]">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-2 py-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <EvidenceBadge label="预报" status={forecastStatus} detail={freshnessLabel(latestForecast?.timestamp)} />
+              <EvidenceBadge label="METAR" status={metarStatus} detail={freshnessLabel(latestMetar?.timestamp)} />
+              <EvidenceBadge label="历史观测" status={historyStatus} detail={latestHistory?.provider || 'no data'} />
+              <span className="border border-[#2C3445] px-1.5 py-0.5 text-[9px] text-[#7D8694]">Hourly {hourlyRows.length}</span>
+            </div>
+            <div className="text-[10px] text-[#7D8694]">PolyWX-style city workbench · local time</div>
+          </div>
+          <div className="flex gap-1 overflow-x-auto px-2 pb-2">
+            {WORKBENCH_TABS.map(tab => (
+              <WorkbenchTabButton
+                key={tab.id}
+                tab={tab}
+                active={activeWorkbenchTab === tab.id}
+                onClick={() => setActiveWorkbenchTab(tab.id)}
+              />
+            ))}
+          </div>
+        </div>
+
+        {activeWorkbenchTab === 'forecast' && (
+          <div className="space-y-2 p-2">
+            <HourlyEvidencePanel
+              rows={hourlyRows}
+              unit={unit}
+              cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
+              selectedDate={selectedDate}
+              actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
+              historyProvider={latestHistory?.provider || truthTier}
+            />
+            <TemperatureDistributionPanel
+              signal={distributionSignal}
+              items={distributionChartItems}
+              unit={unit}
+              selectedDate={selectedDate}
+              actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
+              evidenceSummary={selectedDateEvidence?.modules?.probability_buckets?.probability_summary}
+              marketSummary={selectedDateEvidence?.modules?.market_buckets?.market_summary}
+            />
+            <ForecastDataTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
+            <details className="border border-[#2C3445] bg-[#161A22]">
+              <summary className="cursor-pointer select-none px-2 py-2 text-xs text-[#CBD2DC] hover:bg-[#222A37]">
+                Forecast snapshot cards · {forecastRows.length}
+              </summary>
+              <div className="border-t border-neutral-800">
+                <EvidenceCards empty="No forecast snapshots for this date" items={forecastCards} />
+              </div>
+            </details>
+          </div>
+        )}
+
+        {activeWorkbenchTab === 'metar' && (
+          <div className="grid gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <MetarObservationTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
+            <EvidenceCards empty="No METAR snapshots for this date" items={metarCards} />
+          </div>
+        )}
+
+        {activeWorkbenchTab === 'historical' && (
+          <div className="grid gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <HistoricalObservationTable rows={historyRows} unit={unit} stationId={series?.station_id} />
+            <EvidenceCards empty="No historical observations yet" items={historyCards} />
+          </div>
+        )}
+
+        {activeWorkbenchTab === 'diff' && (
+          <div className="space-y-2 p-2">
+            <DiffStatsPanel
+              rows={hourlyRows}
+              chartData={chartData}
+              unit={unit}
+              selectedDate={selectedDate}
+              evidenceSummary={selectedDateEvidence?.modules?.diff_stats?.summary}
+            />
+            <details className="border border-[#2C3445] bg-[#161A22]">
+              <summary className="cursor-pointer select-none px-2 py-2 text-xs text-[#CBD2DC] hover:bg-[#222A37]">
+                Calibration detail · average delta / Pearson R / truth
+              </summary>
+              <div className="border-t border-neutral-800">
+                <BiasPanel
+                  chartData={chartData}
+                  series={series}
+                  historyRows={historyRows}
+                  forecastRows={forecastRows}
+                  selectedDate={selectedDate}
+                  selectedDateRow={selectedDateRow}
+                  unit={unit}
+                  truthTier={truthTier}
+                  forecastStatus={forecastStatus}
+                  metarStatus={metarStatus}
+                  historyStatus={historyStatus}
+                  citySignals={citySignals}
+                  actionableSignals={actionableSignals}
+                  latestHistory={latestHistory}
+                  latestForecast={latestForecast}
+                />
+              </div>
+            </details>
+          </div>
+        )}
+
+        {activeWorkbenchTab === 'fetch' && (
+          <div className="grid gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_420px]">
+            <EventTimeline events={eventRows} fetchLog={fetchLog} />
+            <SignalCards signals={citySignals.slice(0, 18)} unit={unit} selectedDate={selectedDate} />
+          </div>
+        )}
+      </section>
+
+      {backfillResult && (
+        <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 text-[10px] text-cyan-300">
+          最近补历史：写入 {backfillResult.fetched} 条，错误 {backfillResult.errors.length} 个
+        </div>
+      )}
+    </div>
+  )
+}
+
+function WorkbenchTabButton({
+  tab,
+  active,
+  onClick,
+}: {
+  tab: (typeof WORKBENCH_TABS)[number]
+  active: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`min-w-[120px] shrink-0 border px-2 py-1.5 text-left rounded-none ${
+        active
+          ? 'border-[#2563EB] bg-[#2563EB] text-white'
+          : 'border-[#2C3445] bg-[#161A22] text-[#7D8694] hover:bg-[#222A37] hover:text-[#CBD2DC]'
+      }`}
+      title={tab.note}
+    >
+      <div className="text-[11px] font-medium">{tab.label}</div>
+      <div className="truncate text-[9px] opacity-70">{tab.note}</div>
+    </button>
+  )
+}
+
+function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRow[]; unit: string; selectedDate: string }) {
+  return (
+    <section className="border border-neutral-800 bg-black">
+      <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+        <div>
+          <div className="text-[10px] text-neutral-500">Forecast Data</div>
+          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {rows.length} rows</div>
+        </div>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">PolyWX schema</span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="max-h-[360px] overflow-auto">
+          <table className="min-w-[980px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Time', 'Temp', 'Cloud', 'Precip', 'Wind', 'Condition', 'Pres', 'Dew', 'Changes', 'Fetched (Sys)', 'Fetched (Local)'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colSpan={11} className="px-2 py-12 text-center text-neutral-600">
+                  No hourly forecast rows for this date. Use manual fetch to populate this panel.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="max-h-[360px] overflow-auto">
+          <table className="min-w-[980px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Time', 'Temp', 'Cloud', 'Precip', 'Wind', 'Condition', 'Pres', 'Dew', 'Changes', 'Fetched (Sys)', 'Fetched (Local)'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row => (
+                <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                  <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
+                  <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.cloud_cover)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPrecip(row.precipitation)} / {fmtPct(row.precipitation_probability)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
+                  <td className="max-w-[140px] truncate px-2 py-1 text-neutral-400" title={`${row.source || '--'} · ${row.horizon || '--'}`}>
+                    {row.condition || row.source || row.horizon || '--'}
+                  </td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{row.archive ? 'archive' : row.member_count ? `n ${row.member_count}` : '--'}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.timestamp)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortHour(row.timestamp)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
+        <summary className="cursor-pointer select-none hover:text-neutral-400">Schema notes</summary>
+        <div className="mt-1 leading-relaxed">
+          Cloud uses real cloud_cover when available and falls back to humidity for older rows. Precip shows amount / probability; wind shows direction degrees and speed.
+        </div>
+      </details>
+    </section>
+  )
+}
+
+function MetarObservationTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRow[]; unit: string; selectedDate: string }) {
+  const metarRows = rows.filter(row => row.metar !== null && row.metar !== undefined)
+
+  return (
+    <section className="min-w-0 border border-neutral-800 bg-black">
+      <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+        <div>
+          <div className="text-[10px] text-neutral-500">METAR</div>
+          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {metarRows.length} observations</div>
+        </div>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">local station</span>
+      </div>
+      {metarRows.length === 0 ? (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="min-w-[760px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Time', 'Observed', 'Forecast', 'Delta', 'Humidity', 'Source', 'Fetched'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colSpan={7} className="px-2 py-12 text-center text-neutral-600">
+                  No METAR observations for this date yet.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="min-w-[760px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Time', 'Observed', 'Forecast', 'Delta', 'Humidity', 'Source', 'Fetched'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {metarRows.map(row => (
+                <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                  <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
+                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtTemp(row.metar, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-300">{fmtSignedTemp(row.gap, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.humidity)}</td>
+                  <td className="max-w-[140px] truncate px-2 py-1 text-neutral-500" title={`${row.source || '--'} · ${row.horizon || '--'}`}>{row.source || '--'}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.timestamp)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function HistoricalObservationTable({ rows, unit, stationId }: { rows: HistoricalWeatherPoint[]; unit: string; stationId?: string }) {
+  return (
+    <section className="min-w-0 border border-neutral-800 bg-black">
+      <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+        <div>
+          <div className="text-[10px] text-neutral-500">Historical</div>
+          <div className="text-xs text-neutral-100">{rows.length} settlement-truth rows</div>
+        </div>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">{stationId || 'station pending'}</span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="min-w-[900px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Date', 'Actual High', 'Humidity', 'Provider', 'Tier', 'Station', 'Fetched', 'Source'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colSpan={8} className="px-2 py-12 text-center text-neutral-600">
+                  No historical observations yet. Backfill history to compare forecast against actual highs.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="min-w-[900px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['Date', 'Actual High', 'Humidity', 'Provider', 'Tier', 'Station', 'Fetched', 'Source'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row => (
+                <tr key={`${row.station_id || row.city}-${row.target_date}`} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                  <td className="px-2 py-1 tabular-nums text-neutral-300">{longDate(row.target_date)}</td>
+                  <td className="px-2 py-1 tabular-nums text-cyan-300">{fmtTemp(row.actual_high, row.unit || unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.humidity_mean)}</td>
+                  <td className="max-w-[160px] truncate px-2 py-1 text-neutral-400" title={row.provider || '--'}>{row.provider || '--'}</td>
+                  <td className="px-2 py-1 text-neutral-400">{row.calibration_tier || '--'}</td>
+                  <td className="px-2 py-1 text-neutral-500">{row.station_id || stationId || '--'}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.fetched_at)}</td>
+                  <td className="max-w-[180px] truncate px-2 py-1 text-neutral-500" title={row.source_url || '--'}>
+                    {row.source_url ? (
+                      <a href={row.source_url} target="_blank" rel="noreferrer" className="text-cyan-300 hover:text-cyan-100">source</a>
+                    ) : '--'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function DiffStatsPanel({
+  rows,
+  chartData,
+  unit,
+  selectedDate,
+  evidenceSummary,
+}: {
+  rows: HourlyWeatherRow[]
+  chartData: WeatherChartRow[]
+  unit: string
+  selectedDate: string
+  evidenceSummary?: CityEvidenceDiffStatsSummary
+}) {
+  const hourlyPairs = rows
+    .filter(row => row.forecast !== null && row.forecast !== undefined && row.metar !== null && row.metar !== undefined)
+    .map(row => ({
+      id: row.id,
+      time: row.label,
+      observed: Number(row.metar),
+      forecast: Number(row.forecast),
+      delta: Number(row.metar) - Number(row.forecast),
+      cloud_cover: row.cloud_cover,
+      condition: row.condition,
+      wind_speed: row.wind_speed,
+      wind_direction: row.wind_direction,
+      pressure: row.pressure,
+      dew_point: row.dew_point,
+      fetched_sys: row.timestamp,
+      fetched_local: row.timestamp,
+      source: row.source || 'METAR',
+    }))
+  const dailyPairs = chartData
+    .filter(row => row.actual_high !== null && row.actual_high !== undefined && row.forecast_high !== null && row.forecast_high !== undefined)
+    .map(row => ({
+      id: row.date,
+      time: longDate(row.date),
+      observed: Number(row.actual_high),
+      forecast: Number(row.forecast_high),
+      delta: Number(row.actual_high) - Number(row.forecast_high),
+      cloud_cover: row.humidity_mean,
+      condition: row.calibration_tier || row.historical_provider,
+      wind_speed: null,
+      wind_direction: null,
+      pressure: null,
+      dew_point: null,
+      fetched_sys: row.forecast_timestamp || row.date,
+      fetched_local: row.forecast_timestamp || row.date,
+      source: row.historical_provider || row.forecast_source || 'history',
+    }))
+  const tableRows = hourlyPairs.length > 0 ? hourlyPairs : dailyPairs.slice(-30).reverse()
+  const diffColumns = ['Time', 'Temp', 'Cloud', 'Wx', 'Vis', 'Wind', 'Pres', 'Dew', 'Fetched (Sys)', 'Fetched (Local)']
+  const deltas = tableRows.map(row => row.delta)
+  const avgDelta = mean(deltas)
+  const correlation = pearsonR(
+    tableRows.map(row => row.forecast),
+    tableRows.map(row => row.observed)
+  )
+  const maxAbsDelta = Math.max(1, ...deltas.map(delta => Math.abs(delta)))
+  const summaryCount = evidenceSummary?.count ?? tableRows.length
+  const summaryAvgDelta = evidenceSummary?.avg_delta ?? avgDelta
+  const summaryMae = evidenceSummary?.mae ?? (deltas.length ? mean(deltas.map(delta => Math.abs(delta))) : null)
+  const summaryPearson = evidenceSummary?.pearson_r ?? correlation
+  const summaryOverlap = evidenceSummary?.overlap_ratio
+  const summaryOverlapLabel = summaryOverlap === null || summaryOverlap === undefined
+    ? (summaryCount ? `${summaryCount}` : '--')
+    : fmtProb(summaryOverlap)
+  const summaryOverlapSub = summaryOverlap === null || summaryOverlap === undefined
+    ? 'paired samples'
+    : `${evidenceSummary?.overlap_count ?? 0}/${Math.max(evidenceSummary?.metar_hours ?? 0, evidenceSummary?.forecast_hours ?? 0, 1)} hours`
+  const historyMetarOverlap = evidenceSummary?.historical_metar_overlap_ratio
+
+  return (
+    <section className="border border-neutral-800 bg-black">
+      <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+        <div>
+          <div className="text-[10px] text-neutral-500">Diff Stats (Observed - Forecast)</div>
+          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {tableRows.length} paired rows</div>
+        </div>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">{hourlyPairs.length > 0 ? 'hourly' : 'daily history'}</span>
+      </div>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] gap-2 border-b border-neutral-900 p-2">
+        <MetricCard label="Average Delta" value={fmtSignedTemp(summaryAvgDelta, unit)} sub="Observed - Forecast" />
+        <MetricCard label="MAE" value={summaryMae === null ? '--' : fmtTemp(summaryMae, unit)} sub="mean abs error" />
+        <MetricCard label="Accuracy" value={fmtPearson(summaryPearson)} sub="Pearson R" />
+        <MetricCard label="Overlap" value={summaryOverlapLabel} sub={summaryOverlapSub} />
+        <MetricCard label="Hist↔METAR" value={historyMetarOverlap === null || historyMetarOverlap === undefined ? '--' : fmtProb(historyMetarOverlap)} sub={`${evidenceSummary?.historical_metar_overlap_count ?? 0} hrs`} />
+        <MetricCard label="Max Abs Delta" value={fmtTemp(Math.max(0, ...deltas.map(delta => Math.abs(delta))), unit)} sub="worst visible row" />
+      </div>
+      {tableRows.length === 0 ? (
+        <div className="max-h-[460px] overflow-auto">
+          <table className="min-w-[980px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {diffColumns.map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colSpan={diffColumns.length} className="px-2 py-12 text-center text-neutral-600">
+                  No paired observed/forecast rows yet.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="max-h-[460px] overflow-auto">
+          <table className="min-w-[980px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {diffColumns.map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {tableRows.map(row => {
+                const width = Math.max(4, Math.min(100, Math.abs(row.delta) / maxAbsDelta * 100))
+                const tone = errorTone(Math.abs(row.delta))
+                const barClass = tone === 'green' ? 'bg-green-400/70' : tone === 'amber' ? 'bg-amber-400/75' : 'bg-red-400/75'
+                return (
+                  <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                    <td className="px-2 py-1 tabular-nums text-neutral-300">{row.time}</td>
+                    <td className="min-w-[160px] px-2 py-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="tabular-nums text-neutral-200">{fmtSignedTemp(row.delta, unit)}</span>
+                        <span className="tabular-nums text-neutral-500">{fmtTemp(row.observed, unit)} / {fmtTemp(row.forecast, unit)}</span>
+                      </div>
+                      <div className="mt-1 h-1.5 overflow-hidden bg-neutral-900">
+                        <div className={`h-full ${barClass}`} style={{ width: `${width}%` }} />
+                      </div>
+                    </td>
+                    <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.cloud_cover)}</td>
+                    <td className="max-w-[120px] truncate px-2 py-1 text-neutral-400" title={row.condition || row.source}>{row.condition || row.source || '--'}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-500">--</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.fetched_sys)}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.fetched_local)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function HourlyEvidencePanel({
+  rows,
+  unit,
+  cityName,
+  selectedDate,
+  actualHigh,
+  historyProvider,
+}: {
+  rows: HourlyWeatherRow[]
+  unit: string
+  cityName?: string
+  selectedDate: string
+  actualHigh?: number | null
+  historyProvider?: string
+}) {
+  const forecastValues = rows.map(row => row.forecast).filter((value): value is number => Number.isFinite(Number(value)))
+  const metarValues = rows.map(row => row.metar).filter((value): value is number => Number.isFinite(Number(value)))
+  const cloudValues = rows.map(row => row.cloud_cover).filter((value): value is number => Number.isFinite(Number(value)))
+  const gapValues = rows.map(row => row.gap).filter((value): value is number => Number.isFinite(Number(value)))
+  const forecastMax = forecastValues.length > 0 ? Math.max(...forecastValues) : null
+  const metarMax = metarValues.length > 0 ? Math.max(...metarValues) : null
+  const avgGap = mean(gapValues)
+  const avgCloud = mean(cloudValues)
+  const pairedRows = rows.filter(row => row.forecast !== null && row.forecast !== undefined && row.metar !== null && row.metar !== undefined)
+  const pearson = pearsonR(
+    pairedRows.map(row => Number(row.forecast)),
+    pairedRows.map(row => Number(row.metar))
+  )
+  const metarCoverage = rows.length > 0 ? metarValues.length / rows.length : null
+  const actualMetarDelta = actualHigh !== null && actualHigh !== undefined && metarMax !== null
+    ? Number(metarMax) - Number(actualHigh)
+    : null
+  const overlapLabel = actualMetarDelta === null
+    ? (metarCoverage === null ? '--' : `${Math.round(metarCoverage * 100)}%`)
+    : fmtSignedTemp(actualMetarDelta, unit)
+  const chartRows = rows.map(row => ({
+    ...row,
+    forecast_c: tempToC(row.forecast, unit),
+    metar_c: tempToC(row.metar, unit),
+    gap_c: deltaToC(row.gap, unit),
+    cloud_pct: row.cloud_cover ?? row.humidity ?? null,
+  }))
+  const maxAbsGapC = Math.max(0.1, ...chartRows.map(row => Math.abs(Number(row.gap_c ?? 0))))
+  if (rows.length === 0) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-center text-neutral-600">
+        该日期暂无逐小时快照。点击“自动抓取”后，这里会按抓取时间展示预报、METAR、湿度和模型差异。
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid min-h-0 flex-1 gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <section className="min-h-0 border border-[#2C3445] bg-[#161A22]">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#2C3445] px-2 py-1.5">
+          <div>
+            <div className="text-[10px] text-[#7D8694]">逐小时气温</div>
+            <div className="text-xs text-[#CBD2DC]">{cityName || '当前城市'} · {longDate(selectedDate)}</div>
+          </div>
+          <div className="flex flex-wrap gap-1 text-[9px] text-[#7D8694]">
+            <span className="border border-[#2C3445] px-1.5 py-0.5">预报最高 {fmtTemp(forecastMax, unit)}</span>
+            <span className="border border-[#2C3445] px-1.5 py-0.5">METAR最高 {fmtTemp(metarMax, unit)}</span>
+            <span className="border border-[#2C3445] px-1.5 py-0.5">平均差 {fmtSignedTemp(avgGap, unit)}</span>
+          </div>
+        </div>
+
+        <div
+          className="p-2"
+          role="img"
+          aria-label={`${cityName || '当前城市'} Hourly Temperature chart. METAR is a solid light line, forecast is a dashed blue line, cloud or humidity is shown as bars, residual diff bars are red or blue at the bottom.`}
+        >
+          <div className="relative h-[280px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={chartRows} margin={{ top: 8, right: 18, bottom: 0, left: -8 }}>
+                <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" />
+                <XAxis dataKey="label" stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} minTickGap={8} />
+                <YAxis yAxisId="temp" stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°C`} />
+                <YAxis yAxisId="percent" hide domain={[0, 100]} />
+                <Tooltip
+                  contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
+                  formatter={(value: any, name: any) => {
+                    if (name === 'Cloud / RH') return [`${Number(value).toFixed(0)}%`, name]
+                    return [fmtC(Number(value)), name]
+                  }}
+                  labelFormatter={(_, payload) => payload?.[0]?.payload?.timestamp ? shortTime(payload[0].payload.timestamp) : ''}
+                />
+                <Bar yAxisId="percent" dataKey="cloud_pct" name="Cloud / RH" fill="#2563EB" fillOpacity={0.18} maxBarSize={18} />
+                <Line yAxisId="temp" type="monotone" dataKey="metar_c" name="METAR 实测" stroke="#F8FAFC" dot={{ r: 2, fill: '#F8FAFC', strokeWidth: 0 }} strokeWidth={2.2} connectNulls={false} />
+                <Line yAxisId="temp" type="monotone" dataKey="forecast_c" name="预报" stroke="#38BDF8" strokeDasharray="4 4" dot={false} strokeWidth={2} connectNulls={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+            <div className="pointer-events-none absolute bottom-3 left-10 right-5 grid h-10 grid-flow-col auto-cols-fr items-end gap-px border-t border-[#2C3445] pt-1" aria-label="Diff residual bars">
+              {chartRows.map(row => {
+                const diff = Number(row.gap_c ?? 0)
+                const height = Math.max(2, Math.min(36, Math.abs(diff) / maxAbsGapC * 36))
+                return (
+                  <div key={`diff-${row.id}`} className="flex h-9 items-end justify-center" title={`${row.label} diff ${fmtC(diff)}`}>
+                    <div
+                      className={diff >= 0 ? 'w-full bg-red-500' : 'w-full bg-blue-500'}
+                      style={{ height: `${height}px`, opacity: row.gap_c === null || row.gap_c === undefined ? 0 : 0.72 }}
+                    />
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+
+        <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
+          <summary className="cursor-pointer select-none hover:text-neutral-400">数据说明</summary>
+          <div className="mt-1 leading-relaxed">
+            亮白线为 METAR，蓝色虚线为模型预报，蓝色半透明柱为云量或湿度，底部红/蓝柱为实测减预报残差。中国天气实况与 PWS 实时源尚未接入时不伪造曲线，只在数据明细中保留接入位置。
+          </div>
+        </details>
+      </section>
+
+      <aside className="min-h-0 border border-[#2C3445] bg-[#161A22]">
+        <div className="grid grid-cols-2 gap-1 border-b border-[#2C3445] p-2 text-[10px]">
+          <MetricCard label="平均 Δ" value={fmtSignedTemp(avgGap, unit)} sub="实测 - 预报" />
+          <MetricCard label="准确度" value={fmtPearson(pearson)} sub={`n=${pairedRows.length}`} />
+          <MetricCard label="历史↔METAR" value={overlapLabel} sub={actualMetarDelta === null ? `覆盖 ${metarValues.length}/${rows.length}` : historyProvider || '日高温差'} />
+          <MetricCard label="Cloud" value={fmtPct(avgCloud)} sub="cloud or humidity proxy" />
+          <MetricCard label="预报高点" value={fmtTemp(forecastMax, unit)} sub="峰值标记" />
+          <MetricCard label="METAR高点" value={fmtTemp(metarMax, unit)} sub="峰值标记" />
+        </div>
+        <div className="max-h-[360px] overflow-auto">
+          <table className="w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-[#1B212C] text-[#7D8694]">
+              <tr className="border-b border-[#2C3445]">
+                <th className="px-2 py-1 font-normal">时间</th>
+                <th className="px-2 py-1 font-normal">预报</th>
+                <th className="px-2 py-1 font-normal">METAR</th>
+                <th className="px-2 py-1 font-normal">Cloud</th>
+                <th className="px-2 py-1 font-normal">来源</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row => (
+                <tr key={row.id} className="border-b border-[#2C3445]/80 hover:bg-[#222A37]">
+                  <td className="px-2 py-1 tabular-nums text-[#CBD2DC]">{row.label}</td>
+                  <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtTemp(row.metar, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.cloud_cover)}</td>
+                  <td className="max-w-[90px] truncate px-2 py-1 text-neutral-500" title={`${row.source || '--'} · ${row.horizon || '--'} · n=${row.member_count ?? '--'} · ${shortTime(row.timestamp)}`}>
+                    {row.archive ? 'archive' : row.source || '--'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </aside>
+    </div>
+  )
+}
+
+type BiasPoint = {
+  date: string
+  label: string
+  actual: number
+  forecast: number
+  error: number
+  metar?: number | null
+  provider?: string
+  calibrationTier?: string
+  forecastSource?: string
+}
+
+function BiasPanel({
+  chartData,
+  series,
+  historyRows,
+  forecastRows,
+  selectedDate,
+  selectedDateRow,
+  unit,
+  truthTier,
+  forecastStatus,
+  metarStatus,
+  historyStatus,
+  citySignals,
+  actionableSignals,
+  latestHistory,
+  latestForecast,
+}: {
+  chartData: WeatherChartRow[]
+  series?: WeatherCitySeries
+  historyRows: HistoricalWeatherPoint[]
+  forecastRows: WeatherCityPoint[]
+  selectedDate: string
+  selectedDateRow?: WeatherChartRow
+  unit: string
+  truthTier: string
+  forecastStatus: EvidenceStatus
+  metarStatus: EvidenceStatus
+  historyStatus: EvidenceStatus
+  citySignals: WeatherSignal[]
+  actionableSignals: WeatherSignal[]
+  latestHistory?: HistoricalWeatherPoint
+  latestForecast?: WeatherCityPoint
+}) {
+  const paired: BiasPoint[] = chartData
+    .filter(row => row.actual_high !== null && row.actual_high !== undefined && row.forecast_high !== null && row.forecast_high !== undefined)
+    .map(row => {
+      const actual = Number(row.actual_high)
+      const forecast = Number(row.forecast_high)
+      return {
+        date: row.date,
+        label: row.label,
+        actual,
+        forecast,
+        error: actual - forecast,
+        metar: row.metar,
+        provider: row.historical_provider,
+        calibrationTier: row.calibration_tier,
+        forecastSource: row.forecast_source,
+      }
+    })
+
+  const absErrors = paired.map(point => Math.abs(point.error))
+  const mae = mean(absErrors)
+  const bias = mean(paired.map(point => point.error))
+  const correlation = pearsonR(
+    paired.map(point => point.forecast),
+    paired.map(point => point.actual)
+  )
+  const maxAbsError = Math.max(1, ...absErrors)
+  const latestPair = paired[paired.length - 1]
+  const selectedPair = paired.find(point => point.date === selectedDate)
+  const focusPair = selectedPair ?? latestPair
+  const historyAll = series?.history_points ?? historyRows
+  const historyTotal = series?.history_count ?? historyAll.length
+  const forecastTotal = series?.forecast_count ?? series?.forecast_points?.length ?? series?.points?.length ?? forecastRows.length
+  const liveTruth = historyAll.filter(point => point.calibration_tier === 'live_truth').length
+  const researchTruth = historyAll.filter(point => point.calibration_tier === 'research_truth').length
+  const eligibleTruth = liveTruth + researchTruth
+  const fallbackTruth = Math.max(0, historyAll.length - eligibleTruth)
+  const truthCoverage = historyAll.length > 0 ? eligibleTruth / historyAll.length : null
+  const providerCounts = historyAll.reduce<Record<string, number>>((counts, point) => {
+    const provider = point.provider || 'unknown'
+    counts[provider] = (counts[provider] ?? 0) + 1
+    return counts
+  }, {})
+  const providerSummary = Object.entries(providerCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([provider, count]) => `${provider} ${count}`)
+    .join(' · ') || '--'
+  const statusLabel = forecastStatus === 'fresh' && historyStatus === 'fresh'
+    ? '可读'
+    : forecastStatus === 'missing' || historyStatus === 'missing'
+      ? '缺数据'
+      : '需刷新'
+
+  if (paired.length === 0) {
+    return (
+      <div className="min-h-0 flex-1 overflow-y-auto p-2">
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2">
+          <MetricCard label="平均 Δ" value="--" sub="实测 - 预报" />
+          <MetricCard label="准确度" value="--" sub="Pearson R" />
+          <MetricCard label="MAE" value="--" sub="等待配对样本" />
+          <MetricCard label="配对样本" value="0" sub={`历史 ${historyTotal} · 预报 ${forecastTotal}`} />
+          <MetricCard label="Truth 覆盖" value={truthCoverage === null ? '--' : fmtProb(truthCoverage)} sub={`live ${liveTruth} · research ${researchTruth}`} />
+          <MetricCard label="数据状态" value={statusLabel} sub={`预报 ${forecastStatus} · METAR ${metarStatus} · 历史 ${historyStatus}`} />
+        </div>
+        <div className="mt-2 border border-neutral-800 bg-neutral-950/40 p-4 text-center text-neutral-500">
+          <div className="text-xs text-neutral-300">暂无可配对偏差样本</div>
+          <div className="mt-1 text-[10px] leading-relaxed">
+            当前城市还没有同一天同时包含“历史实际最高温”和“保存预测最高温”的样本。自动抓取或完成更多日度抓取后，这里会显示最近误差、MAE 和 bias。
+          </div>
+          <details className="mt-3 text-left text-[10px] text-neutral-500">
+            <summary className="cursor-pointer select-none text-center hover:text-neutral-300">数据明细</summary>
+            <div className="mt-2 grid gap-1 md:grid-cols-2">
+              <DetailLine label="选中日期" value={longDate(selectedDate)} />
+              <DetailLine label="实际最高" value={fmtTemp(selectedDateRow?.actual_high, unit)} />
+              <DetailLine label="预测最高" value={fmtTemp(selectedDateRow?.forecast_high, unit)} />
+              <DetailLine label="provider" value={providerSummary} wide />
+              <DetailLine label="truth" value={`live ${liveTruth} · research ${researchTruth} · fallback ${fallbackTruth}`} wide />
+            </div>
+          </details>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2">
+        <MetricCard label="平均 Δ" value={bias === null ? '--' : fmtSignedTemp(bias, unit)} sub="实测 - 预报" />
+        <MetricCard label="准确度" value={fmtPearson(correlation)} sub="Pearson R" />
+        <MetricCard label="MAE" value={mae === null ? '--' : fmtTemp(mae, unit)} sub="平均绝对误差" />
+        <MetricCard label="配对样本" value={`${paired.length}`} sub={`历史 ${historyTotal} · 预报 ${forecastTotal}`} />
+        <MetricCard label="Truth 覆盖" value={truthCoverage === null ? '--' : fmtProb(truthCoverage)} sub={`live ${liveTruth} · research ${researchTruth}`} />
+      </div>
+
+      <div className="mt-2 grid min-h-0 gap-2 xl:grid-cols-[minmax(0,1fr)_280px]">
+        <section className="min-h-[240px] border border-neutral-800 bg-black" aria-label="最近预测误差">
+          <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+            <div>
+              <div className="text-[10px] text-neutral-500">最近误差</div>
+              <div className="text-xs text-neutral-100">实际最高 - 保存预测</div>
+            </div>
+            <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">
+              {paired.length} paired
+            </span>
+          </div>
+          <div className="max-h-[360px] overflow-y-auto p-2">
+            <div className="space-y-1">
+              {paired.slice(-14).reverse().map(point => {
+                const absError = Math.abs(point.error)
+                const tone = errorTone(absError)
+                const width = Math.max(4, Math.min(100, (absError / maxAbsError) * 100))
+                const barClass = tone === 'green'
+                  ? 'bg-green-400/70'
+                  : tone === 'amber'
+                    ? 'bg-amber-400/75'
+                    : 'bg-red-400/75'
+                return (
+                  <div key={point.date} className={`border px-2 py-1.5 ${point.date === selectedDate ? 'border-cyan-500/35 bg-cyan-500/5' : 'border-neutral-900 bg-neutral-950/50'}`}>
+                    <div className="grid grid-cols-[66px_minmax(0,1fr)_58px] items-center gap-2">
+                      <span className="text-[10px] tabular-nums text-neutral-400">{shortDate(point.date)}</span>
+                      <div className="h-1.5 overflow-hidden bg-neutral-900" aria-hidden="true">
+                        <div className={`h-full ${barClass}`} style={{ width: `${width}%` }} />
+                      </div>
+                      <span className={`text-right text-[10px] tabular-nums ${tone === 'green' ? 'text-green-300' : tone === 'amber' ? 'text-amber-300' : 'text-red-300'}`}>
+                        {fmtSignedTemp(point.error, unit)}
+                      </span>
+                    </div>
+                    <div className="mt-1 grid gap-1 text-[9px] text-neutral-600 md:grid-cols-3">
+                      <span>实际 {fmtTemp(point.actual, unit)}</span>
+                      <span>预测 {fmtTemp(point.forecast, unit)}</span>
+                      <span>{point.provider || point.calibrationTier || '--'}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </section>
+
+        <aside className="min-h-[240px] border border-neutral-800 bg-neutral-950/30">
+          <div className="border-b border-neutral-800 px-2 py-1.5">
+            <div className="text-[10px] text-neutral-500">选中日期校准</div>
+            <div className="text-xs text-neutral-100">{longDate(selectedDate || focusPair?.date)}</div>
+          </div>
+          <div className="space-y-2 p-2">
+            <div className="grid grid-cols-2 gap-1">
+              <DecisionMetric label="实际最高" value={fmtTemp(focusPair?.actual ?? selectedDateRow?.actual_high, unit)} sub={focusPair?.provider || latestHistory?.provider || truthTier} />
+              <DecisionMetric label="预测最高" value={fmtTemp(focusPair?.forecast ?? selectedDateRow?.forecast_high, unit)} sub={focusPair?.forecastSource || latestForecast?.source || 'forecast'} />
+              <DecisionMetric label="误差" value={focusPair ? fmtSignedTemp(focusPair.error, unit) : '--'} sub={focusPair ? (errorTone(Math.abs(focusPair.error)) === 'green' ? '低误差' : errorTone(Math.abs(focusPair.error)) === 'amber' ? '需关注' : '偏差大') : '未配对'} />
+              <DecisionMetric label="信号" value={`${actionableSignals.length}/${citySignals.length}`} sub={statusLabel} />
+            </div>
+
+            <div className="border border-neutral-900 bg-black/40 p-2 text-[10px] leading-relaxed text-neutral-500">
+              <div className="mb-1 text-neutral-300">Truth 分层</div>
+              <div className="grid grid-cols-3 gap-1 text-center tabular-nums">
+                <div className="border border-neutral-800 px-1 py-1">live <span className="text-neutral-200">{liveTruth}</span></div>
+                <div className="border border-neutral-800 px-1 py-1">research <span className="text-neutral-200">{researchTruth}</span></div>
+                <div className="border border-neutral-800 px-1 py-1">fallback <span className="text-neutral-200">{fallbackTruth}</span></div>
+              </div>
+            </div>
+
+            <details className="border border-neutral-900 bg-black/40 p-2 text-[10px] text-neutral-500">
+              <summary className="cursor-pointer select-none hover:text-neutral-300">更多明细</summary>
+              <div className="mt-2 grid gap-1">
+                <DetailLine label="最近配对" value={latestPair ? `${longDate(latestPair.date)} · ${fmtSignedTemp(latestPair.error, unit)}` : '--'} wide />
+                <DetailLine label="provider" value={providerSummary} wide />
+                <DetailLine label="METAR" value={fmtTemp(focusPair?.metar, unit)} />
+                <DetailLine label="数据状态" value={`预报 ${forecastStatus} · METAR ${metarStatus} · 历史 ${historyStatus}`} wide />
+                <DetailLine label="用途" value="这是研究/校准视图，实盘仍需独立 truth 样本和回放闸门通过。" wide />
+              </div>
+            </details>
+          </div>
+        </aside>
       </div>
     </div>
   )
 }
 
-function Metric({ label, value, tone }: { label: string; value: string; tone: 'neutral' | 'cyan' | 'green' | 'amber' }) {
+function SignalCards({ signals, unit, selectedDate }: { signals: WeatherSignal[]; unit: string; selectedDate: string }) {
+  const actionable = signals.filter(signal => signal.actionable).length
+  const withPositions = signals.filter(signal => signal.paper_position).length
+  const dated = selectedDate ? signals.filter(signal => signal.target_date === selectedDate).length : 0
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      <div className="mb-2 grid grid-cols-[repeat(auto-fit,minmax(110px,1fr))] gap-1 text-[10px]">
+        <SignalStat label="可执行" value={`${actionable}`} tone={actionable > 0 ? 'green' : 'neutral'} />
+        <SignalStat label="选中日期" value={`${dated}`} />
+        <SignalStat label="模拟持仓" value={`${withPositions}`} tone={withPositions > 0 ? 'cyan' : 'neutral'} />
+        <SignalStat label="总信号" value={`${signals.length}`} />
+      </div>
+      {signals.length === 0 && (
+        <div className="flex min-h-[180px] items-center justify-center border border-neutral-900 p-4 text-neutral-600">
+          该城市暂无市场信号
+        </div>
+      )}
+      <div className="space-y-1">
+        {signals.map(signal => {
+          const edge = signal.probability_edge ?? signal.edge
+          const probability = signal.calibrated_probability ?? signal.model_probability
+          const price = signal.limit_price ?? signal.market_probability
+          const isSelectedDate = !selectedDate || signal.target_date === selectedDate
+          const blockedReasons = signal.decision?.reasons ?? signal.live_block_reasons ?? []
+          const cautions = signal.decision?.cautions ?? signal.live_cautions ?? []
+          return (
+            <div
+              key={signal.id ?? signal.market_id}
+              className={`border px-2 py-1.5 ${
+                signal.actionable
+                  ? 'border-green-500/30 bg-green-500/5'
+                  : isSelectedDate
+                    ? 'border-amber-500/25 bg-amber-500/5'
+                    : 'border-neutral-800 bg-neutral-950'
+              }`}
+            >
+              <div className="grid gap-2 md:grid-cols-[1.3fr_repeat(4,minmax(0,1fr))_auto]">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-1">
+                    <span className={`border px-1.5 py-0.5 text-[9px] ${signal.actionable ? 'border-green-500/40 text-green-300' : 'border-neutral-700 text-neutral-500'}`}>
+                      {signal.actionable ? 'BUY YES' : signal.status || '观察'}
+                    </span>
+                    {isSelectedDate && <span className="border border-cyan-500/25 px-1.5 py-0.5 text-[9px] text-cyan-300">当前日期</span>}
+                    {signal.paper_position && <span className="border border-amber-500/25 px-1.5 py-0.5 text-[9px] text-amber-300">已模拟</span>}
+                    {isOpenTailBucket(signal) && <span className="border border-red-500/25 px-1.5 py-0.5 text-[9px] text-red-300">开放尾桶</span>}
+                  </div>
+                  <div className="mt-1 truncate text-xs text-neutral-100" title={signal.question || signalBucketLabel(signal, unit)}>
+                    {signalBucketLabel(signal, unit)}
+                  </div>
+                  <div className="truncate text-[9px] text-neutral-600">{longDate(signal.target_date)} · {signal.direction || 'YES'}</div>
+                </div>
+                <DecisionMetric label="盘口" value={fmtPrice(price)} sub={signal.spread !== undefined && signal.spread !== null ? `spread ${fmtPrice(signal.spread)}` : `bid ${fmtPrice(signal.bid_price)}`} />
+                <DecisionMetric label="概率" value={fmtProb(probability)} sub={`市场 ${fmtProb(signal.market_probability)}`} />
+                <DecisionMetric label="Edge / EV" value={fmtSignedPct(edge)} sub={signal.calibrated_edge !== undefined && signal.calibrated_edge !== null ? `cal ${fmtSignedPct(signal.calibrated_edge)}` : `raw ${fmtSignedPct(signal.raw_edge)}`} />
+                <DecisionMetric label="模型" value={fmtTemp(signal.ensemble_mean, unit)} sub={`σ ${signal.ensemble_std?.toFixed?.(1) ?? '--'} · n ${signal.ensemble_members ?? '--'}`} />
+                {signal.event_url ? (
+                  <a href={signal.event_url} target="_blank" rel="noreferrer" className="inline-flex min-h-9 items-center justify-center gap-1 border border-cyan-500/30 px-2 text-[10px] text-cyan-300 hover:bg-cyan-500/10">
+                    Polymarket <ExternalLink className="h-3 w-3" />
+                  </a>
+                ) : (
+                  <span className="inline-flex min-h-9 items-center justify-center border border-neutral-800 px-2 text-[10px] text-neutral-600">无链接</span>
+                )}
+              </div>
+              <details className="mt-1 border-t border-neutral-800/80 pt-1 text-[9px] text-neutral-500">
+                <summary className="cursor-pointer select-none hover:text-neutral-300">信号明细</summary>
+                <div className="mt-1 grid gap-1 md:grid-cols-2">
+                  <DetailLine label="建议金额" value={signal.sim_amount !== null && signal.sim_amount !== undefined ? `$${Number(signal.sim_amount).toFixed(2)}` : `$${Number(signal.suggested_size ?? 0).toFixed(2)}`} />
+                  <DetailLine label="份额" value={signal.shares !== null && signal.shares !== undefined ? `${Number(signal.shares).toFixed(2)}` : '--'} />
+                  <DetailLine label="质量分" value={signal.strategy_score !== undefined && signal.strategy_score !== null ? signal.strategy_score.toFixed(2) : '--'} />
+                  <DetailLine label="truth" value={signal.truth?.status || signal.live_risk_level || '--'} />
+                  <DetailLine label="fit" value={signal.fit_samples !== undefined ? `${signal.fit_samples} samples · MAE ${signal.fit_mae_f?.toFixed?.(1) ?? '--'}F` : '--'} />
+                  <DetailLine label="near-lock" value={signal.near_lock ? `${signal.near_lock.hours_left.toFixed(1)}h · obs ${fmtTemp(signal.near_lock.observed_temp, unit)}` : '--'} />
+                  <DetailLine label="阻塞" value={blockedReasons.length ? blockedReasons.join(' · ') : '--'} wide />
+                  <DetailLine label="提醒" value={cautions.length ? cautions.join(' · ') : '--'} wide />
+                  <DetailLine label="标签" value={[...(signal.strategy_tags ?? []), ...(signal.quality_flags ?? [])].join(' · ') || '--'} wide />
+                  <DetailLine label="备注" value={[signal.manual_note, signal.reasoning, ...(signal.strategy_notes ?? [])].filter(Boolean).join(' · ') || '--'} wide />
+                  <DetailLine label="market" value={signal.market_id || '--'} wide />
+                  <DetailLine label="YES token" value={signal.yes_token_id || '--'} wide />
+                </div>
+              </details>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function SignalStat({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: 'green' | 'cyan' | 'neutral' }) {
+  const color = tone === 'green' ? 'text-green-300' : tone === 'cyan' ? 'text-cyan-300' : 'text-neutral-200'
+  return (
+    <div className="border border-neutral-800 px-2 py-1 text-neutral-500">
+      {label} <span className={`tabular-nums ${color}`}>{value}</span>
+    </div>
+  )
+}
+
+function DetailLine({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {
+  return (
+    <div className={`min-w-0 grid grid-cols-[72px_minmax(0,1fr)] gap-1 ${wide ? 'md:col-span-2' : ''}`}>
+      <span className="text-neutral-600">{label}</span>
+      <span className="min-w-0 break-words text-neutral-400" title={value}>{value}</span>
+    </div>
+  )
+}
+
+type NormalizedFetchLogRow = {
+  index: number
+  key: string
+  time?: string
+  source: string
+  stage: string
+  status: string
+  duration: string
+  message: string
+  details: string
+}
+
+function EventTimeline({ events, fetchLog = [] }: { events: DashboardEvent[]; fetchLog?: FetchLogRow[] }) {
+  const durationLabel = (event: DashboardEvent) => {
+    const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data)
+      ? event.data as Record<string, unknown>
+      : {}
+    const raw = data.elapsed_ms ?? data.duration_ms ?? data.duration
+    if (typeof raw === 'number') return elapsedLabel(raw)
+    if (typeof raw === 'string') return raw
+    return '--'
+  }
+  const sourceLabel = (event: DashboardEvent) => {
+    const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data)
+      ? event.data as Record<string, unknown>
+      : {}
+    const raw = data.source ?? data.provider ?? data.stage ?? data.action ?? event.type
+    if (typeof raw === 'string' && raw.trim()) return raw.trim()
+    if (typeof raw === 'number') return String(raw)
+    return eventStage(event)
+  }
+  const statusLabel = (event: DashboardEvent) => {
+    const tone = eventTone(event)
+    if (tone === 'red') return 'ERR'
+    if (tone === 'amber') return 'WARN'
+    if (tone === 'green' || tone === 'cyan') return 'OK'
+    return 'INFO'
+  }
+  const rows: NormalizedFetchLogRow[] = fetchLog.length > 0
+    ? fetchLog.slice(0, 100).map((row, index) => {
+      const duration = typeof row.duration === 'number'
+        ? elapsedLabel(row.duration)
+        : (row.duration ? String(row.duration) : '--')
+      return {
+        index: row.index ?? index + 1,
+        key: String(row.event_id ?? `${row.time || 'fetch'}-${index}`),
+        time: row.time,
+        source: row.source || row.event_type || '--',
+        stage: row.stage || 'system',
+        status: row.status || 'INFO',
+        duration,
+        message: row.message || row.details || '--',
+        details: row.details || row.event_type || '--',
+      }
+    })
+    : events.slice(0, 100).map((event, index) => {
+      const data = compactData(event.data, 360)
+      const message = [event.message, data && `data: ${data}`].filter(Boolean).join(' / ') || '--'
+      return {
+        index: index + 1,
+        key: String(event.id ?? `${event.timestamp || 'event'}-${index}`),
+        time: event.timestamp,
+        source: sourceLabel(event),
+        stage: eventStage(event),
+        status: statusLabel(event),
+        duration: durationLabel(event),
+        message,
+        details: data || event.type || '--',
+      }
+    })
+  const statusClass = (status: string) => {
+    if (status === 'ERR') return 'text-red-300'
+    if (status === 'WARN') return 'text-amber-300'
+    if (status === 'OK') return 'text-green-300'
+    return 'text-neutral-400'
+  }
+
+  return (
+    <section className="min-w-0 border border-neutral-800 bg-black">
+      <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+        <div>
+          <div className="text-[10px] text-neutral-500">Fetch Log (last 100)</div>
+          <div className="text-xs text-neutral-100">{rows.length} events</div>
+        </div>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500"># / Time / Source / Status / Duration / Message</span>
+      </div>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(100px,1fr))] gap-1 border-b border-neutral-900 p-2 text-[10px]">
+        {[
+          ['weather', '天气'],
+          ['observation', '观测'],
+          ['orderbook', '盘口'],
+          ['signal', '信号'],
+          ['system', '系统'],
+        ].map(([stage, label]) => {
+          const count = rows.filter(row => row.stage === stage).length
+          return (
+            <div key={stage} className="border border-neutral-800 px-2 py-1 text-neutral-500">
+              {label} <span className="tabular-nums text-neutral-200">{count}</span>
+            </div>
+          )
+        })}
+      </div>
+      {rows.length === 0 ? (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="min-w-[860px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['#', 'Time', 'Source', 'Status', 'Duration', 'Message'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td colSpan={6} className="px-2 py-12 text-center text-neutral-600">
+                  No log entries.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="max-h-[560px] overflow-auto">
+          <table className="min-w-[860px] w-full border-collapse text-left text-[10px]">
+            <thead className="sticky top-0 bg-black text-neutral-500">
+              <tr className="border-b border-neutral-900">
+                {['#', 'Time', 'Source', 'Status', 'Duration', 'Message'].map(column => (
+                  <th key={column} className="px-2 py-1 font-normal">{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row => (
+                  <tr key={row.key} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                    <td className="px-2 py-1 tabular-nums text-neutral-500">{row.index}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-300">{shortTime(row.time)}</td>
+                    <td className="max-w-[160px] truncate px-2 py-1 text-neutral-400" title={row.stage}>{row.source}</td>
+                    <td className={`px-2 py-1 tabular-nums ${statusClass(row.status)}`}>{row.status}</td>
+                    <td className="px-2 py-1 tabular-nums text-neutral-500">{row.duration}</td>
+                    <td className="max-w-[480px] px-2 py-1 text-neutral-400">
+                      <details>
+                        <summary className="cursor-pointer truncate hover:text-neutral-200" title={row.message}>{row.message}</summary>
+                        <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words border border-neutral-900 bg-neutral-950/60 p-2 font-mono text-[9px] leading-relaxed text-neutral-500">
+                          {row.details}
+                        </pre>
+                      </details>
+                    </td>
+                  </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function TemperatureDistributionPanel({
+  signal,
+  items,
+  unit,
+  selectedDate,
+  actualHigh,
+  evidenceSummary,
+  marketSummary,
+}: {
+  signal?: WeatherSignal
+  items: DistributionItem[]
+  unit: string
+  selectedDate: string
+  actualHigh?: number | null
+  evidenceSummary?: CityEvidenceProbabilitySummary
+  marketSummary?: CityEvidenceMarketBucketSummary
+}) {
+  const distribution = signal?.distribution
+  const maxProbability = Math.max(0.01, ...items.map(item => Number(item.probability || 0)))
+  const forecastValue = distribution?.forecast_f === null || distribution?.forecast_f === undefined
+    ? null
+    : unit === 'C'
+      ? (Number(distribution.forecast_f) - 32) * 5 / 9
+      : Number(distribution.forecast_f)
+  const sigmaValue = distribution?.sigma_f === null || distribution?.sigma_f === undefined
+    ? null
+    : unit === 'C'
+      ? Number(distribution.sigma_f) * 5 / 9
+      : Number(distribution.sigma_f)
+  const chartRows = items.map(item => ({
+    ...item,
+    label: fmtBucket(item, unit),
+    probabilityPct: Number(item.probability ?? 0) * 100,
+    askPct: Number(item.ask ?? 0) * 100,
+    edgePct: Number(item.probability_edge ?? item.ev ?? 0) * 100,
+  }))
+  const evidenceTopBuckets = evidenceSummary?.top_buckets ?? []
+  const evidenceHighestProbability = evidenceSummary?.highest_probability
+  const evidenceHighestBucket = evidenceSummary?.highest_bucket
+  const reasonCounts = marketSummary?.reason_counts ?? []
+  const blockedSignals = marketSummary?.top_blocked ?? []
+  const executableSignals = marketSummary?.top_executable ?? []
+
+  const probabilityFill = (probability?: number | null, selected = false) => {
+    const ratio = Math.max(0.18, Math.min(1, Number(probability ?? 0) / maxProbability))
+    if (selected) return `rgba(34, 211, 238, ${0.35 + ratio * 0.55})`
+    return `rgba(34, 197, 94, ${0.18 + ratio * 0.72})`
+  }
+
+  return (
+    <section className="border border-[#2C3445] bg-[#161A22]" aria-label="当日最高温概率分布">
+      <div className="border-b border-[#2C3445] px-2 py-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <div className="text-[10px] text-[#7D8694]">当日最高温预测（DEB）</div>
+            <div className="text-xs text-[#CBD2DC]">
+              {signal ? signal.city_name : '等待信号'} · {longDate(signal?.target_date ?? selectedDate)}
+            </div>
+          </div>
+          {signal?.event_url && (
+            <a href={signal.event_url} target="_blank" rel="noreferrer" className="shrink-0 text-[10px] text-cyan-300 hover:text-cyan-100">
+              Poly ↗
+            </a>
+          )}
+        </div>
+        <div className="mt-1 flex flex-wrap gap-1 text-[9px] text-[#7D8694]">
+          <span className="border border-[#2C3445] px-1 py-0.5">μ {fmtTemp(forecastValue, unit)}</span>
+          <span className="border border-[#2C3445] px-1 py-0.5">±σ {fmtTemp(sigmaValue, unit)}</span>
+          <span className="border border-[#2C3445] px-1 py-0.5">实测 {fmtTemp(actualHigh, unit)}</span>
+          <span className="border border-[#2C3445] px-1 py-0.5">{distribution?.normalized ? '高斯归一' : '未归一'}</span>
+        </div>
+      </div>
+
+      {items.length === 0 ? (
+        <div className="flex min-h-[220px] items-center justify-center px-3 text-center text-[10px] leading-relaxed text-neutral-600">
+          暂无温度桶分布。自动抓取并生成市场信号后，这里会显示各温度桶的模型概率、盘口价格和可执行 edge。
+        </div>
+      ) : (
+        <div className="grid gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_280px]">
+          <div className="h-[260px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={chartRows} margin={{ top: 8, right: 14, bottom: 34, left: -8 }}>
+                <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" />
+                <XAxis dataKey="label" stroke="#7D8694" fontSize={9} tickLine={false} axisLine={false} interval={0} angle={-28} textAnchor="end" height={54} />
+                <YAxis stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} />
+                <Tooltip
+                  contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
+                  formatter={(value: any, name: any) => {
+                    if (name === '模型概率') return [`${Number(value).toFixed(1)}%`, name]
+                    if (name === '卖一') return [`${Number(value).toFixed(1)}¢`, name]
+                    return [`${Number(value).toFixed(1)}%`, name]
+                  }}
+                />
+                <Bar dataKey="probabilityPct" name="模型概率" maxBarSize={36} radius={[0, 0, 0, 0]}>
+                  {chartRows.map(row => (
+                    <Cell key={row.market_id || row.label} fill={probabilityFill(row.probability, row.is_signal)} stroke={row.is_signal ? '#22d3ee' : 'transparent'} strokeWidth={row.is_signal ? 1.5 : 0} />
+                  ))}
+                </Bar>
+                <Line type="monotone" dataKey="askPct" name="卖一" stroke="#f97316" dot={false} strokeWidth={1.4} connectNulls={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+
+          <aside className="border border-[#2C3445] bg-[#161A22]">
+            <div className="grid grid-cols-2 gap-1 border-b border-[#2C3445] p-2 text-[10px]">
+              <MetricCard label="最高概率" value={fmtProb(evidenceHighestProbability ?? Math.max(...items.map(item => Number(item.probability ?? 0))))} sub={evidenceHighestBucket || '柱色越深概率越高'} />
+              <MetricCard label="信号桶" value={signal ? signalBucketLabel(signal, unit) : '--'} sub={signal?.actionable ? 'BUY YES' : '观察'} />
+              <MetricCard label="分布覆盖" value={`${evidenceSummary?.bucket_count ?? items.length}`} sub={`归一 ${evidenceSummary?.normalized_count ?? (distribution?.normalized ? 1 : 0)} / 信号 ${evidenceSummary?.signal_count ?? (signal ? 1 : 0)}`} />
+              <MetricCard label="可操作" value={`${evidenceSummary?.actionable_signal_count ?? (signal?.actionable ? 1 : 0)}`} sub={evidenceSummary?.strict_matching_required ? '严格匹配' : '观察'} />
+            </div>
+            <div className="max-h-[260px] overflow-auto">
+              <table className="w-full border-collapse text-left text-[10px]">
+                <thead className="sticky top-0 bg-[#1B212C] text-[#7D8694]">
+                  <tr className="border-b border-[#2C3445]">
+                    <th className="px-2 py-1 font-normal">桶</th>
+                    <th className="px-2 py-1 font-normal">概率</th>
+                    <th className="px-2 py-1 font-normal">卖一</th>
+                    <th className="px-2 py-1 font-normal">Edge</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map(item => (
+                    <tr key={item.market_id || `${item.bucket_low}-${item.bucket_high}`} className={`border-b border-[#2C3445]/80 ${item.is_signal ? 'bg-cyan-500/10 text-cyan-200' : 'hover:bg-[#222A37]'}`}>
+                      <td className="max-w-[108px] truncate px-2 py-1" title={item.question}>{fmtBucket(item, unit)}</td>
+                      <td className="px-2 py-1 tabular-nums text-green-300">{fmtProb(item.probability)}</td>
+                      <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPrice(item.ask)}</td>
+                      <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtSignedPct(item.probability_edge ?? item.ev)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {evidenceTopBuckets.length > 0 && (
+              <details className="border-t border-[#2C3445] px-2 py-1 text-[9px] text-[#7D8694]">
+                <summary className="cursor-pointer select-none hover:text-[#CBD2DC]">Evidence top buckets</summary>
+                <div className="mt-1 space-y-1">
+                  {evidenceTopBuckets.slice(0, 5).map((bucket, index) => (
+                    <div key={`${bucket.market_id || bucket.bucket}-${index}`} className="flex items-center justify-between gap-2 border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
+                      <span className="min-w-0 truncate" title={bucket.bucket}>{bucket.bucket || '--'}</span>
+                      <span className="shrink-0 tabular-nums text-green-300">{fmtProb(bucket.probability)}</span>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+            {marketSummary && (
+              <details className="border-t border-[#2C3445] px-2 py-1 text-[9px] text-[#7D8694]" open>
+                <summary className="cursor-pointer select-none hover:text-[#CBD2DC]">盘口 / 执行摘要</summary>
+                <div className="mt-1 grid grid-cols-2 gap-1">
+                  <MetricCard label="匹配桶" value={`${marketSummary.matched_bucket_count ?? 0}/${marketSummary.bucket_count ?? 0}`} sub={marketSummary.strict_matching_required ? '严格匹配' : '观察'} />
+                  <MetricCard label="Paper OK" value={`${marketSummary.paper_allowed_count ?? 0}`} sub={`阻塞 ${marketSummary.blocked_signal_count ?? 0}`} />
+                  <MetricCard label="低价尾桶" value={`${marketSummary.low_price_tail_count ?? 0}`} sub={`开放 ${marketSummary.open_tail_count ?? 0}`} />
+                  <MetricCard label="盘口问题" value={`${marketSummary.high_spread_count ?? 0}`} sub={`缺价 ${marketSummary.missing_price_count ?? 0} / 过期 ${marketSummary.stale_book_count ?? 0}`} />
+                </div>
+                {reasonCounts.length > 0 && (
+                  <div className="mt-1 space-y-1">
+                    {reasonCounts.slice(0, 4).map(reason => (
+                      <div key={reason.reason} className="flex items-center justify-between gap-2 border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
+                        <span className="min-w-0 truncate" title={reason.reason}>{reason.reason}</span>
+                        <span className="shrink-0 tabular-nums text-amber-300">{reason.count}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {executableSignals.length > 0 && (
+                  <div className="mt-1 space-y-1">
+                    {executableSignals.slice(0, 2).map(row => (
+                      <a key={`${row.signal_id}-${row.market_id}`} href={row.event_url || undefined} target="_blank" rel="noreferrer" className="block border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-1 text-emerald-200 hover:bg-emerald-500/15">
+                        <span className="block truncate" title={row.bucket}>{row.bucket || '--'}</span>
+                        <span className="tabular-nums text-emerald-300">{fmtPrice(row.price)} / edge {fmtSignedPct(row.edge)}</span>
+                      </a>
+                    ))}
+                  </div>
+                )}
+                {blockedSignals.length > 0 && executableSignals.length === 0 && (
+                  <div className="mt-1 space-y-1">
+                    {blockedSignals.slice(0, 2).map(row => (
+                      <div key={`${row.signal_id}-${row.market_id}`} className="border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
+                        <div className="truncate text-[#CBD2DC]" title={row.bucket}>{row.bucket || '--'}</div>
+                        <div className="truncate text-[#7D8694]" title={(row.reasons || []).join(', ')}>{(row.reasons || []).slice(0, 2).join(', ') || 'blocked'}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </details>
+            )}
+          </aside>
+        </div>
+      )}
+
+      {(distribution?.notes?.length ?? 0) > 0 && (
+        <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
+          <summary className="cursor-pointer select-none hover:text-neutral-400">分布备注</summary>
+          <div className="mt-1 leading-relaxed">{distribution?.notes?.join(' · ')}</div>
+        </details>
+      )}
+    </section>
+  )
+}
+
+function toneClass(tone: EvidenceCardTone = 'neutral') {
+  if (tone === 'green') return 'border-green-500/25 bg-green-500/5 text-green-200'
+  if (tone === 'amber') return 'border-amber-500/25 bg-amber-500/5 text-amber-200'
+  if (tone === 'red') return 'border-red-500/25 bg-red-500/5 text-red-200'
+  if (tone === 'cyan') return 'border-cyan-500/25 bg-cyan-500/5 text-cyan-200'
+  return 'border-neutral-800 bg-neutral-950/40 text-neutral-400'
+}
+
+function EvidenceCards({ items, empty }: { items: EvidenceCardItem[]; empty: string }) {
+  if (items.length === 0) {
+    return <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-neutral-600">{empty}</div>
+  }
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      <div className="grid gap-2 lg:grid-cols-2">
+        {items.map(item => (
+          <article key={item.id} className={`min-w-0 border p-2 ${toneClass(item.tone)}`}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="truncate text-[9px] uppercase tracking-wide opacity-70">{item.eyebrow}</div>
+                <div className="truncate text-[11px] text-neutral-100" title={item.title}>{item.title}</div>
+              </div>
+              <div className="shrink-0 text-right">
+                <div className="text-sm tabular-nums text-neutral-50">{item.value}</div>
+                {item.meta && <div className="max-w-[160px] truncate text-[9px] opacity-70" title={item.meta}>{item.meta}</div>}
+              </div>
+            </div>
+
+            {(item.badges?.length ?? 0) > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {item.badges?.map((badge, index) => (
+                  <span key={`${badge.label}-${index}`} className={`border px-1.5 py-0.5 text-[9px] ${toneClass(badge.tone)}`}>
+                    {badge.label}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {(item.details?.length ?? 0) > 0 && (
+              <details className="mt-2 border-t border-neutral-800/70 pt-1 text-[10px]">
+                <summary className="cursor-pointer select-none text-neutral-500 hover:text-neutral-300">展开字段</summary>
+                <div className="mt-2 grid gap-1 md:grid-cols-2">
+                  {item.details?.map(detail => {
+                    const isLink = /^https?:\/\//.test(detail.value)
+                    return (
+                      <div key={detail.label} className={detail.wide ? 'min-w-0 md:col-span-2' : 'min-w-0'}>
+                        <div className="text-[9px] text-neutral-600">{detail.label}</div>
+                        {isLink ? (
+                          <a href={detail.value} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1 truncate text-cyan-300 hover:text-cyan-100">
+                            <span className="truncate">{detail.value}</span>
+                            <ExternalLink className="h-3 w-3 shrink-0" />
+                          </a>
+                        ) : (
+                          <div className="truncate text-neutral-300" title={detail.value}>{detail.value}</div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </details>
+            )}
+          </article>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function DecisionMetric({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="min-w-0 border border-neutral-800/80 bg-black/35 px-2 py-1">
+      <div className="text-[9px] text-neutral-600">{label}</div>
+      <div className="truncate text-xs tabular-nums text-neutral-100" title={value}>{value}</div>
+      {sub && <div className="truncate text-[9px] text-neutral-600" title={sub}>{sub}</div>}
+    </div>
+  )
+}
+
+function MetricCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="border border-neutral-800 bg-neutral-950/40 p-3">
+      <div className="text-[10px] text-neutral-500">{label}</div>
+      <div className="mt-1 text-lg tabular-nums text-neutral-100">{value}</div>
+      {sub && <div className="mt-1 truncate text-[10px] text-neutral-600" title={sub}>{sub}</div>}
+    </div>
+  )
+}
+
+function Metric({
+  icon,
+  label,
+  value,
+  sub,
+  tone,
+}: {
+  icon: ReactNode
+  label: string
+  value: string
+  sub?: string
+  tone: 'neutral' | 'cyan' | 'green' | 'amber'
+}) {
   const color = tone === 'cyan' ? 'text-cyan-300' : tone === 'green' ? 'text-green-300' : tone === 'amber' ? 'text-amber-300' : 'text-neutral-200'
   return (
-    <div className="min-w-0 border border-neutral-800 px-2 py-1">
-      <div className="truncate text-[9px] text-neutral-600">{label}</div>
+    <div className="min-w-0 border border-neutral-800 px-2 py-1.5">
+      <div className="mb-0.5 flex items-center gap-1 text-[9px] text-neutral-600">
+        {icon}
+        <span className="truncate">{label}</span>
+      </div>
       <div className={`truncate tabular-nums ${color}`}>{value}</div>
+      {sub && <div className="truncate text-[9px] text-neutral-600" title={sub}>{sub}</div>}
     </div>
+  )
+}
+
+function SourcePulse({
+  label,
+  status,
+  value,
+  meta,
+  details = [],
+  samples = [],
+}: {
+  label: string
+  status: EvidenceStatus
+  value: string
+  meta?: string
+  details?: Array<{ label: string; value: string }>
+  samples?: SourceSample[]
+}) {
+  const sampleToneClass = (tone: SourceSampleTone = 'neutral') => {
+    if (tone === 'green') return 'border-green-500/25 bg-green-500/5 text-green-200'
+    if (tone === 'amber') return 'border-amber-500/25 bg-amber-500/5 text-amber-200'
+    if (tone === 'red') return 'border-red-500/25 bg-red-500/5 text-red-200'
+    if (tone === 'cyan') return 'border-cyan-500/25 bg-cyan-500/5 text-cyan-200'
+    return 'border-neutral-800 bg-black/35 text-neutral-300'
+  }
+
+  return (
+    <div className={`min-w-0 border px-2 py-1.5 ${statusClass(status)}`}>
+      <div className="mb-0.5 flex items-center gap-1 text-[9px]">
+        <span className={`h-1.5 w-1.5 shrink-0 ${status === 'fresh' ? 'bg-green-300' : status === 'stale' ? 'bg-amber-300' : 'bg-red-300'}`} />
+        <span className="truncate text-neutral-300">{label}</span>
+      </div>
+      <div className="truncate text-xs tabular-nums text-neutral-100">{value}</div>
+      {meta && <div className="truncate text-[9px] text-neutral-500" title={meta}>{meta}</div>}
+      {(details.length > 0 || samples.length > 0) && (
+        <details className="mt-1 border-t border-neutral-800/70 pt-1 text-[9px] text-neutral-500">
+          <summary className="cursor-pointer select-none hover:text-neutral-300">明细</summary>
+          <div className="mt-1 grid gap-1">
+            {details.map(item => (
+              <div key={`${label}-${item.label}`} className="grid grid-cols-[64px_minmax(0,1fr)] gap-1">
+                <span className="text-neutral-600">{item.label}</span>
+                <span className="truncate text-neutral-400" title={item.value}>{item.value}</span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 border-t border-neutral-800/70 pt-1">
+            <div className="mb-1 text-neutral-600">最近记录</div>
+            {samples.length === 0 ? (
+              <div className="border border-neutral-800 bg-black/35 px-1.5 py-1 text-neutral-600">暂无最近记录</div>
+            ) : (
+              <div className="space-y-1">
+                {samples.map(sample => (
+                  <div key={`${label}-${sample.label}-${sample.value}`} className={`border px-1.5 py-1 ${sampleToneClass(sample.tone)}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 truncate text-neutral-400" title={sample.label}>{sample.label}</span>
+                      <span className="shrink-0 tabular-nums text-neutral-100">{sample.value}</span>
+                    </div>
+                    {sample.meta && <div className="mt-0.5 truncate text-[9px] text-neutral-600" title={sample.meta}>{sample.meta}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </details>
+      )}
+    </div>
+  )
+}
+
+function EvidenceBadge({ label, status, detail }: { label: string; status: EvidenceStatus; detail: string }) {
+  return (
+    <span className={`inline-flex items-center gap-1 border px-1.5 py-0.5 text-[9px] ${statusClass(status)}`} title={detail}>
+      <span className={`h-1.5 w-1.5 ${status === 'fresh' ? 'bg-green-300' : status === 'stale' ? 'bg-amber-300' : 'bg-red-300'}`} />
+      {label}
+    </span>
   )
 }
