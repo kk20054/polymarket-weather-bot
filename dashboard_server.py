@@ -2217,6 +2217,80 @@ def _distribution_item_count(distribution) -> int:
     return 0
 
 
+def _distribution_items(distribution) -> list[dict]:
+    if not isinstance(distribution, dict):
+        return []
+    for key in ("items", "buckets", "distribution"):
+        value = distribution.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _distribution_bucket_label(item: dict) -> str:
+    for key in ("label", "bucket", "bucket_label", "question"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    low = _float_or_none(item.get("bucket_low"))
+    high = _float_or_none(item.get("bucket_high"))
+    if low is None and high is None:
+        return "--"
+    if low is not None and low <= -900 and high is not None:
+        return f"{high:g} or below"
+    if high is not None and high >= 900 and low is not None:
+        return f"{low:g} or above"
+    if low is not None and high is not None:
+        return f"{low:g}-{high:g}"
+    return str(low if low is not None else high)
+
+
+def _probability_bucket_summary(city_signals: list[dict]) -> dict:
+    top_buckets: list[dict] = []
+    total_items = 0
+    normalized_count = 0
+    actionable_count = 0
+    signal_count = len(city_signals)
+
+    for signal in city_signals:
+        distribution = signal.get("distribution")
+        items = _distribution_items(distribution)
+        if items and isinstance(distribution, dict) and distribution.get("normalized"):
+            normalized_count += 1
+        if signal.get("actionable"):
+            actionable_count += 1
+        total_items += len(items)
+        for item in items:
+            probability = _float_or_none(item.get("probability"))
+            if probability is None:
+                probability = _float_or_none(item.get("probability_raw"))
+            top_buckets.append({
+                "bucket": _distribution_bucket_label(item),
+                "probability": probability,
+                "ask": _float_or_none(item.get("ask")),
+                "bid": _float_or_none(item.get("bid")),
+                "edge": _float_or_none(item.get("probability_edge") if item.get("probability_edge") is not None else item.get("ev")),
+                "market_id": item.get("market_id") or signal.get("market_id"),
+                "signal_id": signal.get("id"),
+                "is_signal": bool(item.get("is_signal")),
+                "actionable": bool(signal.get("actionable")),
+            })
+
+    top_buckets.sort(key=lambda row: (row.get("probability") is not None, row.get("probability") or -1), reverse=True)
+    best = top_buckets[0] if top_buckets else {}
+    return {
+        "signal_count": signal_count,
+        "bucket_count": total_items,
+        "normalized_count": normalized_count,
+        "actionable_signal_count": actionable_count,
+        "highest_bucket": best.get("bucket"),
+        "highest_probability": best.get("probability"),
+        "strict_matching_required": True,
+        "source": "signal.distribution",
+        "top_buckets": top_buckets[:10],
+    }
+
+
 def _row_matches_text(row: dict, terms: list[str]) -> bool:
     text = _json_compact(row).lower()
     return any(term and term.lower() in text for term in terms)
@@ -2361,6 +2435,7 @@ def _city_date_evidence_modules(city: dict, target_date: str, signals: list[dict
     log_rows = [row for row in fetch_log if _row_matches_text(row, terms)]
     bucket_count = sum(_distribution_item_count(signal.get("distribution")) for signal in city_signals)
     diff_summary = _diff_stats_summary(chart_points, history_points)
+    probability_summary = _probability_bucket_summary(city_signals)
 
     return {
         "hourly_temperature": {
@@ -2373,12 +2448,14 @@ def _city_date_evidence_modules(city: dict, target_date: str, signals: list[dict
         "daily_max_prediction": {
             "engine": "DEB/Gaussian-compatible",
             "signals": len(city_signals),
+            "probability_summary": probability_summary,
             "empty_state": "No prediction yet.",
             "ready": bool(city_signals),
         },
         "probability_buckets": {
             "rows": bucket_count,
             "source": "signal.distribution",
+            "probability_summary": probability_summary,
             "empty_state": "No probability buckets yet.",
             "ready": bucket_count > 0,
         },
@@ -2417,6 +2494,7 @@ def _city_date_evidence_modules(city: dict, target_date: str, signals: list[dict
             "signals": len(city_signals),
             "buckets": bucket_count,
             "strict_matching_required": True,
+            "probability_summary": probability_summary,
             "ready": bucket_count > 0,
         },
     }

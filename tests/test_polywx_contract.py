@@ -156,6 +156,8 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("export interface CityEvidenceDate", types)
         self.assertIn("export interface CityEvidenceModule", types)
         self.assertIn("export interface CityEvidenceDiffStatsSummary", types)
+        self.assertIn("export interface CityEvidenceProbabilitySummary", types)
+        self.assertIn("probability_summary?: CityEvidenceProbabilitySummary", types)
         self.assertIn("city_evidence?: CityEvidence[]", types)
         self.assertIn("const cityEvidence = data?.city_evidence ?? []", app)
         self.assertIn("selectedDateEvidence?.ready_modules", app)
@@ -163,7 +165,9 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         panel = read_text("frontend/src/components/WeatherPanel.tsx")
         self.assertIn("selectedDateEvidence?: CityEvidenceDate", panel)
         self.assertIn("evidenceSummary={selectedDateEvidence?.modules?.diff_stats?.summary}", panel)
+        self.assertIn("evidenceSummary={selectedDateEvidence?.modules?.probability_buckets?.probability_summary}", panel)
         self.assertIn("evidenceSummary?: CityEvidenceDiffStatsSummary", panel)
+        self.assertIn("evidenceSummary?: CityEvidenceProbabilitySummary", panel)
         self.assertIn("模块", app)
 
 

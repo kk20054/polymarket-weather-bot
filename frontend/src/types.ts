@@ -720,6 +720,31 @@ export interface CityEvidenceModule {
   empty_state?: string
   strict_matching_required?: boolean
   summary?: CityEvidenceDiffStatsSummary
+  probability_summary?: CityEvidenceProbabilitySummary
+}
+
+export interface CityEvidenceProbabilityBucket {
+  bucket?: string
+  probability?: number | null
+  ask?: number | null
+  bid?: number | null
+  edge?: number | null
+  market_id?: string
+  signal_id?: number
+  is_signal?: boolean
+  actionable?: boolean
+}
+
+export interface CityEvidenceProbabilitySummary {
+  signal_count?: number
+  bucket_count?: number
+  normalized_count?: number
+  actionable_signal_count?: number
+  highest_bucket?: string | null
+  highest_probability?: number | null
+  strict_matching_required?: boolean
+  source?: string
+  top_buckets?: CityEvidenceProbabilityBucket[]
 }
 
 export interface CityEvidenceDiffStatsRow {

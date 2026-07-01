@@ -62,7 +62,16 @@ class V3CoreTests(unittest.TestCase):
         signals = [{
             "city_key": "chicago-kord",
             "target_date": "2026-06-29",
-            "distribution": {"items": [{"bucket": "80-81"}, {"bucket": "82-83"}]},
+            "id": 101,
+            "market_id": "market-101",
+            "actionable": True,
+            "distribution": {
+                "normalized": True,
+                "items": [
+                    {"bucket": "80-81", "probability": 0.32, "ask": 0.25, "probability_edge": 0.07},
+                    {"bucket": "82-83", "probability": 0.44, "ask": 0.34, "probability_edge": 0.10, "is_signal": True},
+                ],
+            },
         }]
         fetch_log = [{
             "source": "weather",
@@ -84,6 +93,14 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(modules["diff_stats"]["summary"]["avg_delta"], -2.0)
         self.assertEqual(modules["diff_stats"]["summary"]["mae"], 2.0)
         self.assertEqual(modules["probability_buckets"]["rows"], 2)
+        probability_summary = modules["probability_buckets"]["probability_summary"]
+        self.assertEqual(probability_summary["bucket_count"], 2)
+        self.assertEqual(probability_summary["signal_count"], 1)
+        self.assertEqual(probability_summary["normalized_count"], 1)
+        self.assertEqual(probability_summary["actionable_signal_count"], 1)
+        self.assertEqual(probability_summary["highest_bucket"], "82-83")
+        self.assertAlmostEqual(probability_summary["highest_probability"], 0.44)
+        self.assertEqual(probability_summary["top_buckets"][0]["edge"], 0.10)
         self.assertEqual(modules["fetch_log"]["rows"], 1)
         self.assertTrue(modules["market_buckets"]["strict_matching_required"])
         self.assertTrue(_city_evidence_matches(payload[0], "chicago-kord"))

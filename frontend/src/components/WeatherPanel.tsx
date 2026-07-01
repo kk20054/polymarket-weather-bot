@@ -11,7 +11,7 @@ import {
   YAxis,
 } from 'recharts'
 import { CloudSun, Database, ExternalLink, Signal, ThermometerSun } from 'lucide-react'
-import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DistributionItem, FetchLogRow, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, CityEvidenceProbabilitySummary, DashboardEvent, DistributionItem, FetchLogRow, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -985,6 +985,7 @@ export function WeatherPanel({
               unit={unit}
               selectedDate={selectedDate}
               actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
+              evidenceSummary={selectedDateEvidence?.modules?.probability_buckets?.probability_summary}
             />
             <ForecastDataTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
             <details className="border border-[#2C3445] bg-[#161A22]">
@@ -2089,12 +2090,14 @@ function TemperatureDistributionPanel({
   unit,
   selectedDate,
   actualHigh,
+  evidenceSummary,
 }: {
   signal?: WeatherSignal
   items: DistributionItem[]
   unit: string
   selectedDate: string
   actualHigh?: number | null
+  evidenceSummary?: CityEvidenceProbabilitySummary
 }) {
   const distribution = signal?.distribution
   const maxProbability = Math.max(0.01, ...items.map(item => Number(item.probability || 0)))
@@ -2115,6 +2118,9 @@ function TemperatureDistributionPanel({
     askPct: Number(item.ask ?? 0) * 100,
     edgePct: Number(item.probability_edge ?? item.ev ?? 0) * 100,
   }))
+  const evidenceTopBuckets = evidenceSummary?.top_buckets ?? []
+  const evidenceHighestProbability = evidenceSummary?.highest_probability
+  const evidenceHighestBucket = evidenceSummary?.highest_bucket
 
   const probabilityFill = (probability?: number | null, selected = false) => {
     const ratio = Math.max(0.18, Math.min(1, Number(probability ?? 0) / maxProbability))
@@ -2178,10 +2184,10 @@ function TemperatureDistributionPanel({
 
           <aside className="border border-[#2C3445] bg-[#161A22]">
             <div className="grid grid-cols-2 gap-1 border-b border-[#2C3445] p-2 text-[10px]">
-              <MetricCard label="最高概率" value={fmtProb(Math.max(...items.map(item => Number(item.probability ?? 0))))} sub="柱色越深概率越高" />
+              <MetricCard label="最高概率" value={fmtProb(evidenceHighestProbability ?? Math.max(...items.map(item => Number(item.probability ?? 0))))} sub={evidenceHighestBucket || '柱色越深概率越高'} />
               <MetricCard label="信号桶" value={signal ? signalBucketLabel(signal, unit) : '--'} sub={signal?.actionable ? 'BUY YES' : '观察'} />
-              <MetricCard label="市场价格" value={fmtPrice(signal?.limit_price ?? signal?.market_probability)} sub="卖一/概率" />
-              <MetricCard label="Edge" value={fmtSignedPct(signal?.probability_edge ?? signal?.edge)} sub="模型 - 市场" />
+              <MetricCard label="分布覆盖" value={`${evidenceSummary?.bucket_count ?? items.length}`} sub={`归一 ${evidenceSummary?.normalized_count ?? (distribution?.normalized ? 1 : 0)} / 信号 ${evidenceSummary?.signal_count ?? (signal ? 1 : 0)}`} />
+              <MetricCard label="可操作" value={`${evidenceSummary?.actionable_signal_count ?? (signal?.actionable ? 1 : 0)}`} sub={evidenceSummary?.strict_matching_required ? '严格匹配' : '观察'} />
             </div>
             <div className="max-h-[260px] overflow-auto">
               <table className="w-full border-collapse text-left text-[10px]">
@@ -2205,6 +2211,19 @@ function TemperatureDistributionPanel({
                 </tbody>
               </table>
             </div>
+            {evidenceTopBuckets.length > 0 && (
+              <details className="border-t border-[#2C3445] px-2 py-1 text-[9px] text-[#7D8694]">
+                <summary className="cursor-pointer select-none hover:text-[#CBD2DC]">Evidence top buckets</summary>
+                <div className="mt-1 space-y-1">
+                  {evidenceTopBuckets.slice(0, 5).map((bucket, index) => (
+                    <div key={`${bucket.market_id || bucket.bucket}-${index}`} className="flex items-center justify-between gap-2 border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
+                      <span className="min-w-0 truncate" title={bucket.bucket}>{bucket.bucket || '--'}</span>
+                      <span className="shrink-0 tabular-nums text-green-300">{fmtProb(bucket.probability)}</span>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
           </aside>
         </div>
       )}

@@ -76,6 +76,23 @@
 
 ## 近期进度记录
 
+### 2026-07-01：概率分桶 evidence summary 接入
+
+- 目标：把 PolyWX 的“当日最高温预测 / 概率分桶”从单个信号的前端图表，推进为城市/日期 evidence payload 的可复盘摘要。
+- 改动：
+  - 后端 `city/date evidence` 新增 `probability_summary`，包含信号数、分桶数、归一化分布数、可操作信号数、最高概率桶、最高概率、top buckets 和严格匹配标记。
+  - `daily_max_prediction`、`probability_buckets`、`market_buckets` 三个模块都带同一份概率摘要，便于 UI、信号和审计共享。
+  - 前端 `TemperatureDistributionPanel` 接入 `selectedDateEvidence.modules.probability_buckets.probability_summary`，展示 evidence 级最高概率、分布覆盖、可操作信号和 top buckets。
+  - TypeScript 增加 `CityEvidenceProbabilitySummary` 和 `CityEvidenceProbabilityBucket`。
+  - 测试补充概率摘要 contract，防止退回只有行数没有分布摘要。
+- 验证：
+  - `python -m unittest tests.test_v3_core` 通过；仍有既有 sqlite `ResourceWarning` 噪声。
+  - `python -m unittest tests.test_polywx_contract` 通过。
+  - `npm run build` 通过；仍有既有 Browserslist/chunk size warning。
+- 结论：概率桶现在更接近 PolyWX 的“城市/日期证据模块”，但仍需要更多真实分布样本和盘口回放来证明策略收益。
+- 下一步：补 market bucket 严格匹配和盘口回放，让 probability summary 不只是展示概率，还能解释“为什么可以买/为什么不能买”。
+- 相关提交：`c60de8f Surface probability bucket evidence summary`。
+
 ### 2026-07-01：建立进度台账和每轮记录规则
 
 - 原因：用户指出多轮 Firecrawl 和 UI 修改缺少统一进度记录，导致上下文压缩后容易重复造轮子。
