@@ -36,6 +36,7 @@ from weatherbot_v3.config import load_config as load_v3_config
 from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
 from weatherbot_v3.db import init_v3_db
 from weatherbot_v3.db import insert_event_distribution, latest_event_distribution, latest_signal_decision
+from weatherbot_v3.db import list_data_fetch_logs
 from weatherbot_v3.db import bulk_settlement_contract_verification, list_settlement_contracts, set_settlement_contract_verification, truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
@@ -876,6 +877,35 @@ def _fetch_log_payload(events: list[dict], limit: int = 100) -> list[dict]:
             "event_id": event.get("id"),
             "event_type": event.get("type"),
         })
+    return rows
+
+
+def _data_fetch_log_payload(limit: int = 100) -> list[dict]:
+    rows: list[dict] = []
+    for index, row in enumerate(list_data_fetch_logs(limit), start=1):
+        rows.append({
+            "index": index,
+            "time": row.get("finished_at") or row.get("created_at") or row.get("started_at"),
+            "source": row.get("source") or "--",
+            "stage": row.get("stage") or row.get("source") or "weather",
+            "status": row.get("status") or "INFO",
+            "duration": row.get("duration_ms"),
+            "message": _repair_display_text(row.get("message") or ""),
+            "details": row.get("details_json") or "",
+            "event_id": row.get("id"),
+            "event_type": "data_fetch_log",
+            "city": row.get("city") or "",
+            "target_date": row.get("target_date") or "",
+        })
+    return rows
+
+
+def _combined_fetch_log_payload(events: list[dict], limit: int = 100) -> list[dict]:
+    persisted = _data_fetch_log_payload(limit)
+    transient = _fetch_log_payload(events, limit)
+    rows = (persisted + transient)[:limit]
+    for index, row in enumerate(rows, start=1):
+        row["index"] = index
     return rows
 
 
@@ -3087,7 +3117,7 @@ def build_dashboard_payload():
     }
 
     events = list_events(100)
-    fetch_log = _fetch_log_payload(events)
+    fetch_log = _combined_fetch_log_payload(events)
     city_evidence = _build_city_evidence_payload(weather_city_series, weather_signals, fetch_log)
     return {
         "stats": stats,
@@ -3116,7 +3146,7 @@ def build_dashboard_payload():
 def _minimal_dashboard_payload(reason: str = "cache_warming"):
     now = datetime.now(timezone.utc).isoformat()
     events = list_events(50)
-    fetch_log = _fetch_log_payload(events, 50)
+    fetch_log = _combined_fetch_log_payload(events, 50)
     city_series = _registry_city_series()
     stats = {
         "bankroll": 0,

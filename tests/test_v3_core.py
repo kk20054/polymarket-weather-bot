@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_settlement_contracts, set_settlement_contract_verification, upsert_hourly_consensus, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, weather_evidence_summary
+from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_settlement_contracts, log_data_fetch, set_settlement_contract_verification, upsert_hourly_consensus, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
@@ -23,7 +23,7 @@ from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_c
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import default_orderbook_start_date, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
-from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
+from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timedelta, timezone
 
@@ -485,6 +485,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("metar_reports", tables)
         self.assertIn("mesonet_observations", tables)
         self.assertIn("hourly_consensus", tables)
+        self.assertIn("data_fetch_logs", tables)
 
     def test_weather_evidence_tables_upsert_and_summarize_polywx_core_sources(self):
         db_path = test_db_path("weather_evidence_sources")
@@ -558,6 +559,61 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(summary["metar_reports"], 1)
         self.assertEqual(summary["mesonet_observations"], 1)
         self.assertEqual(summary["hourly_consensus"], 1)
+
+    def test_data_fetch_logs_persist_polywx_fetch_log_shape(self):
+        db_path = test_db_path("data_fetch_logs")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            log_id = log_data_fetch(
+                source="metar",
+                stage="refresh_metar_reports",
+                status="OK",
+                duration_ms=2446,
+                city="tokyo",
+                target_date="2026-06-29",
+                message="RJTT reports fetched",
+                details={"rows": 48, "station": "RJTT"},
+                started_at="2026-07-01T01:19:48+00:00",
+                finished_at="2026-07-01T01:19:51+00:00",
+            )
+            rows = list_data_fetch_logs(10)
+            summary = dashboard_summary()
+
+        self.assertGreater(log_id, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "metar")
+        self.assertEqual(rows[0]["status"], "OK")
+        self.assertEqual(rows[0]["city"], "tokyo")
+        self.assertIn("RJTT", rows[0]["details_json"])
+        self.assertEqual(summary["data_fetch_logs"], 1)
+        self.assertEqual(summary["latest_data_fetch_logs"][0]["stage"], "refresh_metar_reports")
+
+    def test_dashboard_fetch_log_prefers_persisted_data_fetch_logs(self):
+        db_path = test_db_path("dashboard_fetch_logs")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            log_data_fetch(
+                source="forecast",
+                stage="production_action",
+                status="OK",
+                duration_ms=94,
+                city="tokyo",
+                target_date="2026-06-29",
+                message="processed 4 dates",
+            )
+            rows = _combined_fetch_log_payload([{
+                "id": 7,
+                "timestamp": "2026-07-01T00:00:00+00:00",
+                "type": "weather",
+                "message": "legacy refresh event",
+                "data": {"source": "legacy", "duration_ms": 10},
+            }], limit=10)
+
+        self.assertEqual(rows[0]["source"], "forecast")
+        self.assertEqual(rows[0]["status"], "OK")
+        self.assertEqual(rows[0]["duration"], 94)
+        self.assertEqual(rows[0]["event_type"], "data_fetch_log")
+        self.assertTrue(any(row["source"] == "legacy" for row in rows))
 
     def test_metar_reports_build_station_local_hourly_consensus(self):
         db_path = test_db_path("metar_hourly_consensus")
@@ -876,27 +932,35 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(evidence["latest_metar_reports"][0]["temperature"], 91.4, places=1)
 
     def test_production_action_executes_whitelisted_metar_refresh(self):
-        with patch("weatherbot_v3.production_actions.refresh_metar_reports") as mocked_refresh:
-            mocked_refresh.return_value = {"ok": True, "reports_upserted": 2}
-            with patch("weatherbot_v3.production_actions.build_data_readiness") as mocked_readiness:
-                mocked_readiness.return_value = {
-                    "status": "blocked",
-                    "score": 0.3,
-                    "live_allowed": False,
-                    "production_phase": {"blocked_keys": ["metar"]},
-                }
-                with patch("weatherbot_v3.production_actions.persist_data_readiness"):
-                    result = run_production_action(
-                        "refresh_metar_reports",
-                        apply=True,
-                        cities=["chicago"],
-                        days=2,
-                    )
+        db_path = test_db_path("production_action_fetch_log")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            with patch("weatherbot_v3.production_actions.refresh_metar_reports") as mocked_refresh:
+                mocked_refresh.return_value = {"ok": True, "reports_upserted": 2}
+                with patch("weatherbot_v3.production_actions.build_data_readiness") as mocked_readiness:
+                    mocked_readiness.return_value = {
+                        "status": "blocked",
+                        "score": 0.3,
+                        "live_allowed": False,
+                        "production_phase": {"blocked_keys": ["metar"]},
+                    }
+                    with patch("weatherbot_v3.production_actions.persist_data_readiness"):
+                        result = run_production_action(
+                            "refresh_metar_reports",
+                            apply=True,
+                            cities=["chicago"],
+                            days=2,
+                        )
+            fetch_logs = list_data_fetch_logs(5)
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "executed")
         mocked_refresh.assert_called_once_with(cities=["chicago"], hours=48.0)
         self.assertEqual(result["payload"]["reports_upserted"], 2)
+        self.assertEqual(fetch_logs[0]["source"], "refresh_metar_reports")
+        self.assertEqual(fetch_logs[0]["stage"], "production_action")
+        self.assertEqual(fetch_logs[0]["status"], "OK")
+        self.assertEqual(fetch_logs[0]["city"], "chicago")
 
     def test_production_action_executes_whitelisted_hourly_consensus_build(self):
         with patch("weatherbot_v3.production_actions.build_metar_hourly_consensus") as mocked_build:

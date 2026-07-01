@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import timezone, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from .cli import run_forecast_backfill, run_orderbook_backfill, run_production_refresh, run_truth_backfill
-from .db import bulk_settlement_contract_verification
+from .db import bulk_settlement_contract_verification, log_data_fetch
 from .forecast_archive import import_forecast_archive
 from .hourly import build_metar_hourly_consensus
 from .metar import refresh_metar_reports
@@ -134,9 +136,25 @@ def run_production_action(
             "params": params,
         }
 
+    started_at = datetime.now(timezone.utc).isoformat()
+    start = perf_counter()
     try:
         payload = _execute_action(action_key, params)
     except Exception as exc:
+        finished_at = datetime.now(timezone.utc).isoformat()
+        duration_ms = (perf_counter() - start) * 1000.0
+        log_data_fetch(
+            source=action_key,
+            stage="production_action",
+            status="ERR",
+            duration_ms=duration_ms,
+            city=",".join(clean_cities),
+            target_date=start_date or end_date or "",
+            message=str(exc),
+            details={"params": params, "reason": exc.__class__.__name__},
+            started_at=started_at,
+            finished_at=finished_at,
+        )
         return {
             "ok": False,
             "status": "failed",
@@ -146,6 +164,20 @@ def run_production_action(
             "action": action,
             "params": params,
         }
+    finished_at = datetime.now(timezone.utc).isoformat()
+    duration_ms = (perf_counter() - start) * 1000.0
+    log_data_fetch(
+        source=action_key,
+        stage="production_action",
+        status="OK" if bool(payload.get("ok", True)) else "WARN",
+        duration_ms=duration_ms,
+        city=",".join(clean_cities),
+        target_date=start_date or end_date or "",
+        message=str(payload.get("message") or payload.get("reason") or f"{action_key} executed"),
+        details={"params": params, "payload": payload},
+        started_at=started_at,
+        finished_at=finished_at,
+    )
     readiness = build_data_readiness()
     persist_data_readiness(readiness)
     return {

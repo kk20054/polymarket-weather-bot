@@ -414,6 +414,22 @@ def init_v3_db(path: Path | None = None) -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS data_fetch_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                log_key TEXT UNIQUE,
+                source TEXT,
+                stage TEXT,
+                status TEXT,
+                duration_ms REAL,
+                city TEXT,
+                target_date TEXT,
+                message TEXT,
+                details_json TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS event_distributions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 market_id TEXT,
@@ -569,6 +585,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_metar_reports_station_time ON metar_reports(station_id, report_time)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_mesonet_observations_city_time ON mesonet_observations(city, observed_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_hourly_consensus_city_date ON hourly_consensus(city, target_date, local_hour)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_created ON data_fetch_logs(created_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_source_status ON data_fetch_logs(source, status)")
 
 
 def dump_json(payload: Any) -> str:
@@ -2065,6 +2083,90 @@ def log_notification(channel: str, event_type: str, status: str, message: str, p
         )
 
 
+def log_data_fetch(
+    *,
+    source: str,
+    stage: str,
+    status: str,
+    message: str = "",
+    duration_ms: float | None = None,
+    city: str = "",
+    target_date: str = "",
+    details: dict[str, Any] | None = None,
+    started_at: str = "",
+    finished_at: str = "",
+    log_key: str = "",
+) -> int:
+    init_v3_db()
+    now = utc_now()
+    clean_source = str(source or "unknown")
+    clean_stage = str(stage or clean_source)
+    clean_status = str(status or "INFO").upper()
+    key = log_key or _stable_key(
+        "data_fetch",
+        clean_source,
+        clean_stage,
+        clean_status,
+        city,
+        target_date,
+        started_at,
+        finished_at or now,
+        message,
+    )
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO data_fetch_logs (
+                log_key, source, stage, status, duration_ms, city, target_date,
+                message, details_json, started_at, finished_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(log_key) DO UPDATE SET
+                source=excluded.source,
+                stage=excluded.stage,
+                status=excluded.status,
+                duration_ms=excluded.duration_ms,
+                city=excluded.city,
+                target_date=excluded.target_date,
+                message=excluded.message,
+                details_json=excluded.details_json,
+                started_at=excluded.started_at,
+                finished_at=excluded.finished_at
+            """,
+            (
+                key,
+                clean_source,
+                clean_stage,
+                clean_status,
+                _nullable_num(duration_ms),
+                city,
+                target_date,
+                message,
+                dump_json(details or {}),
+                started_at,
+                finished_at,
+                now,
+            ),
+        )
+        row = conn.execute("SELECT id FROM data_fetch_logs WHERE log_key = ?", (key,)).fetchone()
+        return int(row["id"]) if row else 0
+
+
+def list_data_fetch_logs(limit: int = 100) -> list[dict[str, Any]]:
+    init_v3_db()
+    bounded = max(1, min(int(limit or 100), 500))
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM data_fetch_logs
+            ORDER BY datetime(COALESCE(finished_at, created_at)) DESC, id DESC
+            LIMIT ?
+            """,
+            (bounded,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def dashboard_summary() -> dict[str, Any]:
     init_v3_db()
     with connect() as conn:
@@ -2082,6 +2184,7 @@ def dashboard_summary() -> dict[str, Any]:
             "metar_reports": count("SELECT COUNT(*) FROM metar_reports"),
             "mesonet_observations": count("SELECT COUNT(*) FROM mesonet_observations"),
             "hourly_consensus": count("SELECT COUNT(*) FROM hourly_consensus"),
+            "data_fetch_logs": count("SELECT COUNT(*) FROM data_fetch_logs"),
             "latest_risk_events": [dict(r) for r in conn.execute("SELECT * FROM risk_events ORDER BY id DESC LIMIT 10").fetchall()],
             "latest_live_orders": [dict(r) for r in conn.execute("SELECT * FROM live_orders ORDER BY id DESC LIMIT 10").fetchall()],
             "latest_paper_orders": [dict(r) for r in conn.execute("SELECT * FROM paper_orders ORDER BY id DESC LIMIT 10").fetchall()],
@@ -2097,6 +2200,7 @@ def dashboard_summary() -> dict[str, Any]:
                 dict(r)
                 for r in conn.execute("SELECT * FROM hourly_consensus ORDER BY target_date DESC, local_hour DESC, id DESC LIMIT 24").fetchall()
             ],
+            "latest_data_fetch_logs": list_data_fetch_logs(10),
         }
 
 
