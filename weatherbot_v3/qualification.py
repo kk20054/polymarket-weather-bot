@@ -55,6 +55,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             ).fetchone()[0]
         )
         orderbooks = [dict(row) for row in conn.execute("SELECT * FROM orderbooks").fetchall()]
+        metar_reports = [dict(row) for row in conn.execute("SELECT * FROM metar_reports").fetchall()]
+        mesonet_observations = [dict(row) for row in conn.execute("SELECT * FROM mesonet_observations").fetchall()]
 
     rules_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     contracts_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -174,6 +176,15 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     timezone_missing = sum(1 for row in station_rows if not row.get("timezone"))
     unit_missing = sum(1 for row in station_rows if row.get("unit") not in {"F", "C"})
     wmo_missing = sum(1 for row in station_rows if not row.get("wmo_id"))
+    metar_cities = {str(row.get("city") or "") for row in metar_reports if row.get("city")}
+    mesonet_cities = {str(row.get("city") or "") for row in mesonet_observations if row.get("city")}
+    metar_station_ids = {str(row.get("station_id") or "").upper() for row in metar_reports if row.get("station_id")}
+    station_ids = {str(row.get("station_id") or "").upper() for row in station_rows if row.get("station_id")}
+    metar_parse_warnings = sum(1 for row in metar_reports if _json_list_count(row.get("parse_warnings")))
+    metar_parse_failures = sum(1 for row in metar_reports if str(row.get("parse_status") or "parsed") not in {"parsed", "partial"})
+    mesonet_parse_warnings = sum(1 for row in mesonet_observations if _json_list_count(row.get("parse_warnings")))
+    missing_metar_city_coverage = max(0, len(station_rows) - len(metar_cities))
+    primary_metar_station_gap = max(0, len(station_ids) - len(station_ids & metar_station_ids))
     utc_rules = sum(1 for row in contracts if str(row.get("timezone") or "") == "UTC")
     unverified_rules = sum(1 for row in contracts if not row.get("manual_verified_at"))
     auto_verified_rules = sum(1 for row in contracts if row.get("auto_verified_at"))
@@ -227,6 +238,33 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 "wmo_id_missing": wmo_missing,
                 "registry_version": REGISTRY_VERSION,
                 "sync": station_sync,
+            },
+        ),
+        _stage(
+            "observations",
+            "站点观测",
+            (
+                len(metar_reports) > 0
+                and missing_metar_city_coverage == 0
+                and primary_metar_station_gap == 0
+                and metar_parse_failures == 0
+            ),
+            [
+                ("metar_reports_missing", 1 if not metar_reports else 0),
+                ("metar_city_coverage_incomplete", missing_metar_city_coverage),
+                ("primary_metar_station_gap", primary_metar_station_gap),
+                ("metar_parse_failures", metar_parse_failures),
+            ],
+            {
+                "metar_reports": len(metar_reports),
+                "metar_cities": len(metar_cities),
+                "metar_stations": len(metar_station_ids),
+                "mesonet_observations": len(mesonet_observations),
+                "mesonet_cities": len(mesonet_cities),
+                "mesonet_optional": True,
+                "metar_parse_warnings": metar_parse_warnings,
+                "mesonet_parse_warnings": mesonet_parse_warnings,
+                "parser_contract": "raw report/row + decoded fields + source URL + parser version + parse warnings",
             },
         ),
         _stage(
@@ -358,6 +396,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             "registered_cities": len(station_rows),
             "station_rows": len(station_rows),
             "eligible_cities": sum(1 for row in city_rows if row["status"] == "eligible"),
+            "metar_reports": len(metar_reports),
+            "mesonet_observations": len(mesonet_observations),
             "market_rules": len(rules),
             "settlement_contracts": len(contracts),
             "eligible_truth_days": len(eligible_truth_days),
@@ -382,6 +422,18 @@ def _orderbook_levels(raw: Any) -> list[Any]:
         return value if isinstance(value, list) else []
     except Exception:
         return []
+
+
+def _json_list_count(raw: Any) -> int:
+    if not raw:
+        return 0
+    if isinstance(raw, list):
+        return len(raw)
+    try:
+        value = json.loads(str(raw))
+        return len(value) if isinstance(value, list) else 0
+    except Exception:
+        return 0
 
 
 def _production_phase(
@@ -539,6 +591,28 @@ def _build_next_actions(
             "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli contracts-list --status unverified --limit 20",
             "requires_operator": True,
             "targets": _city_targets(city_rows, {"settlement_rule_not_manually_verified"}),
+        })
+
+    observations_stage = stage_by_key.get("observations", {})
+    observation_reason_counts = {
+        str(reason.get("code")): int(reason.get("count") or 0)
+        for reason in observations_stage.get("reasons", [])
+    }
+    observation_gap = max(
+        int(observation_reason_counts.get("metar_reports_missing") or 0),
+        int(observation_reason_counts.get("metar_city_coverage_incomplete") or 0),
+        int(observation_reason_counts.get("primary_metar_station_gap") or 0),
+    )
+    if observation_gap:
+        actions.append({
+            "key": "refresh_metar_reports",
+            "priority": 3,
+            "label": "刷新 METAR 实况",
+            "count": observation_gap,
+            "impact": "补机场 METAR/SPECI 原文和解析字段，支撑 D+0 最高温判断和观测层证据。",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli production-refresh --skip-signal-scan --days 1 --limit 20",
+            "requires_operator": False,
+            "targets": _city_targets(city_rows, {"versioned_forecast_runs_missing", "forecast_runs_stale"})[:20],
         })
 
     forecast_gap = int(reason_counts.get("forecast_city_coverage_incomplete") or 0)

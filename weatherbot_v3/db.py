@@ -408,6 +408,10 @@ def init_v3_db(path: Path | None = None) -> None:
                 pressure REAL,
                 precipitation REAL,
                 source_url TEXT,
+                parser_version TEXT,
+                parse_status TEXT,
+                parse_warnings TEXT,
+                raw_unit TEXT,
                 quality_flags TEXT,
                 raw_json TEXT,
                 created_at TEXT NOT NULL,
@@ -584,6 +588,12 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "ask_depth": "REAL",
             "source_url": "TEXT",
             "raw_response_hash": "TEXT",
+        },
+        "mesonet_observations": {
+            "parser_version": "TEXT",
+            "parse_status": "TEXT",
+            "parse_warnings": "TEXT",
+            "raw_unit": "TEXT",
         },
         "stations": {
             "icao_id": "TEXT",
@@ -1623,8 +1633,9 @@ def upsert_mesonet_observation(observation: dict[str, Any]) -> int:
                 observation_key, city, city_name, station_id, station_name, network,
                 observed_at, temperature, humidity, dew_point, wind_direction,
                 wind_speed, wind_gust, pressure, precipitation, source_url,
+                parser_version, parse_status, parse_warnings, raw_unit,
                 quality_flags, raw_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(observation_key) DO UPDATE SET
                 city=excluded.city,
                 city_name=excluded.city_name,
@@ -1641,6 +1652,10 @@ def upsert_mesonet_observation(observation: dict[str, Any]) -> int:
                 pressure=excluded.pressure,
                 precipitation=excluded.precipitation,
                 source_url=excluded.source_url,
+                parser_version=excluded.parser_version,
+                parse_status=excluded.parse_status,
+                parse_warnings=excluded.parse_warnings,
+                raw_unit=excluded.raw_unit,
                 quality_flags=excluded.quality_flags,
                 raw_json=excluded.raw_json,
                 updated_at=excluded.updated_at
@@ -1662,6 +1677,10 @@ def upsert_mesonet_observation(observation: dict[str, Any]) -> int:
                 _num(observation.get("pressure"), 0.0),
                 _num(observation.get("precipitation"), 0.0),
                 observation.get("source_url"),
+                observation.get("parser_version") or "weatherbot-mesonet-v1",
+                observation.get("parse_status") or "parsed",
+                dump_json(observation.get("parse_warnings", [])),
+                observation.get("raw_unit") or observation.get("source_unit") or "",
                 dump_json(observation.get("quality_flags", [])),
                 dump_json(observation),
                 now,

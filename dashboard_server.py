@@ -37,6 +37,7 @@ from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
 from weatherbot_v3.db import init_v3_db
 from weatherbot_v3.db import insert_event_distribution, latest_event_distribution, latest_signal_decision
 from weatherbot_v3.db import list_data_fetch_logs
+from weatherbot_v3.db import weather_evidence_summary
 from weatherbot_v3.db import bulk_settlement_contract_verification, list_settlement_contracts, set_settlement_contract_verification, truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
@@ -3830,6 +3831,16 @@ async def stations(region: str = "", city: str = "", sync_registry: bool = True)
         "sync": sync_result,
         "count": len(rows),
         "stations": rows,
+    }
+
+
+@app.get("/api/observations")
+async def observations(city: str = "", target_date: str = ""):
+    return {
+        "ok": True,
+        "city": city,
+        "target_date": target_date,
+        "evidence": weather_evidence_summary(city or None, target_date or None),
     }
 
 

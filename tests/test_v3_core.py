@@ -15,6 +15,7 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
 from weatherbot_v3.hourly import build_metar_hourly_consensus, forecast_hourly_points, hourly_consensus_points
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
+from weatherbot_v3.mesonet import ingest_mesonet_observations, mesonet_observation_from_pws_row
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.stations import list_stations, station_row_from_profile, sync_station_registry
@@ -24,7 +25,7 @@ from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_c
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import default_orderbook_start_date, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
-from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
+from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
 from dashboard_server import stations as stations_api
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timedelta, timezone
@@ -574,6 +575,12 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("mesonet_observations", tables)
         self.assertIn("hourly_consensus", tables)
         self.assertIn("data_fetch_logs", tables)
+        with connect(db_path) as conn:
+            mesonet_columns = {row["name"] for row in conn.execute("PRAGMA table_info(mesonet_observations)").fetchall()}
+        self.assertIn("parser_version", mesonet_columns)
+        self.assertIn("parse_status", mesonet_columns)
+        self.assertIn("parse_warnings", mesonet_columns)
+        self.assertIn("raw_unit", mesonet_columns)
 
     def test_weather_evidence_tables_upsert_and_summarize_polywx_core_sources(self):
         db_path = test_db_path("weather_evidence_sources")
@@ -615,6 +622,10 @@ class V3CoreTests(unittest.TestCase):
                 "observed_at": "2026-06-29T16:04:48",
                 "temperature": 90.2,
                 "humidity": 52,
+                "parser_version": "pws-observation-row-v1",
+                "parse_status": "parsed",
+                "parse_warnings": [],
+                "raw_unit": "F",
                 "quality_flags": ["nearby_station"],
             })
             consensus_id = upsert_hourly_consensus({
@@ -647,6 +658,57 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(summary["metar_reports"], 1)
         self.assertEqual(summary["mesonet_observations"], 1)
         self.assertEqual(summary["hourly_consensus"], 1)
+        self.assertEqual(evidence["latest_mesonet_observations"][0]["parser_version"], "pws-observation-row-v1")
+        self.assertEqual(evidence["latest_mesonet_observations"][0]["parse_status"], "parsed")
+        self.assertEqual(evidence["latest_mesonet_observations"][0]["raw_unit"], "F")
+
+    def test_pws_mesonet_rows_parse_and_persist_polywx_xhr_shape(self):
+        db_path = test_db_path("mesonet_pws")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        row = {
+            "observation_time": "2026-07-01T12:15:00Z",
+            "station_id": "KILROSEM4",
+            "temperature_c": 30.5,
+            "humidity": 51,
+            "fetched_at": "2026-07-01T12:16:00Z",
+        }
+        parsed = mesonet_observation_from_pws_row(row, SETTLEMENT_REGISTRY["chicago"], source_url="https://api.weather.polywx.xyz/api/pws")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            result = ingest_mesonet_observations(
+                {"chicago": [row]},
+                network="pws",
+                source_url="https://api.weather.polywx.xyz/api/pws",
+            )
+            evidence = weather_evidence_summary("chicago")
+
+        self.assertEqual(parsed["station_id"], "KILROSEM4")
+        self.assertEqual(parsed["raw_unit"], "C")
+        self.assertEqual(parsed["parse_status"], "parsed")
+        self.assertAlmostEqual(parsed["temperature"], 86.9, places=1)
+        self.assertIn("nearby_station", parsed["quality_flags"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["rows_upserted"], 1)
+        self.assertEqual(evidence["mesonet_observations"], 1)
+        self.assertEqual(evidence["latest_mesonet_observations"][0]["network"], "pws")
+        self.assertEqual(evidence["latest_mesonet_observations"][0]["parser_version"], "pws-observation-row-v1")
+
+    def test_observations_api_returns_layer2_evidence_without_refreshing(self):
+        db_path = test_db_path("observations_api")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": "2026-06-29T21:51:00Z",
+                "raw_text": "METAR KORD 292151Z 20017G26KT 10SM 33/23 A2987",
+                "temperature": 91.94,
+            })
+            payload = asyncio.run(observations_api(city="chicago", target_date="2026-06-29"))
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["city"], "chicago")
+        self.assertEqual(payload["evidence"]["metar_reports"], 1)
 
     def test_data_fetch_logs_persist_polywx_fetch_log_shape(self):
         db_path = test_db_path("data_fetch_logs")
@@ -912,12 +974,16 @@ class V3CoreTests(unittest.TestCase):
             readiness = build_data_readiness(db_path)
         self.assertFalse(readiness["live_allowed"])
         stations_stage = next(stage for stage in readiness["stages"] if stage["key"] == "stations")
+        observations_stage = next(stage for stage in readiness["stages"] if stage["key"] == "observations")
         self.assertEqual(stations_stage["status"], "ready")
         self.assertEqual(stations_stage["metrics"]["stations"], 20)
+        self.assertEqual(observations_stage["status"], "blocked")
+        self.assertIn("metar_reports_missing", {item["code"] for item in observations_stage["reasons"]})
         self.assertEqual(readiness["summary"]["market_rules"], 1)
         self.assertEqual(readiness["summary"]["station_rows"], 20)
         self.assertEqual(readiness["production_phase"]["id"], "phase1_5")
         blocker_codes = {item["code"] for item in readiness["blockers"]}
+        self.assertIn("metar_reports_missing", blocker_codes)
         self.assertIn("settlement_rule_not_manually_verified", blocker_codes)
         self.assertIn("versioned_forecast_runs_missing", blocker_codes)
 

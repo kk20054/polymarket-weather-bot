@@ -76,6 +76,39 @@
 
 ## 近期进度记录
 
+### 2026-07-01：Layer 2 METAR/mesonet 观测层生产化
+
+- 目标：按 `AGENTS.md` Build Order 继续 Layer 2，只补 METAR/SPECI 与 mesonet/PWS 观测层的数据合约、解析、API 和测试；不改右侧执行台、不启动自动抓取、不触碰实盘交易。
+- Build Order layer：Layer 2 — `METAR/SPECI + mesonet_observations`。
+- Layer 0 前置核验：
+  - 复核 `audits/polywx-firecrawl-2026-07-01/MANIFEST.json`：`generated_at=2026-07-01T20:51:44.375748+08:00`、`files=17`、`five_tabs=true`、`hourly_chart=true`、`xhr_response_bodies=true`、`api_endpoints=true`。
+  - 结论：本轮复用既有 PolyWX 证据，不重复 Firecrawl。
+- 改动：
+  - `weatherbot_v3/db.py` 扩展 `mesonet_observations`，新增 `parser_version`、`parse_status`、`parse_warnings`、`raw_unit`，并让 upsert 持久化这些解析审计字段。
+  - 新增 `weatherbot_v3/mesonet.py`，提供 PWS/mesonet 行解析和批量 ingest：支持 `temperature_c`/`temperature_f`、站点 id、观测时间、湿度、露点、质量标记、source URL、parser version 和 parse warnings。
+  - `dashboard_server.py` 新增只读接口 `GET /api/observations?city=...&target_date=...`，直接返回 `weather_evidence_summary`，不会触发抓取或扫描。
+  - `weatherbot_v3/qualification.py` 新增 `observations` readiness stage：检查 METAR 是否存在、城市覆盖是否完整、主结算站点是否缺口、METAR parse failure 是否为 0；同时把 mesonet 作为可选辅助观测指标暴露。
+  - `tests/test_v3_core.py` 增加 Layer 2 合约测试：mesonet schema 字段、PWS 行解析与落库、观测 API 不触发刷新、data readiness 对 METAR 缺口的阻塞提示。
+- 验证：
+  - `python -m unittest tests.test_v3_core` 通过：93 tests OK；仍有既有 sqlite `ResourceWarning: unclosed database` 噪声，需要后续单独治理。
+  - `python -m unittest tests.test_polywx_contract` 通过：7 tests OK。
+  - `npm run build` 通过；仍有既有 Browserslist 过期和 Vite chunk size warning。
+  - 当前 8765 `/api/dashboard` 运行态：约 `293.6ms` 返回，`scanner_status=stopped`、`is_running=false`、`production_running=false`、`auto_refresh_running=false`、`last_refresh_was_auto=false`。
+  - 临时启动 8766 验证新代码：`/api/dashboard` OK，`/api/observations?city=chicago` OK，返回 `metar_reports=2`、`mesonet_observations=0`；验证后已关闭临时进程。
+  - `git diff --check` 通过；仅有 Windows LF/CRLF 提示，没有 whitespace error。
+- 当前可用性结论：
+  - Layer 2 现在具备“结构化保存站点观测证据”的基础能力：METAR 和 mesonet 观测可以带原始来源、解析版本、解析状态和警告进入 SQLite，并能通过 API 读出来。
+  - 这让后续 D+0 最高温判断、PolyWX 风格的 METAR/实时观测模块、偏差统计和策略 gate 有了更稳的数据落点。
+  - 当前仍不能用于自动实盘赚钱；它只是把观测层证据链打稳了一格。
+- 剩余阻塞：
+  - 当前库里 Chicago 有少量 METAR 证据，但 mesonet/PWS 仍是通用 ingest/parser，没有完整区域网络 collector。
+  - METAR 城市全覆盖、主站点全覆盖、parse failure 清理仍未达生产 gate。
+  - WMO id 映射仍未补齐。
+  - 现有完整测试仍有 sqlite ResourceWarning，需要后续做连接关闭治理，减少噪声。
+- 下一步：
+  - 进入 Layer 3：`forecast_runs` 与 `forecast_members`，把预报数据从“展示/快照”升级成可追踪 run、member、source、issued_at、valid_time 的无泄漏训练/推理基座。
+- 相关提交：待提交；提交后回填 hash。
+
 ### 2026-07-01：Layer 1 stations 站点基座落库
 
 - 目标：按 `AGENTS.md` Build Order 进入 Layer 1，只补 `stations` 站点基座：SQLite schema、registry collector、测试和 API surface；不触碰右侧执行台、不启动自动抓取、不做实盘。
