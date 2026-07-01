@@ -110,7 +110,7 @@
   - sqlite ResourceWarning 仍需后续单独治理，减少测试噪声。
 - 下一步：
   - 进入 Layer 4：`hourly_consensus`，把 Layer 2 观测和 Layer 3 预报汇成城市/日期/小时的统一证据路径，供 PolyWX 风格小时图和后续信号引擎读取。
-- 相关提交：待提交；提交后回填 hash。
+- 相关提交：`f7249b4 Add forecast data foundation layer`；随后 ledger-hash 回填提交记录本行。
 
 ### 2026-07-01：Layer 2 METAR/mesonet 观测层生产化
 
