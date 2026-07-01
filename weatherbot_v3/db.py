@@ -342,6 +342,10 @@ def init_v3_db(path: Path | None = None) -> None:
                 raw_response_hash TEXT,
                 data_license TEXT,
                 quality_flags TEXT,
+                parser_version TEXT,
+                parse_status TEXT,
+                parse_warnings TEXT,
+                source_unit TEXT,
                 training_eligible INTEGER,
                 ineligibility_reason TEXT,
                 raw_json TEXT,
@@ -570,6 +574,10 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "raw_response_hash": "TEXT",
             "data_license": "TEXT",
             "quality_flags": "TEXT",
+            "parser_version": "TEXT",
+            "parse_status": "TEXT",
+            "parse_warnings": "TEXT",
+            "source_unit": "TEXT",
             "training_eligible": "INTEGER",
             "ineligibility_reason": "TEXT",
         },
@@ -1790,6 +1798,36 @@ def weather_evidence_summary(city: str | None = None, target_date: str | None = 
                 city_params,
             ),
             "hourly_consensus": count(f"SELECT COUNT(*) FROM hourly_consensus {consensus_clause}", params),
+            "forecast_runs": count(f"SELECT COUNT(*) FROM forecast_runs {consensus_clause}", params),
+            "forecast_members": count(
+                f"""
+                SELECT COUNT(*)
+                FROM forecast_members fm
+                JOIN forecast_runs fr ON fr.id = fm.run_id
+                {consensus_clause.replace('WHERE', 'WHERE fr.') if consensus_clause else ''}
+                """,
+                params,
+            ) if not consensus_clause else count(
+                """
+                SELECT COUNT(*)
+                FROM forecast_members fm
+                JOIN forecast_runs fr ON fr.id = fm.run_id
+                WHERE fr.city = ? AND fr.target_date = ?
+                """ if city and target_date else (
+                    """
+                    SELECT COUNT(*)
+                    FROM forecast_members fm
+                    JOIN forecast_runs fr ON fr.id = fm.run_id
+                    WHERE fr.city = ?
+                    """ if city else """
+                    SELECT COUNT(*)
+                    FROM forecast_members fm
+                    JOIN forecast_runs fr ON fr.id = fm.run_id
+                    WHERE fr.target_date = ?
+                    """
+                ),
+                params,
+            ),
             "latest_metar_reports": [
                 dict(r)
                 for r in conn.execute(
@@ -1811,7 +1849,76 @@ def weather_evidence_summary(city: str | None = None, target_date: str | None = 
                     tuple(params),
                 ).fetchall()
             ],
+            "latest_forecast_runs": [
+                dict(r)
+                for r in conn.execute(
+                    f"SELECT * FROM forecast_runs {consensus_clause} ORDER BY COALESCE(retrieved_at, run_at, created_at) DESC, id DESC LIMIT 10",
+                    tuple(params),
+                ).fetchall()
+            ],
         }
+
+
+def forecast_summary(city: str | None = None, target_date: str | None = None) -> dict[str, Any]:
+    init_v3_db()
+    where: list[str] = []
+    params: list[Any] = []
+    if city:
+        where.append("city = ?")
+        params.append(city)
+    if target_date:
+        where.append("target_date = ?")
+        params.append(target_date)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    member_join_clause = f"WHERE {' AND '.join('fr.' + item for item in where)}" if where else ""
+    with connect() as conn:
+        run_count = int(conn.execute(f"SELECT COUNT(*) FROM forecast_runs {clause}", tuple(params)).fetchone()[0])
+        runs = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM forecast_runs
+                {clause}
+                ORDER BY COALESCE(retrieved_at, run_at, created_at) DESC, id DESC
+                LIMIT 50
+                """,
+                tuple(params),
+            ).fetchall()
+        ]
+        member_count = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM forecast_members fm
+                JOIN forecast_runs fr ON fr.id = fm.run_id
+                {member_join_clause}
+                """,
+                tuple(params),
+            ).fetchone()[0]
+        )
+        source_rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT source, COUNT(*) AS runs, SUM(COALESCE(member_count, 0)) AS members
+                FROM forecast_runs
+                {clause}
+                GROUP BY source
+                ORDER BY runs DESC, source
+                """,
+                tuple(params),
+            ).fetchall()
+        ]
+    return {
+        "ok": True,
+        "city": city or "",
+        "target_date": target_date or "",
+        "runs": run_count,
+        "members": member_count,
+        "sources": source_rows,
+        "latest_runs": runs,
+    }
 
 
 def insert_forecast_run(run: dict[str, Any], members: list[dict[str, Any]] | None = None) -> int:
@@ -1837,13 +1944,20 @@ def insert_forecast_run(run: dict[str, Any], members: list[dict[str, Any]] | Non
                 run_type, run_at, retrieved_at, valid_at, horizon, lead_hours,
                 latitude, longitude, station_id, timezone, unit, mean_high, std_high,
                 member_count, source_url, raw_response_hash, data_license,
-                quality_flags, training_eligible, ineligibility_reason,
+                quality_flags, parser_version, parse_status, parse_warnings, source_unit,
+                training_eligible, ineligibility_reason,
                 raw_json, created_at
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(run_key) DO UPDATE SET
+                source=excluded.source,
+                provider=excluded.provider,
+                model=excluded.model,
+                model_version=excluded.model_version,
+                run_type=excluded.run_type,
+                run_at=excluded.run_at,
                 retrieved_at=excluded.retrieved_at,
                 valid_at=excluded.valid_at,
                 horizon=excluded.horizon,
@@ -1851,7 +1965,14 @@ def insert_forecast_run(run: dict[str, Any], members: list[dict[str, Any]] | Non
                 mean_high=excluded.mean_high,
                 std_high=excluded.std_high,
                 member_count=excluded.member_count,
+                source_url=excluded.source_url,
+                raw_response_hash=excluded.raw_response_hash,
+                data_license=excluded.data_license,
                 quality_flags=excluded.quality_flags,
+                parser_version=excluded.parser_version,
+                parse_status=excluded.parse_status,
+                parse_warnings=excluded.parse_warnings,
+                source_unit=excluded.source_unit,
                 training_eligible=excluded.training_eligible,
                 ineligibility_reason=excluded.ineligibility_reason,
                 raw_json=excluded.raw_json
@@ -1882,6 +2003,10 @@ def insert_forecast_run(run: dict[str, Any], members: list[dict[str, Any]] | Non
                 run.get("raw_response_hash"),
                 run.get("data_license"),
                 dump_json(run.get("quality_flags", [])),
+                run.get("parser_version") or "forecast-run-v1",
+                run.get("parse_status") or "parsed",
+                dump_json(run.get("parse_warnings", [])),
+                run.get("source_unit") or run.get("unit") or "",
                 1 if run.get("training_eligible") else 0,
                 run.get("ineligibility_reason"),
                 dump_json(run),

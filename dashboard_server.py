@@ -34,6 +34,7 @@ from dashboard_db import (
 )
 from weatherbot_v3.config import load_config as load_v3_config
 from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
+from weatherbot_v3.db import forecast_summary
 from weatherbot_v3.db import init_v3_db
 from weatherbot_v3.db import insert_event_distribution, latest_event_distribution, latest_signal_decision
 from weatherbot_v3.db import list_data_fetch_logs
@@ -3798,6 +3799,11 @@ async def model_dataset_audit():
 async def forecast_archive_manifest(limit: int = 200, sources: str = "ecmwf,gfs_ensemble", include_jsonl: bool = False):
     source_list = [source.strip() for source in sources.split(",") if source.strip()]
     return _forecast_archive_manifest_payload(limit=limit, sources=source_list, include_jsonl=include_jsonl)
+
+
+@app.get("/api/forecasts")
+async def forecasts(city: str = "", target_date: str = ""):
+    return forecast_summary(city or None, target_date or None)
 
 
 @app.get("/api/temperature-fit")

@@ -76,6 +76,42 @@
 
 ## 近期进度记录
 
+### 2026-07-01：Layer 3 forecast_runs / forecast_members 预报层生产化
+
+- 目标：按 `AGENTS.md` Build Order 继续 Layer 3，只补预报运行与成员层的数据合约、PolyWX forecast 行解析、只读 API 和测试；不触碰概率策略、信号决策、右侧执行台、自动抓取或实盘交易。
+- Build Order layer：Layer 3 — `forecast_runs` and `forecast_members` for ECMWF, GFS, HRRR, Open-Meteo, DEB, and related inputs。
+- Layer 0 前置核验：
+  - 复核 `audits/polywx-firecrawl-2026-07-01/MANIFEST.json`：`generated_at=2026-07-01T20:51:44.375748+08:00`、`files=17`、`five_tabs=true`、`hourly_chart=true`、`xhr_response_bodies=true`、`api_endpoints=true`。
+  - 结论：本轮复用现有 PolyWX XHR 证据，不重复 Firecrawl；`/api/forecast` 已知字段包括 `hour`、`temperature_c`、`fetched_at`、`cloud_cover_pct`、`precip_chance_pct`、`wind_dir_deg`、`wind_kph`、`pressure_hpa`、`dew_point_c`、`condition_phrase` 等。
+- 改动：
+  - `weatherbot_v3/db.py` 扩展 `forecast_runs`，新增 `parser_version`、`parse_status`、`parse_warnings`、`source_unit`，并让 `insert_forecast_run()` 在 upsert 时持久化这些解析审计字段。
+  - `weatherbot_v3/db.py` 新增 `forecast_summary()`，提供按 city/date 查询 forecast run、member、source 统计和最近 run 的只读摘要。
+  - 新增 `weatherbot_v3/forecast.py`，提供 `forecast_run_from_polywx_rows()` 与 `ingest_polywx_forecasts()`：把 PolyWX `/api/forecast` 风格小时行解析为一个 deterministic forecast run + member，并保留 source URL、raw response hash、单位转换、解析状态和 warnings。
+  - `dashboard_server.py` 新增只读接口 `GET /api/forecasts?city=...&target_date=...`，不会触发抓取、扫描或自动模拟。
+  - `tests/test_v3_core.py` 增加 Layer 3 合约测试：forecast schema 字段、PolyWX forecast 行解析与落库、单位 C->F 转换、hourly member 聚合、`/api/forecasts` 不触发刷新。
+- 重要取舍：
+  - PolyWX forecast XHR 没有披露底层模型和真实 run time，本轮明确标记 `source=polywx_forecast`、`model_version=undisclosed`、`training_eligible=false`、`ineligibility_reason=polywx_model_source_and_run_time_not_disclosed`，不伪装成 ECMWF/GFS/HRRR，也不解锁训练或实盘 gate。
+- 验证：
+  - Targeted Layer 3 tests 通过：schema、forecast store、PolyWX forecast parser、forecast API、hourly points 共 5 tests OK。
+  - Data readiness/model dataset 相关窄测试通过：3 tests OK。
+  - `python -m unittest tests.test_v3_core` 通过：95 tests OK；仍有既有 sqlite `ResourceWarning: unclosed database` 噪声。
+  - `python -m unittest tests.test_polywx_contract` 通过：7 tests OK。
+  - `npm run build` 通过；仍有既有 Browserslist 过期和 Vite chunk size warning。
+  - 当前 8765 `/api/dashboard` 运行态：约 `220.5ms` 返回，`scanner_status=stopped`、`is_running=false`、`production_running=false`、`auto_refresh_running=false`、`last_refresh_was_auto=false`。
+  - 临时启动 8766 验证新代码：`/api/dashboard` OK，未启动扫描/自动刷新；`/api/forecasts?city=chicago` OK，当前库返回 `forecast_runs=874`、`forecast_members=9462`；验证后已关闭临时进程。
+  - `git diff --check` 通过；仅有 Windows LF/CRLF 提示，没有 whitespace error。
+- 当前可用性结论：
+  - Layer 3 现在具备“把预报输入作为可审计 run/member 存储和读取”的基础能力，后续 PolyWX 风格 Forecast tab、小时图、偏差统计、模型训练和信号引擎可以从同一套 forecast run/member 表取数。
+  - 这提升的是数据基座和可复盘能力，不代表策略已经有 edge，也不代表可以自动实盘。
+- 剩余阻塞：
+  - 当前 PolyWX forecast 只能作为参考输入，不能作为无泄漏训练样本，因为底层模型和 run time 不透明。
+  - 生产级 ECMWF/GFS/HRRR/Open-Meteo collector 仍需继续补齐 typed collector 和真实 provider metadata。
+  - forecast_members 虽可存 hourly_json，但成员级 ensemble source、run id、issued_at、provider license 还需要更细的源适配。
+  - sqlite ResourceWarning 仍需后续单独治理，减少测试噪声。
+- 下一步：
+  - 进入 Layer 4：`hourly_consensus`，把 Layer 2 观测和 Layer 3 预报汇成城市/日期/小时的统一证据路径，供 PolyWX 风格小时图和后续信号引擎读取。
+- 相关提交：待提交；提交后回填 hash。
+
 ### 2026-07-01：Layer 2 METAR/mesonet 观测层生产化
 
 - 目标：按 `AGENTS.md` Build Order 继续 Layer 2，只补 METAR/SPECI 与 mesonet/PWS 观测层的数据合约、解析、API 和测试；不改右侧执行台、不启动自动抓取、不触碰实盘交易。
