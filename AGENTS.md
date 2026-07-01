@@ -20,6 +20,15 @@ Do not claim or imply that the bot can reliably make money until the paper-tradi
 - Use `suislanchez/polymarket-kalshi-weather-bot` only as a reference for FastAPI + SQLite + React dashboard structure and simulation ergonomics. Do not reintroduce BTC modules, Kalshi-first assumptions, or simple `edge > 8%` auto-trading logic.
 - Treat `alteregoeth-ai/weatherbot` as the airport-station and multi-source weather baseline, not as a production trading architecture.
 
+## PolyWX Local Reference State
+
+- Current local PolyWX notes live under `audits/polywx-firecrawl-reference-2026-07-01/` and `audits/polywx-full-reference-2026-07-01/`.
+- As of 2026-07-01, those directories contain summary `README_CN.md` files, not a complete copy of PolyWX source code, backend APIs, screenshots, static bundles, or all query-parameter city/date pages.
+- Do not claim "PolyWX has been fully crawled" merely because a directory named `polywx-full-reference-*` exists. Inspect the directory contents first.
+- After context compression, re-check the current files before relying on earlier crawl status. Treat previous chat memory as a pointer, not proof.
+- If a future turn creates a real reference corpus, it should include at minimum: fixed city/date sample list, rendered DOM snapshots, screenshots, discovered static assets, visible network/API responses, Firecrawl job ids, and a `MANIFEST.json` with counts and timestamps.
+- Keep all PolyWX reference corpus files under `audits/`; they are local research artifacts and must not be committed to GitHub.
+
 ## Reference Fusion Architecture
 
 Use these external repositories as design inputs, not as code to copy blindly. Every borrowed idea must be mapped into WeatherBot's data, audit, paper-trading, and risk-control model.
