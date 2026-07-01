@@ -6,6 +6,7 @@ from typing import Any
 from .cli import run_forecast_backfill, run_orderbook_backfill, run_production_refresh, run_truth_backfill
 from .db import bulk_settlement_contract_verification
 from .forecast_archive import import_forecast_archive
+from .metar import refresh_metar_reports
 from .qualification import build_data_readiness, persist_data_readiness
 
 
@@ -19,6 +20,12 @@ ACTION_CATALOG: dict[str, dict[str, Any]] = {
     "refresh_clob_orderbooks": {
         "label": "Refresh CLOB orderbooks",
         "description": "Fetch current bid/ask depth for candidate signal markets.",
+        "requires_operator": False,
+        "mutates": True,
+    },
+    "refresh_metar_reports": {
+        "label": "Refresh METAR reports",
+        "description": "Fetch recent AviationWeather METAR/SPECI reports for registry airport stations.",
         "requires_operator": False,
         "mutates": True,
     },
@@ -156,6 +163,11 @@ def _execute_action(action_key: str, params: dict[str, Any]) -> dict[str, Any]:
         return run_forecast_backfill(cities_arg, params["days"])
     if action_key == "refresh_clob_orderbooks":
         return run_orderbook_backfill(params["limit"], params["start_date"], params["end_date"])
+    if action_key == "refresh_metar_reports":
+        return refresh_metar_reports(
+            cities=params["cities"],
+            hours=max(1.0, min(float(params["days"] or 1) * 24.0, 96.0)),
+        )
     if action_key == "production_refresh":
         return run_production_refresh(
             cities=cities_arg,

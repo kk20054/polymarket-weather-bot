@@ -18,6 +18,7 @@ from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
+from weatherbot_v3.metar import fetch_awc_metars, refresh_metar_reports
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
@@ -714,6 +715,7 @@ class V3CoreTests(unittest.TestCase):
     def test_production_actions_are_whitelisted_and_dry_run_by_default(self):
         actions = {action["key"] for action in list_production_actions()}
         self.assertIn("refresh_clob_orderbooks", actions)
+        self.assertIn("refresh_metar_reports", actions)
         self.assertIn("backfill_official_truth", actions)
         self.assertIn("backfill_forecast_members", actions)
 
@@ -725,6 +727,108 @@ class V3CoreTests(unittest.TestCase):
         self.assertTrue(dry_run["ok"])
         self.assertEqual(dry_run["status"], "dry_run")
         self.assertEqual(dry_run["params"]["limit"], 3)
+
+    def test_awc_metar_fetch_uses_scoped_json_request(self):
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return [{
+                    "stationId": "KORD",
+                    "obsTime": "2026-06-29T16:00:00Z",
+                    "rawOb": "METAR KORD 291600Z 18014KT 10SM 33/23 A2988",
+                    "temp": 33,
+                    "dewp": 23,
+                }]
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, params, headers, timeout):
+                self.calls.append((url, params, headers, timeout))
+                return FakeResponse()
+
+        session = FakeSession()
+        rows = fetch_awc_metars(["kord", "KORD", "KLGA"], hours=48, session=session)
+
+        self.assertEqual(len(rows), 1)
+        _, params, headers, timeout = session.calls[0]
+        self.assertEqual(params["ids"], "KLGA,KORD")
+        self.assertEqual(params["format"], "json")
+        self.assertEqual(params["hours"], 48.0)
+        self.assertIn("WeatherBot", headers["User-Agent"])
+        self.assertEqual(timeout, 20.0)
+
+    def test_metar_refresh_persists_registry_station_reports(self):
+        db_path = test_db_path("metar_refresh")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return [
+                    {
+                        "stationId": "KORD",
+                        "obsTime": "2026-06-29T16:00:00Z",
+                        "reportType": "METAR",
+                        "rawOb": "METAR KORD 291600Z 18014KT 10SM 33/23 A2988",
+                        "temp": 33,
+                        "dewp": 23,
+                        "wdir": 180,
+                        "wspd": 14,
+                        "wgst": 25,
+                        "visib": 10,
+                        "altim": 29.88,
+                        "clouds": [{"cover": "FEW", "base": 4200}],
+                    }
+                ]
+
+        class FakeSession:
+            def get(self, url, params, headers, timeout):
+                return FakeResponse()
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            result = refresh_metar_reports(["chicago"], hours=24, session=FakeSession())
+            evidence = weather_evidence_summary("chicago")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stations"], ["KORD"])
+        self.assertEqual(result["reports_fetched"], 1)
+        self.assertEqual(result["reports_upserted"], 1)
+        self.assertEqual(evidence["metar_reports"], 1)
+        self.assertEqual(evidence["latest_metar_reports"][0]["station_id"], "KORD")
+        self.assertAlmostEqual(evidence["latest_metar_reports"][0]["temperature"], 91.4, places=1)
+
+    def test_production_action_executes_whitelisted_metar_refresh(self):
+        with patch("weatherbot_v3.production_actions.refresh_metar_reports") as mocked_refresh:
+            mocked_refresh.return_value = {"ok": True, "reports_upserted": 2}
+            with patch("weatherbot_v3.production_actions.build_data_readiness") as mocked_readiness:
+                mocked_readiness.return_value = {
+                    "status": "blocked",
+                    "score": 0.3,
+                    "live_allowed": False,
+                    "production_phase": {"blocked_keys": ["metar"]},
+                }
+                with patch("weatherbot_v3.production_actions.persist_data_readiness"):
+                    result = run_production_action(
+                        "refresh_metar_reports",
+                        apply=True,
+                        cities=["chicago"],
+                        days=2,
+                    )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "executed")
+        mocked_refresh.assert_called_once_with(cities=["chicago"], hours=48.0)
+        self.assertEqual(result["payload"]["reports_upserted"], 2)
 
     def test_production_action_requires_operator_confirmation_for_bulk_review(self):
         result = run_production_action(
