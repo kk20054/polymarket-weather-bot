@@ -2145,6 +2145,183 @@ def _registry_city_series():
     return sorted(rows, key=lambda row: (row.get("city_name") or "").lower())
 
 
+def _distribution_item_count(distribution) -> int:
+    if not isinstance(distribution, dict):
+        return 0
+    for key in ("items", "buckets", "distribution"):
+        value = distribution.get(key)
+        if isinstance(value, list):
+            return len(value)
+    return 0
+
+
+def _row_matches_text(row: dict, terms: list[str]) -> bool:
+    text = _json_compact(row).lower()
+    return any(term and term.lower() in text for term in terms)
+
+
+def _city_date_evidence_modules(city: dict, target_date: str, signals: list[dict], fetch_log: list[dict]) -> dict:
+    hourly_points = [p for p in city.get("hourly_points") or [] if str(p.get("target_date") or "") == target_date]
+    forecast_points = [p for p in city.get("forecast_points") or [] if str(p.get("target_date") or "") == target_date]
+    history_points = [p for p in city.get("history_points") or [] if str(p.get("target_date") or "") == target_date]
+    chart_points = hourly_points or forecast_points
+    metar_rows = [p for p in chart_points if p.get("metar") is not None]
+    forecast_rows = [
+        p for p in chart_points
+        if p.get("best") is not None
+        or p.get("ecmwf") is not None
+        or p.get("hrrr") is not None
+        or p.get("ensemble_mean") is not None
+    ]
+    diff_rows = [
+        p for p in chart_points
+        if p.get("metar") is not None
+        and (
+            p.get("best") is not None
+            or p.get("ecmwf") is not None
+            or p.get("hrrr") is not None
+            or p.get("ensemble_mean") is not None
+        )
+    ]
+    city_signals = [
+        signal for signal in signals
+        if str(signal.get("city_key") or "") == str(city.get("city_key") or "")
+        and str(signal.get("target_date") or "") == target_date
+    ]
+    terms = [str(city.get("city_key") or ""), str(city.get("city_name") or ""), target_date]
+    log_rows = [row for row in fetch_log if _row_matches_text(row, terms)]
+    bucket_count = sum(_distribution_item_count(signal.get("distribution")) for signal in city_signals)
+
+    return {
+        "hourly_temperature": {
+            "chart": "LineChart",
+            "rows": len(chart_points),
+            "series": ["Real METAR", "Model Forecast", "Diff", "Cloud Cover %"],
+            "empty_state": "No hourly forecast rows for this city/date.",
+            "ready": bool(chart_points),
+        },
+        "daily_max_prediction": {
+            "engine": "DEB/Gaussian-compatible",
+            "signals": len(city_signals),
+            "empty_state": "No prediction yet.",
+            "ready": bool(city_signals),
+        },
+        "probability_buckets": {
+            "rows": bucket_count,
+            "source": "signal.distribution",
+            "empty_state": "No probability buckets yet.",
+            "ready": bucket_count > 0,
+        },
+        "forecast": {
+            "rows": len(forecast_rows),
+            "table": "Forecast Data",
+            "empty_state": "No forecast data for this date.",
+            "ready": bool(forecast_rows),
+        },
+        "metar": {
+            "rows": len(metar_rows),
+            "table": "METAR Observations",
+            "empty_state": "No METAR observations for this date.",
+            "ready": bool(metar_rows),
+        },
+        "historical": {
+            "rows": len(history_points),
+            "table": "Historical Observations",
+            "empty_state": "No historical observations for this date.",
+            "ready": bool(history_points),
+        },
+        "diff_stats": {
+            "rows": len(diff_rows),
+            "formula": "Observed - Forecast",
+            "empty_state": "No diff stats for this date.",
+            "ready": bool(diff_rows),
+        },
+        "fetch_log": {
+            "rows": len(log_rows),
+            "table": "Fetch Log (last 100)",
+            "empty_state": "No log entries.",
+            "ready": bool(log_rows),
+        },
+        "market_buckets": {
+            "signals": len(city_signals),
+            "buckets": bucket_count,
+            "strict_matching_required": True,
+            "ready": bucket_count > 0,
+        },
+    }
+
+
+def _build_city_evidence_payload(city_series: list[dict], weather_signals: list[dict], fetch_log: list[dict]) -> list[dict]:
+    """PolyWX-style city/date evidence contract shared by dashboard and signals."""
+    signals_by_city: dict[str, list[dict]] = {}
+    for signal in weather_signals:
+        signals_by_city.setdefault(str(signal.get("city_key") or ""), []).append(signal)
+
+    payload = []
+    for city in city_series:
+        city_key = str(city.get("city_key") or "")
+        if not city_key:
+            continue
+        date_keys = set()
+        for collection, field in (
+            ("hourly_points", "target_date"),
+            ("forecast_points", "target_date"),
+            ("history_points", "target_date"),
+        ):
+            for row in city.get(collection) or []:
+                value = row.get(field)
+                if value:
+                    date_keys.add(str(value))
+        for signal in signals_by_city.get(city_key, []):
+            if signal.get("target_date"):
+                date_keys.add(str(signal.get("target_date")))
+
+        date_payloads = []
+        for target_date in sorted(date_keys, reverse=True)[:14]:
+            modules = _city_date_evidence_modules(
+                city,
+                target_date,
+                signals_by_city.get(city_key, []),
+                fetch_log,
+            )
+            ready_count = sum(1 for module in modules.values() if module.get("ready"))
+            date_payloads.append({
+                "target_date": target_date,
+                "ready_modules": ready_count,
+                "module_count": len(modules),
+                "tabs": ["Forecast", "METAR", "Historical", "Diff Stats", "Fetch Log"],
+                "modules": modules,
+            })
+
+        payload.append({
+            "city_key": city_key,
+            "city_name": city.get("city_name") or city_key,
+            "station_id": city.get("station_id") or "",
+            "unit": city.get("unit") or "F",
+            "generated_from": "weather_city_series + weather_signals + fetch_log",
+            "data_sources": ["Forecast", "METAR", "Historical", "Market", "Fetch Log"],
+            "dates": date_payloads,
+            "latest_date": date_payloads[0]["target_date"] if date_payloads else None,
+            "latest_ready_modules": date_payloads[0]["ready_modules"] if date_payloads else 0,
+        })
+    return sorted(payload, key=lambda row: row.get("city_name") or "")
+
+
+def _city_evidence_matches(row: dict, city: str) -> bool:
+    city_lower = city.lower().strip()
+    city_key = str(row.get("city_key") or "").lower()
+    city_name = str(row.get("city_name") or "").lower().replace(" ", "-")
+    station_id = str(row.get("station_id") or "").lower()
+    candidates = {
+        city_key,
+        city_name,
+        station_id,
+        f"{city_key}-{station_id}" if station_id else city_key,
+        f"{city_name}-{station_id}" if station_id else city_name,
+    }
+    return city_lower in candidates
+
+
 def _strategy_diagnostics(signal, raw_signal, market, fit):
     tags = []
     notes = []
@@ -2878,6 +3055,8 @@ def build_dashboard_payload():
     }
 
     events = list_events(100)
+    fetch_log = _fetch_log_payload(events)
+    city_evidence = _build_city_evidence_payload(weather_city_series, weather_signals, fetch_log)
     return {
         "stats": stats,
         "v3": v3_dashboard_summary(),
@@ -2896,14 +3075,17 @@ def build_dashboard_payload():
         "weather_signals": weather_signals,
         "weather_forecasts": list(weather_forecasts_by_city.values()),
         "weather_city_series": weather_city_series,
+        "city_evidence": city_evidence,
         "events": events,
-        "fetch_log": _fetch_log_payload(events),
+        "fetch_log": fetch_log,
     }
 
 
 def _minimal_dashboard_payload(reason: str = "cache_warming"):
     now = datetime.now(timezone.utc).isoformat()
     events = list_events(50)
+    fetch_log = _fetch_log_payload(events, 50)
+    city_series = _registry_city_series()
     stats = {
         "bankroll": 0,
         "cash_balance": 0,
@@ -2949,9 +3131,10 @@ def _minimal_dashboard_payload(reason: str = "cache_warming"):
         "backtest": None,
         "weather_signals": [],
         "weather_forecasts": [],
-        "weather_city_series": _registry_city_series(),
+        "weather_city_series": city_series,
+        "city_evidence": _build_city_evidence_payload(city_series, [], fetch_log),
         "events": events,
-        "fetch_log": _fetch_log_payload(events, 50),
+        "fetch_log": fetch_log,
         "_meta": {"cache": "warming", "reason": reason, "generated_at": now},
     }
 
@@ -3168,6 +3351,26 @@ async def dashboard():
     if dashboard_payload_cache is not None:
         return dashboard_payload_cache
     return _minimal_dashboard_payload()
+
+
+@app.get("/api/city-evidence")
+async def city_evidence(city: str | None = None, date: str | None = None):
+    payload = dashboard_payload_cache or _minimal_dashboard_payload()
+    rows = list(payload.get("city_evidence") or [])
+    if city:
+        rows = [row for row in rows if _city_evidence_matches(row, city)]
+    if date:
+        filtered = []
+        for row in rows:
+            dates = [item for item in row.get("dates") or [] if str(item.get("target_date") or "") == date]
+            if dates:
+                filtered.append({**row, "dates": dates, "latest_date": dates[0].get("target_date"), "latest_ready_modules": dates[0].get("ready_modules", 0)})
+        rows = filtered
+    return {
+        "cities": rows,
+        "count": len(rows),
+        "source": "dashboard_payload_cache" if dashboard_payload_cache is not None else "minimal_dashboard_payload",
+    }
 
 
 @app.get("/api/signals")

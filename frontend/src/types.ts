@@ -706,6 +706,41 @@ export interface WeatherCitySeries {
   points: WeatherCityPoint[]
 }
 
+export interface CityEvidenceModule {
+  rows?: number
+  signals?: number
+  buckets?: number
+  ready?: boolean
+  chart?: string
+  table?: string
+  engine?: string
+  formula?: string
+  source?: string
+  series?: string[]
+  empty_state?: string
+  strict_matching_required?: boolean
+}
+
+export interface CityEvidenceDate {
+  target_date: string
+  ready_modules: number
+  module_count: number
+  tabs: string[]
+  modules: Record<string, CityEvidenceModule>
+}
+
+export interface CityEvidence {
+  city_key: string
+  city_name: string
+  station_id?: string
+  unit: string
+  generated_from: string
+  data_sources: string[]
+  dates: CityEvidenceDate[]
+  latest_date?: string | null
+  latest_ready_modules?: number
+}
+
 export interface WeatherSignal {
   id?: number
   market_id: string
@@ -892,6 +927,7 @@ export interface DashboardData {
   weather_signals: WeatherSignal[]
   weather_forecasts: WeatherForecast[]
   weather_city_series?: WeatherCitySeries[]
+  city_evidence?: CityEvidence[]
   events?: DashboardEvent[]
   fetch_log?: FetchLogRow[]
   _meta?: {

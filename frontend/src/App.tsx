@@ -821,6 +821,7 @@ function App() {
   const signals = data?.weather_signals ?? []
   const forecasts = data?.weather_forecasts ?? []
   const citySeries = data?.weather_city_series ?? []
+  const cityEvidence = data?.city_evidence ?? []
   const events = data?.events ?? []
   const fetchLog = data?.fetch_log ?? []
   const trades = data?.recent_trades ?? []
@@ -951,6 +952,8 @@ function App() {
   }, [cityOptions, selectedCity])
 
   const selectedCityMeta = cityOptions.find(city => city.key === selectedCity)
+  const selectedCityEvidence = cityEvidence.find(city => city.city_key === selectedCity)
+  const selectedDateEvidence = selectedCityEvidence?.dates.find(item => item.target_date === selectedDate) ?? selectedCityEvidence?.dates[0]
   const recommendedCity = cityOptions.find(city => city.actionable > 0)
   const citySummaryCard = recommendedCity ?? selectedCityMeta ?? cityOptions[0]
   const actionableCityCount = cityOptions.filter(city => city.actionable > 0).length
@@ -1295,6 +1298,9 @@ function App() {
                 </span>
                 <span className={`border px-1.5 py-0.5 ${selectedEvidenceReady ? 'border-cyan-500/30 text-cyan-200' : 'border-neutral-800 text-neutral-500'}`}>
                   证据 F{selectedCityMeta?.forecastCount ?? 0} / H{selectedCityMeta?.historyCount ?? 0}
+                </span>
+                <span className={`border px-1.5 py-0.5 ${(selectedDateEvidence?.ready_modules ?? 0) > 0 ? 'border-blue-500/30 text-blue-200' : 'border-neutral-800 text-neutral-500'}`}>
+                  模块 {selectedDateEvidence?.ready_modules ?? 0}/{selectedDateEvidence?.module_count ?? 8}
                 </span>
                 <span className={`border px-1.5 py-0.5 ${actionable > 0 ? 'border-green-500/30 text-green-300' : 'border-neutral-800 text-neutral-500'}`}>
                   信号 {actionable}/{signals.length}

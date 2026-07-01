@@ -22,7 +22,7 @@ from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_c
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import default_orderbook_start_date, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
-from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_policy_candidates, _build_temperature_fit, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
+from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _city_evidence_matches, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timedelta, timezone
 
@@ -38,6 +38,53 @@ def test_db_path(name: str) -> Path:
 
 
 class V3CoreTests(unittest.TestCase):
+    def test_city_evidence_payload_counts_polywx_modules(self):
+        city_series = [{
+            "city_key": "chicago-kord",
+            "city_name": "Chicago",
+            "station_id": "KORD",
+            "unit": "F",
+            "hourly_points": [{
+                "target_date": "2026-06-29",
+                "timestamp": "2026-06-29T18:00:00Z",
+                "best": 82.0,
+                "metar": 80.0,
+                "cloud_cover": 40,
+            }],
+            "forecast_points": [],
+            "history_points": [{
+                "target_date": "2026-06-29",
+                "actual_high": 83.0,
+                "provider": "station_truth",
+            }],
+        }]
+        signals = [{
+            "city_key": "chicago-kord",
+            "target_date": "2026-06-29",
+            "distribution": {"items": [{"bucket": "80-81"}, {"bucket": "82-83"}]},
+        }]
+        fetch_log = [{
+            "source": "weather",
+            "stage": "weather",
+            "message": "chicago-kord 2026-06-29 refresh complete",
+        }]
+
+        payload = _build_city_evidence_payload(city_series, signals, fetch_log)
+
+        self.assertEqual(len(payload), 1)
+        day = payload[0]["dates"][0]
+        modules = day["modules"]
+        self.assertEqual(day["target_date"], "2026-06-29")
+        self.assertEqual(modules["hourly_temperature"]["rows"], 1)
+        self.assertEqual(modules["metar"]["rows"], 1)
+        self.assertEqual(modules["historical"]["rows"], 1)
+        self.assertEqual(modules["diff_stats"]["rows"], 1)
+        self.assertEqual(modules["probability_buckets"]["rows"], 2)
+        self.assertEqual(modules["fetch_log"]["rows"], 1)
+        self.assertTrue(modules["market_buckets"]["strict_matching_required"])
+        self.assertTrue(_city_evidence_matches(payload[0], "chicago-kord"))
+        self.assertTrue(_city_evidence_matches(payload[0], "chicago"))
+
     def test_target_dates_follow_airport_local_day_not_utc_day(self):
         now_utc = datetime(2026, 6, 25, 2, 0, tzinfo=timezone.utc)
         self.assertEqual(target_dates_for_city("nyc", 2, now_utc), ["2026-06-24", "2026-06-25"])

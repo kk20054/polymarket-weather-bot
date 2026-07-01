@@ -118,13 +118,44 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("export interface FetchLogRow", types)
         self.assertIn("fetch_log?: FetchLogRow[]", types)
         self.assertIn("def _fetch_log_payload", server)
-        self.assertIn('"fetch_log": _fetch_log_payload(events)', server)
+        self.assertIn("fetch_log = _fetch_log_payload(events)", server)
+        self.assertIn('"fetch_log": fetch_log', server)
         self.assertIn(".polywx-light th", css)
         self.assertIn(".polywx-dark th", css)
         self.assertIn("background: #f9fafb", css)
         self.assertIn("font-weight: 600", css)
         self.assertIn("padding: 0.5rem 1rem", css)
         self.assertIn("tbody tr:hover", css)
+
+    def test_city_evidence_contract_is_exposed_for_polywx_generation(self):
+        app = read_text("frontend/src/App.tsx")
+        types = read_text("frontend/src/types.ts")
+        server = read_text("dashboard_server.py")
+
+        self.assertIn("def _build_city_evidence_payload", server)
+        self.assertIn("def _city_date_evidence_modules", server)
+        self.assertIn('"city_evidence": city_evidence', server)
+        self.assertIn('@app.get("/api/city-evidence")', server)
+        for module in (
+            "hourly_temperature",
+            "daily_max_prediction",
+            "probability_buckets",
+            "forecast",
+            "metar",
+            "historical",
+            "diff_stats",
+            "fetch_log",
+            "market_buckets",
+        ):
+            self.assertIn(module, server)
+
+        self.assertIn("export interface CityEvidence", types)
+        self.assertIn("export interface CityEvidenceDate", types)
+        self.assertIn("export interface CityEvidenceModule", types)
+        self.assertIn("city_evidence?: CityEvidence[]", types)
+        self.assertIn("const cityEvidence = data?.city_evidence ?? []", app)
+        self.assertIn("selectedDateEvidence?.ready_modules", app)
+        self.assertIn("模块", app)
 
 
 if __name__ == "__main__":
