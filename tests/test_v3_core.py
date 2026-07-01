@@ -23,7 +23,7 @@ from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_c
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import default_orderbook_start_date, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
-from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
+from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, production_refresh, production_refresh_lock, update_auto_simulation
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timedelta, timezone
 
@@ -80,11 +80,57 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(modules["metar"]["rows"], 1)
         self.assertEqual(modules["historical"]["rows"], 1)
         self.assertEqual(modules["diff_stats"]["rows"], 1)
+        self.assertEqual(modules["diff_stats"]["summary"]["count"], 1)
+        self.assertEqual(modules["diff_stats"]["summary"]["avg_delta"], -2.0)
+        self.assertEqual(modules["diff_stats"]["summary"]["mae"], 2.0)
         self.assertEqual(modules["probability_buckets"]["rows"], 2)
         self.assertEqual(modules["fetch_log"]["rows"], 1)
         self.assertTrue(modules["market_buckets"]["strict_matching_required"])
         self.assertTrue(_city_evidence_matches(payload[0], "chicago-kord"))
         self.assertTrue(_city_evidence_matches(payload[0], "chicago"))
+
+    def test_diff_stats_summary_reports_polywx_metrics(self):
+        summary = _diff_stats_summary(
+            [
+                {
+                    "target_date": "2026-06-29",
+                    "timestamp": "2026-06-29T15:00:00-05:00",
+                    "local_hour": "15:00",
+                    "best": 92.0,
+                    "metar": 91.0,
+                    "source": "metar",
+                },
+                {
+                    "target_date": "2026-06-29",
+                    "timestamp": "2026-06-29T16:00:00-05:00",
+                    "local_hour": "16:00",
+                    "ensemble_mean": 94.0,
+                    "metar": 95.0,
+                    "source": "metar",
+                },
+                {
+                    "target_date": "2026-06-29",
+                    "timestamp": "2026-06-29T17:00:00-05:00",
+                    "local_hour": "17:00",
+                    "best": 93.0,
+                },
+            ],
+            [
+                {"target_date": "2026-06-29", "timestamp": "2026-06-29T15:51:00-05:00"},
+                {"target_date": "2026-06-29", "timestamp": "2026-06-29T16:51:00-05:00"},
+            ],
+        )
+
+        self.assertEqual(summary["count"], 2)
+        self.assertEqual(summary["avg_delta"], 0.0)
+        self.assertEqual(summary["mae"], 1.0)
+        self.assertEqual(summary["metar_hours"], 2)
+        self.assertEqual(summary["forecast_hours"], 3)
+        self.assertEqual(summary["overlap_count"], 2)
+        self.assertAlmostEqual(summary["overlap_ratio"], 2 / 3, places=4)
+        self.assertEqual(summary["historical_metar_overlap_count"], 2)
+        self.assertEqual(len(summary["rows"]), 2)
+        self.assertIsNotNone(summary["pearson_r"])
 
     def test_target_dates_follow_airport_local_day_not_utc_day(self):
         now_utc = datetime(2026, 6, 25, 2, 0, tzinfo=timezone.utc)

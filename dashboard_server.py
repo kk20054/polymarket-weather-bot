@@ -2222,6 +2222,113 @@ def _row_matches_text(row: dict, terms: list[str]) -> bool:
     return any(term and term.lower() in text for term in terms)
 
 
+def _float_or_none(value):
+    try:
+        if value is None or value == "":
+            return None
+        number = float(value)
+        if math.isnan(number) or math.isinf(number):
+            return None
+        return number
+    except Exception:
+        return None
+
+
+def _point_forecast_value(point: dict) -> float | None:
+    for key in ("best", "ensemble_mean", "ecmwf", "hrrr"):
+        number = _float_or_none(point.get(key))
+        if number is not None:
+            return number
+    return None
+
+
+def _pearson_r(pairs: list[tuple[float, float]]) -> float | None:
+    if len(pairs) < 2:
+        return None
+    observed = [pair[0] for pair in pairs]
+    forecast = [pair[1] for pair in pairs]
+    mean_observed = sum(observed) / len(observed)
+    mean_forecast = sum(forecast) / len(forecast)
+    numerator = sum((o - mean_observed) * (f - mean_forecast) for o, f in pairs)
+    observed_var = sum((o - mean_observed) ** 2 for o in observed)
+    forecast_var = sum((f - mean_forecast) ** 2 for f in forecast)
+    denominator = math.sqrt(observed_var * forecast_var)
+    if denominator <= 0:
+        return None
+    return max(-1.0, min(1.0, numerator / denominator))
+
+
+def _diff_stats_summary(chart_points: list[dict], history_points: list[dict]) -> dict:
+    def hour_bucket(point: dict, *timestamp_keys: str) -> str:
+        hour = str(point.get("local_hour") or "")
+        if hour:
+            return hour[:2] + ":00" if len(hour) >= 2 and hour[:2].isdigit() else hour
+        for key in timestamp_keys:
+            timestamp = str(point.get(key) or "")
+            if len(timestamp) >= 13 and "T" in timestamp:
+                return f"{timestamp[11:13]}:00"
+            if timestamp:
+                return timestamp
+        return ""
+
+    pairs: list[tuple[float, float]] = []
+    deltas: list[float] = []
+    rows: list[dict] = []
+    metar_hours = set()
+    forecast_hours = set()
+    historical_hours = set()
+    for point in chart_points:
+        hour = hour_bucket(point, "timestamp")
+        observed = _float_or_none(point.get("metar"))
+        forecast = _point_forecast_value(point)
+        if observed is not None:
+            metar_hours.add(hour)
+        if forecast is not None:
+            forecast_hours.add(hour)
+        if observed is None or forecast is None:
+            continue
+        delta = observed - forecast
+        pairs.append((observed, forecast))
+        deltas.append(delta)
+        rows.append({
+            "timestamp": point.get("timestamp"),
+            "local_hour": hour,
+            "observed": observed,
+            "forecast": forecast,
+            "delta": round(delta, 3),
+            "source": point.get("source") or "hourly",
+        })
+    for point in history_points:
+        hour = hour_bucket(point, "timestamp", "observed_at")
+        if hour:
+            historical_hours.add(hour)
+    count = len(deltas)
+    mae = (sum(abs(delta) for delta in deltas) / count) if count else None
+    bias = (sum(deltas) / count) if count else None
+    pearson = _pearson_r(pairs)
+    overlap_count = len(metar_hours & forecast_hours)
+    possible_overlap = max(len(metar_hours), len(forecast_hours), 1)
+    hist_metar_overlap = len(historical_hours & metar_hours) if historical_hours and metar_hours else 0
+    hist_metar_possible = max(len(historical_hours), len(metar_hours), 1) if (historical_hours or metar_hours) else 0
+    return {
+        "count": count,
+        "avg_delta": round(bias, 3) if bias is not None else None,
+        "mae": round(mae, 3) if mae is not None else None,
+        "pearson_r": round(pearson, 4) if pearson is not None else None,
+        "metar_hours": len(metar_hours),
+        "forecast_hours": len(forecast_hours),
+        "overlap_count": overlap_count,
+        "overlap_ratio": round(overlap_count / possible_overlap, 4) if possible_overlap else None,
+        "historical_metar_overlap_count": hist_metar_overlap,
+        "historical_metar_overlap_ratio": (
+            round(hist_metar_overlap / hist_metar_possible, 4)
+            if hist_metar_possible
+            else None
+        ),
+        "rows": rows[:100],
+    }
+
+
 def _city_date_evidence_modules(city: dict, target_date: str, signals: list[dict], fetch_log: list[dict]) -> dict:
     hourly_points = [p for p in city.get("hourly_points") or [] if str(p.get("target_date") or "") == target_date]
     forecast_points = [p for p in city.get("forecast_points") or [] if str(p.get("target_date") or "") == target_date]
@@ -2253,6 +2360,7 @@ def _city_date_evidence_modules(city: dict, target_date: str, signals: list[dict
     terms = [str(city.get("city_key") or ""), str(city.get("city_name") or ""), target_date]
     log_rows = [row for row in fetch_log if _row_matches_text(row, terms)]
     bucket_count = sum(_distribution_item_count(signal.get("distribution")) for signal in city_signals)
+    diff_summary = _diff_stats_summary(chart_points, history_points)
 
     return {
         "hourly_temperature": {
@@ -2295,6 +2403,7 @@ def _city_date_evidence_modules(city: dict, target_date: str, signals: list[dict
         "diff_stats": {
             "rows": len(diff_rows),
             "formula": "Observed - Forecast",
+            "summary": diff_summary,
             "empty_state": "No diff stats for this date.",
             "ready": bool(diff_rows),
         },
