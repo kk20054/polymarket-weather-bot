@@ -76,6 +76,37 @@
 
 ## 近期进度记录
 
+### 2026-07-01：进度治理修复与 Layer 0 证据状态校准
+
+- 目标：回应“每轮工作没有稳定记录、Firecrawl 重复抓取、项目推进不透明”的问题，把记录规则写死到 `AGENTS.md`，并校准当前 PolyWX corpus 的真实状态。
+- Build Order layer：项目治理 / Layer 0 状态校准；未进入 Layer 1+，未修改交易逻辑、算法、看板组件或执行工作台。
+- 改动：
+  - 重写整理 `AGENTS.md` 的 Markdown 结构，修复使命代码块未闭合、标题和命令块被打散的问题。
+  - 新增并强化 `Where Progress Lives`、`Turn Start Protocol`、`Turn End Protocol`：后续每轮必须先读 `PROJECT_PROGRESS_CN.md`，再看 git 状态；涉及 PolyWX 时先核验最新 `MANIFEST.json` 和 `SCHEMA_MAP_CN.md`，不能因为上下文压缩就重复 Firecrawl。
+  - 明确最终回复必须说明：当前能不能用、改了什么、验证结果、剩余阻塞、下一步、记录写在哪里。
+  - 明确 `audits/` 是本地研究证据，不提交；`PROJECT_PROGRESS_CN.md` 才是人类可读事实台账。
+  - 复核 `audits/polywx-firecrawl-2026-07-01/MANIFEST.json`：当前 `xhr_response_bodies=true`、`api_endpoints=true`、`five_tabs=true`、`hourly_chart=true`。
+  - 复核本地 XHR 证据文件：`audits/polywx-firecrawl-2026-07-01/network/chicago-kord/2026-07-01/xhr_capture.json`，scrape id 为 `019f1db5-1419-77d7-b55c-297ac1227be9`，捕获了 Forecast、METAR、Historical、PWS、Fetch Log、Diff Stats、Accuracy、Historical-METAR Match、Peak Marker、Prediction、Recommendations 等响应摘要。
+- 验证：
+  - `git diff --check` 通过；仅提示 Windows 工作区会把 `AGENTS.md`、`PROJECT_PROGRESS_CN.md` 的 LF 转为 CRLF，没有 whitespace error。
+  - `python -m unittest tests.test_v3_core` 通过：88 tests OK；仍有既有 sqlite `ResourceWarning: unclosed database` 噪音。
+  - `npm run build` 通过；仍有既有 Browserslist 过期和 chunk size warning。
+  - `/api/dashboard` runtime check：约 `214ms` 返回；`scanner_status=stopped`、`is_running=false`、`production_running=false`、`auto_refresh_running=false`、`last_refresh_was_auto=false`。
+  - Layer 0 manifest check：`five_tabs=true`、`hourly_chart=true`、`xhr_response_bodies=true`、`api_endpoints=true`、`files=17`、XHR scrape id `019f1db5-1419-77d7-b55c-297ac1227be9`。
+- 当前可用性结论：
+  - 项目当前仍是“可观察、可模拟、可继续生产化验证”的阶段，不是可无人值守实盘自动赚钱的机器人。
+  - PolyWX Layer 0 已经比旧台账更完整：有代表性 XHR response body 证据；但仍不是 PolyWX 完整源码克隆，也不是所有城市/日期的完整 API 归档。
+  - 回测/模拟当前有研发价值，可用于发现坏策略、数据缺口、盘口成本和低价尾桶问题；还不能证明稳定 edge。
+- 剩余阻塞：
+  - 结算 truth 覆盖和独立 settlement day 样本仍不足。
+  - 盘口级 orderbook replay、成交/退出流动性回放仍不足。
+  - 策略 allowed 组尚未证明长期 ROI 为正且优于 blocked 组。
+  - PolyWX corpus 的长响应多数保存为 `bodyPrefix + textLength + keys`，不是全量原文归档。
+- 下一步：
+  - 进入下一轮生产验证前，先从本台账和最新 manifest 继续；不重复 Firecrawl，除非新问题需要新的证据。
+  - 优先推进 Layer 1 `stations` 和 Layer 2 METAR/mesonet truth 数据基座，再继续 UI 像素级对齐或策略扩展。
+- 相关提交：待本轮如提交后回填。
+
 ### 2026-07-01：Layer 0 PolyWX Firecrawl corpus 重新生成
 
 - 目标：按 AGENTS.md 的 Build Order 先补 Layer 0，确认 `audits/polywx-firecrawl-2026-07-01/` 是否存在；不存在则先用 Firecrawl 生成语料，停止在 Layer 0，不触碰上层 schema/API/UI。

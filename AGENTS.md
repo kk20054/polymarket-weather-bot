@@ -10,7 +10,54 @@ WeatherBot is a production-oriented Polymarket weather trading platform. The goa
 real data foundation -> leakage-free probability model -> realistic paper execution -> production dashboard -> 14-30 day validation -> small live canary
 ```
 
-Do not claim or imply that the bot can reliably make money until the paper-trading and validation gates prove it. Current status is still Phase 1.5 to Phase 2 transition: usable for simulation and observation, not for unattended live trading.
+Do not claim or imply that the bot can reliably make money until paper-trading and validation gates prove it. Current status is still Phase 1.5 to Phase 2 transition: usable for observation and controlled simulation, not for unattended live trading.
+
+## Where Progress Lives
+
+- `PROJECT_PROGRESS_CN.md` is the authoritative project ledger. Every non-trivial development, research, Firecrawl, UI, data, algorithm, test, deployment, or debugging turn must append an entry before the final response.
+- `audits/polywx-firecrawl-<YYYY-MM-DD>/MANIFEST.json` is the authoritative PolyWX corpus index. Never infer corpus quality from directory names alone.
+- `audits/` contains local research evidence only. It can explain decisions, but it must not be committed.
+- Final answers after non-trivial work must say: current usable status, what changed, verification run, blockers, next step, and where the record was written.
+- When the user asks "where are we", "can I use it", "does backtest have value", or "is data guaranteed", answer from `PROJECT_PROGRESS_CN.md` plus current runtime evidence, not from memory or chat summaries.
+
+## Turn Start Protocol
+
+Before editing anything in this repository:
+
+1. Read `PROJECT_PROGRESS_CN.md` enough to know the current phase, latest completed layer, last verification, and blockers.
+2. Check git state with `git status --short --branch`.
+3. If the task involves PolyWX, Firecrawl, dashboard schema, or visual matching, open the latest `audits/polywx-firecrawl-*/MANIFEST.json` and `SCHEMA_MAP_CN.md` first.
+4. If a fresh crawl is not required by a new question, reuse existing evidence instead of repeating Firecrawl.
+5. If the dashboard appears stuck, first check `/api/dashboard` latency and live runtime fields before deeper browser debugging.
+
+## Turn End Protocol
+
+At the end of every non-trivial turn:
+
+1. Append a new entry to `PROJECT_PROGRESS_CN.md`.
+2. Include the Build Order layer, exact changed files, verification output, current usability conclusion, remaining blockers, and next step.
+3. If Firecrawl was used, record job ids or scrape ids, URLs, what succeeded, what failed, and whether the result changed architecture or code.
+4. If no code was changed, say so explicitly and run only the checks relevant to the documentation or research change.
+5. If a commit is made, update the ledger with the final commit hash.
+6. Do not let the only record of work live in the chat transcript, context summary, or `audits/`.
+
+## Build Order
+
+WeatherBot must be built from the data floor upward. Do not work on a higher layer until the lower layer has persisted rows, a regression test, and a `PROJECT_PROGRESS_CN.md` ledger entry.
+
+- Layer 0: PolyWX reference corpus using Firecrawl. Store under `audits/polywx-firecrawl-<YYYY-MM-DD>/` with `MANIFEST.json`, rendered DOM snapshots, XHR responses, screenshots, and `SCHEMA_MAP_CN.md`.
+- Layer 1: `stations` table for target cities, including ICAO/WMO ids, timezone, and settlement rule text.
+- Layer 2: `metar_reports` and `mesonet_observations` ingestion with parser unit tests.
+- Layer 3: `forecast_runs` and `forecast_members` for ECMWF, GFS, HRRR, Open-Meteo, DEB, and related inputs.
+- Layer 4: `hourly_consensus` view feeding charts and signal engine.
+- Layer 5: `market_buckets` with strict bucket matching, tick size, `orderMinSize`, `negRisk`, token id, and orderbook metadata.
+- Layer 6: `signal_decisions` with distribution, model-market edge, execution gate, evidence links, AI review, and paper/live decision.
+- Layer 7: PolyWX-shaped dashboard. It reads only from Layers 1-6 and must not create visual-only mock data paths.
+- Layer 8: Paper execution and risk gates.
+- Layer 9: 14-30 day validation.
+- Layer 10: Live canary.
+
+One turn should not modify more than one Build Order layer plus its immediate consumer. Split larger work and record each step in the ledger.
 
 ## Product Direction
 
@@ -20,55 +67,51 @@ Do not claim or imply that the bot can reliably make money until the paper-tradi
 - Use `suislanchez/polymarket-kalshi-weather-bot` only as a reference for FastAPI + SQLite + React dashboard structure and simulation ergonomics. Do not reintroduce BTC modules, Kalshi-first assumptions, or simple `edge > 8%` auto-trading logic.
 - Treat `alteregoeth-ai/weatherbot` as the airport-station and multi-source weather baseline, not as a production trading architecture.
 
-## PolyWX Local Reference State
+## PolyWX Reference Workflow
 
-- Current local PolyWX notes live under `audits/polywx-firecrawl-reference-2026-07-01/` and `audits/polywx-full-reference-2026-07-01/`.
-- As of 2026-07-01, those directories contain summary `README_CN.md` files, not a complete copy of PolyWX source code, backend APIs, screenshots, static bundles, or all query-parameter city/date pages.
-- Do not claim "PolyWX has been fully crawled" merely because a directory named `polywx-full-reference-*` exists. Inspect the directory contents first.
-- After context compression, re-check the current files before relying on earlier crawl status. Treat previous chat memory as a pointer, not proof.
-- If a future turn creates a real reference corpus, it should include at minimum: fixed city/date sample list, rendered DOM snapshots, screenshots, discovered static assets, visible network/API responses, Firecrawl job ids, and a `MANIFEST.json` with counts and timestamps.
-- Keep all PolyWX reference corpus files under `audits/`; they are local research artifacts and must not be committed to GitHub.
+Before any dashboard, schema, or "align with PolyWX" task, verify a fresh PolyWX reference corpus exists. If it does not, produce it with Firecrawl in this order:
 
-## Progress Ledger
+1. `firecrawl_map` on `https://polywx.xyz` to enumerate reachable routes and query-parameter permutations. Save raw output.
+2. `firecrawl_search` for module-level keywords: `Forecast`, `METAR`, `Historical`, `Diff Stats`, `Fetch Log`, `Hourly Temperature`, `Daily Max Prediction`, `Probability buckets`.
+3. `firecrawl_scrape` with JavaScript rendering for each of the five tabs and the hourly chart. Capture rendered DOM, visible network calls, and inline JSON when available.
+4. For at least 3 cities x 3 dates, scrape city/date URLs and store outputs under `audits/polywx-firecrawl-<YYYY-MM-DD>/<city>/<date>/`.
+5. Write `MANIFEST.json` with crawl start/end time, Firecrawl ids, sha256 file list, discovered API endpoints, JS-rendered/static status, unresolved gaps, and per-tab coverage counts.
+6. Write `SCHEMA_MAP_CN.md` mapping each PolyWX field to a WeatherBot SQLite column and dashboard component.
 
-- `PROJECT_PROGRESS_CN.md` is the authoritative human-readable progress ledger.
-- At the end of every non-trivial development, research, Firecrawl, UI, data, algorithm, test, or deployment turn, update `PROJECT_PROGRESS_CN.md` before the final response.
-- Each entry must state: goal, concrete changes, verification run, current usability conclusion, remaining blockers, next step, and commit hash if one exists.
-- Do not rely on chat history, context summaries, or `audits/` folders as the only record of progress. They may help, but they are not the project ledger.
-- If a turn uses Firecrawl, record what was actually fetched, job ids if available, what failed, and whether the result changed architecture or code. Avoid repeating the same crawl unless the ledger shows a new question that requires it.
-- When the user asks "where are we" or "can I use it", answer from `PROJECT_PROGRESS_CN.md` plus current runtime evidence, not from memory.
+Corpus validity requires `MANIFEST.json` less than 14 days old, all five tabs plus hourly chart, and at least representative XHR response body evidence. A static markdown-only scrape is not valid because PolyWX is a JS-rendered SPA.
+
+Never say PolyWX has been "fully crawled" unless the manifest proves it. Current accepted wording for partial evidence is "rendered evidence corpus" or "representative XHR corpus", not "full source clone".
 
 ## Reference Fusion Architecture
 
-Use these external repositories as design inputs, not as code to copy blindly. Every borrowed idea must be mapped into WeatherBot's data, audit, paper-trading, and risk-control model.
+Use external repositories as design inputs, not code to copy blindly. Every borrowed idea must be mapped into WeatherBot's data, audit, paper-trading, and risk-control model and pinned to a Build Order layer.
 
-- `punkpeye/awesome-mcp-servers`: treat as a discovery index for research and data-acquisition tools. MCPs are supporting adapters, not core trading dependencies. Record whether each tool is local or cloud, whether it needs credentials, whether it can mutate state, and what evidence it produced. Firecrawl is allowed for PolyWX/GitHub/source research; production weather and trading decisions must still use typed WeatherBot collectors and persisted database rows.
-- `python-metar/python-metar`: use as the METAR/SPECI decoding model. WeatherBot needs a first-class METAR ingestion layer that stores the raw report plus decoded temperature, dew point, wind, gust, visibility, cloud layers, altimeter/pressure, precipitation, sea-level pressure, peak wind, station id, report time, source URL, parser version, and parse warnings. NOAA current station TXT and 24-hour cycle files are valid collection targets. METAR supports D+0 and intraday evidence; it is not automatically final settlement truth unless the market rule says the airport METAR station is the settlement source.
-- `Polymarket/*`: official market and CLOB references define execution boundaries. Prefer the current official unified SDK or documented CLOB flow for new execution work, and keep legacy client quirks isolated behind a `PolymarketExecutor` adapter. Every order path must fetch or persist token id, tick size, negRisk, orderMinSize, best bid/ask, book timestamp, allowance/balance state, idempotency key, and exact API response. First production shape remains BUY YES limit-only GTC/dry-run/canary; market orders, FOK/FAK, automated size escalation, and deposit-wallet auth workarounds are forbidden until explicitly validated.
-- `yangyuan-zhen/PolyWeather`: borrow the production weather-intelligence shape: city terminal, observation-driven chart updates, aviation METAR/TAF, official nearby-network layers, DEB/hourly consensus, full bucket distribution, strict market-bucket matching, SSE/event replay, health/metrics endpoints, and a clear public/private trading boundary. Do not copy subscription/payment/growth code or private strategy thresholds. The useful product idea is a city/date evidence terminal where observations, forecasts, settlement station, probability buckets, and market quotes are generated from one auditable core.
+- `punkpeye/awesome-mcp-servers`: discovery index for research and data-acquisition tools. MCPs are supporting adapters, not core trading dependencies. Firecrawl is allowed for PolyWX/GitHub/source research; production decisions must still use typed collectors and persisted database rows. Layer 0 only.
+- `python-metar/python-metar`: METAR/SPECI decoding model. Store raw report plus decoded temperature, dew point, wind, gust, visibility, cloud layers, altimeter/pressure, precipitation, sea-level pressure, peak wind, station id, report time, source URL, parser version, and parse warnings. Layer 2.
+- `Polymarket/*`: official market and CLOB references define execution boundaries. Keep order creation behind a `PolymarketExecutor` adapter with token id, tick size, `negRisk`, `orderMinSize`, best bid/ask, book timestamp, allowance/balance state, idempotency key, and exact API response. Layer 5 boundary plus Layer 8 execution.
+- `yangyuan-zhen/PolyWeather`: borrow the city terminal shape, observation-driven chart updates, aviation METAR/TAF, nearby official network layers, DEB/hourly consensus, full bucket distribution, strict market-bucket matching, SSE/event replay, health endpoints, and public/private trading boundary. Layers 4-7.
+- PolyWX corpus: dashboard visual evidence and signal evidence surface. Layers 6-7.
 
-### WeatherBot Target Data Foundation
-
-The next architecture pass should make these data layers explicit in SQLite and API payloads:
+## Target Data Foundation
 
 - `stations`: city key, display name, ICAO/WMO/provider station ids, timezone, settlement rule text, primary settlement source, nearby observation networks, and confidence.
 - `metar_reports`: raw METAR/SPECI text, decoded fields, parser version, report time, station id, source URL, fetch time, parse status, and parse warnings.
-- `mesonet_observations`: non-METAR official/local networks such as JMA AMeDAS, HKO, CWA, AMOS, NWS/NOAA, airport runway sensors, and other rule-relevant station feeds. These rows must be labeled as observation evidence, not settlement truth by default.
+- `mesonet_observations`: non-METAR official/local networks such as JMA AMeDAS, HKO, CWA, AMOS, NWS/NOAA, airport runway sensors, and other rule-relevant station feeds. Label as observation evidence, not settlement truth by default.
 - `forecast_runs` and `forecast_members`: ECMWF/GFS/HRRR/Open-Meteo/DEB inputs with run time, valid time, horizon, member values, and source quality.
-- `hourly_consensus`: one city/date/hour path used by the chart and signal engine; it must separate real observations, forecast consensus, TAF timing markers, cloud/humidity, and residuals.
-- `market_buckets`: all Polymarket outcomes for a city/date event, with exact/range/or-higher/or-lower direction, token id, quote, tick size, orderMinSize, and strict matching status.
+- `hourly_consensus`: one city/date/hour path for chart and signal engine, separating observations, forecast consensus, timing markers, cloud/humidity, and residuals.
+- `market_buckets`: all Polymarket outcomes for a city/date event, with exact/range/or-higher/or-lower direction, token id, quote, tick size, `orderMinSize`, and strict matching status.
 - `signal_decisions`: distribution, model-market edge, execution gate, AI review, paper/live decision, skip reason, and source evidence links.
 
-### PolyWX / PolyWeather Dashboard Generation Rules
+## Dashboard Generation Rules
 
-- The dashboard should be generated from the same city/date evidence payload that powers signals. Do not build separate visual-only mock data paths.
+- Generate the dashboard from the same city/date evidence payload that powers signals.
 - Each city page should show one primary hourly chart, one probability/market bucket module, then five tabbed evidence tables: Forecast, METAR, Historical, Diff Stats, Fetch Log.
-- The hourly chart must make observation provenance clear: Real METAR or official observation lines are solid; model/DEB forecasts are dashed; residuals are red/blue bars; humidity/cloud can be secondary bars only when real data exists.
+- Observation lines are solid; model/DEB forecasts are dashed; residuals are red/blue bars; humidity/cloud can be secondary bars only when real data exists.
 - The METAR tab must show raw report, decoded temperature/dew point/wind/cloud/pressure/precipitation, report age, parser warnings, and station-local time.
 - The Historical tab must distinguish settlement truth, METAR history, official nearby-network history, and Open-Meteo fallback. Fallback rows must not unlock live gates.
 - The Diff Stats tab must compute observed minus forecast, MAE/bias/Pearson R, overlap count, source coverage, and whether the sample is independent by settlement day.
-- The Fetch Log tab must use structured backend rows (`source`, `stage`, `status`, `duration`, `message`, `details`) rather than guessing from raw UI events.
-- The recommendation/focus area should highlight cities with fresh observations, market liquidity, clean bucket matching, high evidence coverage, and actionable but still gated paper signals.
+- The Fetch Log tab must use structured backend rows: source, stage, status, duration, message, and details.
+- Recommendation/focus areas should highlight cities with fresh observations, market liquidity, clean bucket matching, high evidence coverage, and actionable but gated paper signals.
 
 ## Technology Stack
 
@@ -83,11 +126,20 @@ The next architecture pass should make these data layers explicit in SQLite and 
 ## Directory Boundaries
 
 - `weatherbot_v3/`: production modules for config, DB, truth, forecast archives, distributions, qualification, execution, AI review, notifications, and CLI utilities.
-- `dashboard_server.py`: API and adapter layer only. Keep business logic moving into `weatherbot_v3/` when practical.
+- `dashboard_server.py`: API and adapter layer only. Move business logic into `weatherbot_v3/` when practical.
 - `frontend/src/components/`: dashboard UI components.
 - `tests/`: core regression tests, especially `tests/test_v3_core.py`.
 - `legacy/`: read-only historical snapshot unless the user explicitly asks for legacy work.
 - `data/`, `.env`, `config.json`, `.venv/`, `frontend/dist/`, `node_modules/`, `backups/`, and `audits/`: local state or generated artifacts; do not commit.
+
+## Agent Guardrails
+
+- Plan before code for Layers 0-6. For those layers, output a numbered plan and wait for user confirmation unless the user already provided an explicit implementation plan.
+- No fabricated data. If a PolyWX field, API endpoint, unit, or schema is unknown, inspect the corpus or run Firecrawl. If evidence is unavailable, stop and ask.
+- Scope lock: files outside the current layer are read-only unless the user names them. The right-column trading workbench and `legacy/` are always read-only unless the task title mentions them.
+- Ask before deleting or rewriting existing collectors, tables, or components.
+- Ask before broad refactors, renames, or moves outside the current layer.
+- Verification is mandatory. A turn without a ledger entry and verification note is incomplete.
 
 ## UI Rules
 
@@ -95,63 +147,61 @@ The next architecture pass should make these data layers explicit in SQLite and 
 - Left column: city index, search, recommendation focus, station and signal summaries only.
 - Center column: one city and one date. Show forecast, METAR, historical observations, bias statistics, fetch logs, market signals, and expandable details.
 - Right column: paper account, one-click simulation, signal queue, trade records, and controlled execution actions.
-- System readiness, data gates, truth health, model dataset audit, equity curve, and long explanations belong in folded "system / review / risk" areas, not the first viewport.
-- Long text must go into `details`, tooltips, row expansion, or a secondary tab.
-- Avoid duplicate city headings. Keep the selected city, station, date, signal state, and data freshness visible when the center panel scrolls.
-- Empty states must be useful and calm: show what is missing and which manual action can refresh it. Do not trigger automatic scans just because a panel is empty.
+- System readiness, data gates, truth health, model dataset audit, equity curve, and long explanations belong in folded system/review/risk areas, not the first viewport.
+- Long text belongs in details, tooltips, row expansion, or secondary tabs.
+- Avoid duplicate city headings. Keep selected city, station, date, signal state, and data freshness visible when the center panel scrolls.
+- Empty states should show what is missing and which manual action can refresh it. Do not trigger automatic scans because a panel is empty.
 - Desktop and mobile layouts must avoid horizontal overflow. Left, center, and right columns should scroll independently on desktop.
 
-## PolyWX Workbench Theme Contract
+## PolyWX Theme Contract
 
-When the task is to align with PolyWX, use the current PolyWX page as the product baseline, but preserve WeatherBot trading controls and auditability.
-
-- Theme support: WeatherBot must support both PolyWX-style light and dark modes. Do not hard-code the page into one theme. Persist the user's theme choice locally.
-- Light visual style: use `#FFFFFF` page/panel backgrounds, `#111827` primary text, `border-gray-200` borders, and restrained gray secondary text.
-- Dark visual style: align with Firecrawl-extracted PolyWX branding: `#161A22` page background, `#1B212C` panels, `#222A37` raised/input surfaces, `#2C3445` borders, `#CBD2DC` primary text, `#7D8694` secondary text, and `#2563EB` primary accent.
-- Avoid decorative gradients, heavy dashboard chrome, and high-saturation panels unless a specific data state requires them.
-- Corners: use straight edges everywhere. Containers, buttons, tabs, inputs, tables, and cards must be `rounded-none` or equivalent.
-- Top filter bar: must expose City switching, Continent filtering, and a date switcher with previous/next/today behavior. Keep these controls in the primary path, not hidden in details.
-- Tabs: the city workbench must include exactly these five primary data tabs, localized in Chinese when the surrounding UI is Chinese: `预报`, `METAR`, `历史`, `偏差统计`, `抓取日志`. Tabs are straight-edged segmented controls, not pill buttons.
-- Hourly Temperature chart: use Recharts `ResponsiveContainer` and a 24-hour chart from `00:00` to `23:00`. The production target is a dual-axis line chart: Real METAR as a solid black line `#000000`, Model Forecast as a gray dashed line `#6B7280` with `strokeDasharray="4 4"`, and Diff residuals as red/blue bars near the bottom.
-- Tables: tab interiors should use standard HTML tables. Header cells are bold with `#F9FAFB` background; rows use fixed `py-2 px-4` spacing and `hover:bg-gray-50`. Preserve horizontal scrolling for wide schemas instead of compressing text into unreadable cells.
-- PolyWX evidence to preserve: product/version placement, language toggle, light-mode indicator, manual refresh action, city list by continent, date controls, `Forecast / METAR / Historical / Diff Stats / Fetch Log` information architecture, hourly chart, forecast table schema, METAR/historical observation schemas, Diff Stats, and Fetch Log.
-- Do not copy PolyWX membership, voting, feedback, branding, or non-trading prompts. WeatherBot's right side remains the controlled paper/live execution workbench.
+- Support both PolyWX-style light and dark modes. Persist the user's theme choice locally.
+- Light style: `#FFFFFF` page/panel backgrounds, `#111827` primary text, `border-gray-200` borders, restrained gray secondary text.
+- Dark style: `#161A22` page background, `#1B212C` panels, `#222A37` raised/input surfaces, `#2C3445` borders, `#CBD2DC` primary text, `#7D8694` secondary text, `#2563EB` accent.
+- Avoid decorative gradients, heavy chrome, and high-saturation panels unless a specific data state requires them.
+- Use straight edges. Containers, buttons, tabs, inputs, tables, and cards should be `rounded-none` or equivalent.
+- Top filter bar exposes city switching, continent filtering, and previous/next/today date controls.
+- City workbench tabs are exactly: `预报`, `METAR`, `历史`, `偏差统计`, `抓取日志`.
+- Hourly chart target: Recharts `ResponsiveContainer`, 24-hour chart from `00:00` to `23:00`, METAR/real observation solid line, model forecast dashed line, residual bars near the bottom.
+- Tables use standard HTML tables with horizontal scrolling for wide schemas.
+- Do not copy PolyWX membership, voting, feedback, branding, or non-trading prompts. WeatherBot's right side remains the controlled execution workbench.
 
 ## Data And Algorithm Rules
 
 - Settlement truth is the foundation. Production calibration must use station-level or official/paid truth where possible.
-- Open-Meteo archive is only a low-confidence fallback. It cannot unlock live trading.
+- Open-Meteo archive is low-confidence fallback only. It cannot unlock live trading.
 - METAR hourly observations are useful for D+0 reasoning but are not automatically final daily settlement truth.
 - Probability must be stored and displayed as an auditable distribution, not just a single bucket EV.
-- Every signal should preserve enough evidence to reconstruct the decision: market rule, station, date, forecast run, truth version, orderbook snapshot, distribution, risk gate, and paper/live decision.
+- Every signal must preserve enough evidence to reconstruct the decision: market rule, station, date, forecast run, truth version, orderbook snapshot, distribution, risk gate, and paper/live decision.
 - Independent settlement days matter more than repeated snapshots. Do not treat many snapshots from one market day as many independent samples.
 - Low-price tail buckets, thin orderbooks, stale books, high spread, missing tick/orderMinSize, missing station truth, and short calibration history must be gated hard.
-- Strategy changes must prove that allowed groups outperform blocked groups in paper/backtest before any live canary expansion.
+- Strategy changes must prove that allowed groups outperform blocked groups in paper/backtest before live canary expansion.
 
 ## Execution Safety
 
-- Backend startup must be lightweight: do not auto-fetch weather, do not resume auto simulation, and do not start legacy infinite scans by default.
-- Data refresh should be triggered by the dashboard "manual fetch" action or by explicit environment variables such as `WEATHERBOT_AUTO_REFRESH=true`.
+- Backend startup must be lightweight: do not auto-fetch weather, resume auto simulation, or start legacy infinite scans by default.
+- Data refresh should be triggered by the dashboard action or explicit environment variables such as `WEATHERBOT_AUTO_REFRESH=true`.
 - Do not start `weatherbet.py` legacy loops unless the user explicitly asks.
-- Live trading defaults remain off. Live execution must stay behind `LIVE_TRADING=false` by default, dry-run checks, risk gates, and canary sizing.
-- First live behavior, when allowed in the future, is BUY YES limit-only canary with strict idempotency, balance, tick size, orderMinSize, stale-book, duplicate-order, spread, and daily-limit checks.
+- Live trading defaults remain off. Live execution stays behind `LIVE_TRADING=false`, dry-run checks, risk gates, and canary sizing.
+- First live behavior, when allowed, is BUY YES limit-only canary with strict idempotency, balance, tick size, `orderMinSize`, stale-book, duplicate-order, spread, and daily-limit checks.
 
 ## Naming And Code Style
 
 - Python functions, variables, and DB helpers use `snake_case`.
 - React components use `PascalCase`.
-- Frontend local state and TypeScript props may use camelCase; backend payload fields generally remain snake_case unless an existing adapter maps them.
+- Frontend local state and TypeScript props may use camelCase; backend payload fields generally remain snake_case unless an adapter maps them.
 - New database tables, risk events, policy names, and log stages must use explicit, auditable names. Avoid vague abbreviations.
 - Keep changes scoped. Do not refactor unrelated modules while fixing UI, data, or execution behavior.
-- Use UTF-8 for Chinese docs and dashboard copy. Avoid introducing garbled text; read Chinese files with UTF-8 in PowerShell.
+- Use UTF-8 for Chinese docs and dashboard copy.
 
 ## Tools And Workflow
 
 - Use `rg` / `rg --files` first for repo search.
 - Use `apply_patch` for manual tracked-file edits.
-- For UI/product work, use the Product Design and data-visualization skills when requested or relevant.
-- For PolyWX research, use Firecrawl in this order: `firecrawl_map` or `firecrawl_search` first, then a schema-scoped `firecrawl_scrape` for specific modules/fields. Avoid long `firecrawl_interact`, broad markdown scrapes, or feedback calls in the critical path when they are not necessary for the current edit.
-- Browser verification should use the in-app browser when available. Before spending time on browser debugging, quickly check `/api/dashboard` latency and runtime state.
+- For UI/product work, use Product Design and data-visualization skills when requested or relevant.
+- For PolyWX research, follow the PolyWX Reference Workflow. Avoid long broad crawls when the existing manifest already answers the question.
+- Browser verification should use the in-app browser when available.
+- Before spending time on browser debugging, check `/api/dashboard` latency and runtime state.
 - Figma is a design baseline and communication tool. It does not replace code, runtime, or browser acceptance checks.
 - For GitHub work, keep local git state and remote branch aligned. Stage only intended files.
 
@@ -177,31 +227,43 @@ $d=Invoke-RestMethod -Uri 'http://127.0.0.1:8765/api/dashboard'
   scanner_status=$d.stats.scanner_status
   is_running=$d.stats.is_running
   auto_simulation_enabled=$d.auto_simulation.enabled
+  production_running=$d.production_refresh.running
+  auto_refresh_running=$d.production_refresh.auto_refresh_running
 } | ConvertTo-Json
 ```
 
+For Firecrawl / Layer 0 turns, additionally verify:
+
+- `audits/polywx-firecrawl-<YYYY-MM-DD>/MANIFEST.json` exists.
+- Manifest covers all five tabs plus the hourly chart.
+- At least 3 cities x 3 dates were scraped with JS rendering when the task requires a full representative corpus.
+- At least representative XHR response body evidence is captured and recorded.
+- `SCHEMA_MAP_CN.md` maps captured fields to WeatherBot columns and dashboard components.
+
 For frontend changes, also verify in a browser:
 
-- No long-lived "正在连接本地看板 API".
+- No long-lived `正在连接本地看板 API`.
 - No console errors or warnings introduced by the change.
 - No horizontal overflow on the main dashboard.
 - Left, center, and right columns remain independently scrollable on desktop.
 - Live trading remains locked unless the task explicitly implements canary validation.
 
-## Git Discipline
-
-- Check status before editing and before committing:
+For docs-only turns, run at least:
 
 ```powershell
-git -c safe.directory=C:/Users/Administrator/Documents/polymarket/weatherbot status --short --branch
+git diff --check
+git status --short --branch
 ```
 
+## Git Discipline
+
+- Check status before editing and before committing.
 - Do not stage unrelated user changes.
 - Do not commit `audits/`, `data/`, `.env`, `config.json`, `.venv/`, `frontend/dist/`, `node_modules/`, or secrets.
 - Prefer explicit staging:
 
 ```powershell
-git -c safe.directory=C:/Users/Administrator/Documents/polymarket/weatherbot add -- AGENTS.md
+git -c safe.directory=C:/Users/Administrator/Documents/polymarket/weatherbot add -- AGENTS.md PROJECT_PROGRESS_CN.md
 ```
 
 - Before push, confirm the diff contains only intended files.
@@ -211,5 +273,5 @@ git -c safe.directory=C:/Users/Administrator/Documents/polymarket/weatherbot add
 Use this as the next Codex goal when starting the production validation and dashboard pass:
 
 ```text
-Continue WeatherBot v6 production validation and dashboard remediation. Follow AGENTS.md. The project goal is real data foundation -> leakage-free probability model -> realistic paper execution -> production dashboard -> 14-30 day validation -> small live canary. Continue optimizing the UI around a PolyWX-style city workbench: left side only city index, recommendation focus, and search; center city page shows forecast, METAR, historical observations, bias statistics, fetch logs, market signals, and expandable details; right side only paper account, signal queue, trade records, and controlled actions. Do not put data gates, long explanations, equity curves, or system audits in the first viewport; place them in folded system/review/risk areas. Keep backend startup lightweight: no auto fetch, no auto simulation resume, no legacy scan. After each change, run Python unittest, frontend build, /api/dashboard latency/runtime checks, and browser UI verification. Before commit, confirm no data/config/.env/.venv/audits artifacts are staged.
+Continue WeatherBot v6 production validation and dashboard remediation. Follow AGENTS.md. Start by reading PROJECT_PROGRESS_CN.md and the latest PolyWX MANIFEST instead of repeating prior crawls. The project goal is real data foundation -> leakage-free probability model -> realistic paper execution -> production dashboard -> 14-30 day validation -> small live canary. Continue one Build Order layer at a time. Keep backend startup lightweight: no auto fetch, no auto simulation resume, no legacy scan. After each change, update PROJECT_PROGRESS_CN.md with usability, verification, blockers, and next step. Before commit, confirm no data/config/.env/.venv/audits artifacts are staged.
 ```
