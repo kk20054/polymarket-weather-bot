@@ -1328,6 +1328,7 @@ function App() {
               selectedCity={selectedCity}
               onSelectedCity={setSelectedCity}
               selectedDate={selectedDate}
+              selectedDateEvidence={selectedDateEvidence}
               onSelectedDate={setSelectedDate}
               onRefreshWeather={() => productionRefreshMutation.mutate({
                 cities: selectedCity ? [selectedCity] : [],

@@ -719,6 +719,30 @@ export interface CityEvidenceModule {
   series?: string[]
   empty_state?: string
   strict_matching_required?: boolean
+  summary?: CityEvidenceDiffStatsSummary
+}
+
+export interface CityEvidenceDiffStatsRow {
+  timestamp?: string
+  local_hour?: string
+  observed?: number | null
+  forecast?: number | null
+  delta?: number | null
+  source?: string
+}
+
+export interface CityEvidenceDiffStatsSummary {
+  count?: number
+  avg_delta?: number | null
+  mae?: number | null
+  pearson_r?: number | null
+  metar_hours?: number
+  forecast_hours?: number
+  overlap_count?: number
+  overlap_ratio?: number | null
+  historical_metar_overlap_count?: number
+  historical_metar_overlap_ratio?: number | null
+  rows?: CityEvidenceDiffStatsRow[]
 }
 
 export interface CityEvidenceDate {

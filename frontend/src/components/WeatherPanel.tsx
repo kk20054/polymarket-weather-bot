@@ -12,7 +12,7 @@ import {
   YAxis,
 } from 'recharts'
 import { CloudSun, Database, ExternalLink, RefreshCw, Signal, ThermometerSun } from 'lucide-react'
-import type { DashboardEvent, DistributionItem, FetchLogRow, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DistributionItem, FetchLogRow, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -24,6 +24,7 @@ interface Props {
   selectedCity?: string
   onSelectedCity?: (cityKey: string) => void
   selectedDate?: string
+  selectedDateEvidence?: CityEvidenceDate
   onSelectedDate?: (date: string) => void
   onRefreshWeather?: () => void
   weatherRefreshing?: boolean
@@ -547,6 +548,7 @@ export function WeatherPanel({
   selectedCity,
   onSelectedCity,
   selectedDate: controlledSelectedDate,
+  selectedDateEvidence,
   onSelectedDate,
   onRefreshWeather,
   weatherRefreshing = false,
@@ -1127,7 +1129,13 @@ export function WeatherPanel({
 
         {activeWorkbenchTab === 'diff' && (
           <div className="space-y-2 p-2">
-            <DiffStatsPanel rows={hourlyRows} chartData={chartData} unit={unit} selectedDate={selectedDate} />
+            <DiffStatsPanel
+              rows={hourlyRows}
+              chartData={chartData}
+              unit={unit}
+              selectedDate={selectedDate}
+              evidenceSummary={selectedDateEvidence?.modules?.diff_stats?.summary}
+            />
             <details className="border border-neutral-800 bg-neutral-950/30">
               <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
                 Calibration detail · average delta / Pearson R / truth
@@ -1399,11 +1407,13 @@ function DiffStatsPanel({
   chartData,
   unit,
   selectedDate,
+  evidenceSummary,
 }: {
   rows: HourlyWeatherRow[]
   chartData: WeatherChartRow[]
   unit: string
   selectedDate: string
+  evidenceSummary?: CityEvidenceDiffStatsSummary
 }) {
   const hourlyPairs = rows
     .filter(row => row.forecast !== null && row.forecast !== undefined && row.metar !== null && row.metar !== undefined)
@@ -1450,6 +1460,18 @@ function DiffStatsPanel({
     tableRows.map(row => row.observed)
   )
   const maxAbsDelta = Math.max(1, ...deltas.map(delta => Math.abs(delta)))
+  const summaryCount = evidenceSummary?.count ?? tableRows.length
+  const summaryAvgDelta = evidenceSummary?.avg_delta ?? avgDelta
+  const summaryMae = evidenceSummary?.mae ?? (deltas.length ? mean(deltas.map(delta => Math.abs(delta))) : null)
+  const summaryPearson = evidenceSummary?.pearson_r ?? correlation
+  const summaryOverlap = evidenceSummary?.overlap_ratio
+  const summaryOverlapLabel = summaryOverlap === null || summaryOverlap === undefined
+    ? (summaryCount ? `${summaryCount}` : '--')
+    : fmtProb(summaryOverlap)
+  const summaryOverlapSub = summaryOverlap === null || summaryOverlap === undefined
+    ? 'paired samples'
+    : `${evidenceSummary?.overlap_count ?? 0}/${Math.max(evidenceSummary?.metar_hours ?? 0, evidenceSummary?.forecast_hours ?? 0, 1)} hours`
+  const historyMetarOverlap = evidenceSummary?.historical_metar_overlap_ratio
 
   return (
     <section className="border border-neutral-800 bg-black">
@@ -1461,9 +1483,11 @@ function DiffStatsPanel({
         <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">{hourlyPairs.length > 0 ? 'hourly' : 'daily history'}</span>
       </div>
       <div className="grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] gap-2 border-b border-neutral-900 p-2">
-        <MetricCard label="Average Delta" value={fmtSignedTemp(avgDelta, unit)} sub="Observed - Forecast" />
-        <MetricCard label="Accuracy" value={fmtPearson(correlation)} sub="Pearson R" />
-        <MetricCard label="Overlap" value={tableRows.length ? `${tableRows.length}` : '--'} sub="paired samples" />
+        <MetricCard label="Average Delta" value={fmtSignedTemp(summaryAvgDelta, unit)} sub="Observed - Forecast" />
+        <MetricCard label="MAE" value={summaryMae === null ? '--' : fmtTemp(summaryMae, unit)} sub="mean abs error" />
+        <MetricCard label="Accuracy" value={fmtPearson(summaryPearson)} sub="Pearson R" />
+        <MetricCard label="Overlap" value={summaryOverlapLabel} sub={summaryOverlapSub} />
+        <MetricCard label="Hist↔METAR" value={historyMetarOverlap === null || historyMetarOverlap === undefined ? '--' : fmtProb(historyMetarOverlap)} sub={`${evidenceSummary?.historical_metar_overlap_count ?? 0} hrs`} />
         <MetricCard label="Max Abs Delta" value={fmtTemp(Math.max(0, ...deltas.map(delta => Math.abs(delta))), unit)} sub="worst visible row" />
       </div>
       {tableRows.length === 0 ? (
