@@ -105,7 +105,7 @@
 - 下一步：
   - 进入下一轮生产验证前，先从本台账和最新 manifest 继续；不重复 Firecrawl，除非新问题需要新的证据。
   - 优先推进 Layer 1 `stations` 和 Layer 2 METAR/mesonet truth 数据基座，再继续 UI 像素级对齐或策略扩展。
-- 相关提交：待本轮如提交后回填。
+- 相关提交：`70bcee2 Record project progress protocol`；随后 ledger-hash 回填提交记录本行。
 
 ### 2026-07-01：Layer 0 PolyWX Firecrawl corpus 重新生成
 
