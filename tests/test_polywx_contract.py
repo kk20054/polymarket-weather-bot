@@ -77,25 +77,25 @@ class PolyWXDashboardContractTests(unittest.TestCase):
 
         for tab_id in ("'forecast'", "'metar'", "'historical'", "'diff'", "'fetch'"):
             self.assertIn(tab_id, panel)
-        for label in ("预报", "METAR", "历史", "偏差统计", "抓取日志"):
+        for label in ("预报", "METAR", "历史观测", "偏差统计", "抓取日志"):
             self.assertIn(label, panel)
 
         self.assertIn("const CONTINENTS", panel)
         self.assertIn("value={continentFilter}", panel)
         self.assertIn("value={cityKey}", panel)
-        self.assertIn("dateOptions", panel)
-        self.assertIn('aria-label="Select date"', panel)
+        self.assertIn('type="date"', panel)
+        self.assertIn('aria-label="选择日期"', panel)
 
     def test_hourly_temperature_chart_keeps_linechart_and_residual_contract(self):
         panel = read_text("frontend/src/components/WeatherPanel.tsx")
 
         self.assertIn("function placeholderHourlyRow", panel)
         self.assertIn("Array.from({ length: 24 }", panel)
-        self.assertIn("<LineChart data={chartRows}", panel)
-        self.assertIn('name="Real METAR" stroke="#000000"', panel)
-        self.assertIn('name="Model Forecast" stroke="#6B7280"', panel)
+        self.assertIn("<ComposedChart data={chartRows}", panel)
+        self.assertIn('name="METAR 实测" stroke="#F8FAFC"', panel)
+        self.assertIn('name="预报" stroke="#38BDF8"', panel)
+        self.assertIn('dataKey="cloud_pct" name="Cloud / RH"', panel)
         self.assertIn('strokeDasharray="4 4"', panel)
-        self.assertIn('dataKey="gap_c" name="Diff"', panel)
         self.assertIn('aria-label="Diff residual bars"', panel)
         self.assertIn("bg-red-500", panel)
         self.assertIn("bg-blue-500", panel)

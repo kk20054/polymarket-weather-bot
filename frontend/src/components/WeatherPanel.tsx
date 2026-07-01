@@ -4,14 +4,13 @@ import {
   CartesianGrid,
   Cell,
   ComposedChart,
-  LineChart,
   Line,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts'
-import { CloudSun, Database, ExternalLink, RefreshCw, Signal, ThermometerSun } from 'lucide-react'
+import { CloudSun, Database, ExternalLink, Signal, ThermometerSun } from 'lucide-react'
 import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DistributionItem, FetchLogRow, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
@@ -104,11 +103,11 @@ type EvidenceCardItem = {
 type WeatherWorkbenchTab = 'forecast' | 'metar' | 'historical' | 'diff' | 'fetch'
 
 const WORKBENCH_TABS: Array<{ id: WeatherWorkbenchTab; label: string; note: string }> = [
-  { id: 'forecast', label: '预报', note: 'Hourly Temperature + DEB + Forecast Data' },
-  { id: 'metar', label: 'METAR', note: 'Station observations' },
-  { id: 'historical', label: '历史', note: 'Settlement-truth history' },
-  { id: 'diff', label: '偏差统计', note: 'Observed - Forecast' },
-  { id: 'fetch', label: '抓取日志', note: 'Last 100 events' },
+  { id: 'forecast', label: '预报', note: '逐小时气温 + DEB + 分桶' },
+  { id: 'metar', label: 'METAR', note: '机场实况观测' },
+  { id: 'historical', label: '历史观测', note: '结算/站点历史' },
+  { id: 'diff', label: '偏差统计', note: '实测 - 预报' },
+  { id: 'fetch', label: '抓取日志', note: '最近数据任务' },
 ]
 
 const CONTINENTS = ['全部', 'Americas', 'Europe', 'Asia', 'Pacific', 'Africa', 'Other'] as const
@@ -434,7 +433,7 @@ function evidenceStatus(value?: string | null, staleAfterMinutes = 180): Evidenc
 function statusClass(status: EvidenceStatus) {
   if (status === 'fresh') return 'border-green-500/25 bg-green-500/5 text-green-200'
   if (status === 'stale') return 'border-amber-500/25 bg-amber-500/5 text-amber-200'
-  return 'border-neutral-800 bg-neutral-950 text-neutral-500'
+  return 'border-red-500/25 bg-red-500/5 text-red-200'
 }
 
 function latestBy<T>(items: T[], predicate: (item: T) => boolean, getter: (item: T) => string | undefined | null): T | undefined {
@@ -550,10 +549,6 @@ export function WeatherPanel({
   selectedDate: controlledSelectedDate,
   selectedDateEvidence,
   onSelectedDate,
-  onRefreshWeather,
-  weatherRefreshing = false,
-  onBackfillHistory,
-  backfilling = false,
   backfillResult,
 }: Props) {
   const cities = useMemo(() => uniqueCities(citySeries, forecasts), [citySeries, forecasts])
@@ -651,11 +646,7 @@ export function WeatherPanel({
   const forecastStatus = evidenceStatus(latestForecast?.timestamp)
   const metarStatus = evidenceStatus(latestMetar?.timestamp, 45)
   const historyStatus = latestHistory ? 'fresh' : 'missing'
-  const humidityAvailable = chartData.some(row => row.humidity_mean !== null && row.humidity_mean !== undefined)
-    || hourlyRows.some(row => row.cloud_cover !== null && row.cloud_cover !== undefined)
   const forecastRefreshStage = refreshStage(productionRefresh, ['forecast_backfill'])
-  const signalRefreshStage = refreshStage(productionRefresh, ['signal_scan', 'signal_migration'])
-  const orderbookRefreshStage = refreshStage(productionRefresh, ['orderbook_backfill'])
   const latestHistoryFetch = latestHistory?.fetched_at
   const truthTier = latestHistory?.calibration_tier === 'live_truth'
     ? '实盘 truth'
@@ -673,24 +664,10 @@ export function WeatherPanel({
   }, [availableDates, forecastFallback?.target_date, latestForecast?.target_date, selectedDate])
 
   const selectedDateIndex = availableDates.indexOf(selectedDate)
-  const latestDate = availableDates[availableDates.length - 1] ?? ''
-  const timelineDates = useMemo(() => {
-    if (availableDates.length === 0) return selectedDate ? [selectedDate] : [todayDate]
-    const anchor = selectedDateIndex >= 0 ? selectedDateIndex : Math.max(0, availableDates.length - 1)
-    const dates = availableDates.slice(Math.max(0, anchor - 3), Math.min(availableDates.length, anchor + 4))
-    if (selectedDate && !dates.includes(selectedDate)) dates.push(selectedDate)
-    return dates.sort((a, b) => a.localeCompare(b))
-  }, [availableDates, selectedDate, selectedDateIndex, todayDate])
-  const dateOptions = useMemo(() => {
-    const rows = availableDates.length > 0 ? [...availableDates] : []
-    if (selectedDate && !rows.includes(selectedDate)) rows.push(selectedDate)
-    if (rows.length === 0) rows.push(todayDate)
-    return rows.sort((a, b) => a.localeCompare(b))
-  }, [availableDates, selectedDate, todayDate])
   const selectedDateRow = chartData.find(row => row.date === selectedDate) ?? chartData[chartData.length - 1]
   const decisionLabel = bestSignal?.actionable ? 'BUY YES' : bestSignal ? '观察' : '等待信号'
   const decisionTone = bestSignal?.actionable ? 'green' : bestSignal ? 'amber' : 'neutral'
-  const decisionReason = bestSignal?.decision?.reasons?.[0] ?? bestSignal?.status ?? (bestSignal ? '未通过可执行闸门' : '手动抓取后生成')
+  const decisionReason = bestSignal?.decision?.reasons?.[0] ?? bestSignal?.status ?? (bestSignal ? '未通过可执行闸门' : '自动抓取后生成')
   const selectedForecast = selectedDateRow?.forecast_high ?? latestForecast?.best ?? latestForecast?.ensemble_mean ?? forecastFallback?.mean_high
   const selectedMetar = selectedDateRow?.metar ?? latestMetar?.metar
   const metarGap = selectedForecast !== null && selectedForecast !== undefined && selectedMetar !== null && selectedMetar !== undefined
@@ -730,16 +707,6 @@ export function WeatherPanel({
     meta: `${point.provider || '--'} · ${point.calibration_tier || '--'} · ${point.station_id || series?.station_id || '--'}`,
     tone: point.calibration_tier === 'live_truth' ? 'green' : point.calibration_tier === 'research_truth' ? 'amber' : 'neutral',
   }))
-  const marketSamples: SourceSample[] = (selectedDateSignals.length > 0 ? selectedDateSignals : citySignals).slice(0, 4).map(signal => {
-    const edge = signal.probability_edge ?? signal.edge
-    const price = signal.limit_price ?? signal.market_probability
-    return {
-      label: `${shortDate(signal.target_date)} · ${signalBucketLabel(signal, unit)}`,
-      value: signal.actionable ? 'BUY YES' : signal.status || '观察',
-      meta: `price ${fmtPrice(price)} · edge ${fmtSignedPct(edge)} · ${signal.decision?.reasons?.[0] || signal.manual_note || signal.reasoning || '--'}`,
-      tone: signal.actionable ? 'green' : 'neutral',
-    }
-  })
   const forecastCards: EvidenceCardItem[] = forecastRows.map((point, index) => ({
     id: `forecast-${point.timestamp}-${point.target_date}-${index}`,
     eyebrow: shortTime(point.timestamp),
@@ -838,7 +805,7 @@ export function WeatherPanel({
   if (forecasts.length === 0 && citySeries.length === 0 && signals.length === 0) {
     return (
       <div className="flex h-full items-center justify-center p-4 text-center text-[11px] leading-relaxed text-neutral-600">
-        暂无天气快照。点击顶部“手动抓取”，系统会同步预测、METAR、历史观测和盘口快照。
+        暂无天气快照。点击顶部“自动抓取”，系统会同步预测、METAR、历史观测和盘口快照。
       </div>
     )
   }
@@ -875,9 +842,13 @@ export function WeatherPanel({
           >
             前一天
           </button>
-          <div className="border-x border-neutral-800 px-2 py-1 text-[10px] tabular-nums text-neutral-200">
-            {longDate(selectedDate)}
-          </div>
+          <input
+            type="date"
+            value={selectedDate || todayDate}
+            onChange={event => setSelectedDate(event.target.value)}
+            className="w-[136px] border-x border-neutral-800 bg-black px-2 py-1 text-center text-[10px] tabular-nums text-neutral-200 outline-none"
+            aria-label="选择日期"
+          />
           <button
             type="button"
             onClick={() => selectedDateIndex >= 0 && selectedDateIndex < availableDates.length - 1 && setSelectedDate(availableDates[selectedDateIndex + 1])}
@@ -894,85 +865,14 @@ export function WeatherPanel({
             今天
           </button>
         </div>
-        <select
-          value={selectedDate || dateOptions[dateOptions.length - 1] || todayDate}
-          onChange={event => setSelectedDate(event.target.value)}
-          className="min-w-[150px] shrink-0 border border-gray-200 bg-white px-2 py-1 text-[10px] tabular-nums text-gray-900 outline-none focus:border-gray-400"
-          aria-label="Select date"
-        >
-          {dateOptions.map(date => (
-            <option key={date} value={date}>{longDate(date)}</option>
-          ))}
-        </select>
         {bestSignal?.event_url && (
           <a href={bestSignal.event_url} target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-1 border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-300 hover:bg-cyan-500/10">
             Polymarket <ExternalLink className="h-3 w-3" />
           </a>
         )}
-        <button
-          onClick={onRefreshWeather}
-          disabled={weatherRefreshing || !onRefreshWeather}
-          className="inline-flex shrink-0 items-center gap-1 border border-green-500/30 px-2 py-1 text-[10px] text-green-300 hover:bg-green-500/10 disabled:opacity-40"
-          title="只补当前城市的预测、小时预报和盘口快照；不会启动旧版无限扫描。"
-        >
-          <RefreshCw className={`h-3 w-3 ${weatherRefreshing ? 'animate-spin' : ''}`} />
-          {weatherRefreshing ? '补天气中' : '补当前天气'}
-        </button>
-        <button
-          onClick={onBackfillHistory}
-          disabled={backfilling || !onBackfillHistory}
-          className="inline-flex shrink-0 items-center gap-1 border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-40"
-          title="补最近 30 天研究级历史天气；不会开启实盘，也不会解锁实盘闸门。"
-        >
-          <RefreshCw className={`h-3 w-3 ${backfilling ? 'animate-spin' : ''}`} />
-          {backfilling ? '补历史中' : '补历史数据'}
-        </button>
       </div>
 
-      <div className="flex items-center gap-1 overflow-x-auto border border-neutral-800 bg-black/60 p-1" aria-label="Date timeline">
-        <span className="shrink-0 px-1.5 text-[9px] uppercase tracking-wide text-neutral-600">Timeline</span>
-        <button
-          type="button"
-          onClick={() => setSelectedDate(todayDate)}
-          className={`shrink-0 border px-2 py-1 text-[10px] ${
-            selectedDate === todayDate
-              ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200'
-              : 'border-neutral-800 text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300'
-          }`}
-        >
-          Today
-        </button>
-        <button
-          type="button"
-          onClick={() => latestDate && setSelectedDate(latestDate)}
-          disabled={!latestDate}
-          className={`shrink-0 border px-2 py-1 text-[10px] disabled:cursor-not-allowed disabled:opacity-35 ${
-            selectedDate === latestDate && latestDate
-              ? 'border-green-500/40 bg-green-500/10 text-green-200'
-              : 'border-neutral-800 text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300'
-          }`}
-        >
-          Latest
-        </button>
-        <div className="h-4 w-px shrink-0 bg-neutral-800" />
-        {timelineDates.map(date => (
-          <button
-            key={date}
-            type="button"
-            onClick={() => setSelectedDate(date)}
-            className={`shrink-0 border px-2 py-1 text-[10px] tabular-nums ${
-              selectedDate === date
-                ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
-                : 'border-neutral-800 text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300'
-            }`}
-            title={longDate(date)}
-          >
-            {shortDate(date)}
-          </button>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-2">
         <SourcePulse
           label="预报"
           status={forecastStatus}
@@ -1016,20 +916,6 @@ export function WeatherPanel({
           ]}
           samples={historySamples}
         />
-        <SourcePulse
-          label="盘口/信号"
-          status={orderbookRefreshStage?.ok || signalRefreshStage?.ok ? 'fresh' : 'missing'}
-          value={elapsedLabel(orderbookRefreshStage?.elapsed_ms) || elapsedLabel(signalRefreshStage?.elapsed_ms) || '未刷新'}
-          meta={orderbookRefreshStage?.error || signalRefreshStage?.error || productionRefresh?.message || '等待手动抓取'}
-          details={[
-            { label: '信号', value: `${actionableSignals.length} 可操作 / ${citySignals.length} 总数` },
-            { label: '选中日期信号', value: `${selectedDateSignals.length}` },
-            { label: '盘口刷新', value: refreshStageLabel(orderbookRefreshStage) },
-            { label: '信号刷新', value: refreshStageLabel(signalRefreshStage) },
-            { label: '最新消息', value: orderbookRefreshStage?.error || signalRefreshStage?.error || productionRefresh?.message || '等待手动抓取' },
-          ]}
-          samples={marketSamples}
-        />
       </div>
 
       <div className={`grid gap-2 border px-2 py-2 md:grid-cols-[1.2fr_repeat(4,minmax(0,1fr))_auto] ${decisionTone === 'green' ? 'border-green-500/30 bg-green-500/5' : decisionTone === 'amber' ? 'border-amber-500/30 bg-amber-500/5' : 'border-neutral-800 bg-black'}`}>
@@ -1060,17 +946,16 @@ export function WeatherPanel({
         <Metric icon={<Signal className="h-3.5 w-3.5" />} label="可操作信号" value={`${actionableSignals.length}/${citySignals.length}`} tone={actionableSignals.length > 0 ? 'green' : 'neutral'} sub={bestSignal ? `${signalBucketLabel(bestSignal, unit)} · ${(((bestSignal.probability_edge ?? bestSignal.edge) || 0) * 100).toFixed(1)}%` : '暂无'} />
       </div>
 
-      <section className="border border-gray-200 bg-white">
-        <div className="border-b border-gray-200">
+      <section className="border border-[#2C3445] bg-[#1B212C]">
+        <div className="border-b border-[#2C3445]">
           <div className="flex flex-wrap items-center justify-between gap-2 px-2 py-1.5">
             <div className="flex flex-wrap items-center gap-1.5">
-              <EvidenceBadge label="Forecast" status={forecastStatus} detail={freshnessLabel(latestForecast?.timestamp)} />
+              <EvidenceBadge label="预报" status={forecastStatus} detail={freshnessLabel(latestForecast?.timestamp)} />
               <EvidenceBadge label="METAR" status={metarStatus} detail={freshnessLabel(latestMetar?.timestamp)} />
-              <EvidenceBadge label="Historical" status={historyStatus} detail={latestHistory?.provider || 'no data'} />
-            <EvidenceBadge label="Cloud" status={humidityAvailable ? 'fresh' : 'missing'} detail={humidityAvailable ? 'cloud/humidity ready' : 'cloud feed pending'} />
-              <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">Hourly {hourlyRows.length}</span>
+              <EvidenceBadge label="历史观测" status={historyStatus} detail={latestHistory?.provider || 'no data'} />
+              <span className="border border-[#2C3445] px-1.5 py-0.5 text-[9px] text-[#7D8694]">Hourly {hourlyRows.length}</span>
             </div>
-            <div className="text-[10px] text-neutral-500">PolyWX-style city workbench · local time</div>
+            <div className="text-[10px] text-[#7D8694]">PolyWX-style city workbench · local time</div>
           </div>
           <div className="flex gap-1 overflow-x-auto px-2 pb-2">
             {WORKBENCH_TABS.map(tab => (
@@ -1102,8 +987,8 @@ export function WeatherPanel({
               actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
             />
             <ForecastDataTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
-            <details className="border border-neutral-800 bg-neutral-950/30">
-              <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
+            <details className="border border-[#2C3445] bg-[#161A22]">
+              <summary className="cursor-pointer select-none px-2 py-2 text-xs text-[#CBD2DC] hover:bg-[#222A37]">
                 Forecast snapshot cards · {forecastRows.length}
               </summary>
               <div className="border-t border-neutral-800">
@@ -1136,8 +1021,8 @@ export function WeatherPanel({
               selectedDate={selectedDate}
               evidenceSummary={selectedDateEvidence?.modules?.diff_stats?.summary}
             />
-            <details className="border border-neutral-800 bg-neutral-950/30">
-              <summary className="cursor-pointer select-none px-2 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
+            <details className="border border-[#2C3445] bg-[#161A22]">
+              <summary className="cursor-pointer select-none px-2 py-2 text-xs text-[#CBD2DC] hover:bg-[#222A37]">
                 Calibration detail · average delta / Pearson R / truth
               </summary>
               <div className="border-t border-neutral-800">
@@ -1195,8 +1080,8 @@ function WorkbenchTabButton({
       onClick={onClick}
       className={`min-w-[120px] shrink-0 border px-2 py-1.5 text-left rounded-none ${
         active
-          ? 'border-gray-900 bg-gray-900 text-white'
-          : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+          ? 'border-[#2563EB] bg-[#2563EB] text-white'
+          : 'border-[#2C3445] bg-[#161A22] text-[#7D8694] hover:bg-[#222A37] hover:text-[#CBD2DC]'
       }`}
       title={tab.note}
     >
@@ -1595,54 +1480,58 @@ function HourlyEvidencePanel({
     forecast_c: tempToC(row.forecast, unit),
     metar_c: tempToC(row.metar, unit),
     gap_c: deltaToC(row.gap, unit),
+    cloud_pct: row.cloud_cover ?? row.humidity ?? null,
   }))
   const maxAbsGapC = Math.max(0.1, ...chartRows.map(row => Math.abs(Number(row.gap_c ?? 0))))
   if (rows.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-center text-neutral-600">
-        该日期暂无逐小时快照。点击“手动抓取”后，这里会按抓取时间展示预报、METAR、湿度和模型差异。
+        该日期暂无逐小时快照。点击“自动抓取”后，这里会按抓取时间展示预报、METAR、湿度和模型差异。
       </div>
     )
   }
 
   return (
     <div className="grid min-h-0 flex-1 gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_320px]">
-      <section className="min-h-0 border border-neutral-900 bg-neutral-950/30">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-900 px-2 py-1.5">
+      <section className="min-h-0 border border-[#2C3445] bg-[#161A22]">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#2C3445] px-2 py-1.5">
           <div>
-            <div className="text-[10px] text-neutral-500">逐小时气温</div>
-            <div className="text-xs text-neutral-100">{cityName || '当前城市'} · {longDate(selectedDate)}</div>
+            <div className="text-[10px] text-[#7D8694]">逐小时气温</div>
+            <div className="text-xs text-[#CBD2DC]">{cityName || '当前城市'} · {longDate(selectedDate)}</div>
           </div>
-          <div className="flex flex-wrap gap-1 text-[9px] text-neutral-500">
-            <span className="border border-neutral-800 px-1.5 py-0.5">预报最高 {fmtTemp(forecastMax, unit)}</span>
-            <span className="border border-neutral-800 px-1.5 py-0.5">METAR最高 {fmtTemp(metarMax, unit)}</span>
-            <span className="border border-neutral-800 px-1.5 py-0.5">平均差 {fmtSignedTemp(avgGap, unit)}</span>
+          <div className="flex flex-wrap gap-1 text-[9px] text-[#7D8694]">
+            <span className="border border-[#2C3445] px-1.5 py-0.5">预报最高 {fmtTemp(forecastMax, unit)}</span>
+            <span className="border border-[#2C3445] px-1.5 py-0.5">METAR最高 {fmtTemp(metarMax, unit)}</span>
+            <span className="border border-[#2C3445] px-1.5 py-0.5">平均差 {fmtSignedTemp(avgGap, unit)}</span>
           </div>
         </div>
 
         <div
           className="p-2"
           role="img"
-          aria-label={`${cityName || '当前城市'} Hourly Temperature chart. Real METAR is a solid black line, Model Forecast is a dashed gray line, residual diff bars are red or blue at the bottom.`}
+          aria-label={`${cityName || '当前城市'} Hourly Temperature chart. METAR is a solid light line, forecast is a dashed blue line, cloud or humidity is shown as bars, residual diff bars are red or blue at the bottom.`}
         >
           <div className="relative h-[280px]">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartRows} margin={{ top: 8, right: 18, bottom: 0, left: -8 }}>
-                <CartesianGrid stroke="#e5e7eb" strokeDasharray="3 3" />
-                <XAxis dataKey="label" stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} minTickGap={8} />
-                <YAxis yAxisId="temp" stroke="#6b7280" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°C`} />
-                <YAxis yAxisId="diff" orientation="right" stroke="#9ca3af" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°C`} />
+              <ComposedChart data={chartRows} margin={{ top: 8, right: 18, bottom: 0, left: -8 }}>
+                <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" />
+                <XAxis dataKey="label" stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} minTickGap={8} />
+                <YAxis yAxisId="temp" stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°C`} />
+                <YAxis yAxisId="percent" hide domain={[0, 100]} />
                 <Tooltip
-                  contentStyle={{ background: '#ffffff', border: '1px solid #e5e7eb', color: '#111827', fontSize: 11 }}
-                  formatter={(value: any, name: any) => [fmtC(Number(value)), name]}
+                  contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
+                  formatter={(value: any, name: any) => {
+                    if (name === 'Cloud / RH') return [`${Number(value).toFixed(0)}%`, name]
+                    return [fmtC(Number(value)), name]
+                  }}
                   labelFormatter={(_, payload) => payload?.[0]?.payload?.timestamp ? shortTime(payload[0].payload.timestamp) : ''}
                 />
-                <Line yAxisId="temp" type="monotone" dataKey="metar_c" name="Real METAR" stroke="#000000" dot={false} strokeWidth={2.2} connectNulls={false} />
-                <Line yAxisId="temp" type="monotone" dataKey="forecast_c" name="Model Forecast" stroke="#6B7280" strokeDasharray="4 4" dot={false} strokeWidth={2} connectNulls={false} />
-                <Line yAxisId="diff" type="monotone" dataKey="gap_c" name="Diff" stroke="transparent" dot={false} activeDot={false} connectNulls={false} />
-              </LineChart>
+                <Bar yAxisId="percent" dataKey="cloud_pct" name="Cloud / RH" fill="#2563EB" fillOpacity={0.18} maxBarSize={18} />
+                <Line yAxisId="temp" type="monotone" dataKey="metar_c" name="METAR 实测" stroke="#F8FAFC" dot={{ r: 2, fill: '#F8FAFC', strokeWidth: 0 }} strokeWidth={2.2} connectNulls={false} />
+                <Line yAxisId="temp" type="monotone" dataKey="forecast_c" name="预报" stroke="#38BDF8" strokeDasharray="4 4" dot={false} strokeWidth={2} connectNulls={false} />
+              </ComposedChart>
             </ResponsiveContainer>
-            <div className="pointer-events-none absolute bottom-3 left-10 right-5 grid h-10 grid-flow-col auto-cols-fr items-end gap-px border-t border-gray-200/80 pt-1" aria-label="Diff residual bars">
+            <div className="pointer-events-none absolute bottom-3 left-10 right-5 grid h-10 grid-flow-col auto-cols-fr items-end gap-px border-t border-[#2C3445] pt-1" aria-label="Diff residual bars">
               {chartRows.map(row => {
                 const diff = Number(row.gap_c ?? 0)
                 const height = Math.max(2, Math.min(36, Math.abs(diff) / maxAbsGapC * 36))
@@ -1662,13 +1551,13 @@ function HourlyEvidencePanel({
         <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
           <summary className="cursor-pointer select-none hover:text-neutral-400">数据说明</summary>
           <div className="mt-1 leading-relaxed">
-            绿色为预报，橙色为 METAR，青/蓝为可用模型分量，柱状优先使用云量，旧数据缺云量时回退湿度百分比。中国天气实况与 PWS 实时源尚未接入时不伪造曲线，只在数据明细中保留接入位置。
+            亮白线为 METAR，蓝色虚线为模型预报，蓝色半透明柱为云量或湿度，底部红/蓝柱为实测减预报残差。中国天气实况与 PWS 实时源尚未接入时不伪造曲线，只在数据明细中保留接入位置。
           </div>
         </details>
       </section>
 
-      <aside className="min-h-0 border border-neutral-900 bg-neutral-950/30">
-        <div className="grid grid-cols-2 gap-1 border-b border-neutral-900 p-2 text-[10px]">
+      <aside className="min-h-0 border border-[#2C3445] bg-[#161A22]">
+        <div className="grid grid-cols-2 gap-1 border-b border-[#2C3445] p-2 text-[10px]">
           <MetricCard label="平均 Δ" value={fmtSignedTemp(avgGap, unit)} sub="实测 - 预报" />
           <MetricCard label="准确度" value={fmtPearson(pearson)} sub={`n=${pairedRows.length}`} />
           <MetricCard label="历史↔METAR" value={overlapLabel} sub={actualMetarDelta === null ? `覆盖 ${metarValues.length}/${rows.length}` : historyProvider || '日高温差'} />
@@ -1678,8 +1567,8 @@ function HourlyEvidencePanel({
         </div>
         <div className="max-h-[360px] overflow-auto">
           <table className="w-full border-collapse text-left text-[10px]">
-            <thead className="sticky top-0 bg-black text-neutral-500">
-              <tr className="border-b border-neutral-900">
+            <thead className="sticky top-0 bg-[#1B212C] text-[#7D8694]">
+              <tr className="border-b border-[#2C3445]">
                 <th className="px-2 py-1 font-normal">时间</th>
                 <th className="px-2 py-1 font-normal">预报</th>
                 <th className="px-2 py-1 font-normal">METAR</th>
@@ -1689,8 +1578,8 @@ function HourlyEvidencePanel({
             </thead>
             <tbody>
               {rows.map(row => (
-                <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
-                  <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
+                <tr key={row.id} className="border-b border-[#2C3445]/80 hover:bg-[#222A37]">
+                  <td className="px-2 py-1 tabular-nums text-[#CBD2DC]">{row.label}</td>
                   <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
                   <td className="px-2 py-1 tabular-nums text-amber-300">{fmtTemp(row.metar, unit)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.cloud_cover)}</td>
@@ -1819,7 +1708,7 @@ function BiasPanel({
         <div className="mt-2 border border-neutral-800 bg-neutral-950/40 p-4 text-center text-neutral-500">
           <div className="text-xs text-neutral-300">暂无可配对偏差样本</div>
           <div className="mt-1 text-[10px] leading-relaxed">
-            当前城市还没有同一天同时包含“历史实际最高温”和“保存预测最高温”的样本。补历史数据或完成更多日度抓取后，这里会显示最近误差、MAE 和 bias。
+            当前城市还没有同一天同时包含“历史实际最高温”和“保存预测最高温”的样本。自动抓取或完成更多日度抓取后，这里会显示最近误差、MAE 和 bias。
           </div>
           <details className="mt-3 text-left text-[10px] text-neutral-500">
             <summary className="cursor-pointer select-none text-center hover:text-neutral-300">数据明细</summary>
@@ -2234,12 +2123,12 @@ function TemperatureDistributionPanel({
   }
 
   return (
-    <section className="border border-neutral-800 bg-black" aria-label="当日最高温概率分布">
-      <div className="border-b border-neutral-900 px-2 py-1.5">
+    <section className="border border-[#2C3445] bg-[#161A22]" aria-label="当日最高温概率分布">
+      <div className="border-b border-[#2C3445] px-2 py-1.5">
         <div className="flex items-center justify-between gap-2">
           <div>
-            <div className="text-[10px] text-neutral-500">当日最高温预测（DEB）</div>
-            <div className="text-xs text-neutral-100">
+            <div className="text-[10px] text-[#7D8694]">当日最高温预测（DEB）</div>
+            <div className="text-xs text-[#CBD2DC]">
               {signal ? signal.city_name : '等待信号'} · {longDate(signal?.target_date ?? selectedDate)}
             </div>
           </div>
@@ -2249,28 +2138,28 @@ function TemperatureDistributionPanel({
             </a>
           )}
         </div>
-        <div className="mt-1 flex flex-wrap gap-1 text-[9px] text-neutral-500">
-          <span className="border border-neutral-800 px-1 py-0.5">μ {fmtTemp(forecastValue, unit)}</span>
-          <span className="border border-neutral-800 px-1 py-0.5">±σ {fmtTemp(sigmaValue, unit)}</span>
-          <span className="border border-neutral-800 px-1 py-0.5">实测 {fmtTemp(actualHigh, unit)}</span>
-          <span className="border border-neutral-800 px-1 py-0.5">{distribution?.normalized ? '高斯归一' : '未归一'}</span>
+        <div className="mt-1 flex flex-wrap gap-1 text-[9px] text-[#7D8694]">
+          <span className="border border-[#2C3445] px-1 py-0.5">μ {fmtTemp(forecastValue, unit)}</span>
+          <span className="border border-[#2C3445] px-1 py-0.5">±σ {fmtTemp(sigmaValue, unit)}</span>
+          <span className="border border-[#2C3445] px-1 py-0.5">实测 {fmtTemp(actualHigh, unit)}</span>
+          <span className="border border-[#2C3445] px-1 py-0.5">{distribution?.normalized ? '高斯归一' : '未归一'}</span>
         </div>
       </div>
 
       {items.length === 0 ? (
         <div className="flex min-h-[220px] items-center justify-center px-3 text-center text-[10px] leading-relaxed text-neutral-600">
-          暂无温度桶分布。手动抓取并生成市场信号后，这里会显示各温度桶的模型概率、盘口价格和可执行 edge。
+          暂无温度桶分布。自动抓取并生成市场信号后，这里会显示各温度桶的模型概率、盘口价格和可执行 edge。
         </div>
       ) : (
         <div className="grid gap-2 p-2 xl:grid-cols-[minmax(0,1fr)_280px]">
           <div className="h-[260px]">
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={chartRows} margin={{ top: 8, right: 14, bottom: 34, left: -8 }}>
-                <CartesianGrid stroke="#1f1f1f" strokeDasharray="3 3" />
-                <XAxis dataKey="label" stroke="#737373" fontSize={9} tickLine={false} axisLine={false} interval={0} angle={-28} textAnchor="end" height={54} />
-                <YAxis stroke="#737373" fontSize={10} tickLine={false} axisLine={false} />
+                <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" />
+                <XAxis dataKey="label" stroke="#7D8694" fontSize={9} tickLine={false} axisLine={false} interval={0} angle={-28} textAnchor="end" height={54} />
+                <YAxis stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} />
                 <Tooltip
-                  contentStyle={{ background: '#050505', border: '1px solid #262626', color: '#e5e5e5', fontSize: 11 }}
+                  contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
                   formatter={(value: any, name: any) => {
                     if (name === '模型概率') return [`${Number(value).toFixed(1)}%`, name]
                     if (name === '卖一') return [`${Number(value).toFixed(1)}¢`, name]
@@ -2287,8 +2176,8 @@ function TemperatureDistributionPanel({
             </ResponsiveContainer>
           </div>
 
-          <aside className="border border-neutral-900 bg-neutral-950/30">
-            <div className="grid grid-cols-2 gap-1 border-b border-neutral-900 p-2 text-[10px]">
+          <aside className="border border-[#2C3445] bg-[#161A22]">
+            <div className="grid grid-cols-2 gap-1 border-b border-[#2C3445] p-2 text-[10px]">
               <MetricCard label="最高概率" value={fmtProb(Math.max(...items.map(item => Number(item.probability ?? 0))))} sub="柱色越深概率越高" />
               <MetricCard label="信号桶" value={signal ? signalBucketLabel(signal, unit) : '--'} sub={signal?.actionable ? 'BUY YES' : '观察'} />
               <MetricCard label="市场价格" value={fmtPrice(signal?.limit_price ?? signal?.market_probability)} sub="卖一/概率" />
@@ -2296,8 +2185,8 @@ function TemperatureDistributionPanel({
             </div>
             <div className="max-h-[260px] overflow-auto">
               <table className="w-full border-collapse text-left text-[10px]">
-                <thead className="sticky top-0 bg-black text-neutral-500">
-                  <tr className="border-b border-neutral-900">
+                <thead className="sticky top-0 bg-[#1B212C] text-[#7D8694]">
+                  <tr className="border-b border-[#2C3445]">
                     <th className="px-2 py-1 font-normal">桶</th>
                     <th className="px-2 py-1 font-normal">概率</th>
                     <th className="px-2 py-1 font-normal">卖一</th>
@@ -2306,7 +2195,7 @@ function TemperatureDistributionPanel({
                 </thead>
                 <tbody>
                   {items.map(item => (
-                    <tr key={item.market_id || `${item.bucket_low}-${item.bucket_high}`} className={`border-b border-neutral-900/80 ${item.is_signal ? 'bg-cyan-500/10 text-cyan-200' : 'hover:bg-neutral-900/50'}`}>
+                    <tr key={item.market_id || `${item.bucket_low}-${item.bucket_high}`} className={`border-b border-[#2C3445]/80 ${item.is_signal ? 'bg-cyan-500/10 text-cyan-200' : 'hover:bg-[#222A37]'}`}>
                       <td className="max-w-[108px] truncate px-2 py-1" title={item.question}>{fmtBucket(item, unit)}</td>
                       <td className="px-2 py-1 tabular-nums text-green-300">{fmtProb(item.probability)}</td>
                       <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPrice(item.ask)}</td>
@@ -2471,7 +2360,7 @@ function SourcePulse({
   return (
     <div className={`min-w-0 border px-2 py-1.5 ${statusClass(status)}`}>
       <div className="mb-0.5 flex items-center gap-1 text-[9px]">
-        <span className={`h-1.5 w-1.5 shrink-0 ${status === 'fresh' ? 'bg-green-300' : status === 'stale' ? 'bg-amber-300' : 'bg-neutral-600'}`} />
+        <span className={`h-1.5 w-1.5 shrink-0 ${status === 'fresh' ? 'bg-green-300' : status === 'stale' ? 'bg-amber-300' : 'bg-red-300'}`} />
         <span className="truncate text-neutral-300">{label}</span>
       </div>
       <div className="truncate text-xs tabular-nums text-neutral-100">{value}</div>
@@ -2514,7 +2403,7 @@ function SourcePulse({
 function EvidenceBadge({ label, status, detail }: { label: string; status: EvidenceStatus; detail: string }) {
   return (
     <span className={`inline-flex items-center gap-1 border px-1.5 py-0.5 text-[9px] ${statusClass(status)}`} title={detail}>
-      <span className={`h-1.5 w-1.5 ${status === 'fresh' ? 'bg-green-300' : status === 'stale' ? 'bg-amber-300' : 'bg-neutral-600'}`} />
+      <span className={`h-1.5 w-1.5 ${status === 'fresh' ? 'bg-green-300' : status === 'stale' ? 'bg-amber-300' : 'bg-red-300'}`} />
       {label}
     </span>
   )

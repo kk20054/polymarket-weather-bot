@@ -43,7 +43,7 @@ const APP_VERSION = 'v6.0'
 
 const UI_COPY = {
   zh: {
-    subtitle: '城市最高温交易工作台',
+    subtitle: '天气量化交易平台',
     data: '数据',
     manual: '手动刷新',
     legacyRunning: '旧扫描运行中',
@@ -51,7 +51,7 @@ const UI_COPY = {
     autoOff: '一键模拟关闭',
     liveReady: '实盘可用',
     liveLocked: '实盘锁定',
-    manualFetch: '手动抓取',
+    manualFetch: '自动抓取',
     fetching: '抓取中',
     refresh: '刷新',
     stopLegacy: '停止旧扫描',
@@ -59,7 +59,7 @@ const UI_COPY = {
     theme: '主题',
   },
   en: {
-    subtitle: 'city max-temperature trading workbench',
+    subtitle: 'weather quant trading platform',
     data: 'Data',
     manual: 'Manual refresh',
     legacyRunning: 'Legacy scan running',
@@ -67,7 +67,7 @@ const UI_COPY = {
     autoOff: 'Auto paper off',
     liveReady: 'Live ready',
     liveLocked: 'Live locked',
-    manualFetch: 'Manual fetch',
+    manualFetch: 'Auto fetch',
     fetching: 'Fetching',
     refresh: 'Refresh',
     stopLegacy: 'Stop legacy scan',
@@ -1138,7 +1138,7 @@ function App() {
             >
               <div className="mb-1 flex items-center justify-between gap-2">
                 <div className={`text-xs font-medium ${recommendedCity ? 'text-emerald-100' : 'text-neutral-300'}`}>
-                  {recommendedCity ? '推荐关注' : needsManualRefresh ? '等待抓取' : '当前城市'}
+                  推荐关注
                 </div>
                 <div className={`text-[10px] ${recommendedCity ? 'text-emerald-300' : 'text-neutral-500'}`}>
                   {citySummaryCard.actionable}/{citySummaryCard.signals} 信号
@@ -1197,7 +1197,7 @@ function App() {
             <div className="space-y-1">
               {cityOptions.length === 0 && (
                 <div className="border border-neutral-800 bg-black/40 p-3 text-[11px] leading-relaxed text-neutral-500">
-                  暂无城市快照。点击顶部“手动抓取”后，这里会按城市列出预报、站点和信号数量。
+                  暂无城市快照。点击顶部“自动抓取”后，这里会按城市列出预报、站点和信号数量。
                 </div>
               )}
               {cityOptions.length > 0 && filteredCityOptions.length === 0 && (
@@ -1310,7 +1310,7 @@ function App() {
             <div className="flex flex-wrap gap-1.5 text-[10px]">
               {needsManualRefresh && (
                 <span className="border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-cyan-200">
-                  等待手动抓取
+                  等待自动抓取
                 </span>
               )}
               <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-400">数据 {dataAge(stats.data_age_minutes)}</span>
