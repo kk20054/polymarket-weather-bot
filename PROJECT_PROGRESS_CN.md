@@ -393,4 +393,4 @@
 - 当前可用性结论：Layer 5 已具备把 Polymarket 天气 outcome/token/盘口约束沉淀成可审计市场桶的基础能力；这仍是数据基座层，不证明策略有 edge，不解锁自动实盘。
 - 剩余阻塞：collector 当前只同步本地已落库 Gamma-like payload；后续仍需显式市场发现/详情抓取 action。历史盘口 replay、真实成交/退出流动性和 Layer 6 `signal_decisions` 尚未完成。sqlite ResourceWarning 仍需单独治理。
 - 下一步：进入 Layer 6 `signal_decisions`，把 Layer 4 小时证据、Layer 5 market bucket、distribution、model-market edge、execution gate 和 skip/buy 原因链沉淀为可复盘决策表。
-- 相关提交：`4b8d60a Add market buckets data layer`；ledger hash 回填提交待补。
+- 相关提交：`4b8d60a Add market buckets data layer`；`41fc301 Record market buckets layer hash`。
