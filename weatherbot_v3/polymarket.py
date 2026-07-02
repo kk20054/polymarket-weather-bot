@@ -82,7 +82,10 @@ def quote_from_market_payload(data: dict[str, Any], default_order_min_size: floa
     asks = tuple(_levels(data.get("asks")))
     best_bid = max((level["price"] for level in bids), default=_to_float(data.get("bestBid"), yes_price))
     best_ask = min((level["price"] for level in asks), default=_to_float(data.get("bestAsk"), yes_price))
-    spread = _to_float(data.get("spread"), best_ask - best_bid)
+    if bids or asks:
+        spread = best_ask - best_bid if best_ask and best_bid else _to_float(data.get("spread"), 0.0)
+    else:
+        spread = _to_float(data.get("spread"), best_ask - best_bid)
     tick_size = _to_float(data.get("tick_size"), _to_float(data.get("orderPriceMinTickSize"), default_tick_size))
     order_min_size = _to_float(data.get("min_order_size"), _to_float(data.get("orderMinSize"), default_order_min_size))
     quote_timestamp = str(data.get("quote_timestamp") or data.get("timestamp") or "")

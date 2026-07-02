@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from datetime import datetime
+import time
+from datetime import date, datetime, timedelta
 from typing import Any
 
-from .db import upsert_market_bucket
+import requests
+
+from .db import insert_orderbook, log_data_fetch, upsert_market_bucket
 from .polymarket import quote_from_market_payload
+from .stations import list_stations
 
 
 PARSER_VERSION = "market-buckets-v1"
+GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
+CLOB_BASE_URL = "https://clob.polymarket.com"
+POLYMARKET_BASE_URL = "https://polymarket.com"
+ACTIVE_SYNC_VERSION = "market-buckets-active-weather-v1"
 MONTHS = {
     "january": "01",
     "february": "02",
@@ -24,6 +33,221 @@ MONTHS = {
     "november": "11",
     "december": "12",
 }
+MONTH_NAMES = {
+    "01": "january",
+    "02": "february",
+    "03": "march",
+    "04": "april",
+    "05": "may",
+    "06": "june",
+    "07": "july",
+    "08": "august",
+    "09": "september",
+    "10": "october",
+    "11": "november",
+    "12": "december",
+}
+
+
+class PolymarketWeatherMarketClient:
+    def __init__(self, session: requests.Session | None = None) -> None:
+        self.session = session or requests.Session()
+        if hasattr(self.session, "trust_env"):
+            self.session.trust_env = False
+        self.session.headers.update({
+            "User-Agent": "WeatherBot/5.5 (+local research; no trading)",
+            "Accept": "application/json",
+        })
+
+    def get_event_by_slug(self, slug: str) -> dict[str, Any]:
+        url = f"{GAMMA_BASE_URL}/events/slug/{slug}"
+        response = self.session.get(url, timeout=(5, 12))
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict):
+            data["source_url"] = url
+            return data
+        return {}
+
+    def get_orderbook(self, token_id: str) -> dict[str, Any]:
+        response = self.session.get(
+            f"{CLOB_BASE_URL}/book",
+            params={"token_id": token_id},
+            timeout=(5, 12),
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            return {}
+        data["snapshot_type"] = "clob"
+        data["source_url"] = response.url
+        return data
+
+
+def sync_active_weather_market_buckets(
+    *,
+    cities: list[str] | None = None,
+    target_dates: list[str] | None = None,
+    days: int = 3,
+    limit_cities: int = 5,
+    limit: int = 200,
+    fetch_orderbooks: bool = True,
+    dry_run: bool = False,
+    session: requests.Session | None = None,
+    sleep_seconds: float = 0.05,
+) -> dict[str, Any]:
+    started_all = time.perf_counter()
+    client = PolymarketWeatherMarketClient(session=session)
+    station_rows = _selected_stations(cities or [], limit_cities=limit_cities)
+    dates = target_dates or _date_window(days)
+    bounded_limit = max(1, min(int(limit or 200), 1000))
+    results: list[dict[str, Any]] = []
+    buckets: list[dict[str, Any]] = []
+    stored = 0
+    orderbook_ok = 0
+    orderbook_failed = 0
+    markets_seen = 0
+    missing_events = 0
+    failed_events = 0
+
+    for station in station_rows:
+        if markets_seen >= bounded_limit:
+            break
+        city_key = str(station.get("city_key") or station.get("city") or "")
+        city_name = str(station.get("city_name") or city_key)
+        station_id = str(station.get("station_id") or station.get("icao_id") or "")
+        city_slug = polymarket_city_slug(city_key, city_name)
+        for target_date in dates:
+            if markets_seen >= bounded_limit:
+                break
+            event_slug = highest_temperature_event_slug(city_slug, target_date)
+            event_started = time.perf_counter()
+            gamma_url = f"{GAMMA_BASE_URL}/events/slug/{event_slug}"
+            try:
+                event = client.get_event_by_slug(event_slug)
+            except requests.HTTPError as exc:
+                status_code = getattr(exc.response, "status_code", None)
+                missing = status_code == 404
+                missing_events += 1 if missing else 0
+                failed_events += 0 if missing else 1
+                result = {
+                    "city": city_key,
+                    "target_date": target_date,
+                    "event_slug": event_slug,
+                    "ok": False,
+                    "status": "missing" if missing else "failed",
+                    "error": str(exc),
+                }
+                results.append(result)
+                _log_market_bucket_fetch(
+                    result,
+                    duration_ms=(time.perf_counter() - event_started) * 1000,
+                    status="WARN" if missing else "ERROR",
+                )
+                continue
+            except Exception as exc:
+                failed_events += 1
+                result = {
+                    "city": city_key,
+                    "target_date": target_date,
+                    "event_slug": event_slug,
+                    "ok": False,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+                results.append(result)
+                _log_market_bucket_fetch(result, duration_ms=(time.perf_counter() - event_started) * 1000, status="ERROR")
+                continue
+
+            event_markets = _active_weather_markets_from_event(event)
+            event_rows = []
+            event_orderbook_errors = []
+            for market in event_markets:
+                if markets_seen >= bounded_limit:
+                    break
+                markets_seen += 1
+                payload = _enrich_market_payload(
+                    market,
+                    event=event,
+                    city_key=city_key,
+                    city_name=city_name,
+                    station_id=station_id,
+                    target_date=target_date,
+                    gamma_url=gamma_url,
+                )
+                if fetch_orderbooks and payload.get("yes_token_id"):
+                    try:
+                        book_payload = client.get_orderbook(str(payload["yes_token_id"]))
+                        payload = _merge_orderbook_payload(payload, book_payload)
+                        if not dry_run:
+                            insert_orderbook(str(payload.get("id") or ""), _orderbook_payload_for_db(payload, book_payload))
+                        orderbook_ok += 1
+                    except Exception as exc:
+                        orderbook_failed += 1
+                        event_orderbook_errors.append({
+                            "market_id": str(payload.get("id") or ""),
+                            "token_id": str(payload.get("yes_token_id") or ""),
+                            "error": str(exc),
+                        })
+                        payload["orderbook_error"] = str(exc)
+                row = market_bucket_from_payload(
+                    payload,
+                    city=city_key,
+                    city_name=city_name,
+                    target_date=target_date,
+                    station_id=station_id,
+                )
+                event_rows.append(row)
+                buckets.append(row)
+                if not dry_run:
+                    upsert_market_bucket(row)
+                    stored += 1
+            result = {
+                "city": city_key,
+                "city_name": city_name,
+                "station_id": station_id,
+                "target_date": target_date,
+                "event_slug": event_slug,
+                "event_url": f"{POLYMARKET_BASE_URL}/event/{event_slug}",
+                "source_url": gamma_url,
+                "ok": bool(event_rows),
+                "status": "ok" if event_rows else "empty",
+                "markets": len(event_markets),
+                "stored": 0 if dry_run else len(event_rows),
+                "matched": sum(1 for row in event_rows if row.get("strict_match_status") == "matched"),
+                "blocked": sum(1 for row in event_rows if row.get("strict_match_status") != "matched"),
+                "orderbook_errors": event_orderbook_errors[:5],
+            }
+            results.append(result)
+            _log_market_bucket_fetch(
+                result,
+                duration_ms=(time.perf_counter() - event_started) * 1000,
+                status="OK" if event_rows else "WARN",
+            )
+            if sleep_seconds:
+                time.sleep(max(0.0, float(sleep_seconds)))
+
+    return {
+        "ok": failed_events == 0 and bool(buckets),
+        "sync_version": ACTIVE_SYNC_VERSION,
+        "dry_run": dry_run,
+        "source": "polymarket_gamma+clob",
+        "cities": [row.get("city_key") or row.get("city") for row in station_rows],
+        "target_dates": dates,
+        "requested_events": len(station_rows) * len(dates),
+        "events_found": sum(1 for row in results if row.get("ok")),
+        "events_missing": missing_events,
+        "events_failed": failed_events,
+        "markets_seen": markets_seen,
+        "stored": stored,
+        "matched": sum(1 for row in buckets if row.get("strict_match_status") == "matched"),
+        "blocked": sum(1 for row in buckets if row.get("strict_match_status") != "matched"),
+        "orderbook_ok": orderbook_ok,
+        "orderbook_failed": orderbook_failed,
+        "elapsed_ms": round((time.perf_counter() - started_all) * 1000),
+        "results": results,
+        "buckets": [_bucket_preview(row) for row in buckets[: min(len(buckets), 50)]],
+    }
 
 
 def ingest_market_buckets(
@@ -237,6 +461,10 @@ def _market_payloads(payloads: list[dict[str, Any]] | dict[str, Any]) -> list[di
 def _normalize_question(question: str) -> str:
     return (
         str(question or "")
+        .replace("\u00c2", "")
+        .replace("\u00b0", "")
+        .replace("\u2109", "F")
+        .replace("\u2103", "C")
         .replace("–", "-")
         .replace("—", "-")
         .replace("℉", "F")
@@ -286,3 +514,170 @@ def _bool(value: Any) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def polymarket_city_slug(city_key: str, city_name: str = "") -> str:
+    key = _slugify(city_key)
+    aliases = {
+        "new-york": "nyc",
+        "new-york-city": "nyc",
+    }
+    if key in aliases:
+        return aliases[key]
+    if key:
+        return key
+    name_key = _slugify(city_name)
+    return aliases.get(name_key, name_key)
+
+
+def highest_temperature_event_slug(city_slug: str, target_date: str) -> str:
+    parsed = date.fromisoformat(str(target_date))
+    month = MONTH_NAMES[f"{parsed.month:02d}"]
+    return f"highest-temperature-in-{city_slug}-on-{month}-{parsed.day}-{parsed.year}"
+
+
+def _date_window(days: int) -> list[str]:
+    count = max(1, min(int(days or 3), 14))
+    today = date.today()
+    return [(today + timedelta(days=offset)).isoformat() for offset in range(count)]
+
+
+def _selected_stations(cities: list[str], *, limit_cities: int) -> list[dict[str, Any]]:
+    requested = {_slugify(city) for city in cities if city}
+    stations = list_stations()
+    if requested:
+        rows = [
+            row for row in stations
+            if _slugify(str(row.get("city_key") or row.get("city") or "")) in requested
+            or _slugify(str(row.get("city_name") or "")) in requested
+        ]
+    else:
+        preferred = ["chicago", "tokyo", "atlanta", "nyc", "dallas"]
+        by_key = {_slugify(str(row.get("city_key") or row.get("city") or "")): row for row in stations}
+        rows = [by_key[key] for key in preferred if key in by_key]
+        rows.extend(row for row in stations if row not in rows)
+    return rows[: max(1, min(int(limit_cities or 5), 50))]
+
+
+def _active_weather_markets_from_event(event: dict[str, Any]) -> list[dict[str, Any]]:
+    markets = event.get("markets") if isinstance(event.get("markets"), list) else []
+    rows = []
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        question = str(market.get("question") or "")
+        if "highest temperature" not in question.lower():
+            continue
+        if market.get("closed") is True or market.get("active") is False:
+            continue
+        rows.append(market)
+    return rows
+
+
+def _enrich_market_payload(
+    market: dict[str, Any],
+    *,
+    event: dict[str, Any],
+    city_key: str,
+    city_name: str,
+    station_id: str,
+    target_date: str,
+    gamma_url: str,
+) -> dict[str, Any]:
+    event_slug = str(event.get("slug") or "")
+    tokens = _parse_list(market.get("clobTokenIds"))
+    payload = dict(market)
+    payload.update({
+        "eventSlug": event_slug,
+        "event_url": f"{POLYMARKET_BASE_URL}/event/{event_slug}" if event_slug else "",
+        "city": city_key,
+        "city_name": city_name,
+        "target_date": target_date,
+        "station_id": station_id,
+        "source_url": gamma_url,
+        "yes_token_id": str(tokens[0]) if tokens else str(market.get("yes_token_id") or ""),
+        "no_token_id": str(tokens[1]) if len(tokens) > 1 else str(market.get("no_token_id") or ""),
+        "raw_response_hash": _hash_json(market),
+    })
+    return payload
+
+
+def _merge_orderbook_payload(market_payload: dict[str, Any], book_payload: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(market_payload)
+    merged.update(book_payload)
+    yes_token_id = str(market_payload.get("yes_token_id") or book_payload.get("asset_id") or "")
+    raw_hash = _hash_json({"market": market_payload, "book": book_payload})
+    merged.update({
+        "id": market_payload.get("id"),
+        "conditionId": market_payload.get("conditionId"),
+        "question": market_payload.get("question"),
+        "outcomes": market_payload.get("outcomes"),
+        "outcomePrices": market_payload.get("outcomePrices"),
+        "clobTokenIds": market_payload.get("clobTokenIds"),
+        "eventSlug": market_payload.get("eventSlug"),
+        "event_url": market_payload.get("event_url"),
+        "city": market_payload.get("city"),
+        "city_name": market_payload.get("city_name"),
+        "target_date": market_payload.get("target_date"),
+        "station_id": market_payload.get("station_id"),
+        "yes_token_id": yes_token_id,
+        "no_token_id": market_payload.get("no_token_id"),
+        "orderMinSize": market_payload.get("orderMinSize") or book_payload.get("min_order_size"),
+        "orderPriceMinTickSize": market_payload.get("orderPriceMinTickSize") or book_payload.get("tick_size"),
+        "enableOrderBook": market_payload.get("enableOrderBook", True),
+        "volume": market_payload.get("volume"),
+        "liquidity": market_payload.get("liquidity"),
+        "negRisk": market_payload.get("negRisk", book_payload.get("neg_risk", False)),
+        "snapshot_key": f"{yes_token_id}:{book_payload.get('hash') or raw_hash}",
+        "source_url": market_payload.get("source_url"),
+        "raw_response_hash": raw_hash,
+    })
+    return merged
+
+
+def _orderbook_payload_for_db(market_payload: dict[str, Any], book_payload: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(market_payload)
+    payload["source_url"] = book_payload.get("source_url") or ""
+    payload["snapshot_type"] = book_payload.get("snapshot_type") or "clob"
+    payload["asset_id"] = book_payload.get("asset_id") or market_payload.get("yes_token_id")
+    return payload
+
+
+def _log_market_bucket_fetch(result: dict[str, Any], *, duration_ms: float, status: str) -> None:
+    log_data_fetch(
+        source="polymarket_gamma",
+        stage="refresh_market_buckets",
+        status=status,
+        city=str(result.get("city") or ""),
+        target_date=str(result.get("target_date") or ""),
+        duration_ms=round(duration_ms, 2),
+        message=str(result.get("status") or ""),
+        details=result,
+    )
+
+
+def _bucket_preview(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "market_id": row.get("market_id"),
+        "city": row.get("city"),
+        "target_date": row.get("target_date"),
+        "bucket_label": row.get("bucket_label"),
+        "bucket_direction": row.get("bucket_direction"),
+        "best_bid": row.get("best_bid"),
+        "best_ask": row.get("best_ask"),
+        "spread": row.get("spread"),
+        "yes_token_id": row.get("yes_token_id"),
+        "event_url": row.get("event_url"),
+        "strict_match_status": row.get("strict_match_status"),
+        "strict_match_reasons": row.get("strict_match_reasons"),
+    }
+
+
+def _hash_json(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _slugify(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
