@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .db import connect, init_v3_db, upsert_hourly_consensus
+from .db import connect, init_v3_db, upsert_hourly_consensus, upsert_hourly_consensus_rows
 from .forecast_archive import TEMPERATURE_KEYS
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 
@@ -45,6 +45,28 @@ WEATHER_CODE_LABELS = {
     82: "Heavy showers",
     95: "Thunderstorm",
 }
+
+HOURLY_CONSENSUS_VERSION = "hourly-consensus-v2"
+HOURLY_CONSENSUS_METHOD = "median_primary_v1"
+
+CONUS_PRIMARY_SOURCES = (
+    "openmeteo_ncep_hrrr_conus",
+    "openmeteo_ncep_nbm_conus",
+    "openmeteo_ecmwf_ifs025",
+    "openmeteo_gfs_seamless",
+    "openmeteo_icon_seamless",
+)
+TOKYO_PRIMARY_SOURCES = (
+    "openmeteo_jma_seamless",
+    "openmeteo_ecmwf_ifs025",
+    "openmeteo_gfs_seamless",
+    "openmeteo_icon_seamless",
+)
+GLOBAL_PRIMARY_SOURCES = (
+    "openmeteo_ecmwf_ifs025",
+    "openmeteo_gfs_seamless",
+    "openmeteo_icon_seamless",
+)
 
 
 def build_metar_hourly_consensus(
@@ -98,6 +120,7 @@ def build_metar_hourly_consensus(
         if temperature is None:
             skipped += 1
             continue
+        temperature = _convert_temp(temperature, _metar_temperature_unit(row, profile), profile.unit)
         local_hour = f"{local_dt.hour:02d}:00"
         key = (profile.city, local_date, local_hour)
         bucket = buckets.setdefault(
@@ -116,7 +139,7 @@ def build_metar_hourly_consensus(
         bucket["temperatures"].append(temperature)
         dew_point = _float(row.get("dew_point"))
         if dew_point is not None:
-            bucket["dew_points"].append(dew_point)
+            bucket["dew_points"].append(_convert_temp(dew_point, _metar_temperature_unit(row, profile), profile.unit))
         bucket["source_reports"].append({
             "id": row.get("id"),
             "report_time": row.get("report_time"),
@@ -172,6 +195,7 @@ def build_hourly_consensus(
     cities: list[str] | None = None,
     target_date: str | None = None,
     db_path: Path | None = None,
+    target_dates_by_city: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Build Layer 4 hourly rows by joining Layer 2 observations and Layer 3 forecasts."""
     init_v3_db(db_path)
@@ -184,9 +208,14 @@ def build_hourly_consensus(
             "rows_built": 0,
             "rows_upserted": 0,
         }
-    targets = _target_map(profiles, target_date, db_path=db_path)
+    targets = _normalize_target_dates(target_dates_by_city) if target_dates_by_city else _target_map(profiles, target_date, db_path=db_path)
     forecast_points = forecast_hourly_points(targets, db_path=db_path)
-    observation_points = _observation_hourly_points(profiles, target_date, db_path=db_path)
+    observation_points = _observation_hourly_points(
+        profiles,
+        target_date,
+        db_path=db_path,
+        target_dates_by_city=targets if target_dates_by_city else None,
+    )
     buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     for city, points in forecast_points.items():
@@ -205,7 +234,7 @@ def build_hourly_consensus(
             bucket = buckets.setdefault(key, _empty_bucket(key))
             bucket["observation_points"].append(point)
 
-    upserted = 0
+    rows_to_upsert: list[dict[str, Any]] = []
     for key, bucket in sorted(buckets.items()):
         city, target, hour = key
         profile = SETTLEMENT_REGISTRY.get(city)
@@ -227,7 +256,9 @@ def build_hourly_consensus(
             warnings.append("forecast_missing")
         if observed_temp is None:
             warnings.append("observation_missing")
-        upsert_hourly_consensus({
+        warnings.extend(forecast.get("warnings", []))
+        build_status = "fallback_only" if forecast.get("fallback_only") else ("partial" if warnings else "built")
+        rows_to_upsert.append({
             "consensus_key": f"hourly:{city}:{target}:{hour}",
             "city": city,
             "city_name": profile.city_name,
@@ -245,25 +276,28 @@ def build_hourly_consensus(
             "wind_direction": observed.get("wind_direction") if observed.get("wind_direction") is not None else forecast.get("wind_direction"),
             "pressure": observed.get("pressure") if observed.get("pressure") is not None else forecast.get("pressure"),
             "dew_point": observed.get("dew_point") if observed.get("dew_point") is not None else forecast.get("dew_point"),
+            "forecast_spread": forecast.get("spread"),
+            "forecast_member_count": forecast.get("member_count"),
+            "consensus_method": forecast.get("method") or HOURLY_CONSENSUS_METHOD,
             "source_count": len(bucket["forecast_points"]) + len(bucket["observation_points"]),
             "source_weights": _source_weights(source_mix),
-            "forecast_source": "+".join(forecast.get("sources", [])),
+            "forecast_source": forecast.get("forecast_source") or "+".join(forecast.get("sources", [])),
             "forecast_sources": forecast.get("sources", []),
             "observation_sources": observed.get("sources", []),
             "source_mix": source_mix,
-            "consensus_version": "hourly-consensus-v2",
-            "build_status": "partial" if warnings else "built",
+            "consensus_version": HOURLY_CONSENSUS_VERSION,
+            "build_status": build_status,
             "build_warnings": warnings,
             "peak_marker": _peak_marker(forecast_temp, observed_temp),
             "raw_json": {
-                "builder": "hourly_consensus_v2",
+                "builder": HOURLY_CONSENSUS_VERSION,
                 "unit": profile.unit,
                 "forecast": forecast,
                 "observation": observed,
                 "source_mix": source_mix,
             },
         })
-        upserted += 1
+    upserted = upsert_hourly_consensus_rows(rows_to_upsert, path=db_path)
 
     return {
         "ok": True,
@@ -337,10 +371,12 @@ def hourly_consensus_points(
             "wind_direction": _float(row.get("wind_direction")),
             "pressure": _float(row.get("pressure")),
             "dew_point": _float(row.get("dew_point")),
+            "forecast_spread": _float(row.get("forecast_spread")),
+            "consensus_method": row.get("consensus_method") or "",
             "diff": residual,
             "source": row.get("observation_source") or "hourly_consensus",
             "forecast_source": row.get("forecast_source") or "",
-            "member_count": int(row.get("source_count") or 0),
+            "member_count": int(row.get("forecast_member_count") or row.get("source_count") or 0),
             "station_id": row.get("station_id"),
             "peak_marker": row.get("peak_marker"),
             "build_status": row.get("build_status") or "",
@@ -421,8 +457,7 @@ def forecast_hourly_points(
                 params,
             ).fetchall()
         ]
-        selected_runs: list[dict[str, Any]] = []
-        source_counts: dict[tuple[str, str], int] = defaultdict(int)
+        latest_runs: list[dict[str, Any]] = []
         seen_source_keys: set[tuple[str, str, str, str, str]] = set()
         for run in run_rows:
             city = str(run.get("city") or "").strip().lower()
@@ -430,9 +465,6 @@ def forecast_hourly_points(
             if not city or not target_date:
                 continue
             if normalized_targets and target_date not in normalized_targets.get(city, set()):
-                continue
-            target_key = (city, target_date)
-            if source_counts[target_key] >= max_sources_per_target:
                 continue
             source_key = (
                 city,
@@ -444,8 +476,14 @@ def forecast_hourly_points(
             if source_key in seen_source_keys:
                 continue
             seen_source_keys.add(source_key)
-            source_counts[target_key] += 1
-            selected_runs.append(run)
+            latest_runs.append(run)
+
+        runs_by_target: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        for run in latest_runs:
+            runs_by_target[(str(run.get("city") or "").strip().lower(), str(run.get("target_date") or ""))].append(run)
+        selected_runs: list[dict[str, Any]] = []
+        for (city, _target_date), runs in runs_by_target.items():
+            selected_runs.extend(_select_forecast_runs_for_target(city, runs))
 
         if not selected_runs:
             return {}
@@ -475,6 +513,7 @@ def forecast_hourly_points(
         if not isinstance(hourly, list):
             continue
         source = _source_label(run)
+        source_role = str(run.get("_forecast_role") or "primary")
         for item in hourly:
             if not isinstance(item, dict):
                 continue
@@ -498,13 +537,21 @@ def forecast_hourly_points(
                     **{f"{field}_values": [] for field in FIELD_KEYS},
                     "condition_values": [],
                     "sources": set(),
+                    "primary_sources": set(),
+                    "fallback_sources": set(),
                     "source_values": defaultdict(list),
                     "unit": unit,
                     "horizon": run.get("horizon") or "",
+                    "roles": set(),
                 },
             )
             bucket["values"].append(float(temp))
             bucket["sources"].add(source)
+            bucket["roles"].add(source_role)
+            if source_role == "fallback":
+                bucket["fallback_sources"].add(source)
+            else:
+                bucket["primary_sources"].add(source)
             bucket["source_values"][source].append(float(temp))
             for field, keys in FIELD_KEYS.items():
                 value = _first_float(item, keys)
@@ -521,13 +568,27 @@ def forecast_hourly_points(
             continue
         source_values = bucket["source_values"]
         source_parts = sorted(str(source) for source in bucket["sources"] if source)
+        primary_sources = sorted(str(source) for source in bucket["primary_sources"] if source)
+        fallback_sources = sorted(str(source) for source in bucket["fallback_sources"] if source)
+        values_sorted = sorted(float(value) for value in values if math.isfinite(float(value)))
+        forecast_temp = _median(values_sorted)
+        forecast_spread = _percentile(values_sorted, 75) - _percentile(values_sorted, 25) if values_sorted else None
+        fallback_only = bool(values_sorted) and not primary_sources and bool(fallback_sources)
         point = {
             "timestamp": bucket["timestamp"],
             "target_date": bucket["target_date"],
             "horizon": bucket["horizon"],
-            "best": _mean(values),
-            "ensemble_mean": _mean(values),
+            "best": forecast_temp,
+            "ensemble_mean": forecast_temp,
             "ensemble_std": _std(values),
+            "forecast_values": values_sorted,
+            "forecast_spread": forecast_spread,
+            "forecast_member_count": len(values_sorted),
+            "forecast_source": "polywx_fallback" if fallback_only else ("openmeteo_multi_model" if any(source.startswith("openmeteo_") for source in primary_sources) else "forecast_archive"),
+            "forecast_sources": source_parts,
+            "fallback_only": fallback_only,
+            "warnings": ["fallback_polywx_only"] if fallback_only else [],
+            "consensus_method": HOURLY_CONSENSUS_METHOD,
             "humidity": _mean(bucket["humidity_values"]),
             "cloud_cover": _mean(bucket["cloud_cover_values"]),
             "precipitation": _mean(bucket["precipitation_values"]),
@@ -550,6 +611,60 @@ def forecast_hourly_points(
         city: sorted(points, key=lambda point: str(point.get("timestamp") or ""))
         for city, points in by_city.items()
     }
+
+
+def _select_forecast_runs_for_target(city: str, runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    profile = SETTLEMENT_REGISTRY.get(str(city or "").strip().lower())
+    primary_sources = set(_primary_sources_for_profile(profile))
+    eligible = [run for run in runs if _is_training_eligible(run)]
+    exact_primary = [run for run in eligible if _source_label(run) in primary_sources]
+    if exact_primary:
+        return [_with_forecast_role(run, "primary") for run in exact_primary]
+
+    openmeteo_candidates = [
+        run
+        for run in eligible
+        if _source_label(run).startswith("openmeteo_") and not _source_label(run).startswith("openmeteo_ensemble_")
+    ]
+    if openmeteo_candidates:
+        return [_with_forecast_role(run, "primary") for run in openmeteo_candidates]
+
+    legacy_primary = [
+        run
+        for run in eligible
+        if any(token in _source_label(run).lower() for token in ("ecmwf", "gfs", "hrrr", "nbm", "icon", "jma"))
+    ]
+    if legacy_primary:
+        return [_with_forecast_role(run, "primary") for run in legacy_primary]
+
+    polywx = [run for run in runs if _source_label(run) == "polywx_forecast"]
+    if polywx:
+        return [_with_forecast_role(polywx[0], "fallback")]
+    return []
+
+
+def _primary_sources_for_profile(profile: CitySettlementProfile | None) -> tuple[str, ...]:
+    if profile and profile.region == "us":
+        return CONUS_PRIMARY_SOURCES
+    if profile and profile.city == "tokyo":
+        return TOKYO_PRIMARY_SOURCES
+    return GLOBAL_PRIMARY_SOURCES
+
+
+def _is_training_eligible(run: dict[str, Any]) -> bool:
+    value = run.get("training_eligible")
+    if value is None:
+        return _source_label(run) != "polywx_forecast"
+    try:
+        return bool(int(value))
+    except Exception:
+        return bool(value)
+
+
+def _with_forecast_role(run: dict[str, Any], role: str) -> dict[str, Any]:
+    copied = dict(run)
+    copied["_forecast_role"] = role
+    return copied
 
 
 def _target_map(
@@ -585,10 +700,19 @@ def _target_map(
     return targets
 
 
+def _normalize_target_dates(target_dates_by_city: dict[str, set[str]] | None) -> dict[str, set[str]]:
+    return {
+        str(city or "").strip().lower(): {str(date) for date in dates if date}
+        for city, dates in (target_dates_by_city or {}).items()
+        if city
+    }
+
+
 def _observation_hourly_points(
     profiles: list[CitySettlementProfile],
     target_date: str | None,
     db_path: Path | None = None,
+    target_dates_by_city: dict[str, set[str]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     station_to_profile = {profile.station_id.upper(): profile for profile in profiles}
     cities = sorted(profile.city for profile in profiles)
@@ -628,6 +752,7 @@ def _observation_hourly_points(
             profile,
             report_time=row.get("report_time"),
             temperature=row.get("temperature"),
+            source_unit=_metar_temperature_unit(row, profile),
             source="metar",
             station_id=row.get("station_id"),
             humidity=None,
@@ -638,7 +763,7 @@ def _observation_hourly_points(
             dew_point=row.get("dew_point"),
             raw=row,
         )
-        _append_observation_bucket(buckets, point, target_date)
+        _append_observation_bucket(buckets, point, target_date, target_dates_by_city)
 
     for row in mesonet_rows:
         profile = SETTLEMENT_REGISTRY.get(str(row.get("city") or ""))
@@ -648,6 +773,7 @@ def _observation_hourly_points(
             profile,
             report_time=row.get("observed_at"),
             temperature=row.get("temperature"),
+            source_unit=profile.unit,
             source=str(row.get("network") or "mesonet"),
             station_id=row.get("station_id"),
             humidity=row.get("humidity"),
@@ -658,7 +784,7 @@ def _observation_hourly_points(
             dew_point=row.get("dew_point"),
             raw=row,
         )
-        _append_observation_bucket(buckets, point, target_date)
+        _append_observation_bucket(buckets, point, target_date, target_dates_by_city)
 
     by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for (city, date_value, hour), bucket in buckets.items():
@@ -691,6 +817,7 @@ def _observation_point(
     *,
     report_time: Any,
     temperature: Any,
+    source_unit: Any,
     source: str,
     station_id: Any,
     humidity: Any,
@@ -705,6 +832,10 @@ def _observation_point(
     temp = _float(temperature)
     if report_dt is None or temp is None:
         return None
+    temp = _convert_temp(temp, str(source_unit or profile.unit), profile.unit)
+    dew_point_value = _float(dew_point)
+    if dew_point_value is not None:
+        dew_point_value = _convert_temp(dew_point_value, str(source_unit or profile.unit), profile.unit)
     local_dt = report_dt.astimezone(ZoneInfo(profile.timezone))
     return {
         "city": profile.city,
@@ -719,7 +850,7 @@ def _observation_point(
         "wind_speed": _float(wind_speed),
         "wind_direction": _float(wind_direction),
         "pressure": _float(pressure),
-        "dew_point": _float(dew_point),
+        "dew_point": dew_point_value,
         "raw": raw,
     }
 
@@ -728,10 +859,13 @@ def _append_observation_bucket(
     buckets: dict[tuple[str, str, str], dict[str, Any]],
     point: dict[str, Any] | None,
     target_date: str | None,
+    target_dates_by_city: dict[str, set[str]] | None = None,
 ) -> None:
     if not point:
         return
     if target_date and point["target_date"] != str(target_date):
+        return
+    if target_dates_by_city and point["target_date"] not in target_dates_by_city.get(str(point["city"]), set()):
         return
     key = (point["city"], point["target_date"], point["local_hour"])
     bucket = buckets.setdefault(
@@ -779,12 +913,42 @@ def _empty_bucket(key: tuple[str, str, str]) -> dict[str, Any]:
 
 
 def _combined_forecast(points: list[dict[str, Any]]) -> dict[str, Any]:
-    values = [_float(point.get("best")) for point in points]
-    values = [value for value in values if value is not None]
-    sources = sorted({str(point.get("source") or "forecast") for point in points if point.get("source")})
+    values: list[float] = []
+    sources: set[str] = set()
+    fallback_only = False
+    warnings: list[str] = []
+    forecast_source = ""
+    for point in points:
+        point_values = point.get("forecast_values")
+        if isinstance(point_values, list):
+            values.extend(float(value) for value in point_values if _float(value) is not None)
+        else:
+            value = _float(point.get("best"))
+            if value is not None:
+                values.append(value)
+        point_sources = point.get("forecast_sources")
+        if isinstance(point_sources, list):
+            sources.update(str(source) for source in point_sources if source)
+        elif point.get("source"):
+            sources.add(str(point.get("source")))
+        fallback_only = fallback_only or bool(point.get("fallback_only"))
+        warnings.extend(str(item) for item in point.get("warnings", []) if item)
+        if point.get("forecast_source"):
+            forecast_source = str(point.get("forecast_source"))
+    values = [value for value in values if math.isfinite(value)]
+    sources_sorted = sorted(sources)
     latest_timestamp = sorted((str(point.get("timestamp") or "") for point in points if point.get("timestamp")), reverse=True)
+    spread_values = [_float(point.get("forecast_spread")) for point in points]
+    spread_values = [value for value in spread_values if value is not None]
+    spread = _mean(spread_values)
     return {
-        "temperature": _mean(values),
+        "temperature": _median(values),
+        "spread": spread if spread is not None else (_percentile(values, 75) - _percentile(values, 25) if values else None),
+        "member_count": len(values),
+        "method": HOURLY_CONSENSUS_METHOD,
+        "forecast_source": forecast_source or ("polywx_fallback" if fallback_only else ("openmeteo_multi_model" if any(source.startswith("openmeteo_") for source in sources_sorted) else "forecast_archive")),
+        "fallback_only": fallback_only,
+        "warnings": sorted(set(warnings)),
         "timestamp": latest_timestamp[0] if latest_timestamp else "",
         "humidity": _mean([value for value in (_float(point.get("humidity")) for point in points) if value is not None]),
         "cloud_cover": _mean([value for value in (_float(point.get("cloud_cover")) for point in points) if value is not None]),
@@ -793,7 +957,7 @@ def _combined_forecast(points: list[dict[str, Any]]) -> dict[str, Any]:
         "wind_direction": _circular_mean_degrees([value for value in (_float(point.get("wind_direction")) for point in points) if value is not None]),
         "pressure": _mean([value for value in (_float(point.get("pressure")) for point in points) if value is not None]),
         "dew_point": _mean([value for value in (_float(point.get("dew_point")) for point in points) if value is not None]),
-        "sources": sources,
+        "sources": sources_sorted,
     }
 
 
@@ -944,6 +1108,31 @@ def _mean(values: list[float]) -> float | None:
     return sum(valid) / len(valid)
 
 
+def _median(values: list[float]) -> float | None:
+    valid = sorted(value for value in values if math.isfinite(value))
+    if not valid:
+        return None
+    mid = len(valid) // 2
+    if len(valid) % 2:
+        return valid[mid]
+    return (valid[mid - 1] + valid[mid]) / 2.0
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    valid = sorted(value for value in values if math.isfinite(value))
+    if not valid:
+        return 0.0
+    if len(valid) == 1:
+        return valid[0]
+    rank = (len(valid) - 1) * (float(percentile) / 100.0)
+    low = math.floor(rank)
+    high = math.ceil(rank)
+    if low == high:
+        return valid[int(rank)]
+    fraction = rank - low
+    return valid[low] * (1.0 - fraction) + valid[high] * fraction
+
+
 def _mode(values: list[str]) -> str | None:
     counts: dict[str, int] = {}
     for value in values:
@@ -975,6 +1164,34 @@ def _std(values: list[float]) -> float | None:
 
 def _source_label(run: dict[str, Any]) -> str:
     return str(run.get("source") or run.get("provider") or run.get("model") or "forecast_archive")
+
+
+def _metar_temperature_unit(row: dict[str, Any], profile: CitySettlementProfile) -> str:
+    parser_version = str(row.get("parser_version") or "").lower()
+    if parser_version.startswith("iem-asos-csv"):
+        return "C"
+    raw = _loads(row.get("raw_json"), {})
+    if isinstance(raw, dict):
+        unit = raw.get("normalized_temperature_unit") or raw.get("temperature_unit")
+        if unit:
+            return str(unit)
+        payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+        unit = payload.get("normalized_temperature_unit") if isinstance(payload, dict) else None
+        if unit:
+            return str(unit)
+    return profile.unit
+
+
+def _convert_temp(value: float, source_unit: str, target_unit: str) -> float:
+    source = str(source_unit or "").strip().upper()
+    target = str(target_unit or "").strip().upper()
+    if source.startswith(target[:1]):
+        return float(value)
+    if source.startswith("C") and target.startswith("F"):
+        return float(value) * 9.0 / 5.0 + 32.0
+    if source.startswith("F") and target.startswith("C"):
+        return (float(value) - 32.0) * 5.0 / 9.0
+    return float(value)
 
 
 def _matching_source_values(source_values: dict[str, list[float]], *needles: str) -> list[float]:
