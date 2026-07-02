@@ -458,6 +458,54 @@ def init_v3_db(path: Path | None = None) -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS market_buckets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bucket_key TEXT UNIQUE,
+                event_slug TEXT,
+                event_url TEXT,
+                market_id TEXT,
+                condition_id TEXT,
+                question TEXT,
+                city TEXT,
+                city_name TEXT,
+                target_date TEXT,
+                station_id TEXT,
+                unit TEXT,
+                bucket_label TEXT,
+                bucket_direction TEXT,
+                bucket_low REAL,
+                bucket_high REAL,
+                outcome_name TEXT,
+                yes_token_id TEXT,
+                no_token_id TEXT,
+                token_id TEXT,
+                token_side TEXT,
+                outcome_index INTEGER,
+                price REAL,
+                best_bid REAL,
+                best_ask REAL,
+                spread REAL,
+                volume REAL,
+                liquidity REAL,
+                order_min_size REAL,
+                tick_size REAL,
+                neg_risk INTEGER,
+                enable_order_book INTEGER,
+                quote_timestamp TEXT,
+                orderbook_snapshot_key TEXT,
+                orderbook_source TEXT,
+                bid_depth REAL,
+                ask_depth REAL,
+                source_url TEXT,
+                raw_response_hash TEXT,
+                strict_match_status TEXT,
+                strict_match_reasons TEXT,
+                parser_version TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS data_fetch_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 log_key TEXT UNIQUE,
@@ -611,6 +659,49 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "build_status": "TEXT",
             "build_warnings": "TEXT",
         },
+        "market_buckets": {
+            "bucket_key": "TEXT",
+            "event_slug": "TEXT",
+            "event_url": "TEXT",
+            "market_id": "TEXT",
+            "condition_id": "TEXT",
+            "question": "TEXT",
+            "city": "TEXT",
+            "city_name": "TEXT",
+            "target_date": "TEXT",
+            "station_id": "TEXT",
+            "unit": "TEXT",
+            "bucket_label": "TEXT",
+            "bucket_direction": "TEXT",
+            "bucket_low": "REAL",
+            "bucket_high": "REAL",
+            "outcome_name": "TEXT",
+            "yes_token_id": "TEXT",
+            "no_token_id": "TEXT",
+            "token_id": "TEXT",
+            "token_side": "TEXT",
+            "outcome_index": "INTEGER",
+            "price": "REAL",
+            "best_bid": "REAL",
+            "best_ask": "REAL",
+            "spread": "REAL",
+            "volume": "REAL",
+            "liquidity": "REAL",
+            "order_min_size": "REAL",
+            "tick_size": "REAL",
+            "neg_risk": "INTEGER",
+            "enable_order_book": "INTEGER",
+            "quote_timestamp": "TEXT",
+            "orderbook_snapshot_key": "TEXT",
+            "orderbook_source": "TEXT",
+            "bid_depth": "REAL",
+            "ask_depth": "REAL",
+            "source_url": "TEXT",
+            "raw_response_hash": "TEXT",
+            "strict_match_status": "TEXT",
+            "strict_match_reasons": "TEXT",
+            "parser_version": "TEXT",
+        },
         "orderbooks": {
             "snapshot_key": "TEXT",
             "snapshot_type": "TEXT",
@@ -667,6 +758,10 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_metar_reports_station_time ON metar_reports(station_id, report_time)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_mesonet_observations_city_time ON mesonet_observations(city, observed_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_hourly_consensus_city_date ON hourly_consensus(city, target_date, local_hour)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_market_buckets_key ON market_buckets(bucket_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_market_buckets_city_date ON market_buckets(city, target_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_market_buckets_market ON market_buckets(market_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_market_buckets_token ON market_buckets(yes_token_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_created ON data_fetch_logs(created_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_source_status ON data_fetch_logs(source, status)")
 
@@ -807,6 +902,222 @@ def insert_orderbook(market_id: str, payload: dict[str, Any]) -> int:
             ),
         )
         return int(conn.execute("SELECT id FROM orderbooks WHERE snapshot_key = ?", (snapshot_key,)).fetchone()["id"])
+
+
+def upsert_market_bucket(bucket: dict[str, Any]) -> int:
+    init_v3_db()
+    now = utc_now()
+    market_id = str(bucket.get("market_id") or "")
+    yes_token_id = str(bucket.get("yes_token_id") or "")
+    bucket_key = str(
+        bucket.get("bucket_key")
+        or _stable_key(
+            "market_bucket",
+            market_id,
+            yes_token_id,
+            bucket.get("outcome_name"),
+            bucket.get("bucket_label"),
+        )
+    )
+    row = {
+        "bucket_key": bucket_key,
+        "event_slug": str(bucket.get("event_slug") or ""),
+        "event_url": str(bucket.get("event_url") or ""),
+        "market_id": market_id,
+        "condition_id": str(bucket.get("condition_id") or ""),
+        "question": str(bucket.get("question") or ""),
+        "city": str(bucket.get("city") or ""),
+        "city_name": str(bucket.get("city_name") or ""),
+        "target_date": str(bucket.get("target_date") or ""),
+        "station_id": str(bucket.get("station_id") or ""),
+        "unit": str(bucket.get("unit") or ""),
+        "bucket_label": str(bucket.get("bucket_label") or ""),
+        "bucket_direction": str(bucket.get("bucket_direction") or ""),
+        "bucket_low": _nullable_num(bucket.get("bucket_low")),
+        "bucket_high": _nullable_num(bucket.get("bucket_high")),
+        "outcome_name": str(bucket.get("outcome_name") or ""),
+        "yes_token_id": yes_token_id,
+        "no_token_id": str(bucket.get("no_token_id") or ""),
+        "token_id": str(bucket.get("token_id") or yes_token_id),
+        "token_side": str(bucket.get("token_side") or "YES"),
+        "outcome_index": int(bucket.get("outcome_index") or 0),
+        "price": _nullable_num(bucket.get("price")),
+        "best_bid": _nullable_num(bucket.get("best_bid")),
+        "best_ask": _nullable_num(bucket.get("best_ask")),
+        "spread": _nullable_num(bucket.get("spread")),
+        "volume": _nullable_num(bucket.get("volume")),
+        "liquidity": _nullable_num(bucket.get("liquidity")),
+        "order_min_size": _nullable_num(bucket.get("order_min_size")),
+        "tick_size": _nullable_num(bucket.get("tick_size")),
+        "neg_risk": 1 if bucket.get("neg_risk") else 0,
+        "enable_order_book": 1 if bucket.get("enable_order_book", True) else 0,
+        "quote_timestamp": str(bucket.get("quote_timestamp") or ""),
+        "orderbook_snapshot_key": str(bucket.get("orderbook_snapshot_key") or ""),
+        "orderbook_source": str(bucket.get("orderbook_source") or ""),
+        "bid_depth": _nullable_num(bucket.get("bid_depth")),
+        "ask_depth": _nullable_num(bucket.get("ask_depth")),
+        "source_url": str(bucket.get("source_url") or ""),
+        "raw_response_hash": str(bucket.get("raw_response_hash") or _json_hash(bucket.get("raw_json") or bucket)),
+        "strict_match_status": str(bucket.get("strict_match_status") or "blocked"),
+        "strict_match_reasons": dump_json(bucket.get("strict_match_reasons", [])),
+        "parser_version": str(bucket.get("parser_version") or "market-buckets-v1"),
+        "raw_json": dump_json(bucket.get("raw_json") or bucket),
+        "created_at": now,
+        "updated_at": now,
+    }
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO market_buckets (
+                bucket_key, event_slug, event_url, market_id, condition_id, question,
+                city, city_name, target_date, station_id, unit, bucket_label,
+                bucket_direction, bucket_low, bucket_high, outcome_name, yes_token_id,
+                no_token_id, token_id, token_side, outcome_index, price, best_bid,
+                best_ask, spread, volume, liquidity, order_min_size, tick_size,
+                neg_risk, enable_order_book, quote_timestamp, orderbook_snapshot_key,
+                orderbook_source, bid_depth, ask_depth, source_url, raw_response_hash,
+                strict_match_status, strict_match_reasons, parser_version, raw_json,
+                created_at, updated_at
+            ) VALUES (
+                :bucket_key, :event_slug, :event_url, :market_id, :condition_id, :question,
+                :city, :city_name, :target_date, :station_id, :unit, :bucket_label,
+                :bucket_direction, :bucket_low, :bucket_high, :outcome_name, :yes_token_id,
+                :no_token_id, :token_id, :token_side, :outcome_index, :price, :best_bid,
+                :best_ask, :spread, :volume, :liquidity, :order_min_size, :tick_size,
+                :neg_risk, :enable_order_book, :quote_timestamp, :orderbook_snapshot_key,
+                :orderbook_source, :bid_depth, :ask_depth, :source_url, :raw_response_hash,
+                :strict_match_status, :strict_match_reasons, :parser_version, :raw_json,
+                :created_at, :updated_at
+            )
+            ON CONFLICT(bucket_key) DO UPDATE SET
+                event_slug=excluded.event_slug,
+                event_url=excluded.event_url,
+                condition_id=excluded.condition_id,
+                question=excluded.question,
+                city=excluded.city,
+                city_name=excluded.city_name,
+                target_date=excluded.target_date,
+                station_id=excluded.station_id,
+                unit=excluded.unit,
+                bucket_label=excluded.bucket_label,
+                bucket_direction=excluded.bucket_direction,
+                bucket_low=excluded.bucket_low,
+                bucket_high=excluded.bucket_high,
+                outcome_name=excluded.outcome_name,
+                yes_token_id=excluded.yes_token_id,
+                no_token_id=excluded.no_token_id,
+                token_id=excluded.token_id,
+                token_side=excluded.token_side,
+                outcome_index=excluded.outcome_index,
+                price=excluded.price,
+                best_bid=excluded.best_bid,
+                best_ask=excluded.best_ask,
+                spread=excluded.spread,
+                volume=excluded.volume,
+                liquidity=excluded.liquidity,
+                order_min_size=excluded.order_min_size,
+                tick_size=excluded.tick_size,
+                neg_risk=excluded.neg_risk,
+                enable_order_book=excluded.enable_order_book,
+                quote_timestamp=excluded.quote_timestamp,
+                orderbook_snapshot_key=excluded.orderbook_snapshot_key,
+                orderbook_source=excluded.orderbook_source,
+                bid_depth=excluded.bid_depth,
+                ask_depth=excluded.ask_depth,
+                source_url=excluded.source_url,
+                raw_response_hash=excluded.raw_response_hash,
+                strict_match_status=excluded.strict_match_status,
+                strict_match_reasons=excluded.strict_match_reasons,
+                parser_version=excluded.parser_version,
+                raw_json=excluded.raw_json,
+                updated_at=excluded.updated_at
+            """,
+            row,
+        )
+        found = conn.execute("SELECT id FROM market_buckets WHERE bucket_key = ?", (bucket_key,)).fetchone()
+        return int(found["id"]) if found else 0
+
+
+def list_market_buckets(
+    city: str | None = None,
+    target_date: str | None = None,
+    market_id: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    init_v3_db()
+    where: list[str] = []
+    params: list[Any] = []
+    if city:
+        where.append("city = ?")
+        params.append(city)
+    if target_date:
+        where.append("target_date = ?")
+        params.append(target_date)
+    if market_id:
+        where.append("market_id = ?")
+        params.append(market_id)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    bounded_limit = max(1, min(int(limit or 200), 1000))
+    with connect() as conn:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM market_buckets
+                {clause}
+                ORDER BY target_date DESC, city, bucket_low, bucket_high, id DESC
+                LIMIT ?
+                """,
+                (*params, bounded_limit),
+            ).fetchall()
+        ]
+    for row in rows:
+        row["neg_risk"] = bool(row.get("neg_risk"))
+        row["enable_order_book"] = bool(row.get("enable_order_book"))
+        row["strict_match_reasons"] = _loads_list(row.get("strict_match_reasons"))
+    return rows
+
+
+def market_bucket_summary(city: str | None = None, target_date: str | None = None) -> dict[str, Any]:
+    init_v3_db()
+    rows = list_market_buckets(city=city, target_date=target_date, limit=1000)
+    reason_counts: dict[str, int] = {}
+    for row in rows:
+        for reason in row.get("strict_match_reasons") or []:
+            reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + 1
+    ready_rows = [row for row in rows if row.get("strict_match_status") == "matched"]
+    return {
+        "ok": True,
+        "city": city or "",
+        "target_date": target_date or "",
+        "bucket_count": len(rows),
+        "matched_bucket_count": len(ready_rows),
+        "blocked_bucket_count": len(rows) - len(ready_rows),
+        "markets": len({row.get("market_id") for row in rows if row.get("market_id")}),
+        "tokens": len({row.get("yes_token_id") for row in rows if row.get("yes_token_id")}),
+        "orderbook_enabled": sum(1 for row in rows if row.get("enable_order_book")),
+        "with_tick_size": sum(1 for row in rows if row.get("tick_size") is not None),
+        "with_order_min_size": sum(1 for row in rows if row.get("order_min_size") is not None),
+        "with_two_sided_depth": sum(1 for row in rows if (row.get("bid_depth") or 0) > 0 and (row.get("ask_depth") or 0) > 0),
+        "reason_counts": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "latest": rows[:20],
+    }
+
+
+def _loads_list(raw: Any) -> list[Any]:
+    if isinstance(raw, list):
+        return raw
+    if not raw:
+        return []
+    try:
+        value = json.loads(str(raw))
+        return value if isinstance(value, list) else []
+    except Exception:
+        return []
 
 
 def _levels(raw: Any) -> list[dict[str, float]]:

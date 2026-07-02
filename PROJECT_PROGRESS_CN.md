@@ -384,3 +384,13 @@
 - 下一步：
 - 相关提交：
 ```
+### 2026-07-02：Layer 5 market_buckets 市场桶数据层
+- 目标：按 `AGENTS.md` Build Order 继续 Layer 5，只补 `market_buckets` 的 SQLite schema、解析/collector、只读 API、readiness stage 和测试；不触碰 Layer 6 信号决策、不改右侧执行工作台、不启用自动抓取或实盘。
+- Build Order layer：Layer 5 — `market_buckets` with strict bucket matching, tick size, `orderMinSize`, `negRisk`, token id, and orderbook metadata。
+- Layer 0 前置核验：复核 `audits/polywx-firecrawl-2026-07-01/MANIFEST.json`：`generated_at=2026-07-01T20:51:44.375748+08:00`，本轮约 `0.52` 天龄，`files=17`，`five_tabs=true`，`hourly_chart=true`，`xhr_response_bodies=true`，`api_endpoints=true`。结论：本轮复用现有 PolyWX corpus，不重复 Firecrawl。
+- 改动：新增 `market_buckets` 表和读写摘要函数；新增 `weatherbot_v3/market_buckets.py` 解析 Polymarket Gamma-like payload；新增只读 `GET /api/market-buckets`；readiness 增加 `market_buckets` stage；CLI 增加 `market-buckets-sync`；production action 增加 `sync_market_buckets`；补 7 个 Layer 5 回归测试。
+- 验证：Targeted Layer 5 tests 7 OK；`python -m unittest tests.test_v3_core` 105 OK；`python -m unittest tests.test_polywx_contract` 7 OK；`npm run build` 通过；8765 `/api/dashboard` 约 `194.6ms`，`scanner_status=stopped`、`is_running=false`、`production_running=false`，`/api/market-buckets` 返回 `ok=true`；`git diff --check` 仅 LF/CRLF 提示。
+- 当前可用性结论：Layer 5 已具备把 Polymarket 天气 outcome/token/盘口约束沉淀成可审计市场桶的基础能力；这仍是数据基座层，不证明策略有 edge，不解锁自动实盘。
+- 剩余阻塞：collector 当前只同步本地已落库 Gamma-like payload；后续仍需显式市场发现/详情抓取 action。历史盘口 replay、真实成交/退出流动性和 Layer 6 `signal_decisions` 尚未完成。sqlite ResourceWarning 仍需单独治理。
+- 下一步：进入 Layer 6 `signal_decisions`，把 Layer 4 小时证据、Layer 5 market bucket、distribution、model-market edge、execution gate 和 skip/buy 原因链沉淀为可复盘决策表。
+- 相关提交：commit pending。

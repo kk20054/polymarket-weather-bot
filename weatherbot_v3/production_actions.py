@@ -5,7 +5,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from .cli import run_forecast_backfill, run_orderbook_backfill, run_production_refresh, run_truth_backfill
+from .cli import run_forecast_backfill, run_market_buckets_sync, run_orderbook_backfill, run_production_refresh, run_truth_backfill
 from .db import bulk_settlement_contract_verification, log_data_fetch
 from .forecast_archive import import_forecast_archive
 from .hourly import build_hourly_consensus
@@ -35,6 +35,12 @@ ACTION_CATALOG: dict[str, dict[str, Any]] = {
     "build_hourly_consensus": {
         "label": "Build hourly consensus",
         "description": "Join persisted forecasts, METAR, and mesonet observations into PolyWX-style hourly evidence rows.",
+        "requires_operator": False,
+        "mutates": True,
+    },
+    "sync_market_buckets": {
+        "label": "Sync market buckets",
+        "description": "Persist strict Polymarket city/date/bucket/token/tick/orderMinSize mappings from local market payloads.",
         "requires_operator": False,
         "mutates": True,
     },
@@ -212,6 +218,8 @@ def _execute_action(action_key: str, params: dict[str, Any]) -> dict[str, Any]:
             cities=params["cities"],
             target_date=params["start_date"] or None,
         )
+    if action_key == "sync_market_buckets":
+        return run_market_buckets_sync(params["limit"])
     if action_key == "production_refresh":
         return run_production_refresh(
             cities=cities_arg,

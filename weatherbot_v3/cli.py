@@ -189,6 +189,57 @@ def run_orderbook_backfill(limit_arg: int = 50, start_date_arg: str = "", end_da
     }
 
 
+def run_market_buckets_sync(limit_arg: int = 200) -> dict:
+    from .market_buckets import ingest_market_buckets
+
+    limit = max(1, min(int(limit_arg or 200), 1000))
+    payloads = []
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT raw_json
+            FROM markets
+            WHERE raw_json IS NOT NULL AND raw_json != ''
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        for row in rows:
+            parsed = _json_object(row["raw_json"])
+            if parsed:
+                payloads.append(parsed)
+        if len(payloads) < limit:
+            signal_rows = conn.execute(
+                """
+                SELECT raw_json
+                FROM signals
+                WHERE raw_json IS NOT NULL AND raw_json != ''
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ?
+                """,
+                (limit - len(payloads),),
+            ).fetchall()
+            for row in signal_rows:
+                parsed = _json_object(row["raw_json"])
+                market_payload = parsed.get("market") if isinstance(parsed.get("market"), dict) else parsed
+                if market_payload:
+                    payloads.append(market_payload)
+    result = ingest_market_buckets(payloads[:limit])
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    result["market_buckets_stage"] = readiness_stage(readiness, "market_buckets")
+    return result
+
+
+def _json_object(raw: str) -> dict:
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
 def _orderbook_quote_usable(quote) -> bool:
     return (
         quote.book_source == "clob"
@@ -386,6 +437,7 @@ def main() -> None:
             "model-dataset-audit",
             "forecast-backfill",
             "hourly-consensus-build",
+            "market-buckets-sync",
             "forecast-archive-import",
             "forecast-archive-manifest",
             "orderbook-backfill",
@@ -474,6 +526,8 @@ def main() -> None:
         print(json.dumps(run_forecast_backfill(args.cities, args.days), ensure_ascii=False, indent=2))
     elif args.command == "hourly-consensus-build":
         print(json.dumps(run_hourly_consensus_build(args.cities, args.start_date), ensure_ascii=False, indent=2))
+    elif args.command == "market-buckets-sync":
+        print(json.dumps(run_market_buckets_sync(args.limit), ensure_ascii=False, indent=2))
     elif args.command == "forecast-archive-import":
         if not args.archive_path:
             raise SystemExit("--archive-path is required")

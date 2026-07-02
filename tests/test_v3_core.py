@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_settlement_contracts, log_data_fetch, set_settlement_contract_verification, upsert_hourly_consensus, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, weather_evidence_summary
+from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_settlement_contracts, log_data_fetch, market_bucket_summary, set_settlement_contract_verification, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
@@ -15,6 +15,7 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
 from weatherbot_v3.forecast import ingest_polywx_forecasts, forecast_run_from_polywx_rows
 from weatherbot_v3.hourly import build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary
+from weatherbot_v3.market_buckets import ingest_market_buckets, market_bucket_from_payload, parse_temperature_bucket
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
 from weatherbot_v3.mesonet import ingest_mesonet_observations, mesonet_observation_from_pws_row
 from weatherbot_v3.qualification import build_data_readiness
@@ -25,8 +26,8 @@ from weatherbot_v3.metar import fetch_awc_metars, refresh_metar_reports
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from weatherbot_v3.cli import default_orderbook_start_date, run_hourly_consensus_build, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
-from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
+from weatherbot_v3.cli import default_orderbook_start_date, run_hourly_consensus_build, run_market_buckets_sync, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
+from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
 from dashboard_server import stations as stations_api
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timedelta, timezone
@@ -235,6 +236,114 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(quote.best_ask, 0.21)
         self.assertEqual(validate_order_constraints(quote, 5.0, 0.21), [])
         self.assertIn("below_order_min_size", validate_order_constraints(quote, 1.0, 0.21))
+
+    def test_market_bucket_parser_handles_temperature_shapes(self):
+        between = parse_temperature_bucket(
+            "Will the highest temperature in Seattle be between 70-71°F on June 16, 2026?"
+        )
+        self.assertEqual(between["direction"], "range")
+        self.assertEqual(between["low"], 70.0)
+        self.assertEqual(between["high"], 71.0)
+        self.assertEqual(between["unit"], "F")
+
+        below = parse_temperature_bucket(
+            "Will the highest temperature in Dallas be 79°F or below on June 16, 2026?"
+        )
+        self.assertEqual(below["direction"], "or_below")
+        self.assertEqual(below["high"], 79.0)
+
+        exact = parse_temperature_bucket(
+            "Will the highest temperature in Paris be 30°C on June 17, 2026?"
+        )
+        self.assertEqual(exact["direction"], "exact")
+        self.assertEqual(exact["low"], 30.0)
+        self.assertEqual(exact["high"], 30.0)
+        self.assertEqual(exact["unit"], "C")
+
+    def test_market_buckets_ingest_persists_strict_matching_metadata(self):
+        path = test_db_path("market-buckets")
+        init_v3_db(path)
+        payload = {
+            "id": "market-1",
+            "conditionId": "condition-1",
+            "eventSlug": "highest-temperature-in-chicago-on-july-1-2026",
+            "question": "Will the highest temperature in Chicago be between 90-91°F on July 1, 2026?",
+            "outcomes": '["Yes", "No"]',
+            "outcomePrices": '["0.22", "0.78"]',
+            "clobTokenIds": '["yes-token", "no-token"]',
+            "orderMinSize": "5",
+            "orderPriceMinTickSize": "0.01",
+            "enableOrderBook": True,
+            "negRisk": True,
+            "bestBid": "0.20",
+            "bestAsk": "0.22",
+            "spread": "0.02",
+            "volume": "1200",
+            "liquidity": "300",
+            "source_url": "https://gamma-api.polymarket.com/markets/market-1",
+        }
+        with patch("weatherbot_v3.db.load_config", return_value=SimpleNamespace(v3_db_path=path)):
+            result = ingest_market_buckets(payload, city="chicago", city_name="Chicago", station_id="KORD")
+            self.assertEqual(result["stored"], 1)
+            self.assertEqual(result["matched"], 1)
+            rows = list_market_buckets(city="chicago", target_date="2026-07-01")
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["market_id"], "market-1")
+            self.assertEqual(row["bucket_direction"], "range")
+            self.assertEqual(row["bucket_low"], 90.0)
+            self.assertEqual(row["bucket_high"], 91.0)
+            self.assertEqual(row["yes_token_id"], "yes-token")
+            self.assertEqual(row["order_min_size"], 5.0)
+            self.assertEqual(row["tick_size"], 0.01)
+            self.assertTrue(row["neg_risk"])
+            self.assertTrue(row["enable_order_book"])
+            self.assertEqual(row["strict_match_status"], "matched")
+            self.assertEqual(row["strict_match_reasons"], [])
+            summary = market_bucket_summary("chicago", "2026-07-01")
+            self.assertEqual(summary["bucket_count"], 1)
+            self.assertEqual(summary["matched_bucket_count"], 1)
+
+    def test_market_bucket_strict_matching_blocks_missing_metadata(self):
+        row = market_bucket_from_payload({
+            "id": "market-2",
+            "question": "Will the highest temperature in Paris be 30°C on June 17, 2026?",
+            "outcomePrices": '["0.12", "0.88"]',
+            "enableOrderBook": False,
+        })
+        self.assertEqual(row["strict_match_status"], "blocked")
+        self.assertIn("yes_token_missing", row["strict_match_reasons"])
+        self.assertIn("tick_size_missing", row["strict_match_reasons"])
+        self.assertIn("order_min_size_missing", row["strict_match_reasons"])
+        self.assertIn("orderbook_disabled", row["strict_match_reasons"])
+
+    def test_market_buckets_api_returns_read_only_summary(self):
+        path = test_db_path("market-buckets-api")
+        init_v3_db(path)
+        with patch("weatherbot_v3.db.load_config", return_value=SimpleNamespace(v3_db_path=path)):
+            upsert_market_bucket({
+                "market_id": "market-3",
+                "question": "Will the highest temperature in Chicago be 92°F on July 1, 2026?",
+                "city": "chicago",
+                "city_name": "Chicago",
+                "target_date": "2026-07-01",
+                "unit": "F",
+                "bucket_label": "92F",
+                "bucket_direction": "exact",
+                "bucket_low": 92,
+                "bucket_high": 92,
+                "yes_token_id": "yes-token-3",
+                "order_min_size": 5,
+                "tick_size": 0.01,
+                "enable_order_book": True,
+                "price": 0.18,
+                "strict_match_status": "matched",
+                "strict_match_reasons": [],
+            })
+            payload = asyncio.run(market_buckets_api(city="chicago", target_date="2026-07-01"))
+        self.assertEqual(payload["bucket_count"], 1)
+        self.assertEqual(payload["matched_bucket_count"], 1)
+        self.assertEqual(payload["latest"][0]["market_id"], "market-3")
 
     def test_clob_quote_uses_true_depth_and_estimates_partial_fill(self):
         quote = quote_from_market_payload({
@@ -1001,6 +1110,35 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("settlement_rule_not_manually_verified", blocker_codes)
         self.assertIn("versioned_forecast_runs_missing", blocker_codes)
 
+    def test_data_readiness_exposes_market_bucket_stage(self):
+        db_path = test_db_path("data_readiness_market_buckets")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db(db_path)
+            upsert_market_bucket({
+                "market_id": "blocked-market",
+                "question": "Will the highest temperature in Chicago be 90°F on July 1, 2026?",
+                "city": "chicago",
+                "target_date": "2026-07-01",
+                "unit": "F",
+                "bucket_label": "90F",
+                "bucket_direction": "exact",
+                "bucket_low": 90,
+                "bucket_high": 90,
+                "strict_match_status": "blocked",
+                "strict_match_reasons": ["yes_token_missing", "tick_size_missing"],
+            })
+            readiness = build_data_readiness(db_path)
+        stage = next(stage for stage in readiness["stages"] if stage["key"] == "market_buckets")
+        self.assertEqual(stage["status"], "blocked")
+        self.assertEqual(stage["metrics"]["buckets"], 1)
+        self.assertEqual(stage["metrics"]["matched_buckets"], 0)
+        codes = {reason["code"] for reason in stage["reasons"]}
+        self.assertIn("market_bucket_strict_matches_missing", codes)
+        self.assertIn("market_bucket_yes_token_missing", codes)
+        self.assertIn("market_bucket_tick_size_missing", codes)
+        self.assertEqual(readiness["summary"]["market_buckets"], 1)
+
     def test_production_validation_report_keeps_live_locked_until_all_layers_pass(self):
         db_path = test_db_path("production_validation")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -1213,6 +1351,78 @@ class V3CoreTests(unittest.TestCase):
         mocked_build.assert_called_once_with(["chicago"], target_date="2026-07-01")
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["hourly_consensus_stage"]["status"], "ready")
+
+    def test_market_buckets_cli_runner_ingests_local_market_payloads(self):
+        db_path = test_db_path("market_buckets_cli")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        market_payload = {
+            "id": "market-cli",
+            "eventSlug": "highest-temperature-in-chicago-on-july-1-2026",
+            "question": "Will the highest temperature in Chicago be 90°F on July 1, 2026?",
+            "outcomes": '["Yes", "No"]',
+            "outcomePrices": '["0.20", "0.80"]',
+            "clobTokenIds": '["yes-cli", "no-cli"]',
+            "orderMinSize": "5",
+            "orderPriceMinTickSize": "0.01",
+            "enableOrderBook": True,
+        }
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db(db_path)
+            with connect(db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO markets (
+                        market_id, event_slug, event_url, question, city, city_name,
+                        target_date, bucket_label, yes_token_id, no_token_id,
+                        order_min_size, tick_size, enable_order_book, raw_json, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "market-cli",
+                        "highest-temperature-in-chicago-on-july-1-2026",
+                        "",
+                        market_payload["question"],
+                        "chicago",
+                        "Chicago",
+                        "2026-07-01",
+                        "90F",
+                        "yes-cli",
+                        "no-cli",
+                        5,
+                        0.01,
+                        1,
+                        json.dumps(market_payload),
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+            with patch("weatherbot_v3.cli.persist_data_readiness"):
+                payload = run_market_buckets_sync(10)
+            rows = list_market_buckets(city="Chicago", target_date="2026-07-01")
+        self.assertEqual(payload["stored"], 1)
+        self.assertEqual(payload["matched"], 1)
+        self.assertEqual(rows[0]["market_id"], "market-cli")
+
+    def test_production_action_executes_whitelisted_market_buckets_sync(self):
+        with patch("weatherbot_v3.production_actions.run_market_buckets_sync") as mocked_sync:
+            mocked_sync.return_value = {"ok": True, "stored": 3}
+            with patch("weatherbot_v3.production_actions.build_data_readiness") as mocked_readiness:
+                mocked_readiness.return_value = {
+                    "status": "blocked",
+                    "score": 0.4,
+                    "live_allowed": False,
+                    "production_phase": {"blocked_keys": ["market_buckets"]},
+                }
+                with patch("weatherbot_v3.production_actions.persist_data_readiness"):
+                    result = run_production_action(
+                        "sync_market_buckets",
+                        apply=True,
+                        limit=3,
+                    )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "executed")
+        mocked_sync.assert_called_once_with(3)
+        self.assertEqual(result["payload"]["stored"], 3)
 
     def test_production_action_requires_operator_confirmation_for_bulk_review(self):
         result = run_production_action(

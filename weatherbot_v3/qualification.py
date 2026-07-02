@@ -58,6 +58,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         metar_reports = [dict(row) for row in conn.execute("SELECT * FROM metar_reports").fetchall()]
         mesonet_observations = [dict(row) for row in conn.execute("SELECT * FROM mesonet_observations").fetchall()]
         hourly_consensus = [dict(row) for row in conn.execute("SELECT * FROM hourly_consensus").fetchall()]
+        market_buckets = [dict(row) for row in conn.execute("SELECT * FROM market_buckets").fetchall()]
 
     rules_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     contracts_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -189,6 +190,25 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         if str(row.get("build_status") or "built") not in {"built", "ready"}
     ]
     hourly_forecast_gap = max(0, len(forecast_city_dates - hourly_city_dates))
+    market_bucket_city_dates = {
+        (str(row.get("city") or ""), str(row.get("target_date") or ""))
+        for row in market_buckets
+        if row.get("city") and row.get("target_date")
+    }
+    matched_market_buckets = [
+        row for row in market_buckets
+        if str(row.get("strict_match_status") or "") == "matched"
+    ]
+    market_bucket_missing_tokens = sum(1 for row in market_buckets if not row.get("yes_token_id"))
+    market_bucket_missing_tick = sum(1 for row in market_buckets if not row.get("tick_size"))
+    market_bucket_missing_order_min = sum(1 for row in market_buckets if not row.get("order_min_size"))
+    market_bucket_disabled_books = sum(1 for row in market_buckets if not row.get("enable_order_book"))
+    market_bucket_unparsed = sum(
+        1 for row in market_buckets
+        if row.get("bucket_low") is None and row.get("bucket_high") is None
+    )
+    market_bucket_strict_blocked = max(0, len(market_buckets) - len(matched_market_buckets))
+    market_bucket_city_date_gap = max(0, len(forecast_city_dates - market_bucket_city_dates))
     expected_station_cities = len(SETTLEMENT_REGISTRY)
     station_city_keys = {str(row.get("city_key") or row.get("city") or "") for row in station_rows}
     missing_station_rows = max(0, expected_station_cities - len(station_city_keys))
@@ -404,6 +424,41 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             },
         ),
         _stage(
+            "market_buckets",
+            "Market buckets",
+            (
+                len(market_buckets) > 0
+                and len(matched_market_buckets) > 0
+                and market_bucket_missing_tokens == 0
+                and market_bucket_missing_tick == 0
+                and market_bucket_missing_order_min == 0
+                and market_bucket_disabled_books == 0
+                and market_bucket_unparsed == 0
+            ),
+            [
+                ("market_buckets_missing", 1 if not market_buckets else 0),
+                ("market_bucket_strict_matches_missing", 1 if market_buckets and not matched_market_buckets else 0),
+                ("market_bucket_strict_blocked", market_bucket_strict_blocked),
+                ("market_bucket_yes_token_missing", market_bucket_missing_tokens),
+                ("market_bucket_tick_size_missing", market_bucket_missing_tick),
+                ("market_bucket_order_min_size_missing", market_bucket_missing_order_min),
+                ("market_bucket_orderbook_disabled", market_bucket_disabled_books),
+                ("market_bucket_temperature_unparsed", market_bucket_unparsed),
+                ("market_bucket_city_date_gap", market_bucket_city_date_gap),
+            ],
+            {
+                "buckets": len(market_buckets),
+                "matched_buckets": len(matched_market_buckets),
+                "city_dates": len(market_bucket_city_dates),
+                "forecast_city_dates": len(forecast_city_dates),
+                "markets": len({row.get("market_id") for row in market_buckets if row.get("market_id")}),
+                "tokens": len({row.get("yes_token_id") for row in market_buckets if row.get("yes_token_id")}),
+                "with_tick_size": len(market_buckets) - market_bucket_missing_tick,
+                "with_order_min_size": len(market_buckets) - market_bucket_missing_order_min,
+                "parser_contract": "city/date/unit/bounds + YES token + tick/orderMinSize + negRisk + orderbook metadata",
+            },
+        ),
+        _stage(
             "orderbooks",
             "盘口快照",
             len(fresh_clob_with_depth_orderbooks) >= cfg.min_fresh_clob_orderbooks,
@@ -456,6 +511,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             "forecast_runs": len(forecast_runs),
             "forecast_members": forecast_member_count,
             "hourly_consensus": len(hourly_consensus),
+            "market_buckets": len(market_buckets),
             "orderbook_snapshots": len(orderbooks),
         },
     }
@@ -706,6 +762,27 @@ def _build_next_actions(
             "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli hourly-consensus-build",
             "requires_operator": False,
             "targets": _city_targets(city_rows, {"versioned_forecast_runs_missing", "forecast_runs_stale"})[:20],
+        })
+
+    market_bucket_gap = max(
+        int(reason_counts.get("market_buckets_missing") or 0),
+        int(reason_counts.get("market_bucket_strict_matches_missing") or 0),
+        int(reason_counts.get("market_bucket_strict_blocked") or 0),
+        int(reason_counts.get("market_bucket_yes_token_missing") or 0),
+        int(reason_counts.get("market_bucket_tick_size_missing") or 0),
+        int(reason_counts.get("market_bucket_order_min_size_missing") or 0),
+        int(reason_counts.get("market_bucket_temperature_unparsed") or 0),
+    )
+    if market_bucket_gap:
+        actions.append({
+            "key": "sync_market_buckets",
+            "priority": 4,
+            "label": "Sync Polymarket buckets",
+            "count": market_bucket_gap,
+            "impact": "Persist exact city/date/bucket/token/tick/orderMinSize mappings before signals or execution gates use a market.",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli market-buckets-sync --limit 200",
+            "requires_operator": False,
+            "targets": [],
         })
 
     orderbook_gap = max(

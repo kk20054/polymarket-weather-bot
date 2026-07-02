@@ -37,6 +37,7 @@ from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
 from weatherbot_v3.db import forecast_summary
 from weatherbot_v3.db import init_v3_db
 from weatherbot_v3.db import insert_event_distribution, latest_event_distribution, latest_signal_decision
+from weatherbot_v3.db import market_bucket_summary
 from weatherbot_v3.db import list_data_fetch_logs
 from weatherbot_v3.db import weather_evidence_summary
 from weatherbot_v3.db import bulk_settlement_contract_verification, list_settlement_contracts, set_settlement_contract_verification, truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
@@ -3809,6 +3810,14 @@ async def forecasts(city: str = "", target_date: str = ""):
 @app.get("/api/hourly-consensus")
 async def hourly_consensus(city: str = "", target_date: str = ""):
     return hourly_consensus_summary(city or None, target_date or None)
+
+
+@app.get("/api/market-buckets")
+async def market_buckets(city: str = "", target_date: str = "", limit: int = 200):
+    payload = market_bucket_summary(city or None, target_date or None)
+    payload["limit"] = max(1, min(int(limit or 200), 1000))
+    payload["latest"] = payload.get("latest", [])[:payload["limit"]]
+    return payload
 
 
 @app.get("/api/temperature-fit")
