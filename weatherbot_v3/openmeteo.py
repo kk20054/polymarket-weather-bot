@@ -1,0 +1,712 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import time
+from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import urlencode
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import requests
+
+from .db import insert_forecast_run, log_data_fetch, utc_now
+from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
+
+
+OPENMETEO_FORECAST_URL = os.getenv("OPENMETEO_FORECAST_URL", "https://api.open-meteo.com/v1/forecast")
+OPENMETEO_ENSEMBLE_URL = os.getenv("OPENMETEO_ENSEMBLE_URL", "https://ensemble-api.open-meteo.com/v1/ensemble")
+OPENMETEO_PARSER_VERSION = "openmeteo-forecast-v1"
+OPENMETEO_STAGE = "refresh_forecast_runs"
+OPENMETEO_HOURLY_FIELDS = (
+    "temperature_2m",
+    "apparent_temperature",
+    "relative_humidity_2m",
+    "dew_point_2m",
+    "cloud_cover",
+    "wind_speed_10m",
+    "wind_gusts_10m",
+    "precipitation",
+    "precipitation_probability",
+)
+OPENMETEO_DEFAULT_CITY_PRIORITY = ("chicago", "tokyo", "atlanta", "nyc", "dallas")
+
+CONUS_MODELS = (
+    "ecmwf_ifs025",
+    "gfs_seamless",
+    "ncep_hrrr_conus",
+    "ncep_nbm_conus",
+    "icon_seamless",
+    "gem_seamless",
+    "ecmwf_aifs025_single",
+)
+TOKYO_MODELS = (
+    "ecmwf_ifs025",
+    "gfs_seamless",
+    "jma_seamless",
+    "icon_seamless",
+    "gem_seamless",
+    "ecmwf_aifs025_single",
+)
+GLOBAL_MODELS = (
+    "ecmwf_ifs025",
+    "gfs_seamless",
+    "icon_seamless",
+    "gem_seamless",
+    "ecmwf_aifs025_single",
+)
+ENSEMBLE_CAPABLE_MODELS = (
+    "ecmwf_ifs025",
+    "gfs_seamless",
+    "icon_seamless",
+)
+MODEL_UPDATE_CADENCE_HOURS = {
+    "gfs_seamless": 1,
+    "gfs_hrrr": 1,
+    "ncep_hrrr_conus": 1,
+    "ncep_nbm_conus": 1,
+    "ecmwf_ifs025": 6,
+    "ecmwf_aifs025_single": 6,
+    "icon_seamless": 3,
+    "jma_seamless": 3,
+    "gem_seamless": 12,
+}
+
+
+def model_allowlist_for_city(city_key: str) -> list[str]:
+    profile = SETTLEMENT_REGISTRY.get(str(city_key or "").strip().lower())
+    if not profile:
+        return list(GLOBAL_MODELS)
+    if profile.region == "us":
+        return list(CONUS_MODELS)
+    if profile.city == "tokyo":
+        return list(TOKYO_MODELS)
+    return list(GLOBAL_MODELS)
+
+
+def ensemble_model_allowlist_for_city(city_key: str) -> list[str]:
+    base = model_allowlist_for_city(city_key)
+    return [model for model in base if model in ENSEMBLE_CAPABLE_MODELS]
+
+
+def fetch_openmeteo_forecasts(
+    cities: list[str] | None = None,
+    *,
+    ensemble: bool = False,
+    dry_run: bool = False,
+    limit_cities: int = 5,
+    forecast_days: int = 7,
+    session: requests.Session | None = None,
+    retrieved_at: str | None = None,
+    sleep_seconds: float | None = None,
+) -> dict[str, Any]:
+    profiles = _select_profiles(cities, limit_cities=limit_cities)
+    retrieved = _parse_time(retrieved_at) or _parse_time(utc_now())
+    client = session or requests.Session()
+    results: list[dict[str, Any]] = []
+    requests_planned: list[dict[str, Any]] = []
+    total_runs = 0
+    total_members = 0
+    failures = 0
+    endpoint_kind = "ensemble" if ensemble else "deterministic"
+    endpoint_url = OPENMETEO_ENSEMBLE_URL if ensemble else OPENMETEO_FORECAST_URL
+    delay = float(os.getenv("OPENMETEO_REQUEST_DELAY_SECONDS", "1.5")) if sleep_seconds is None else float(sleep_seconds)
+
+    for profile in profiles:
+        models = ensemble_model_allowlist_for_city(profile.city) if ensemble else model_allowlist_for_city(profile.city)
+        city_result = {
+            "city": profile.city,
+            "station_id": profile.station_id,
+            "endpoint": endpoint_kind,
+            "models_requested": models,
+            "models": [],
+            "runs_upserted": 0,
+            "members_upserted": 0,
+            "failures": [],
+        }
+        for model in models:
+            request = build_openmeteo_request(profile, model, endpoint_url=endpoint_url, forecast_days=forecast_days)
+            requests_planned.append({
+                "city": profile.city,
+                "model": model,
+                "endpoint": endpoint_kind,
+                "url": _preview_url(endpoint_url, request),
+            })
+            if dry_run:
+                continue
+            started = utc_now()
+            started_perf = time.perf_counter()
+            response = _request_json(client, endpoint_url, request)
+            duration_ms = round((time.perf_counter() - started_perf) * 1000)
+            if not response.get("ok"):
+                failures += 1
+                error = {
+                    "model": model,
+                    "reason": "openmeteo_http_error",
+                    "status_code": response.get("status_code"),
+                    "message": response.get("error") or response.get("text", "")[:200],
+                }
+                city_result["failures"].append(error)
+                log_data_fetch(
+                    source="openmeteo",
+                    stage=OPENMETEO_STAGE,
+                    status="WARN",
+                    duration_ms=duration_ms,
+                    city=profile.city,
+                    message=f"Open-Meteo fetch failed for {profile.city}/{model}",
+                    details={**error, "endpoint": endpoint_kind, "url": response.get("url")},
+                    started_at=started,
+                    finished_at=utc_now(),
+                )
+                continue
+            runs, members = openmeteo_runs_from_response(
+                profile.city,
+                model,
+                response.get("json") or {},
+                source_url=response.get("url") or _preview_url(endpoint_url, request),
+                retrieved_at=retrieved.isoformat() if retrieved else None,
+                endpoint_kind=endpoint_kind,
+            )
+            run_ids: list[int] = []
+            for run, run_members in zip(runs, members):
+                run_ids.append(insert_forecast_run(run, run_members))
+                city_result["runs_upserted"] += 1
+                city_result["members_upserted"] += len(run_members)
+            total_runs += len(run_ids)
+            total_members += sum(len(item) for item in members)
+            model_status = "OK" if all(run.get("parse_status") == "parsed" for run in runs) else "WARN"
+            model_summary = {
+                "model": model,
+                "run_ids": run_ids,
+                "runs": len(run_ids),
+                "members": sum(len(item) for item in members),
+                "parse_statuses": sorted({str(run.get("parse_status") or "") for run in runs}),
+            }
+            city_result["models"].append(model_summary)
+            log_data_fetch(
+                source="openmeteo",
+                stage=OPENMETEO_STAGE,
+                status=model_status,
+                duration_ms=duration_ms,
+                city=profile.city,
+                message=f"Open-Meteo fetched {profile.city}/{model}",
+                details={
+                    "endpoint": endpoint_kind,
+                    "model": model,
+                    "runs": len(run_ids),
+                    "members": model_summary["members"],
+                    "parse_statuses": model_summary["parse_statuses"],
+                    "url": response.get("url"),
+                },
+                started_at=started,
+                finished_at=utc_now(),
+            )
+            if session is None and delay > 0:
+                time.sleep(delay)
+        results.append(city_result)
+    return {
+        "ok": failures == 0,
+        "source": "openmeteo",
+        "endpoint": endpoint_kind,
+        "dry_run": dry_run,
+        "cities": [profile.city for profile in profiles],
+        "requests_planned": requests_planned,
+        "runs_upserted": 0 if dry_run else total_runs,
+        "members_upserted": 0 if dry_run else total_members,
+        "failed": failures,
+        "results": results,
+    }
+
+
+def build_openmeteo_request(
+    profile: CitySettlementProfile,
+    model: str,
+    *,
+    endpoint_url: str = OPENMETEO_FORECAST_URL,
+    forecast_days: int = 7,
+) -> dict[str, Any]:
+    return {
+        "latitude": profile.latitude,
+        "longitude": profile.longitude,
+        "hourly": ",".join(OPENMETEO_HOURLY_FIELDS if endpoint_url == OPENMETEO_FORECAST_URL else ("temperature_2m",)),
+        "timezone": "UTC",
+        "temperature_unit": "celsius",
+        "wind_speed_unit": "kmh",
+        "precipitation_unit": "mm",
+        "forecast_days": max(1, min(int(forecast_days or 7), 16)),
+        "past_days": 0,
+        "models": model,
+    }
+
+
+def openmeteo_runs_from_response(
+    city_key: str,
+    model: str,
+    payload: dict[str, Any],
+    *,
+    source_url: str = "",
+    retrieved_at: str | None = None,
+    endpoint_kind: str = "deterministic",
+) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]]]:
+    profile = SETTLEMENT_REGISTRY.get(str(city_key or "").strip().lower())
+    if not profile:
+        raise ValueError("unknown_city")
+    retrieved = _parse_time(retrieved_at) or _parse_time(utc_now())
+    raw_hash = _stable_hash({"model": model, "endpoint": endpoint_kind, "payload": payload})
+    hourly = payload.get("hourly") if isinstance(payload, dict) else None
+    times = hourly.get("time") if isinstance(hourly, dict) else None
+    warnings: list[str] = ["missing_model_run_time_from_openmeteo"]
+    if not isinstance(times, list) or not times:
+        return _failed_openmeteo_run(
+            profile,
+            model,
+            raw_hash,
+            source_url,
+            retrieved,
+            endpoint_kind,
+            ["missing_hourly_time"],
+            payload,
+        )
+
+    if endpoint_kind == "ensemble":
+        member_series = _ensemble_member_series(hourly, model)
+        if not member_series:
+            return _failed_openmeteo_run(
+                profile,
+                model,
+                raw_hash,
+                source_url,
+                retrieved,
+                endpoint_kind,
+                warnings + ["missing_ensemble_temperature_members"],
+                payload,
+            )
+        return _runs_from_member_series(profile, model, member_series, times, payload, raw_hash, source_url, retrieved, endpoint_kind, warnings)
+
+    series = _deterministic_series(hourly, model)
+    if not series.get("temperature_2m"):
+        return _failed_openmeteo_run(
+            profile,
+            model,
+            raw_hash,
+            source_url,
+            retrieved,
+            endpoint_kind,
+            warnings + ["missing_hourly_temperature_2m"],
+            payload,
+        )
+    member_series = {"deterministic": series}
+    return _runs_from_member_series(profile, model, member_series, times, payload, raw_hash, source_url, retrieved, endpoint_kind, warnings)
+
+
+def _runs_from_member_series(
+    profile: CitySettlementProfile,
+    model: str,
+    member_series: dict[str, dict[str, list[Any]]],
+    times: list[Any],
+    payload: dict[str, Any],
+    raw_hash: str,
+    source_url: str,
+    retrieved: datetime | None,
+    endpoint_kind: str,
+    warnings: list[str],
+) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]]]:
+    by_date: dict[str, list[dict[str, Any]]] = {}
+    for member_id, series in member_series.items():
+        points = _hourly_points_from_series(profile, model, member_id, series, times)
+        for point in points:
+            local_date = _local_date(point["valid_at"], profile.timezone)
+            if local_date:
+                by_date.setdefault(local_date, []).append({"member_id": member_id, **point})
+    if not by_date:
+        return _failed_openmeteo_run(
+            profile,
+            model,
+            raw_hash,
+            source_url,
+            retrieved,
+            endpoint_kind,
+            warnings + ["no_points_in_local_day_windows"],
+            payload,
+        )
+
+    runs: list[dict[str, Any]] = []
+    members_by_run: list[list[dict[str, Any]]] = []
+    for target_date in sorted(by_date):
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for point in by_date[target_date]:
+            grouped.setdefault(point["member_id"], []).append({k: v for k, v in point.items() if k != "member_id"})
+        members: list[dict[str, Any]] = []
+        highs: list[float] = []
+        peak_valid_at = ""
+        for member_id, hourly_points in sorted(grouped.items()):
+            temps = [float(point["temperature_2m"]) for point in hourly_points if point.get("temperature_2m") is not None]
+            if not temps:
+                continue
+            high = max(temps)
+            high_point = max(hourly_points, key=lambda item: float(item.get("temperature_2m") or -999))
+            peak_valid_at = max(peak_valid_at, str(high_point.get("valid_at") or ""))
+            highs.append(high)
+            members.append({
+                "member_id": member_id if endpoint_kind == "ensemble" else "deterministic",
+                "member_name": f"Open-Meteo {model} {member_id}",
+                "high_temp": round(high, 2),
+                "hourly": hourly_points,
+                "parser_version": OPENMETEO_PARSER_VERSION,
+                "source_unit": "C",
+                "raw_model": model,
+                "endpoint": endpoint_kind,
+            })
+        if not highs:
+            continue
+        retrieved_hour = _floor_hour(retrieved)
+        source = f"openmeteo_{model}" if endpoint_kind == "deterministic" else f"openmeteo_ensemble_{model}"
+        meta = {
+            "provider": "open-meteo",
+            "endpoint": endpoint_kind,
+            "model": model,
+            "generationtime_ms": payload.get("generationtime_ms"),
+            "inferred_run_at": _infer_run_at(model, retrieved).isoformat() if retrieved else "",
+            "run_at_inferred": True,
+            "retrieved_hour": retrieved_hour,
+            "raw_response_hash": raw_hash,
+            "temperature_storage": "converted_to_city_unit",
+            "raw_temperature_unit": "C",
+        }
+        run = {
+            "run_key": f"openmeteo:{endpoint_kind}:{profile.city}:{target_date}:{model}:{retrieved_hour}",
+            "city": profile.city,
+            "target_date": target_date,
+            "source": source,
+            "provider": "open-meteo",
+            "model": model,
+            "model_version": "provider_current",
+            "run_type": "forecast",
+            "run_at": "",
+            "retrieved_at": retrieved.isoformat() if retrieved else "",
+            "valid_at": peak_valid_at,
+            "horizon": _horizon(profile, target_date, retrieved),
+            "lead_hours": _lead_hours(retrieved, peak_valid_at),
+            "latitude": profile.latitude,
+            "longitude": profile.longitude,
+            "station_id": profile.station_id,
+            "timezone": profile.timezone,
+            "unit": profile.unit,
+            "mean_high": round(sum(highs) / len(highs), 2),
+            "std_high": round(_population_std(highs), 3),
+            "member_count": len(members),
+            "source_url": source_url,
+            "raw_response_hash": raw_hash,
+            "data_license": "open-meteo-free-api",
+            "quality_flags": ["openmeteo_model_output", "run_time_inferred"],
+            "parser_version": OPENMETEO_PARSER_VERSION,
+            "parse_status": "parsed",
+            "parse_warnings": sorted(set(warnings)),
+            "source_unit": "C",
+            "training_eligible": True,
+            "ineligibility_reason": "",
+            "meta": meta,
+            "raw_response_summary": {
+                "latitude": payload.get("latitude"),
+                "longitude": payload.get("longitude"),
+                "timezone": payload.get("timezone"),
+                "timezone_abbreviation": payload.get("timezone_abbreviation"),
+                "hourly_units": payload.get("hourly_units"),
+            },
+        }
+        runs.append(run)
+        members_by_run.append(members)
+    return runs, members_by_run
+
+
+def _failed_openmeteo_run(
+    profile: CitySettlementProfile,
+    model: str,
+    raw_hash: str,
+    source_url: str,
+    retrieved: datetime | None,
+    endpoint_kind: str,
+    warnings: list[str],
+    payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]]]:
+    target_date = _local_date(retrieved.isoformat() if retrieved else utc_now(), profile.timezone) or ""
+    retrieved_hour = _floor_hour(retrieved)
+    source = f"openmeteo_{model}" if endpoint_kind == "deterministic" else f"openmeteo_ensemble_{model}"
+    run = {
+        "run_key": f"openmeteo:{endpoint_kind}:{profile.city}:{target_date}:{model}:{retrieved_hour}:failed",
+        "city": profile.city,
+        "target_date": target_date,
+        "source": source,
+        "provider": "open-meteo",
+        "model": model,
+        "model_version": "provider_current",
+        "run_type": "forecast",
+        "run_at": "",
+        "retrieved_at": retrieved.isoformat() if retrieved else "",
+        "valid_at": "",
+        "horizon": _horizon(profile, target_date, retrieved),
+        "lead_hours": 0,
+        "latitude": profile.latitude,
+        "longitude": profile.longitude,
+        "station_id": profile.station_id,
+        "timezone": profile.timezone,
+        "unit": profile.unit,
+        "mean_high": 0,
+        "std_high": 0,
+        "member_count": 0,
+        "source_url": source_url,
+        "raw_response_hash": raw_hash,
+        "data_license": "open-meteo-free-api",
+        "quality_flags": ["openmeteo_model_output", "parse_failed"],
+        "parser_version": OPENMETEO_PARSER_VERSION,
+        "parse_status": "failed",
+        "parse_warnings": sorted(set(warnings)),
+        "source_unit": "C",
+        "training_eligible": False,
+        "ineligibility_reason": "openmeteo_parse_failed",
+        "meta": {
+            "provider": "open-meteo",
+            "endpoint": endpoint_kind,
+            "model": model,
+            "raw_response_hash": raw_hash,
+            "payload_keys": sorted(payload.keys()) if isinstance(payload, dict) else [],
+        },
+    }
+    return [run], [[]]
+
+
+def _deterministic_series(hourly: dict[str, Any], model: str) -> dict[str, list[Any]]:
+    return {
+        field: _series_for_field(hourly, field, model)
+        for field in OPENMETEO_HOURLY_FIELDS
+    }
+
+
+def _ensemble_member_series(hourly: dict[str, Any], model: str) -> dict[str, dict[str, list[Any]]]:
+    members: dict[str, dict[str, list[Any]]] = {}
+    for key, values in hourly.items():
+        if not str(key).startswith("temperature_2m_member"):
+            continue
+        member_suffix = str(key).replace("temperature_2m_", "")
+        member_id = member_suffix if member_suffix.startswith("member") else f"member_{member_suffix}"
+        members[member_id] = {"temperature_2m": values}
+    return members
+
+
+def _series_for_field(hourly: dict[str, Any], field: str, model: str) -> list[Any]:
+    suffixed = f"{field}_{model}"
+    value = hourly.get(suffixed)
+    if isinstance(value, list):
+        return value
+    value = hourly.get(field)
+    return value if isinstance(value, list) else []
+
+
+def _hourly_points_from_series(
+    profile: CitySettlementProfile,
+    model: str,
+    member_id: str,
+    series: dict[str, list[Any]],
+    times: list[Any],
+) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    temp_series = series.get("temperature_2m") or []
+    for index, raw_time in enumerate(times):
+        temp_c = _as_float(_at(temp_series, index))
+        valid = _parse_openmeteo_time(raw_time)
+        if temp_c is None or valid is None:
+            continue
+        point = {
+            "valid_at": valid.isoformat(),
+            "temperature_2m": _convert_temperature(temp_c, "C", profile.unit),
+            "temperature_2m_c": round(temp_c, 2),
+            "apparent_temperature": _convert_optional_temperature(_at(series.get("apparent_temperature") or [], index), profile.unit),
+            "relative_humidity_2m": _as_float(_at(series.get("relative_humidity_2m") or [], index)),
+            "dew_point_2m": _convert_optional_temperature(_at(series.get("dew_point_2m") or [], index), profile.unit),
+            "cloud_cover": _as_float(_at(series.get("cloud_cover") or [], index)),
+            "wind_speed_10m": _as_float(_at(series.get("wind_speed_10m") or [], index)),
+            "wind_gusts_10m": _as_float(_at(series.get("wind_gusts_10m") or [], index)),
+            "precipitation": _as_float(_at(series.get("precipitation") or [], index)),
+            "precipitation_probability": _as_float(_at(series.get("precipitation_probability") or [], index)),
+            "source_unit": "C",
+            "model": model,
+            "member_id": member_id,
+        }
+        points.append(point)
+    return points
+
+
+def _request_json(client: requests.Session, url: str, params: dict[str, Any]) -> dict[str, Any]:
+    headers = {"User-Agent": openmeteo_user_agent()}
+    attempts = 3
+    last_error = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            response = client.get(url, params=params, headers=headers, timeout=30)
+            status_code = int(getattr(response, "status_code", 0) or 0)
+            text = str(getattr(response, "text", "") or "")
+            response_url = str(getattr(response, "url", "") or _preview_url(url, params))
+            if status_code in {429} or status_code >= 500:
+                if attempt < attempts:
+                    time.sleep(5 if attempt == 1 else 15)
+                    continue
+            if not (200 <= status_code < 300):
+                return {"ok": False, "status_code": status_code, "text": text, "url": response_url}
+            try:
+                payload = response.json()
+            except Exception:
+                payload = json.loads(text)
+            return {"ok": True, "status_code": status_code, "json": payload, "url": response_url}
+        except Exception as exc:
+            last_error = str(exc)
+            if attempt < attempts:
+                time.sleep(5 if attempt == 1 else 15)
+    return {"ok": False, "status_code": 0, "error": last_error, "url": _preview_url(url, params)}
+
+
+def openmeteo_user_agent() -> str:
+    contact = os.getenv("WEATHERBOT_CONTACT_EMAIL", "local-operator@example.com")
+    return f"WeatherBot/3.5 (contact: {contact})"
+
+
+def _select_profiles(cities: list[str] | None, *, limit_cities: int) -> list[CitySettlementProfile]:
+    requested = [str(city or "").strip().lower() for city in (cities or []) if str(city or "").strip()]
+    if requested:
+        profiles = [SETTLEMENT_REGISTRY[city] for city in requested if city in SETTLEMENT_REGISTRY]
+        return profiles
+    profiles: list[CitySettlementProfile] = []
+    seen: set[str] = set()
+    for city in OPENMETEO_DEFAULT_CITY_PRIORITY:
+        if city in SETTLEMENT_REGISTRY:
+            profiles.append(SETTLEMENT_REGISTRY[city])
+            seen.add(city)
+    for city, profile in SETTLEMENT_REGISTRY.items():
+        if city not in seen:
+            profiles.append(profile)
+            seen.add(city)
+        if len(profiles) >= max(1, int(limit_cities or 5)):
+            break
+    return profiles[: max(1, int(limit_cities or 5))]
+
+
+def _convert_optional_temperature(value: Any, target_unit: str) -> float | None:
+    numeric = _as_float(value)
+    if numeric is None:
+        return None
+    return _convert_temperature(numeric, "C", target_unit)
+
+
+def _convert_temperature(value: float, source_unit: str, target_unit: str) -> float:
+    source = str(source_unit or "").upper()
+    target = str(target_unit or "").upper()
+    if source == target:
+        return round(float(value), 2)
+    if source == "C" and target == "F":
+        return round(float(value) * 9.0 / 5.0 + 32.0, 2)
+    if source == "F" and target == "C":
+        return round((float(value) - 32.0) * 5.0 / 9.0, 2)
+    return round(float(value), 2)
+
+
+def _local_date(value: str, timezone_name: str) -> str:
+    parsed = _parse_time(value)
+    if parsed is None:
+        return ""
+    try:
+        return parsed.astimezone(ZoneInfo(timezone_name)).date().isoformat()
+    except ZoneInfoNotFoundError:
+        return parsed.date().isoformat()
+
+
+def _parse_openmeteo_time(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_time(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _floor_hour(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+
+
+def _infer_run_at(model: str, retrieved: datetime | None) -> datetime:
+    if retrieved is None:
+        return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    cadence = max(1, int(MODEL_UPDATE_CADENCE_HOURS.get(model, 6)))
+    current = retrieved.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    aligned_hour = current.hour - (current.hour % cadence)
+    return current.replace(hour=aligned_hour)
+
+
+def _horizon(profile: CitySettlementProfile, target_date: str, retrieved: datetime | None) -> str:
+    if retrieved is None:
+        return "unknown"
+    try:
+        local_date = retrieved.astimezone(ZoneInfo(profile.timezone)).date()
+        target = datetime.fromisoformat(target_date).date()
+    except Exception:
+        return "unknown"
+    return f"D+{max(0, (target - local_date).days)}"
+
+
+def _lead_hours(retrieved: datetime | None, valid_at: str) -> float:
+    valid = _parse_time(valid_at)
+    if retrieved is None or valid is None:
+        return 0.0
+    return round((valid - retrieved).total_seconds() / 3600.0, 3)
+
+
+def _population_std(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    mean = sum(values) / len(values)
+    return math.sqrt(sum((value - mean) ** 2 for value in values) / len(values))
+
+
+def _stable_hash(payload: Any) -> str:
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _at(values: list[Any], index: int) -> Any:
+    return values[index] if index < len(values) else None
+
+
+def _preview_url(url: str, params: dict[str, Any]) -> str:
+    return f"{url}?{urlencode(params, doseq=True)}"
