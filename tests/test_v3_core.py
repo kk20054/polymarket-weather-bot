@@ -7,9 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, set_settlement_contract_verification, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, weather_evidence_summary
+from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, paper_execution_summary, set_settlement_contract_verification, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
+from weatherbot_v3.paper import execute_paper_decision
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
@@ -29,10 +30,13 @@ from weatherbot_v3.metar import backfill_iem_asos_metars, ingest_iem_asos_csv, p
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from weatherbot_v3.cli import default_orderbook_start_date, run_daily_max_build, run_hourly_consensus_build, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
+from weatherbot_v3.cli import default_orderbook_start_date, run_daily_max_build, run_hourly_consensus_build, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
 from dashboard_server import signal_decision_detail as signal_decision_detail_api
 from dashboard_server import signal_decisions as signal_decisions_api
+from dashboard_server import paper_orders as paper_orders_api
+from dashboard_server import paper_orders_execute as paper_orders_execute_api
+from dashboard_server import PaperExecutionRequest
 from dashboard_server import stations as stations_api
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timedelta, timezone
@@ -932,6 +936,21 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("live_decision", decision_columns)
         self.assertIn("evidence_links_json", decision_columns)
         with connect(db_path) as conn:
+            paper_columns = {row["name"] for row in conn.execute("PRAGMA table_info(paper_orders)").fetchall()}
+        self.assertIn("decision_id", paper_columns)
+        self.assertIn("requested_amount", paper_columns)
+        self.assertIn("filled_amount", paper_columns)
+        self.assertIn("average_fill_price", paper_columns)
+        self.assertIn("unrealized_pnl", paper_columns)
+        self.assertIn("lifecycle_status", paper_columns)
+        self.assertIn("risk_reasons_json", paper_columns)
+        self.assertIn("orderbook_snapshot_json", paper_columns)
+        with connect(db_path) as conn:
+            fill_columns = {row["name"] for row in conn.execute("PRAGMA table_info(fills)").fetchall()}
+        self.assertIn("idempotency_key", fill_columns)
+        self.assertIn("decision_id", fill_columns)
+        self.assertIn("fill_status", fill_columns)
+        with connect(db_path) as conn:
             mesonet_columns = {row["name"] for row in conn.execute("PRAGMA table_info(mesonet_observations)").fetchall()}
         self.assertIn("parser_version", mesonet_columns)
         self.assertIn("parse_status", mesonet_columns)
@@ -1383,6 +1402,7 @@ class V3CoreTests(unittest.TestCase):
         token_suffix: str = "mid",
         bias_sample_count: int = 0,
     ) -> None:
+        quote_timestamp = datetime.now(timezone.utc).isoformat()
         upsert_daily_max_prediction({
             "city_key": "chicago",
             "target_date": "2026-07-02",
@@ -1449,7 +1469,7 @@ class V3CoreTests(unittest.TestCase):
                 "tick_size": 0.01,
                 "neg_risk": False,
                 "enable_order_book": True,
-                "quote_timestamp": "2026-07-02T12:01:00+00:00",
+                "quote_timestamp": quote_timestamp,
                 "bid_depth": 50,
                 "ask_depth": 50,
                 "strict_match_status": strict_match_status if token_suffix in bucket["bucket_key"] else "matched",
@@ -1530,6 +1550,104 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(stage["metrics"]["decisions"], 3)
         self.assertEqual(stage["metrics"]["live_blocked_insufficient_bias_samples"], 3)
         self.assertEqual(readiness["summary"]["signal_decisions"], 3)
+
+    def test_layer8_paper_execution_fills_decision_and_marks_spread_pnl(self):
+        db_path = test_db_path("paper_execution_fill")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "2.0"}, clear=False):
+            init_v3_db(db_path)
+            self._seed_signal_decision_fixture(db_path)
+            build_signal_decisions("chicago", "2026-07-02", path=db_path)
+            decision = next(
+                row for row in list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
+                if row["bucket_key"] == "chicago-20260702-mid"
+            )
+            result = execute_paper_decision(decision["decision_id"], amount=2.0, path=db_path)
+            orders = list_paper_orders(decision_id=decision["decision_id"], path=db_path)
+            summary = paper_execution_summary("chicago", "2026-07-02", path=db_path)
+            readiness = build_data_readiness(db_path)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "paper_filled")
+        self.assertEqual(len(orders), 1)
+        order = orders[0]
+        self.assertEqual(order["lifecycle_status"], "open")
+        self.assertEqual(order["fill_status"], "filled")
+        self.assertAlmostEqual(order["average_fill_price"], decision["market_ask"])
+        self.assertLess(order["unrealized_pnl"], 0)
+        self.assertAlmostEqual(order["unrealized_pnl"], (decision["market_bid"] - decision["market_ask"]) * order["filled_shares"], places=5)
+        self.assertEqual(summary["count"], 1)
+        self.assertEqual(summary["open_orders"], 1)
+        stage = next(stage for stage in readiness["stages"] if stage["key"] == "paper_execution")
+        self.assertEqual(stage["metrics"]["orders"], 1)
+        self.assertEqual(stage["metrics"]["fills"], 1)
+
+    def test_layer8_paper_execution_is_idempotent_by_decision(self):
+        db_path = test_db_path("paper_execution_idempotent")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "2.0"}, clear=False):
+            init_v3_db(db_path)
+            self._seed_signal_decision_fixture(db_path)
+            build_signal_decisions("chicago", "2026-07-02", path=db_path)
+            decision = next(
+                row for row in list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
+                if row["bucket_key"] == "chicago-20260702-mid"
+            )
+            first = execute_paper_decision(decision["decision_id"], amount=2.0, path=db_path)
+            second = execute_paper_decision(decision["decision_id"], amount=2.0, path=db_path)
+            orders = list_paper_orders(decision_id=decision["decision_id"], path=db_path)
+
+        self.assertTrue(first["ok"])
+        self.assertEqual(second["status"], "duplicate")
+        self.assertEqual(len(orders), 1)
+
+    def test_layer8_paper_execution_rejects_blocked_decision_without_fill(self):
+        db_path = test_db_path("paper_execution_reject")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "2.0"}, clear=False):
+            init_v3_db(db_path)
+            self._seed_signal_decision_fixture(db_path, strict_match_status="blocked")
+            build_signal_decisions("chicago", "2026-07-02", path=db_path)
+            decision = next(
+                row for row in list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
+                if row["bucket_key"] == "chicago-20260702-mid"
+            )
+            result = execute_paper_decision(decision["decision_id"], amount=2.0, path=db_path)
+            orders = list_paper_orders(decision_id=decision["decision_id"], path=db_path)
+            with connect(db_path) as conn:
+                fills = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("paper_gate_not_passed", result["reason"])
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]["lifecycle_status"], "rejected")
+        self.assertEqual(fills, 0)
+
+    def test_layer8_paper_execution_api_and_cli_are_controlled(self):
+        db_path = test_db_path("paper_execution_api_cli")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "2.0"}, clear=False):
+            init_v3_db(db_path)
+            self._seed_signal_decision_fixture(db_path)
+            build_signal_decisions("chicago", "2026-07-02", path=db_path)
+            decision = next(
+                row for row in list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
+                if row["bucket_key"] == "chicago-20260702-mid"
+            )
+            dry_run_cli = run_paper_execute(decision_id=decision["decision_id"], amount=2.0, apply=False)
+            self.assertTrue(dry_run_cli["dry_run"])
+            self.assertEqual(len(list_paper_orders(path=db_path)), 0)
+            api_result = asyncio.run(paper_orders_execute_api(PaperExecutionRequest(
+                decision_id=decision["decision_id"],
+                amount=2.0,
+                dry_run=False,
+            )))
+            api_summary = asyncio.run(paper_orders_api(city="chicago", target_date="2026-07-02"))
+
+        self.assertTrue(api_result["ok"])
+        self.assertFalse(api_result["dry_run"])
+        self.assertEqual(api_summary["count"], 1)
 
     def test_signal_decisions_cli_runner_calls_layer6_builder(self):
         with patch("weatherbot_v3.cli.build_data_readiness", return_value={"stages": [{"key": "signal_decisions", "status": "ready"}]}), \

@@ -157,17 +157,42 @@ def init_v3_db(path: Path | None = None) -> None:
 
             CREATE TABLE IF NOT EXISTS paper_orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_id TEXT,
                 signal_id INTEGER,
                 idempotency_key TEXT UNIQUE,
                 market_id TEXT,
                 yes_token_id TEXT,
+                bucket_key TEXT,
+                city_key TEXT,
+                target_date TEXT,
+                event_url TEXT,
                 side TEXT,
                 limit_price REAL,
+                requested_amount REAL,
                 amount REAL,
                 shares REAL,
+                filled_amount REAL,
+                filled_shares REAL,
+                unfilled_amount REAL,
+                average_fill_price REAL,
+                mark_price REAL,
+                unrealized_pnl REAL,
+                realized_pnl REAL,
                 status TEXT,
+                lifecycle_status TEXT,
+                fill_status TEXT,
+                order_version TEXT,
+                model_probability REAL,
+                market_probability REAL,
+                edge REAL,
+                gate_status TEXT,
                 failure_reason TEXT,
+                risk_reasons_json TEXT,
+                orderbook_snapshot_json TEXT,
+                evidence_links_json TEXT,
                 raw_json TEXT,
+                opened_at TEXT,
+                closed_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -193,11 +218,17 @@ def init_v3_db(path: Path | None = None) -> None:
 
             CREATE TABLE IF NOT EXISTS fills (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT UNIQUE,
                 order_id INTEGER,
                 order_type TEXT,
+                decision_id TEXT,
+                market_id TEXT,
+                yes_token_id TEXT,
+                fill_status TEXT,
                 price REAL,
                 shares REAL,
                 amount REAL,
+                source TEXT,
                 raw_json TEXT,
                 created_at TEXT NOT NULL
             );
@@ -852,6 +883,41 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "edge_by_bucket_json": "TEXT",
             "gate_reasons_json": "TEXT",
         },
+        "paper_orders": {
+            "decision_id": "TEXT",
+            "bucket_key": "TEXT",
+            "city_key": "TEXT",
+            "target_date": "TEXT",
+            "event_url": "TEXT",
+            "requested_amount": "REAL",
+            "filled_amount": "REAL",
+            "filled_shares": "REAL",
+            "unfilled_amount": "REAL",
+            "average_fill_price": "REAL",
+            "mark_price": "REAL",
+            "unrealized_pnl": "REAL",
+            "realized_pnl": "REAL",
+            "lifecycle_status": "TEXT",
+            "fill_status": "TEXT",
+            "order_version": "TEXT",
+            "model_probability": "REAL",
+            "market_probability": "REAL",
+            "edge": "REAL",
+            "gate_status": "TEXT",
+            "risk_reasons_json": "TEXT",
+            "orderbook_snapshot_json": "TEXT",
+            "evidence_links_json": "TEXT",
+            "opened_at": "TEXT",
+            "closed_at": "TEXT",
+        },
+        "fills": {
+            "idempotency_key": "TEXT",
+            "decision_id": "TEXT",
+            "market_id": "TEXT",
+            "yes_token_id": "TEXT",
+            "fill_status": "TEXT",
+            "source": "TEXT",
+        },
         "mesonet_observations": {
             "parser_version": "TEXT",
             "parse_status": "TEXT",
@@ -911,6 +977,12 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_decisions_decision_id ON signal_decisions(decision_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_city_date ON signal_decisions(city_key, target_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_bucket ON signal_decisions(bucket_key)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_orders_idempotency ON paper_orders(idempotency_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_decision ON paper_orders(decision_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_city_date ON paper_orders(city_key, target_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_token_status ON paper_orders(yes_token_id, lifecycle_status)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_idempotency ON fills(idempotency_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_type, order_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_created ON data_fetch_logs(created_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_source_status ON data_fetch_logs(source, status)")
 
@@ -3150,6 +3222,248 @@ def insert_order(table: str, order: dict[str, Any]) -> int:
         )
         row = conn.execute(f"SELECT id FROM {table} WHERE idempotency_key = ?", (order.get("idempotency_key"),)).fetchone()
         return int(row["id"]) if row else 0
+
+
+def upsert_paper_order_record(order: dict[str, Any], path: Path | None = None) -> int:
+    init_v3_db(path)
+    now = utc_now()
+    row = {
+        "decision_id": str(order.get("decision_id") or ""),
+        "signal_id": order.get("signal_id"),
+        "idempotency_key": str(order.get("idempotency_key") or _stable_key("paper_order", now)),
+        "market_id": str(order.get("market_id") or ""),
+        "yes_token_id": str(order.get("yes_token_id") or order.get("token_id") or ""),
+        "bucket_key": str(order.get("bucket_key") or ""),
+        "city_key": str(order.get("city_key") or order.get("city") or ""),
+        "target_date": str(order.get("target_date") or ""),
+        "event_url": str(order.get("event_url") or ""),
+        "side": str(order.get("side") or "BUY"),
+        "limit_price": _nullable_num(order.get("limit_price")),
+        "requested_amount": _nullable_num(order.get("requested_amount", order.get("amount"))),
+        "amount": _nullable_num(order.get("amount", order.get("filled_amount"))),
+        "shares": _nullable_num(order.get("shares", order.get("filled_shares"))),
+        "filled_amount": _nullable_num(order.get("filled_amount")),
+        "filled_shares": _nullable_num(order.get("filled_shares")),
+        "unfilled_amount": _nullable_num(order.get("unfilled_amount")),
+        "average_fill_price": _nullable_num(order.get("average_fill_price")),
+        "mark_price": _nullable_num(order.get("mark_price")),
+        "unrealized_pnl": _nullable_num(order.get("unrealized_pnl")),
+        "realized_pnl": _nullable_num(order.get("realized_pnl")),
+        "status": str(order.get("status") or "created"),
+        "lifecycle_status": str(order.get("lifecycle_status") or order.get("status") or "created"),
+        "fill_status": str(order.get("fill_status") or ""),
+        "order_version": str(order.get("order_version") or ""),
+        "model_probability": _nullable_num(order.get("model_probability")),
+        "market_probability": _nullable_num(order.get("market_probability")),
+        "edge": _nullable_num(order.get("edge")),
+        "gate_status": str(order.get("gate_status") or ""),
+        "failure_reason": order.get("failure_reason"),
+        "risk_reasons_json": dump_json(order.get("risk_reasons", order.get("risk_reasons_json", []))),
+        "orderbook_snapshot_json": dump_json(order.get("orderbook_snapshot", order.get("orderbook_snapshot_json", {}))),
+        "evidence_links_json": dump_json(order.get("evidence_links", order.get("evidence_links_json", {}))),
+        "raw_json": dump_json(order),
+        "opened_at": str(order.get("opened_at") or ""),
+        "closed_at": str(order.get("closed_at") or ""),
+        "created_at": str(order.get("created_at") or now),
+        "updated_at": now,
+    }
+    with connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO paper_orders (
+                decision_id, signal_id, idempotency_key, market_id, yes_token_id,
+                bucket_key, city_key, target_date, event_url, side, limit_price,
+                requested_amount, amount, shares, filled_amount, filled_shares,
+                unfilled_amount, average_fill_price, mark_price, unrealized_pnl,
+                realized_pnl, status, lifecycle_status, fill_status, order_version,
+                model_probability, market_probability, edge, gate_status,
+                failure_reason, risk_reasons_json, orderbook_snapshot_json,
+                evidence_links_json, raw_json, opened_at, closed_at, created_at,
+                updated_at
+            ) VALUES (
+                :decision_id, :signal_id, :idempotency_key, :market_id, :yes_token_id,
+                :bucket_key, :city_key, :target_date, :event_url, :side, :limit_price,
+                :requested_amount, :amount, :shares, :filled_amount, :filled_shares,
+                :unfilled_amount, :average_fill_price, :mark_price, :unrealized_pnl,
+                :realized_pnl, :status, :lifecycle_status, :fill_status, :order_version,
+                :model_probability, :market_probability, :edge, :gate_status,
+                :failure_reason, :risk_reasons_json, :orderbook_snapshot_json,
+                :evidence_links_json, :raw_json, :opened_at, :closed_at, :created_at,
+                :updated_at
+            )
+            ON CONFLICT(idempotency_key) DO UPDATE SET
+                status=paper_orders.status,
+                lifecycle_status=paper_orders.lifecycle_status,
+                fill_status=paper_orders.fill_status,
+                raw_json=paper_orders.raw_json,
+                updated_at=paper_orders.updated_at
+            """,
+            row,
+        )
+        found = conn.execute(
+            "SELECT id FROM paper_orders WHERE idempotency_key = ?",
+            (row["idempotency_key"],),
+        ).fetchone()
+        return int(found["id"]) if found else 0
+
+
+def insert_fill_record(fill: dict[str, Any], path: Path | None = None) -> int:
+    init_v3_db(path)
+    now = utc_now()
+    row = {
+        "idempotency_key": str(fill.get("idempotency_key") or _stable_key("fill", now)),
+        "order_id": fill.get("order_id"),
+        "order_type": str(fill.get("order_type") or "paper"),
+        "decision_id": str(fill.get("decision_id") or ""),
+        "market_id": str(fill.get("market_id") or ""),
+        "yes_token_id": str(fill.get("yes_token_id") or ""),
+        "fill_status": str(fill.get("fill_status") or "filled"),
+        "price": _nullable_num(fill.get("price")),
+        "shares": _nullable_num(fill.get("shares")),
+        "amount": _nullable_num(fill.get("amount")),
+        "source": str(fill.get("source") or ""),
+        "raw_json": dump_json(fill),
+        "created_at": str(fill.get("created_at") or now),
+    }
+    with connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO fills (
+                idempotency_key, order_id, order_type, decision_id, market_id,
+                yes_token_id, fill_status, price, shares, amount, source, raw_json,
+                created_at
+            ) VALUES (
+                :idempotency_key, :order_id, :order_type, :decision_id, :market_id,
+                :yes_token_id, :fill_status, :price, :shares, :amount, :source,
+                :raw_json, :created_at
+            )
+            ON CONFLICT(idempotency_key) DO UPDATE SET
+                order_id=fills.order_id,
+                fill_status=fills.fill_status,
+                raw_json=fills.raw_json
+            """,
+            row,
+        )
+        found = conn.execute(
+            "SELECT id FROM fills WHERE idempotency_key = ?",
+            (row["idempotency_key"],),
+        ).fetchone()
+        return int(found["id"]) if found else 0
+
+
+def get_paper_order_by_idempotency_key(idempotency_key: str, path: Path | None = None) -> dict[str, Any] | None:
+    if not idempotency_key:
+        return None
+    init_v3_db(path)
+    with connect(path) as conn:
+        row = conn.execute("SELECT * FROM paper_orders WHERE idempotency_key = ?", (idempotency_key,)).fetchone()
+    return _decode_paper_order(dict(row)) if row else None
+
+
+def open_paper_order_for_token(yes_token_id: str, path: Path | None = None) -> dict[str, Any] | None:
+    if not yes_token_id:
+        return None
+    init_v3_db(path)
+    with connect(path) as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM paper_orders
+            WHERE yes_token_id = ?
+              AND COALESCE(lifecycle_status, status) IN ('open', 'paper_filled', 'paper_partial')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (yes_token_id,),
+        ).fetchone()
+    return _decode_paper_order(dict(row)) if row else None
+
+
+def list_paper_orders(
+    city_key: str | None = None,
+    target_date: str | None = None,
+    decision_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+    path: Path | None = None,
+) -> list[dict[str, Any]]:
+    init_v3_db(path)
+    where: list[str] = []
+    params: list[Any] = []
+    if city_key:
+        where.append("city_key = ?")
+        params.append(city_key)
+    if target_date:
+        where.append("target_date = ?")
+        params.append(target_date)
+    if decision_id:
+        where.append("decision_id = ?")
+        params.append(decision_id)
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    bounded_limit = max(1, min(int(limit or 100), 1000))
+    with connect(path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM paper_orders
+            {clause}
+            ORDER BY datetime(COALESCE(opened_at, updated_at, created_at)) DESC, id DESC
+            LIMIT ?
+            """,
+            (*params, bounded_limit),
+        ).fetchall()
+    return [_decode_paper_order(dict(row)) for row in rows]
+
+
+def paper_execution_summary(
+    city_key: str | None = None,
+    target_date: str | None = None,
+    *,
+    limit: int = 100,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    orders = list_paper_orders(city_key=city_key, target_date=target_date, limit=limit, path=path)
+    status_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    total_filled = 0.0
+    total_unrealized = 0.0
+    open_orders = 0
+    for order in orders:
+        status = str(order.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        for reason in order.get("risk_reasons") or []:
+            reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + 1
+        total_filled += _num(order.get("filled_amount"), 0.0)
+        total_unrealized += _num(order.get("unrealized_pnl"), 0.0)
+        if str(order.get("lifecycle_status") or "") == "open":
+            open_orders += 1
+    return {
+        "ok": True,
+        "execution_version": "paper-execution-v1",
+        "city_key": city_key or "",
+        "target_date": target_date or "",
+        "count": len(orders),
+        "open_orders": open_orders,
+        "filled_amount": round(total_filled, 4),
+        "unrealized_pnl": round(total_unrealized, 4),
+        "status_counts": status_counts,
+        "reason_counts": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "orders": orders,
+    }
+
+
+def _decode_paper_order(row: dict[str, Any]) -> dict[str, Any]:
+    row["risk_reasons"] = _loads_list(row.get("risk_reasons_json"))
+    row["orderbook_snapshot"] = _loads_obj(row.get("orderbook_snapshot_json"))
+    row["evidence_links"] = _loads_obj(row.get("evidence_links_json"))
+    row["raw"] = _loads_obj(row.get("raw_json"))
+    return row
 
 
 def log_risk(event_type: str, message: str, severity: str = "warning", payload: dict[str, Any] | None = None) -> None:

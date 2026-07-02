@@ -64,6 +64,17 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             row for row in raw_signal_decisions
             if str(row.get("decision_version") or "") == "signal-decision-v1"
         ]
+        raw_paper_orders = [dict(row) for row in conn.execute("SELECT * FROM paper_orders").fetchall()]
+        paper_orders = [
+            row for row in raw_paper_orders
+            if str(row.get("order_version") or "") == "paper-execution-v1"
+        ]
+        paper_fills = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM fills WHERE order_type = 'paper' AND source = 'paper-execution-v1'"
+            ).fetchall()
+        ]
 
     rules_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     contracts_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -242,6 +253,20 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         1 for row in signal_decisions
         if str(row.get("live_decision") or "") == "blocked"
         and "insufficient_bias_samples" in _json_list(row.get("gate_reasons_json"))
+    )
+    paper_order_counts = Counter(str(row.get("status") or "unknown") for row in paper_orders)
+    legacy_paper_orders = max(0, len(raw_paper_orders) - len(paper_orders))
+    paper_open_orders = [
+        row for row in paper_orders
+        if str(row.get("lifecycle_status") or row.get("status") or "") in {"open", "paper_filled", "paper_partial"}
+    ]
+    paper_rejected = [row for row in paper_orders if str(row.get("status") or "") == "rejected"]
+    paper_missing_decision = sum(1 for row in paper_orders if not row.get("decision_id"))
+    paper_order_ids_with_fills = {str(row.get("order_id") or "") for row in paper_fills if row.get("order_id")}
+    paper_missing_fill = sum(
+        1 for row in paper_orders
+        if str(row.get("status") or "") in {"paper_filled", "paper_partial"}
+        and str(row.get("id") or "") not in paper_order_ids_with_fills
     )
     expected_station_cities = len(SETTLEMENT_REGISTRY)
     station_city_keys = {str(row.get("city_key") or row.get("city") or "") for row in station_rows}
@@ -522,6 +547,32 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             },
         ),
         _stage(
+            "paper_execution",
+            "Paper execution",
+            (
+                len(signal_decisions) > 0
+                and len(paper_orders) > 0
+                and paper_missing_decision == 0
+                and paper_missing_fill == 0
+            ),
+            [
+                ("signal_decisions_missing_for_paper", 1 if not signal_decisions else 0),
+                ("paper_orders_missing", 1 if not paper_orders else 0),
+                ("paper_order_decision_link_missing", paper_missing_decision),
+                ("paper_filled_order_missing_fill_row", paper_missing_fill),
+            ],
+            {
+                "orders": len(paper_orders),
+                "open_orders": len(paper_open_orders),
+                "fills": len(paper_fills),
+                "rejected": len(paper_rejected),
+                "status_counts": dict(paper_order_counts),
+                "legacy_paper_orders_excluded": legacy_paper_orders,
+                "execution_version": "paper-execution-v1",
+                "parser_contract": "signal_decision -> idempotent BUY YES paper order -> fill row -> mark-to-bid PnL",
+            },
+        ),
+        _stage(
             "orderbooks",
             "盘口快照",
             len(fresh_clob_with_depth_orderbooks) >= cfg.min_fresh_clob_orderbooks,
@@ -576,6 +627,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             "hourly_consensus": len(hourly_consensus),
             "market_buckets": len(market_buckets),
             "signal_decisions": len(signal_decisions),
+            "paper_orders": len(paper_orders),
+            "paper_fills": len(paper_fills),
             "orderbook_snapshots": len(orderbooks),
         },
     }

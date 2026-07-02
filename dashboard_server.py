@@ -52,12 +52,14 @@ from weatherbot_v3.hourly import forecast_hourly_points, hourly_consensus_points
 from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.notifier import FeishuNotifier
+from weatherbot_v3.paper import execute_paper_decision, execute_paper_decisions
 from weatherbot_v3.polymarket import PolymarketDataClient
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.stations import list_stations, sync_station_registry
 from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summary
+from weatherbot_v3.db import paper_execution_summary
 from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.cli import run_market_buckets_sync, run_production_refresh
 from weatherbot_v3.validation import build_production_validation_report
@@ -173,6 +175,15 @@ class MarketBucketsSyncRequest(BaseModel):
     limit_cities: int = 5
     dry_run: bool = False
     fetch_orderbooks: bool = True
+
+
+class PaperExecutionRequest(BaseModel):
+    decision_id: str = ""
+    city: str = ""
+    target_date: str = ""
+    amount: float | None = None
+    limit: int = 20
+    dry_run: bool = True
 
 
 class LiveOrderUpdate(BaseModel):
@@ -3887,6 +3898,30 @@ async def signal_decisions_build(city: str = "", target_date: str = "", limit: i
     if not city or not target_date:
         raise HTTPException(status_code=400, detail="city and target_date are required")
     return build_signal_decisions(city, target_date, dry_run=dry_run, limit=limit)
+
+
+@app.get("/api/paper-orders")
+async def paper_orders(city: str = "", target_date: str = "", limit: int = 100):
+    return paper_execution_summary(city or None, target_date or None, limit=limit)
+
+
+@app.post("/api/paper-orders/execute")
+async def paper_orders_execute(request: PaperExecutionRequest):
+    if request.decision_id:
+        return execute_paper_decision(
+            request.decision_id,
+            amount=request.amount,
+            dry_run=request.dry_run,
+        )
+    if not request.city or not request.target_date:
+        raise HTTPException(status_code=400, detail="decision_id or city+target_date is required")
+    return execute_paper_decisions(
+        city_key=request.city,
+        target_date=request.target_date,
+        limit=request.limit,
+        amount=request.amount,
+        dry_run=request.dry_run,
+    )
 
 
 @app.get("/api/temperature-fit")

@@ -427,6 +427,42 @@ def run_signal_decisions_build(
     return payload
 
 
+def run_paper_execute(
+    *,
+    decision_id: str = "",
+    cities_arg: str = "",
+    target_date: str = "",
+    limit: int = 20,
+    amount: float | None = None,
+    apply: bool = False,
+) -> dict:
+    from .paper import execute_paper_decision, execute_paper_decisions
+
+    dry_run = not bool(apply)
+    if decision_id:
+        payload = execute_paper_decision(decision_id, amount=amount, dry_run=dry_run)
+    else:
+        cities = _cities_from_arg(cities_arg)
+        if not cities or not target_date:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "reason": "decision_id_or_city_target_date_required",
+                "dry_run": dry_run,
+            }
+        payload = execute_paper_decisions(
+            city_key=cities[0],
+            target_date=target_date,
+            limit=limit,
+            amount=amount,
+            dry_run=dry_run,
+        )
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    payload["paper_execution_stage"] = readiness_stage(readiness, "paper_execution")
+    return payload
+
+
 def _json_object(raw: str) -> dict:
     try:
         value = json.loads(raw)
@@ -718,6 +754,7 @@ def main() -> None:
             "daily-max-build",
             "market-buckets-sync",
             "signal-decisions-build",
+            "paper-execute",
             "forecast-archive-import",
             "forecast-archive-manifest",
             "orderbook-backfill",
@@ -742,6 +779,8 @@ def main() -> None:
         help="Contract status filter: all, unverified, verified, auto, mature-auto, future-auto, manual-required, source-missing, low-confidence",
     )
     parser.add_argument("--contract-id", default="", help="Settlement contract id or event slug")
+    parser.add_argument("--decision-id", default="", help="Layer 6 signal decision id")
+    parser.add_argument("--amount", type=float, default=None, help="Paper/live order amount where supported")
     parser.add_argument("--reviewer", default="local-operator", help="Manual verifier name")
     parser.add_argument("--note", default="", help="Manual verification note")
     parser.add_argument("--archive-path", default="", help="Historical forecast archive JSON/JSONL path")
@@ -891,6 +930,19 @@ def main() -> None:
                 dry_run=args.dry_run,
                 limit_cities=args.limit_cities,
                 limit=args.limit,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "paper-execute":
+        print(json.dumps(
+            run_paper_execute(
+                decision_id=args.decision_id,
+                cities_arg=cities_arg,
+                target_date=args.target_date or args.start_date,
+                limit=args.limit,
+                amount=args.amount,
+                apply=args.apply,
             ),
             ensure_ascii=False,
             indent=2,
