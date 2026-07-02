@@ -49,9 +49,9 @@ WeatherBot must be built from the data floor upward. Do not work on a higher lay
 - Layer 1: `stations` table for target cities, including ICAO/WMO ids, timezone, and settlement rule text.
 - Layer 2: `metar_reports` and `mesonet_observations` ingestion with parser unit tests.
 - Layer 3: `forecast_runs` and `forecast_members` for ECMWF, GFS, HRRR, Open-Meteo, DEB, and related inputs.
-- Layer 4: `hourly_consensus` view feeding charts and signal engine.
+- Layer 4: `hourly_consensus` view feeding charts and signal engine, including DEB daily max bias-corrected fusion and `(mu, sigma)` output.
 - Layer 5: `market_buckets` with strict bucket matching, tick size, `orderMinSize`, `negRisk`, token id, and orderbook metadata.
-- Layer 6: `signal_decisions` with distribution, model-market edge, execution gate, evidence links, AI review, and paper/live decision.
+- Layer 6: `signal_decisions` with distribution, model-market edge, execution gate, evidence links, AI review, paper/live decision, Gaussian bucket integration, and open-tail bucket handling.
 - Layer 7: PolyWX-shaped dashboard. It reads only from Layers 1-6 and must not create visual-only mock data paths.
 - Layer 8: Paper execution and risk gates.
 - Layer 9: 14-30 day validation.
@@ -99,6 +99,7 @@ Use external repositories as design inputs, not code to copy blindly. Every borr
 - `mesonet_observations`: non-METAR official/local networks such as JMA AMeDAS, HKO, CWA, AMOS, NWS/NOAA, airport runway sensors, and other rule-relevant station feeds. Label as observation evidence, not settlement truth by default.
 - `forecast_runs` and `forecast_members`: ECMWF/GFS/HRRR/Open-Meteo/DEB inputs with run time, valid time, horizon, member values, and source quality.
 - `hourly_consensus`: one city/date/hour path for chart and signal engine, separating observations, forecast consensus, timing markers, cloud/humidity, and residuals.
+- `daily_max_predictions`: city_key, target_date, issued_at, mu, sigma, model_weights, member_count, components, source_run_ids, sigma_floor, and mu_observed_floor_applied.
 - `market_buckets`: all Polymarket outcomes for a city/date event, with exact/range/or-higher/or-lower direction, token id, quote, tick size, `orderMinSize`, and strict matching status.
 - `signal_decisions`: distribution, model-market edge, execution gate, AI review, paper/live decision, skip reason, and source evidence links.
 
@@ -172,6 +173,9 @@ Use external repositories as design inputs, not code to copy blindly. Every borr
 - Open-Meteo archive is low-confidence fallback only. It cannot unlock live trading.
 - METAR hourly observations are useful for D+0 reasoning but are not automatically final daily settlement truth.
 - Probability must be stored and displayed as an auditable distribution, not just a single bucket EV.
+- Probability distributions must be persisted as `(mu, sigma)` parameters or an empirical distribution. Never store only one bucket EV as the model evidence.
+- `sigma` must have a floor, defaulting to `0.5°C` or the unit-equivalent value, and should decay with remaining intraday uncertainty when observations constrain the day.
+- `mu` must be floored by the highest observed temperature so far for the target station/day before any order decision can use it.
 - Every signal must preserve enough evidence to reconstruct the decision: market rule, station, date, forecast run, truth version, orderbook snapshot, distribution, risk gate, and paper/live decision.
 - Independent settlement days matter more than repeated snapshots. Do not treat many snapshots from one market day as many independent samples.
 - Low-price tail buckets, thin orderbooks, stale books, high spread, missing tick/orderMinSize, missing station truth, and short calibration history must be gated hard.
