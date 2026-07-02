@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -442,6 +443,9 @@ def init_v3_db(path: Path | None = None) -> None:
                 pressure REAL,
                 dew_point REAL,
                 residual REAL,
+                forecast_spread REAL,
+                forecast_member_count INTEGER,
+                consensus_method TEXT,
                 source_count INTEGER,
                 source_weights_json TEXT,
                 forecast_source TEXT,
@@ -453,6 +457,35 @@ def init_v3_db(path: Path | None = None) -> None:
                 build_warnings TEXT,
                 peak_marker TEXT,
                 taf_marker TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_max_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                prediction_key TEXT UNIQUE,
+                city_key TEXT,
+                target_date TEXT,
+                issued_at TEXT,
+                mu REAL,
+                sigma REAL,
+                unit TEXT,
+                method TEXT,
+                model_weights_json TEXT,
+                member_count INTEGER,
+                components_json TEXT,
+                source_run_ids_json TEXT,
+                member_daily_highs_json TEXT,
+                sigma_from_spread REAL,
+                sigma_from_history REAL,
+                bias_correction REAL,
+                bias_sample_count INTEGER,
+                deb_version TEXT,
+                observed_floor REAL,
+                sigma_floor REAL,
+                time_decay_factor REAL,
+                mu_observed_floor_applied INTEGER,
                 raw_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -535,13 +568,51 @@ def init_v3_db(path: Path | None = None) -> None:
 
             CREATE TABLE IF NOT EXISTS signal_decisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_id TEXT,
                 signal_id INTEGER UNIQUE,
                 market_id TEXT,
+                bucket_id INTEGER,
+                bucket_key TEXT,
+                city_key TEXT,
+                target_date TEXT,
+                issued_at TEXT,
+                token_id TEXT,
+                yes_token_id TEXT,
+                bucket_direction TEXT,
+                bucket_lower REAL,
+                bucket_upper REAL,
+                mu REAL,
+                sigma REAL,
+                deb_version TEXT,
+                model_probability REAL,
+                market_ask REAL,
+                market_bid REAL,
+                market_mid REAL,
+                market_implied_probability REAL,
+                edge REAL,
+                edge_percent REAL,
+                orderbook_snapshot_json TEXT,
+                tick_size REAL,
+                order_min_size REAL,
+                neg_risk INTEGER,
+                book_age_seconds REAL,
+                spread_bps REAL,
+                gate_status TEXT,
+                paper_decision TEXT,
+                live_decision TEXT,
+                blocked_reason_primary TEXT,
+                evidence_links_json TEXT,
+                decision_version TEXT,
                 action TEXT,
                 live_allowed INTEGER,
                 paper_allowed INTEGER,
                 reasons TEXT,
                 cautions TEXT,
+                model_distribution_json TEXT,
+                model_bucket_probs_json TEXT,
+                market_bucket_probs_json TEXT,
+                edge_by_bucket_json TEXT,
+                gate_reasons_json TEXT,
                 raw_json TEXT,
                 updated_at TEXT NOT NULL
             );
@@ -651,6 +722,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "wind_direction": "REAL",
             "pressure": "REAL",
             "dew_point": "REAL",
+            "forecast_spread": "REAL",
+            "forecast_member_count": "INTEGER",
+            "consensus_method": "TEXT",
             "forecast_source": "TEXT",
             "forecast_sources_json": "TEXT",
             "observation_sources_json": "TEXT",
@@ -658,6 +732,30 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "consensus_version": "TEXT",
             "build_status": "TEXT",
             "build_warnings": "TEXT",
+        },
+        "daily_max_predictions": {
+            "prediction_key": "TEXT",
+            "city_key": "TEXT",
+            "target_date": "TEXT",
+            "issued_at": "TEXT",
+            "mu": "REAL",
+            "sigma": "REAL",
+            "unit": "TEXT",
+            "method": "TEXT",
+            "model_weights_json": "TEXT",
+            "member_count": "INTEGER",
+            "components_json": "TEXT",
+            "source_run_ids_json": "TEXT",
+            "member_daily_highs_json": "TEXT",
+            "sigma_from_spread": "REAL",
+            "sigma_from_history": "REAL",
+            "bias_correction": "REAL",
+            "bias_sample_count": "INTEGER",
+            "deb_version": "TEXT",
+            "observed_floor": "REAL",
+            "sigma_floor": "REAL",
+            "time_decay_factor": "REAL",
+            "mu_observed_floor_applied": "INTEGER",
         },
         "market_buckets": {
             "bucket_key": "TEXT",
@@ -714,6 +812,46 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "source_url": "TEXT",
             "raw_response_hash": "TEXT",
         },
+        "signal_decisions": {
+            "decision_id": "TEXT",
+            "bucket_id": "INTEGER",
+            "bucket_key": "TEXT",
+            "city_key": "TEXT",
+            "target_date": "TEXT",
+            "issued_at": "TEXT",
+            "token_id": "TEXT",
+            "yes_token_id": "TEXT",
+            "bucket_direction": "TEXT",
+            "bucket_lower": "REAL",
+            "bucket_upper": "REAL",
+            "mu": "REAL",
+            "sigma": "REAL",
+            "deb_version": "TEXT",
+            "model_probability": "REAL",
+            "market_ask": "REAL",
+            "market_bid": "REAL",
+            "market_mid": "REAL",
+            "market_implied_probability": "REAL",
+            "edge": "REAL",
+            "edge_percent": "REAL",
+            "orderbook_snapshot_json": "TEXT",
+            "tick_size": "REAL",
+            "order_min_size": "REAL",
+            "neg_risk": "INTEGER",
+            "book_age_seconds": "REAL",
+            "spread_bps": "REAL",
+            "gate_status": "TEXT",
+            "paper_decision": "TEXT",
+            "live_decision": "TEXT",
+            "blocked_reason_primary": "TEXT",
+            "evidence_links_json": "TEXT",
+            "decision_version": "TEXT",
+            "model_distribution_json": "TEXT",
+            "model_bucket_probs_json": "TEXT",
+            "market_bucket_probs_json": "TEXT",
+            "edge_by_bucket_json": "TEXT",
+            "gate_reasons_json": "TEXT",
+        },
         "mesonet_observations": {
             "parser_version": "TEXT",
             "parse_status": "TEXT",
@@ -758,16 +896,39 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_metar_reports_station_time ON metar_reports(station_id, report_time)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_mesonet_observations_city_time ON mesonet_observations(city, observed_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_hourly_consensus_city_date ON hourly_consensus(city, target_date, local_hour)")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_max_predictions_key "
+        "ON daily_max_predictions(prediction_key)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_daily_max_predictions_city_date_issued "
+        "ON daily_max_predictions(city_key, target_date, issued_at)"
+    )
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_market_buckets_key ON market_buckets(bucket_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_buckets_city_date ON market_buckets(city, target_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_buckets_market ON market_buckets(market_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_buckets_token ON market_buckets(yes_token_id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_decisions_decision_id ON signal_decisions(decision_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_city_date ON signal_decisions(city_key, target_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_bucket ON signal_decisions(bucket_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_created ON data_fetch_logs(created_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_source_status ON data_fetch_logs(source, status)")
 
 
 def dump_json(payload: Any) -> str:
-    return json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
+    return json.dumps(_json_safe(payload or {}), ensure_ascii=False, sort_keys=True, allow_nan=False)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def _stable_key(*parts: Any) -> str:
@@ -904,8 +1065,8 @@ def insert_orderbook(market_id: str, payload: dict[str, Any]) -> int:
         return int(conn.execute("SELECT id FROM orderbooks WHERE snapshot_key = ?", (snapshot_key,)).fetchone()["id"])
 
 
-def upsert_market_bucket(bucket: dict[str, Any]) -> int:
-    init_v3_db()
+def upsert_market_bucket(bucket: dict[str, Any], path: Path | None = None) -> int:
+    init_v3_db(path)
     now = utc_now()
     market_id = str(bucket.get("market_id") or "")
     yes_token_id = str(bucket.get("yes_token_id") or "")
@@ -965,7 +1126,7 @@ def upsert_market_bucket(bucket: dict[str, Any]) -> int:
         "created_at": now,
         "updated_at": now,
     }
-    with connect() as conn:
+    with connect(path) as conn:
         conn.execute(
             """
             INSERT INTO market_buckets (
@@ -1043,8 +1204,9 @@ def list_market_buckets(
     target_date: str | None = None,
     market_id: str | None = None,
     limit: int = 200,
+    path: Path | None = None,
 ) -> list[dict[str, Any]]:
-    init_v3_db()
+    init_v3_db(path)
     where: list[str] = []
     params: list[Any] = []
     if city:
@@ -1058,7 +1220,7 @@ def list_market_buckets(
         params.append(market_id)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     bounded_limit = max(1, min(int(limit or 200), 1000))
-    with connect() as conn:
+    with connect(path) as conn:
         rows = [
             dict(row)
             for row in conn.execute(
@@ -1108,6 +1270,145 @@ def market_bucket_summary(city: str | None = None, target_date: str | None = Non
     }
 
 
+def upsert_daily_max_prediction(prediction: dict[str, Any], path: Path | None = None) -> int:
+    init_v3_db(path)
+    now = utc_now()
+    city_key = str(prediction.get("city_key") or prediction.get("city") or "")
+    target_date = str(prediction.get("target_date") or "")
+    issued_at = str(prediction.get("issued_at") or now)
+    method = str(prediction.get("method") or "weatherbot-deb-v1")
+    prediction_key = str(
+        prediction.get("prediction_key")
+        or _stable_key("daily_max_prediction", city_key, target_date, issued_at, method)
+    )
+    row = {
+        "prediction_key": prediction_key,
+        "city_key": city_key,
+        "target_date": target_date,
+        "issued_at": issued_at,
+        "mu": _nullable_num(prediction.get("mu")),
+        "sigma": _nullable_num(prediction.get("sigma")),
+        "unit": str(prediction.get("unit") or "C"),
+        "method": method,
+        "model_weights_json": dump_json(prediction.get("model_weights", {})),
+        "member_count": int(prediction.get("member_count") or 0),
+        "components_json": dump_json(prediction.get("components", [])),
+        "source_run_ids_json": dump_json(prediction.get("source_run_ids", [])),
+        "member_daily_highs_json": dump_json(prediction.get("member_daily_highs", {})),
+        "sigma_from_spread": _nullable_num(prediction.get("sigma_from_spread")),
+        "sigma_from_history": _nullable_num(prediction.get("sigma_from_history")),
+        "bias_correction": _nullable_num(prediction.get("bias_correction")),
+        "bias_sample_count": int(prediction.get("bias_sample_count") or 0),
+        "deb_version": str(prediction.get("deb_version") or method),
+        "observed_floor": _nullable_num(prediction.get("observed_floor")),
+        "sigma_floor": _nullable_num(prediction.get("sigma_floor")),
+        "time_decay_factor": _nullable_num(prediction.get("time_decay_factor")),
+        "mu_observed_floor_applied": 1 if prediction.get("mu_observed_floor_applied") else 0,
+        "raw_json": dump_json(prediction),
+        "created_at": now,
+        "updated_at": now,
+    }
+    with connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO daily_max_predictions (
+                prediction_key, city_key, target_date, issued_at, mu, sigma, unit,
+                method, model_weights_json, member_count, components_json,
+                source_run_ids_json, member_daily_highs_json, sigma_from_spread,
+                sigma_from_history, bias_correction, bias_sample_count, deb_version,
+                observed_floor, sigma_floor, time_decay_factor,
+                mu_observed_floor_applied, raw_json, created_at, updated_at
+            ) VALUES (
+                :prediction_key, :city_key, :target_date, :issued_at, :mu, :sigma, :unit,
+                :method, :model_weights_json, :member_count, :components_json,
+                :source_run_ids_json, :member_daily_highs_json, :sigma_from_spread,
+                :sigma_from_history, :bias_correction, :bias_sample_count, :deb_version,
+                :observed_floor, :sigma_floor, :time_decay_factor,
+                :mu_observed_floor_applied, :raw_json, :created_at, :updated_at
+            )
+            ON CONFLICT(prediction_key) DO UPDATE SET
+                mu=excluded.mu,
+                sigma=excluded.sigma,
+                unit=excluded.unit,
+                method=excluded.method,
+                model_weights_json=excluded.model_weights_json,
+                member_count=excluded.member_count,
+                components_json=excluded.components_json,
+                source_run_ids_json=excluded.source_run_ids_json,
+                member_daily_highs_json=excluded.member_daily_highs_json,
+                sigma_from_spread=excluded.sigma_from_spread,
+                sigma_from_history=excluded.sigma_from_history,
+                bias_correction=excluded.bias_correction,
+                bias_sample_count=excluded.bias_sample_count,
+                deb_version=excluded.deb_version,
+                observed_floor=excluded.observed_floor,
+                sigma_floor=excluded.sigma_floor,
+                time_decay_factor=excluded.time_decay_factor,
+                mu_observed_floor_applied=excluded.mu_observed_floor_applied,
+                raw_json=excluded.raw_json,
+                updated_at=excluded.updated_at
+            """,
+            row,
+        )
+        found = conn.execute(
+            "SELECT id FROM daily_max_predictions WHERE prediction_key = ?",
+            (prediction_key,),
+        ).fetchone()
+        return int(found["id"]) if found else 0
+
+
+def list_daily_max_predictions(
+    city_key: str | None = None,
+    target_date: str | None = None,
+    limit: int = 100,
+    path: Path | None = None,
+) -> list[dict[str, Any]]:
+    init_v3_db(path)
+    where: list[str] = []
+    params: list[Any] = []
+    if city_key:
+        where.append("city_key = ?")
+        params.append(city_key)
+    if target_date:
+        where.append("target_date = ?")
+        params.append(target_date)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    bounded_limit = max(1, min(int(limit or 100), 1000))
+    with connect(path) as conn:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM daily_max_predictions
+                {clause}
+                ORDER BY issued_at DESC, id DESC
+                LIMIT ?
+                """,
+                (*params, bounded_limit),
+            ).fetchall()
+        ]
+    for row in rows:
+        row["model_weights"] = _loads_obj(row.get("model_weights_json"))
+        row["components"] = _loads_list(row.get("components_json"))
+        row["source_run_ids"] = _loads_list(row.get("source_run_ids_json"))
+        row["member_daily_highs"] = _loads_obj(row.get("member_daily_highs_json"))
+        row["mu_observed_floor_applied"] = bool(row.get("mu_observed_floor_applied"))
+    return rows
+
+
+def daily_max_prediction_summary(city_key: str | None = None, target_date: str | None = None) -> dict[str, Any]:
+    rows = list_daily_max_predictions(city_key=city_key, target_date=target_date, limit=100)
+    latest = rows[0] if rows else None
+    return {
+        "ok": True,
+        "city_key": city_key or "",
+        "target_date": target_date or "",
+        "count": len(rows),
+        "latest": latest,
+    }
+
+
 def _loads_list(raw: Any) -> list[Any]:
     if isinstance(raw, list):
         return raw
@@ -1118,6 +1419,18 @@ def _loads_list(raw: Any) -> list[Any]:
         return value if isinstance(value, list) else []
     except Exception:
         return []
+
+
+def _loads_obj(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        value = json.loads(str(raw))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
 
 
 def _levels(raw: Any) -> list[dict[str, float]]:
@@ -2039,9 +2352,55 @@ def upsert_mesonet_observation(observation: dict[str, Any]) -> int:
         return int(row["id"]) if row else 0
 
 
-def upsert_hourly_consensus(row: dict[str, Any]) -> int:
-    init_v3_db()
-    now = utc_now()
+HOURLY_CONSENSUS_UPSERT_SQL = """
+    INSERT INTO hourly_consensus (
+        consensus_key, city, city_name, target_date, local_hour, valid_time,
+        station_id, forecast_temp, observed_temp, observation_source,
+        humidity, cloud_cover, precipitation, wind_speed, wind_direction,
+        pressure, dew_point, residual, forecast_spread, forecast_member_count,
+        consensus_method, source_count, source_weights_json,
+        forecast_source, forecast_sources_json, observation_sources_json,
+        source_mix_json, consensus_version, build_status, build_warnings,
+        peak_marker, taf_marker, raw_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(consensus_key) DO UPDATE SET
+        city=excluded.city,
+        city_name=excluded.city_name,
+        target_date=excluded.target_date,
+        local_hour=excluded.local_hour,
+        valid_time=excluded.valid_time,
+        station_id=excluded.station_id,
+        forecast_temp=excluded.forecast_temp,
+        observed_temp=excluded.observed_temp,
+        observation_source=excluded.observation_source,
+        humidity=excluded.humidity,
+        cloud_cover=excluded.cloud_cover,
+        precipitation=excluded.precipitation,
+        wind_speed=excluded.wind_speed,
+        wind_direction=excluded.wind_direction,
+        pressure=excluded.pressure,
+        dew_point=excluded.dew_point,
+        residual=excluded.residual,
+        forecast_spread=excluded.forecast_spread,
+        forecast_member_count=excluded.forecast_member_count,
+        consensus_method=excluded.consensus_method,
+        source_count=excluded.source_count,
+        source_weights_json=excluded.source_weights_json,
+        forecast_source=excluded.forecast_source,
+        forecast_sources_json=excluded.forecast_sources_json,
+        observation_sources_json=excluded.observation_sources_json,
+        source_mix_json=excluded.source_mix_json,
+        consensus_version=excluded.consensus_version,
+        build_status=excluded.build_status,
+        build_warnings=excluded.build_warnings,
+        peak_marker=excluded.peak_marker,
+        taf_marker=excluded.taf_marker,
+        raw_json=excluded.raw_json,
+        updated_at=excluded.updated_at
+"""
+
+
+def _hourly_consensus_values(row: dict[str, Any], now: str) -> tuple[Any, ...]:
     city = str(row.get("city") or "")
     target_date = str(row.get("target_date") or "")
     local_hour = str(row.get("local_hour") or row.get("hour") or "")
@@ -2055,87 +2414,65 @@ def upsert_hourly_consensus(row: dict[str, Any]) -> int:
     residual = row.get("residual")
     if residual is None and observed_temp is not None and forecast_temp is not None:
         residual = observed_temp - forecast_temp
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO hourly_consensus (
-                consensus_key, city, city_name, target_date, local_hour, valid_time,
-                station_id, forecast_temp, observed_temp, observation_source,
-                humidity, cloud_cover, precipitation, wind_speed, wind_direction,
-                pressure, dew_point, residual, source_count, source_weights_json,
-                forecast_source, forecast_sources_json, observation_sources_json,
-                source_mix_json, consensus_version, build_status, build_warnings,
-                peak_marker, taf_marker, raw_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(consensus_key) DO UPDATE SET
-                city=excluded.city,
-                city_name=excluded.city_name,
-                target_date=excluded.target_date,
-                local_hour=excluded.local_hour,
-                valid_time=excluded.valid_time,
-                station_id=excluded.station_id,
-                forecast_temp=excluded.forecast_temp,
-                observed_temp=excluded.observed_temp,
-                observation_source=excluded.observation_source,
-                humidity=excluded.humidity,
-                cloud_cover=excluded.cloud_cover,
-                precipitation=excluded.precipitation,
-                wind_speed=excluded.wind_speed,
-                wind_direction=excluded.wind_direction,
-                pressure=excluded.pressure,
-                dew_point=excluded.dew_point,
-                residual=excluded.residual,
-                source_count=excluded.source_count,
-                source_weights_json=excluded.source_weights_json,
-                forecast_source=excluded.forecast_source,
-                forecast_sources_json=excluded.forecast_sources_json,
-                observation_sources_json=excluded.observation_sources_json,
-                source_mix_json=excluded.source_mix_json,
-                consensus_version=excluded.consensus_version,
-                build_status=excluded.build_status,
-                build_warnings=excluded.build_warnings,
-                peak_marker=excluded.peak_marker,
-                taf_marker=excluded.taf_marker,
-                raw_json=excluded.raw_json,
-                updated_at=excluded.updated_at
-            """,
-            (
-                consensus_key,
-                city,
-                row.get("city_name"),
-                target_date,
-                local_hour,
-                valid_time,
-                row.get("station_id"),
-                forecast_temp,
-                observed_temp,
-                row.get("observation_source"),
-                _nullable_num(row.get("humidity")),
-                _nullable_num(row.get("cloud_cover")),
-                _nullable_num(row.get("precipitation")),
-                _nullable_num(row.get("wind_speed")),
-                _nullable_num(row.get("wind_direction")),
-                _nullable_num(row.get("pressure")),
-                _nullable_num(row.get("dew_point")),
-                _nullable_num(residual),
-                int(row.get("source_count") or 0),
-                dump_json(row.get("source_weights", {})),
-                row.get("forecast_source"),
-                dump_json(row.get("forecast_sources", [])),
-                dump_json(row.get("observation_sources", [])),
-                dump_json(row.get("source_mix", {})),
-                row.get("consensus_version") or "hourly-consensus-v1",
-                row.get("build_status") or "built",
-                dump_json(row.get("build_warnings", [])),
-                row.get("peak_marker"),
-                row.get("taf_marker"),
-                dump_json(row),
-                now,
-                now,
-            ),
-        )
+    return (
+        consensus_key,
+        city,
+        row.get("city_name"),
+        target_date,
+        local_hour,
+        valid_time,
+        row.get("station_id"),
+        forecast_temp,
+        observed_temp,
+        row.get("observation_source"),
+        _nullable_num(row.get("humidity")),
+        _nullable_num(row.get("cloud_cover")),
+        _nullable_num(row.get("precipitation")),
+        _nullable_num(row.get("wind_speed")),
+        _nullable_num(row.get("wind_direction")),
+        _nullable_num(row.get("pressure")),
+        _nullable_num(row.get("dew_point")),
+        _nullable_num(residual),
+        _nullable_num(row.get("forecast_spread")),
+        int(row.get("forecast_member_count") or 0),
+        row.get("consensus_method"),
+        int(row.get("source_count") or 0),
+        dump_json(row.get("source_weights", {})),
+        row.get("forecast_source"),
+        dump_json(row.get("forecast_sources", [])),
+        dump_json(row.get("observation_sources", [])),
+        dump_json(row.get("source_mix", {})),
+        row.get("consensus_version") or "hourly-consensus-v1",
+        row.get("build_status") or "built",
+        dump_json(row.get("build_warnings", [])),
+        row.get("peak_marker"),
+        row.get("taf_marker"),
+        dump_json(row),
+        now,
+        now,
+    )
+
+
+def upsert_hourly_consensus(row: dict[str, Any], path: Path | None = None) -> int:
+    init_v3_db(path)
+    now = utc_now()
+    values = _hourly_consensus_values(row, now)
+    consensus_key = str(values[0])
+    with connect(path) as conn:
+        conn.execute(HOURLY_CONSENSUS_UPSERT_SQL, values)
         found = conn.execute("SELECT id FROM hourly_consensus WHERE consensus_key = ?", (consensus_key,)).fetchone()
         return int(found["id"]) if found else 0
+
+
+def upsert_hourly_consensus_rows(rows: list[dict[str, Any]], path: Path | None = None) -> int:
+    init_v3_db(path)
+    now = utc_now()
+    values = [_hourly_consensus_values(row, now) for row in rows]
+    if not values:
+        return 0
+    with connect(path) as conn:
+        conn.executemany(HOURLY_CONSENSUS_UPSERT_SQL, values)
+    return len(values)
 
 
 def weather_evidence_summary(city: str | None = None, target_date: str | None = None) -> dict[str, Any]:
@@ -2430,15 +2767,17 @@ def insert_event_distribution(market_id: str, event_slug: str, distribution: dic
         )
 
 
-def upsert_signal_decision(signal_id: int, decision: dict[str, Any]) -> None:
-    init_v3_db()
-    with connect() as conn:
+def upsert_signal_decision(signal_id: int, decision: dict[str, Any], path: Path | None = None) -> None:
+    init_v3_db(path)
+    with connect(path) as conn:
         conn.execute(
             """
             INSERT INTO signal_decisions (
                 signal_id, market_id, action, live_allowed, paper_allowed,
-                reasons, cautions, raw_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reasons, cautions, model_distribution_json, model_bucket_probs_json,
+                market_bucket_probs_json, edge_by_bucket_json, gate_reasons_json,
+                raw_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(signal_id) DO UPDATE SET
                 market_id=excluded.market_id,
                 action=excluded.action,
@@ -2446,6 +2785,11 @@ def upsert_signal_decision(signal_id: int, decision: dict[str, Any]) -> None:
                 paper_allowed=excluded.paper_allowed,
                 reasons=excluded.reasons,
                 cautions=excluded.cautions,
+                model_distribution_json=excluded.model_distribution_json,
+                model_bucket_probs_json=excluded.model_bucket_probs_json,
+                market_bucket_probs_json=excluded.market_bucket_probs_json,
+                edge_by_bucket_json=excluded.edge_by_bucket_json,
+                gate_reasons_json=excluded.gate_reasons_json,
                 raw_json=excluded.raw_json,
                 updated_at=excluded.updated_at
             """,
@@ -2457,11 +2801,208 @@ def upsert_signal_decision(signal_id: int, decision: dict[str, Any]) -> None:
                 1 if decision.get("paper_allowed", True) else 0,
                 dump_json(decision.get("reasons", [])),
                 dump_json(decision.get("cautions", [])),
+                dump_json(decision.get("model_distribution", decision.get("model_distribution_json", {}))),
+                dump_json(decision.get("model_bucket_probs", decision.get("model_bucket_probs_json", {}))),
+                dump_json(decision.get("market_bucket_probs", decision.get("market_bucket_probs_json", {}))),
+                dump_json(decision.get("edge_by_bucket", decision.get("edge_by_bucket_json", {}))),
+                dump_json(decision.get("gate_reasons", decision.get("gate_reasons_json", []))),
                 dump_json(decision),
                 utc_now(),
             ),
         )
         conn.execute("UPDATE signals SET decision_json = ? WHERE id = ?", (dump_json(decision), signal_id))
+
+
+def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = None) -> int:
+    init_v3_db(path)
+    now = utc_now()
+    decision_id = str(decision.get("decision_id") or _stable_key(
+        "signal_decision",
+        decision.get("city_key") or decision.get("city") or "",
+        decision.get("target_date") or "",
+        decision.get("token_id") or decision.get("yes_token_id") or "",
+        decision.get("issued_at") or "",
+    ))
+    row = {
+        "decision_id": decision_id,
+        "signal_id": decision.get("signal_id"),
+        "market_id": str(decision.get("market_id") or ""),
+        "bucket_id": decision.get("bucket_id"),
+        "bucket_key": str(decision.get("bucket_key") or ""),
+        "city_key": str(decision.get("city_key") or decision.get("city") or ""),
+        "target_date": str(decision.get("target_date") or ""),
+        "issued_at": str(decision.get("issued_at") or ""),
+        "token_id": str(decision.get("token_id") or decision.get("yes_token_id") or ""),
+        "yes_token_id": str(decision.get("yes_token_id") or decision.get("token_id") or ""),
+        "bucket_direction": str(decision.get("bucket_direction") or ""),
+        "bucket_lower": _nullable_num(decision.get("bucket_lower")),
+        "bucket_upper": _nullable_num(decision.get("bucket_upper")),
+        "mu": _nullable_num(decision.get("mu")),
+        "sigma": _nullable_num(decision.get("sigma")),
+        "deb_version": str(decision.get("deb_version") or ""),
+        "model_probability": _nullable_num(decision.get("model_probability")),
+        "market_ask": _nullable_num(decision.get("market_ask")),
+        "market_bid": _nullable_num(decision.get("market_bid")),
+        "market_mid": _nullable_num(decision.get("market_mid")),
+        "market_implied_probability": _nullable_num(decision.get("market_implied_probability")),
+        "edge": _nullable_num(decision.get("edge")),
+        "edge_percent": _nullable_num(decision.get("edge_percent")),
+        "orderbook_snapshot_json": dump_json(decision.get("orderbook_snapshot", decision.get("orderbook_snapshot_json", {}))),
+        "tick_size": _nullable_num(decision.get("tick_size")),
+        "order_min_size": _nullable_num(decision.get("order_min_size")),
+        "neg_risk": 1 if decision.get("neg_risk") else 0,
+        "book_age_seconds": _nullable_num(decision.get("book_age_seconds")),
+        "spread_bps": _nullable_num(decision.get("spread_bps")),
+        "gate_status": str(decision.get("gate_status") or ""),
+        "paper_decision": str(decision.get("paper_decision") or ""),
+        "live_decision": str(decision.get("live_decision") or ""),
+        "blocked_reason_primary": str(decision.get("blocked_reason_primary") or ""),
+        "evidence_links_json": dump_json(decision.get("evidence_links", decision.get("evidence_links_json", {}))),
+        "decision_version": str(decision.get("decision_version") or "signal-decision-v1"),
+        "action": str(decision.get("action") or "observe"),
+        "live_allowed": 1 if decision.get("live_allowed") else 0,
+        "paper_allowed": 1 if decision.get("paper_allowed") else 0,
+        "reasons": dump_json(decision.get("reasons", [])),
+        "cautions": dump_json(decision.get("cautions", [])),
+        "model_distribution_json": dump_json(decision.get("model_distribution", decision.get("model_distribution_json", {}))),
+        "model_bucket_probs_json": dump_json(decision.get("model_bucket_probs", decision.get("model_bucket_probs_json", {}))),
+        "market_bucket_probs_json": dump_json(decision.get("market_bucket_probs", decision.get("market_bucket_probs_json", {}))),
+        "edge_by_bucket_json": dump_json(decision.get("edge_by_bucket", decision.get("edge_by_bucket_json", {}))),
+        "gate_reasons_json": dump_json(decision.get("gate_reasons", decision.get("gate_reasons_json", []))),
+        "raw_json": dump_json({**decision, "decision_id": decision_id}),
+        "updated_at": now,
+    }
+    with connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO signal_decisions (
+                decision_id, signal_id, market_id, bucket_id, bucket_key, city_key,
+                target_date, issued_at, token_id, yes_token_id, bucket_direction,
+                bucket_lower, bucket_upper, mu, sigma, deb_version,
+                model_probability, market_ask, market_bid, market_mid,
+                market_implied_probability, edge, edge_percent, orderbook_snapshot_json,
+                tick_size, order_min_size, neg_risk, book_age_seconds, spread_bps,
+                gate_status, paper_decision, live_decision, blocked_reason_primary,
+                evidence_links_json, decision_version, action, live_allowed, paper_allowed,
+                reasons, cautions, model_distribution_json, model_bucket_probs_json,
+                market_bucket_probs_json, edge_by_bucket_json, gate_reasons_json,
+                raw_json, updated_at
+            ) VALUES (
+                :decision_id, :signal_id, :market_id, :bucket_id, :bucket_key, :city_key,
+                :target_date, :issued_at, :token_id, :yes_token_id, :bucket_direction,
+                :bucket_lower, :bucket_upper, :mu, :sigma, :deb_version,
+                :model_probability, :market_ask, :market_bid, :market_mid,
+                :market_implied_probability, :edge, :edge_percent, :orderbook_snapshot_json,
+                :tick_size, :order_min_size, :neg_risk, :book_age_seconds, :spread_bps,
+                :gate_status, :paper_decision, :live_decision, :blocked_reason_primary,
+                :evidence_links_json, :decision_version, :action, :live_allowed, :paper_allowed,
+                :reasons, :cautions, :model_distribution_json, :model_bucket_probs_json,
+                :market_bucket_probs_json, :edge_by_bucket_json, :gate_reasons_json,
+                :raw_json, :updated_at
+            )
+            ON CONFLICT(decision_id) DO UPDATE SET
+                signal_id=excluded.signal_id,
+                market_id=excluded.market_id,
+                bucket_id=excluded.bucket_id,
+                bucket_key=excluded.bucket_key,
+                city_key=excluded.city_key,
+                target_date=excluded.target_date,
+                issued_at=excluded.issued_at,
+                token_id=excluded.token_id,
+                yes_token_id=excluded.yes_token_id,
+                bucket_direction=excluded.bucket_direction,
+                bucket_lower=excluded.bucket_lower,
+                bucket_upper=excluded.bucket_upper,
+                mu=excluded.mu,
+                sigma=excluded.sigma,
+                deb_version=excluded.deb_version,
+                model_probability=excluded.model_probability,
+                market_ask=excluded.market_ask,
+                market_bid=excluded.market_bid,
+                market_mid=excluded.market_mid,
+                market_implied_probability=excluded.market_implied_probability,
+                edge=excluded.edge,
+                edge_percent=excluded.edge_percent,
+                orderbook_snapshot_json=excluded.orderbook_snapshot_json,
+                tick_size=excluded.tick_size,
+                order_min_size=excluded.order_min_size,
+                neg_risk=excluded.neg_risk,
+                book_age_seconds=excluded.book_age_seconds,
+                spread_bps=excluded.spread_bps,
+                gate_status=excluded.gate_status,
+                paper_decision=excluded.paper_decision,
+                live_decision=excluded.live_decision,
+                blocked_reason_primary=excluded.blocked_reason_primary,
+                evidence_links_json=excluded.evidence_links_json,
+                decision_version=excluded.decision_version,
+                action=excluded.action,
+                live_allowed=excluded.live_allowed,
+                paper_allowed=excluded.paper_allowed,
+                reasons=excluded.reasons,
+                cautions=excluded.cautions,
+                model_distribution_json=excluded.model_distribution_json,
+                model_bucket_probs_json=excluded.model_bucket_probs_json,
+                market_bucket_probs_json=excluded.market_bucket_probs_json,
+                edge_by_bucket_json=excluded.edge_by_bucket_json,
+                gate_reasons_json=excluded.gate_reasons_json,
+                raw_json=excluded.raw_json,
+                updated_at=excluded.updated_at
+            """,
+            row,
+        )
+        found = conn.execute("SELECT id FROM signal_decisions WHERE decision_id = ?", (decision_id,)).fetchone()
+        return int(found["id"]) if found else 0
+
+
+def list_signal_decisions(
+    city_key: str | None = None,
+    target_date: str | None = None,
+    decision_id: str | None = None,
+    limit: int = 100,
+    path: Path | None = None,
+) -> list[dict[str, Any]]:
+    init_v3_db(path)
+    where: list[str] = []
+    params: list[Any] = []
+    if decision_id:
+        where.append("decision_id = ?")
+        params.append(decision_id)
+    if city_key:
+        where.append("city_key = ?")
+        params.append(city_key)
+    if target_date:
+        where.append("target_date = ?")
+        params.append(target_date)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    bounded_limit = max(1, min(int(limit or 100), 1000))
+    with connect(path) as conn:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM signal_decisions
+                {clause}
+                ORDER BY issued_at DESC, edge DESC, id DESC
+                LIMIT ?
+                """,
+                (*params, bounded_limit),
+            ).fetchall()
+        ]
+    for row in rows:
+        row["live_allowed"] = bool(row.get("live_allowed"))
+        row["paper_allowed"] = bool(row.get("paper_allowed"))
+        row["neg_risk"] = bool(row.get("neg_risk"))
+        row["reasons"] = _loads_list(row.get("reasons"))
+        row["cautions"] = _loads_list(row.get("cautions"))
+        row["gate_reasons"] = _loads_list(row.get("gate_reasons_json"))
+        row["model_distribution"] = _loads_obj(row.get("model_distribution_json"))
+        row["model_bucket_probs"] = _loads_obj(row.get("model_bucket_probs_json"))
+        row["market_bucket_probs"] = _loads_list(row.get("market_bucket_probs_json"))
+        row["edge_by_bucket"] = _loads_obj(row.get("edge_by_bucket_json"))
+        row["orderbook_snapshot"] = _loads_obj(row.get("orderbook_snapshot_json"))
+        row["evidence_links"] = _loads_obj(row.get("evidence_links_json"))
+    return rows
 
 
 def latest_event_distribution(market_id: str) -> dict[str, Any] | None:
@@ -2764,6 +3305,7 @@ def _nullable_num(value: Any) -> float | None:
     try:
         if value is None or value == "":
             return None
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
     except Exception:
         return None

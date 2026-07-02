@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_settlement_contracts, log_data_fetch, market_bucket_summary, set_settlement_contract_verification, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, weather_evidence_summary
+from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, set_settlement_contract_verification, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
@@ -15,19 +15,24 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
 from weatherbot_v3.forecast import ingest_polywx_forecasts, forecast_run_from_polywx_rows
 from weatherbot_v3.hourly import build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary
-from weatherbot_v3.market_buckets import ingest_market_buckets, market_bucket_from_payload, parse_temperature_bucket
+from weatherbot_v3.deb import build_and_store_daily_max_prediction, build_daily_max_prediction
+from weatherbot_v3.market_buckets import ingest_market_buckets, market_bucket_from_payload, parse_temperature_bucket, sync_active_weather_market_buckets
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
+from weatherbot_v3.openmeteo import fetch_openmeteo_forecasts, model_allowlist_for_city, openmeteo_runs_from_response
 from weatherbot_v3.mesonet import ingest_mesonet_observations, mesonet_observation_from_pws_row
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
+from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summary
 from weatherbot_v3.stations import list_stations, station_row_from_profile, sync_station_registry
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
-from weatherbot_v3.metar import fetch_awc_metars, refresh_metar_reports
+from weatherbot_v3.metar import backfill_iem_asos_metars, ingest_iem_asos_csv, parse_iem_asos_csv, probe_iem_stations, fetch_awc_metars, refresh_metar_reports
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from weatherbot_v3.cli import default_orderbook_start_date, run_hourly_consensus_build, run_market_buckets_sync, run_orderbook_backfill, run_production_refresh, select_orderbook_backfill_markets
+from weatherbot_v3.cli import default_orderbook_start_date, run_daily_max_build, run_hourly_consensus_build, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
+from dashboard_server import signal_decision_detail as signal_decision_detail_api
+from dashboard_server import signal_decisions as signal_decisions_api
 from dashboard_server import stations as stations_api
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
 from datetime import datetime, timedelta, timezone
@@ -41,6 +46,85 @@ def test_db_path(name: str) -> Path:
     path = TEST_DB_DIR / f"{name}.db"
     path.unlink(missing_ok=True)
     return path
+
+
+class FakeHTTPResponse:
+    def __init__(self, payload, url: str = "https://example.test", status_code: int = 200):
+        self._payload = payload
+        self.url = url
+        self.status_code = status_code
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            exc = Exception(f"HTTP {self.status_code}")
+            exc.response = self
+            raise exc
+
+
+class FakePolymarketSession:
+    def __init__(self, event_payload: dict, book_payloads: dict[str, dict]):
+        self.event_payload = event_payload
+        self.book_payloads = book_payloads
+        self.headers = {}
+        self.calls = []
+
+    def get(self, url, params=None, timeout=None):
+        self.calls.append({"url": url, "params": params, "timeout": timeout})
+        if "/events/slug/" in url:
+            return FakeHTTPResponse(self.event_payload, url=url)
+        token_id = (params or {}).get("token_id")
+        payload = self.book_payloads.get(str(token_id), {})
+        return FakeHTTPResponse(payload, url=f"{url}?token_id={token_id}")
+
+
+def openmeteo_hourly_run(
+    city: str,
+    target_date: str,
+    source: str,
+    temps: list[float],
+    *,
+    valid_times: list[str] | None = None,
+    retrieved_at: str = "2026-07-02T12:00:00+00:00",
+) -> tuple[dict, list[dict]]:
+    profile = SETTLEMENT_REGISTRY[city]
+    times = valid_times or [f"{target_date}T{hour:02d}:00:00+00:00" for hour in range(len(temps))]
+    hourly = [
+        {
+            "valid_at": valid_at,
+            "temperature_2m": temp,
+            "relative_humidity_2m": 50,
+            "cloud_cover": 20,
+        }
+        for valid_at, temp in zip(times, temps)
+    ]
+    return (
+        {
+            "run_key": f"{source}:{city}:{target_date}:{retrieved_at}:{','.join(str(t) for t in temps)}",
+            "city": city,
+            "target_date": target_date,
+            "source": source,
+            "provider": "open-meteo" if source.startswith("openmeteo_") else "test",
+            "model": source.replace("openmeteo_", ""),
+            "model_version": "test",
+            "run_type": "forecast",
+            "retrieved_at": retrieved_at,
+            "valid_at": times[-1] if times else "",
+            "horizon": "d1",
+            "station_id": profile.station_id,
+            "timezone": profile.timezone,
+            "unit": profile.unit,
+            "mean_high": max(temps) if temps else 0,
+            "std_high": 0,
+            "member_count": 1,
+            "parser_version": "openmeteo-test",
+            "parse_status": "parsed",
+            "training_eligible": True,
+        },
+        [{"member_id": "deterministic", "high_temp": max(temps), "hourly": hourly}],
+    )
 
 
 class V3CoreTests(unittest.TestCase):
@@ -317,6 +401,132 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("order_min_size_missing", row["strict_match_reasons"])
         self.assertIn("orderbook_disabled", row["strict_match_reasons"])
 
+    def test_market_bucket_parser_handles_gamma_degree_encoding(self):
+        between = parse_temperature_bucket(
+            "Will the highest temperature in Chicago be between 88-89\u00c2\u00b0F on July 2?"
+        )
+        self.assertEqual(between["direction"], "range")
+        self.assertEqual(between["low"], 88.0)
+        self.assertEqual(between["high"], 89.0)
+        self.assertEqual(between["unit"], "F")
+
+        below = parse_temperature_bucket(
+            "Will the highest temperature in Chicago be 87\u00c2\u00b0F or below on July 2?"
+        )
+        self.assertEqual(below["direction"], "or_below")
+        self.assertEqual(below["high"], 87.0)
+        self.assertEqual(below["unit"], "F")
+
+    def test_active_weather_market_sync_ingests_gamma_and_clob(self):
+        path = test_db_path("active-weather-market-buckets")
+        event_payload = {
+            "id": "event-1",
+            "slug": "highest-temperature-in-chicago-on-july-2-2026",
+            "title": "Highest temperature in Chicago on July 2?",
+            "active": True,
+            "closed": False,
+            "markets": [
+                {
+                    "id": "market-active-1",
+                    "conditionId": "condition-active-1",
+                    "question": "Will the highest temperature in Chicago be between 88-89\u00c2\u00b0F on July 2?",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.22", "0.78"]',
+                    "clobTokenIds": '["yes-active-1", "no-active-1"]',
+                    "orderMinSize": 5,
+                    "orderPriceMinTickSize": 0.001,
+                    "enableOrderBook": True,
+                    "negRisk": True,
+                    "bestBid": 0.20,
+                    "bestAsk": 0.22,
+                    "spread": 0.02,
+                    "volume": "1200",
+                    "liquidity": "300",
+                }
+            ],
+        }
+        book_payloads = {
+            "yes-active-1": {
+                "asset_id": "yes-active-1",
+                "timestamp": "1782975365751",
+                "hash": "book-hash-1",
+                "bids": [{"price": "0.21", "size": "10"}],
+                "asks": [{"price": "0.23", "size": "12"}, {"price": "0.22", "size": "8"}],
+                "min_order_size": "5",
+                "tick_size": "0.001",
+                "neg_risk": True,
+            }
+        }
+        session = FakePolymarketSession(event_payload, book_payloads)
+        with patch.dict(os.environ, {"V3_DB_PATH": str(path)}, clear=False):
+            init_v3_db(path)
+            sync_station_registry(path=path)
+            payload = sync_active_weather_market_buckets(
+                cities=["chicago"],
+                target_dates=["2026-07-02"],
+                limit_cities=1,
+                limit=5,
+                fetch_orderbooks=True,
+                dry_run=False,
+                session=session,
+                sleep_seconds=0,
+            )
+            rows = list_market_buckets(city="chicago", target_date="2026-07-02", path=path)
+            logs = list_data_fetch_logs(5)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["stored"], 1)
+        self.assertEqual(payload["matched"], 1)
+        self.assertEqual(payload["orderbook_ok"], 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["market_id"], "market-active-1")
+        self.assertEqual(rows[0]["bucket_low"], 88.0)
+        self.assertEqual(rows[0]["bucket_high"], 89.0)
+        self.assertEqual(rows[0]["best_bid"], 0.21)
+        self.assertEqual(rows[0]["best_ask"], 0.22)
+        self.assertEqual(rows[0]["tick_size"], 0.001)
+        self.assertEqual(rows[0]["order_min_size"], 5.0)
+        self.assertEqual(rows[0]["orderbook_source"], "clob")
+        self.assertIn("polymarket.com/event/highest-temperature-in-chicago-on-july-2-2026", rows[0]["event_url"])
+        self.assertEqual(logs[0]["source"], "polymarket_gamma")
+
+    def test_active_weather_market_sync_dry_run_does_not_write_rows(self):
+        path = test_db_path("active-weather-market-buckets-dry-run")
+        event_payload = {
+            "slug": "highest-temperature-in-chicago-on-july-2-2026",
+            "active": True,
+            "closed": False,
+            "markets": [{
+                "id": "market-dry-1",
+                "question": "Will the highest temperature in Chicago be 88\u00c2\u00b0F on July 2?",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.22", "0.78"]',
+                "clobTokenIds": '["yes-dry-1", "no-dry-1"]',
+                "orderMinSize": 5,
+                "orderPriceMinTickSize": 0.001,
+                "enableOrderBook": True,
+            }],
+        }
+        session = FakePolymarketSession(event_payload, {})
+        with patch.dict(os.environ, {"V3_DB_PATH": str(path)}, clear=False):
+            init_v3_db(path)
+            sync_station_registry(path=path)
+            payload = sync_active_weather_market_buckets(
+                cities=["chicago"],
+                target_dates=["2026-07-02"],
+                limit_cities=1,
+                limit=5,
+                fetch_orderbooks=False,
+                dry_run=True,
+                session=session,
+                sleep_seconds=0,
+            )
+            rows = list_market_buckets(city="chicago", target_date="2026-07-02", path=path)
+
+        self.assertEqual(payload["stored"], 0)
+        self.assertEqual(payload["matched"], 1)
+        self.assertEqual(rows, [])
+
     def test_market_buckets_api_returns_read_only_summary(self):
         path = test_db_path("market-buckets-api")
         init_v3_db(path)
@@ -349,6 +559,7 @@ class V3CoreTests(unittest.TestCase):
         quote = quote_from_market_payload({
             "id": "1",
             "yes_token_id": "yes",
+            "spread": "0.01",
             "snapshot_type": "clob",
             "bids": [{"price": "0.18", "size": "20"}, {"price": "0.20", "size": "10"}],
             "asks": [{"price": "0.25", "size": "20"}, {"price": "0.22", "size": "5"}],
@@ -358,6 +569,7 @@ class V3CoreTests(unittest.TestCase):
         })
         self.assertEqual(quote.best_bid, 0.20)
         self.assertEqual(quote.best_ask, 0.22)
+        self.assertEqual(quote.spread, 0.02)
         fill = estimate_buy_fill(quote, 2.0, 0.22)
         self.assertFalse(fill["fully_filled"])
         self.assertEqual(fill["filled_shares"], 5.0)
@@ -698,6 +910,27 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("source_mix_json", hourly_columns)
         self.assertIn("consensus_version", hourly_columns)
         self.assertIn("build_status", hourly_columns)
+        self.assertIn("forecast_spread", hourly_columns)
+        self.assertIn("forecast_member_count", hourly_columns)
+        self.assertIn("consensus_method", hourly_columns)
+        with connect(db_path) as conn:
+            daily_columns = {row["name"] for row in conn.execute("PRAGMA table_info(daily_max_predictions)").fetchall()}
+        self.assertIn("member_daily_highs_json", daily_columns)
+        self.assertIn("sigma_from_spread", daily_columns)
+        self.assertIn("sigma_from_history", daily_columns)
+        self.assertIn("bias_correction", daily_columns)
+        self.assertIn("bias_sample_count", daily_columns)
+        self.assertIn("deb_version", daily_columns)
+        with connect(db_path) as conn:
+            decision_columns = {row["name"] for row in conn.execute("PRAGMA table_info(signal_decisions)").fetchall()}
+        self.assertIn("decision_id", decision_columns)
+        self.assertIn("model_probability", decision_columns)
+        self.assertIn("market_implied_probability", decision_columns)
+        self.assertIn("edge", decision_columns)
+        self.assertIn("gate_status", decision_columns)
+        self.assertIn("paper_decision", decision_columns)
+        self.assertIn("live_decision", decision_columns)
+        self.assertIn("evidence_links_json", decision_columns)
         with connect(db_path) as conn:
             mesonet_columns = {row["name"] for row in conn.execute("PRAGMA table_info(mesonet_observations)").fetchall()}
         self.assertIn("parser_version", mesonet_columns)
@@ -1139,6 +1372,231 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("market_bucket_tick_size_missing", codes)
         self.assertEqual(readiness["summary"]["market_buckets"], 1)
 
+    def _seed_signal_decision_fixture(
+        self,
+        db_path: Path,
+        *,
+        strict_match_status: str = "matched",
+        bucket_direction: str = "range",
+        best_ask: float = 0.20,
+        best_bid: float = 0.195,
+        token_suffix: str = "mid",
+        bias_sample_count: int = 0,
+    ) -> None:
+        upsert_daily_max_prediction({
+            "city_key": "chicago",
+            "target_date": "2026-07-02",
+            "issued_at": "2026-07-02T12:00:00+00:00",
+            "mu": 90.0,
+            "sigma": 2.0,
+            "unit": "F",
+            "method": "weatherbot-deb-v2",
+            "deb_version": "weatherbot-deb-v2",
+            "sigma_floor": 0.5,
+            "bias_sample_count": bias_sample_count,
+            "source_run_ids": [101, 102],
+            "components": [{"source": "openmeteo_ncep_hrrr_conus", "weight": 0.5}],
+        }, path=db_path)
+        for bucket in [
+            {
+                "bucket_key": "chicago-20260702-low",
+                "bucket_direction": "or_below",
+                "bucket_low": None,
+                "bucket_high": 88.0,
+                "yes_token_id": "yes-low",
+                "best_ask": 0.20,
+                "best_bid": 0.195,
+            },
+            {
+                "bucket_key": f"chicago-20260702-{token_suffix}",
+                "bucket_direction": bucket_direction,
+                "bucket_low": 89.0,
+                "bucket_high": 91.0,
+                "yes_token_id": f"yes-{token_suffix}",
+                "best_ask": best_ask,
+                "best_bid": best_bid,
+            },
+            {
+                "bucket_key": "chicago-20260702-high",
+                "bucket_direction": "or_above",
+                "bucket_low": 92.0,
+                "bucket_high": None,
+                "yes_token_id": "yes-high",
+                "best_ask": 0.20,
+                "best_bid": 0.195,
+            },
+        ]:
+            upsert_market_bucket({
+                "bucket_key": bucket["bucket_key"],
+                "market_id": bucket["bucket_key"],
+                "question": "Will the highest temperature in Chicago match this test bucket?",
+                "city": "chicago",
+                "city_name": "Chicago",
+                "target_date": "2026-07-02",
+                "station_id": "KORD",
+                "unit": "F",
+                "bucket_label": bucket["bucket_key"],
+                "bucket_direction": bucket["bucket_direction"],
+                "bucket_low": bucket["bucket_low"],
+                "bucket_high": bucket["bucket_high"],
+                "outcome_name": "Yes",
+                "yes_token_id": bucket["yes_token_id"],
+                "token_id": bucket["yes_token_id"],
+                "best_ask": bucket["best_ask"],
+                "best_bid": bucket["best_bid"],
+                "spread": round(bucket["best_ask"] - bucket["best_bid"], 4),
+                "order_min_size": 5.0,
+                "tick_size": 0.01,
+                "neg_risk": False,
+                "enable_order_book": True,
+                "quote_timestamp": "2026-07-02T12:01:00+00:00",
+                "bid_depth": 50,
+                "ask_depth": 50,
+                "strict_match_status": strict_match_status if token_suffix in bucket["bucket_key"] else "matched",
+                "strict_match_reasons": [] if strict_match_status == "matched" else ["test_strict_mismatch"],
+            }, path=db_path)
+
+    def test_signal_decisions_build_edge_and_keep_live_locked_for_bias_samples(self):
+        db_path = test_db_path("signal_decision_build")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            self._seed_signal_decision_fixture(db_path)
+            result = build_signal_decisions("chicago", "2026-07-02", path=db_path)
+            rows = list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
+            mid = next(row for row in rows if row["bucket_key"] == "chicago-20260702-mid")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stored"], 3)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(mid["paper_decision"], "buy")
+        self.assertEqual(mid["gate_status"], "paper_allowed")
+        self.assertEqual(mid["live_decision"], "blocked")
+        self.assertIn("insufficient_bias_samples", mid["gate_reasons"])
+        self.assertEqual(mid["blocked_reason_primary"], "insufficient_bias_samples")
+        self.assertGreater(mid["model_probability"], mid["market_implied_probability"])
+        self.assertGreater(mid["edge"], 0.03)
+        self.assertEqual(mid["decision_version"], "signal-decision-v1")
+        self.assertIn("daily_max_prediction_id", mid["evidence_links"])
+
+    def test_signal_decisions_are_idempotent_by_decision_id(self):
+        db_path = test_db_path("signal_decision_idempotent")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            self._seed_signal_decision_fixture(db_path)
+            first = build_signal_decisions("chicago", "2026-07-02", path=db_path)
+            second = build_signal_decisions("chicago", "2026-07-02", path=db_path)
+            rows = list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
+            decision_ids = {row["decision_id"] for row in rows}
+
+        self.assertEqual(first["stored"], 3)
+        self.assertEqual(second["stored"], 3)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(len(decision_ids), 3)
+
+    def test_signal_decisions_block_non_strict_bucket_match(self):
+        db_path = test_db_path("signal_decision_strict_block")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            self._seed_signal_decision_fixture(db_path, strict_match_status="blocked")
+            build_signal_decisions("chicago", "2026-07-02", path=db_path)
+            rows = list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
+            mid = next(row for row in rows if row["bucket_key"] == "chicago-20260702-mid")
+
+        self.assertEqual(mid["paper_decision"], "blocked")
+        self.assertEqual(mid["gate_status"], "paper_blocked")
+        self.assertEqual(mid["blocked_reason_primary"], "bucket_not_strict_match")
+        self.assertIn("bucket_not_strict_match", mid["gate_reasons"])
+
+    def test_signal_decisions_api_and_readiness_expose_layer6_without_refreshing(self):
+        db_path = test_db_path("signal_decision_api_readiness")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            self._seed_signal_decision_fixture(db_path)
+            build_signal_decisions("chicago", "2026-07-02", path=db_path)
+            summary = signal_decisions_summary("chicago", "2026-07-02", path=db_path)
+            api_payload = asyncio.run(signal_decisions_api(city="chicago", target_date="2026-07-02"))
+            detail_payload = asyncio.run(signal_decision_detail_api(api_payload["decisions"][0]["decision_id"]))
+            readiness = build_data_readiness(db_path)
+
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["count"], 3)
+        self.assertEqual(api_payload["count"], 3)
+        self.assertTrue(detail_payload["ok"])
+        stage = next(stage for stage in readiness["stages"] if stage["key"] == "signal_decisions")
+        self.assertEqual(stage["metrics"]["decisions"], 3)
+        self.assertEqual(stage["metrics"]["live_blocked_insufficient_bias_samples"], 3)
+        self.assertEqual(readiness["summary"]["signal_decisions"], 3)
+
+    def test_signal_decisions_cli_runner_calls_layer6_builder(self):
+        with patch("weatherbot_v3.cli.build_data_readiness", return_value={"stages": [{"key": "signal_decisions", "status": "ready"}]}), \
+             patch("weatherbot_v3.cli.persist_data_readiness"), \
+             patch("weatherbot_v3.cli._signal_decision_targets_from_db", return_value=[("chicago", "2026-07-02")]), \
+             patch("weatherbot_v3.signals.build_signal_decisions_for_targets", return_value={
+                 "ok": True,
+                 "requested": 1,
+                 "decision_count": 3,
+                 "stored": 3,
+                 "results": [],
+             }) as mocked:
+            payload = run_signal_decisions_build("chicago", days_arg=1)
+
+        mocked.assert_called_once()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["signal_decisions_stage"]["status"], "ready")
+
+    def test_signal_decisions_targets_prefer_daily_max_market_bucket_overlap(self):
+        from weatherbot_v3.cli import _signal_decision_targets_from_db
+
+        db_path = test_db_path("signal_decision_target_overlap")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db(db_path)
+            upsert_daily_max_prediction({
+                "city_key": "chicago",
+                "target_date": "2026-07-02",
+                "issued_at": "2026-07-02T05:00:00+00:00",
+                "mu": 92.0,
+                "sigma": 2.0,
+                "unit": "F",
+                "method": "weatherbot-deb-v2",
+                "deb_version": "weatherbot-deb-v2",
+            })
+            upsert_daily_max_prediction({
+                "city_key": "chicago",
+                "target_date": "2026-07-08",
+                "issued_at": "2026-07-02T05:00:00+00:00",
+                "mu": 87.0,
+                "sigma": 3.0,
+                "unit": "F",
+                "method": "weatherbot-deb-v2",
+                "deb_version": "weatherbot-deb-v2",
+            })
+            upsert_market_bucket({
+                "market_id": "market-overlap",
+                "city": "chicago",
+                "city_name": "Chicago",
+                "target_date": "2026-07-02",
+                "unit": "F",
+                "bucket_label": "92F",
+                "bucket_direction": "exact",
+                "bucket_low": 92,
+                "bucket_high": 92,
+                "yes_token_id": "yes-overlap",
+                "order_min_size": 5,
+                "tick_size": 0.001,
+                "enable_order_book": True,
+                "price": 0.2,
+                "best_ask": 0.2,
+                "strict_match_status": "matched",
+                "strict_match_reasons": [],
+            })
+            targets = _signal_decision_targets_from_db(["chicago"], 2)
+
+        self.assertEqual(targets, [("chicago", "2026-07-02")])
+
     def test_production_validation_report_keeps_live_locked_until_all_layers_pass(self):
         db_path = test_db_path("production_validation")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -1284,6 +1742,164 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("+00:00", evidence["latest_metar_reports"][0]["report_time"])
         self.assertAlmostEqual(evidence["latest_metar_reports"][0]["temperature"], 91.4, places=1)
 
+    def test_iem_asos_csv_parser_converts_fahrenheit_to_celsius_and_preserves_raw(self):
+        csv_text = (
+            "station,valid,tmpf,dwpf,drct,sknt,gust,vsby,alti,mslp,p01i,skyc1,skyl1,metar\n"
+            "ORD,2026-06-01 00:51,77.0,50.0,180,12,18,10.0,29.92,1013.2,0.00,FEW,4200,"
+            "\"METAR KORD 010051Z 18012G18KT 10SM FEW042 25/10 A2992\"\n"
+        )
+        station_row = station_row_from_profile(SETTLEMENT_REGISTRY["chicago"])
+
+        parsed = parse_iem_asos_csv(csv_text, station_row, source_url="https://mesonet.example/asos.csv")
+        report = parsed["reports"][0]
+
+        self.assertEqual(parsed["reports_seen"], 1)
+        self.assertEqual(report["station_id"], "KORD")
+        self.assertEqual(report["parser_version"], "iem-asos-csv-v1")
+        self.assertAlmostEqual(report["temperature"], 25.0, places=1)
+        self.assertAlmostEqual(report["dew_point"], 10.0, places=1)
+        self.assertEqual(report["wind_direction"], 180)
+        self.assertEqual(report["wind_speed"], 12)
+        self.assertEqual(report["raw_text"], "METAR KORD 010051Z 18012G18KT 10SM FEW042 25/10 A2992")
+        self.assertEqual(report["raw_json"]["raw_unit"], "F")
+        self.assertEqual(report["raw_json"]["normalized_temperature_unit"], "C")
+
+    def test_iem_asos_upsert_is_station_time_idempotent_and_overwrites_corrections(self):
+        db_path = test_db_path("iem_upsert_idempotent")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        station_row = station_row_from_profile(SETTLEMENT_REGISTRY["chicago"])
+        first_csv = (
+            "station,valid,tmpf,dwpf,drct,sknt,vsby,metar\n"
+            "ORD,2026-06-01 00:51,77.0,50.0,180,12,10.0,"
+            "\"METAR KORD 010051Z 18012KT 10SM 25/10 A2992\"\n"
+        )
+        correction_csv = (
+            "station,valid,tmpf,dwpf,drct,sknt,vsby,metar\n"
+            "ORD,2026-06-01 00:51,78.8,51.8,190,13,10.0,"
+            "\"METAR KORD 010051Z COR 19013KT 10SM 26/11 A2991\"\n"
+        )
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            first = ingest_iem_asos_csv(first_csv, station_row, source_url="https://mesonet.example/first.csv")
+            second = ingest_iem_asos_csv(correction_csv, station_row, source_url="https://mesonet.example/correction.csv")
+            with connect(db_path) as conn:
+                rows = conn.execute("SELECT * FROM metar_reports").fetchall()
+
+        self.assertEqual(first["reports_upserted"], 1)
+        self.assertEqual(second["reports_upserted"], 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["report_key"], "iem_asos:KORD:2026-06-01T00:51:00+00:00")
+        self.assertIn("COR", rows[0]["raw_text"])
+        self.assertAlmostEqual(rows[0]["temperature"], 26.0, places=1)
+
+    def test_iem_asos_parser_marks_partial_failed_and_skips_empty_rows(self):
+        db_path = test_db_path("iem_partial_failed")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        station_row = station_row_from_profile(SETTLEMENT_REGISTRY["chicago"])
+        csv_text = (
+            "station,valid,tmpf,dwpf,drct,sknt,vsby,metar\n"
+            "ORD,2026-06-01 00:51,77.0,50.0,180,12,10.0,\n"
+            "ORD,2026-06-01 01:51,null,null,null,null,null,\n"
+            "ORD,2026-06-01 02:51,78.0,51.0,190,10,10.0,\"BAD RAW REPORT\"\n"
+        )
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            result = ingest_iem_asos_csv(csv_text, station_row, source_url="https://mesonet.example/bad.csv")
+            with connect(db_path) as conn:
+                rows = conn.execute("SELECT parse_status, parse_warnings FROM metar_reports ORDER BY report_time").fetchall()
+
+        self.assertEqual(result["reports_seen"], 2)
+        self.assertEqual(result["skipped_empty_rows"], 1)
+        self.assertEqual(result["partial_rows"], 1)
+        self.assertEqual(result["failed_rows"], 1)
+        self.assertEqual([row["parse_status"] for row in rows], ["partial", "failed"])
+        self.assertIn("no_raw_metar_from_iem", rows[0]["parse_warnings"])
+        self.assertIn("unrecognized_raw_metar", rows[1]["parse_warnings"])
+
+    def test_iem_station_probe_uses_real_probe_result_without_presuming_fallback(self):
+        db_path = test_db_path("iem_probe")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        probe_path = TEST_DB_DIR / "probe_report.json"
+        probe_path.unlink(missing_ok=True)
+
+        class FakeResponse:
+            def __init__(self, text, url):
+                self.status_code = 200
+                self.text = text
+                self.url = url
+
+            def raise_for_status(self):
+                return None
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, params, headers, timeout):
+                station_values = [value for key, value in params if key == "station"]
+                station = station_values[0]
+                self.calls.append((url, params, headers, timeout))
+                if station == "KORD":
+                    return FakeResponse("", f"{url}?station=KORD")
+                return FakeResponse(
+                    "77.00,50.00,180.00,12.00,10.00,FEW,4200.00,KORD 010051Z 18012KT 10SM 25/10 A2992\n",
+                    f"{url}?station={station}",
+                )
+
+        session = FakeSession()
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            sync_station_registry(db_path)
+            result = probe_iem_stations(["chicago"], output_path=probe_path, session=session)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["selected"]["chicago"], "ORD")
+        self.assertTrue(probe_path.exists())
+        first_params = dict(session.calls[0][1])
+        self.assertEqual(first_params["nometa"], "yes")
+
+    def test_iem_backfill_writes_fetch_log_and_hour_coverage_without_auto_start(self):
+        db_path = test_db_path("iem_backfill")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        raw_dir = TEST_DB_DIR / "iem_raw"
+        probe_path = TEST_DB_DIR / "iem_probe_for_backfill.json"
+        probe_path.write_text(json.dumps({"selected": {"chicago": "ORD"}}, ensure_ascii=False), encoding="utf-8")
+
+        class FakeResponse:
+            status_code = 200
+            url = "https://mesonet.example/asos.csv?station=ORD"
+            text = (
+                "station,valid,tmpf,dwpf,drct,sknt,gust,vsby,alti,mslp,p01i,skyc1,skyl1,metar\n"
+                "ORD,2026-07-02 00:51,77.0,50.0,180,12,18,10.0,29.92,1013.2,0.00,FEW,4200,"
+                "\"METAR KORD 020051Z 18012G18KT 10SM FEW042 25/10 A2992\"\n"
+            )
+
+            def raise_for_status(self):
+                return None
+
+        class FakeSession:
+            def get(self, url, params, headers, timeout):
+                return FakeResponse()
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            sync_station_registry(db_path)
+            result = backfill_iem_asos_metars(
+                ["chicago"],
+                days=1,
+                session=FakeSession(),
+                raw_dir=raw_dir,
+                probe_report_path=probe_path,
+            )
+            logs = list_data_fetch_logs(5)
+            evidence = weather_evidence_summary("chicago")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reports_upserted"], 1)
+        self.assertEqual(evidence["metar_reports"], 1)
+        self.assertEqual(result["results"][0]["coverage"]["definition"], "distinct_utc_hours_with_any_report / (24 * days)")
+        self.assertEqual(logs[0]["source"], "iem_asos")
+        self.assertEqual(logs[0]["stage"], "refresh_metar_reports")
+        self.assertTrue(Path(result["results"][0]["raw_path"]).exists())
+
     def test_production_action_executes_whitelisted_metar_refresh(self):
         db_path = test_db_path("production_action_fetch_log")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -1351,6 +1967,23 @@ class V3CoreTests(unittest.TestCase):
         mocked_build.assert_called_once_with(["chicago"], target_date="2026-07-01")
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["hourly_consensus_stage"]["status"], "ready")
+
+    def test_daily_max_cli_runner_calls_deb_builder(self):
+        with patch("weatherbot_v3.deb.build_daily_max_predictions") as mocked_build:
+            mocked_build.return_value = {"ok": True, "requested": 1, "stored": 1, "failed": 0}
+            with patch("weatherbot_v3.cli.build_data_readiness") as mocked_readiness:
+                mocked_readiness.return_value = {"stages": []}
+                with patch("weatherbot_v3.cli.persist_data_readiness"):
+                    payload = run_daily_max_build("chicago", "2026-07-01", dry_run=False)
+
+        mocked_build.assert_called_once_with(
+            city="chicago",
+            target_date="2026-07-01",
+            limit=50,
+            dry_run=False,
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["stored"], 1)
 
     def test_market_buckets_cli_runner_ingests_local_market_payloads(self):
         db_path = test_db_path("market_buckets_cli")
@@ -2121,6 +2754,207 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(payload["members"], 1)
         self.assertEqual(payload["latest_runs"][0]["source"], "ecmwf")
 
+    def test_openmeteo_fetch_ingests_models_with_local_day_high_and_conus_short_range(self):
+        db_path = test_db_path("openmeteo_models")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+
+        class FakeResponse:
+            status_code = 200
+
+            def __init__(self, payload, url):
+                self._payload = payload
+                self.text = json.dumps(payload)
+                self.url = url
+
+            def json(self):
+                return self._payload
+
+        class FakeSession:
+            def __init__(self):
+                self.models = []
+
+            def get(self, url, params, headers, timeout):
+                model = params["models"]
+                self.models.append(model)
+                payload = {
+                    "latitude": params["latitude"],
+                    "longitude": params["longitude"],
+                    "generationtime_ms": 0.1,
+                    "timezone": "GMT",
+                    "hourly": {
+                        "time": [
+                            "2026-07-01T03:00",
+                            "2026-07-01T15:00",
+                            "2026-07-01T21:00",
+                            "2026-07-02T04:00",
+                            "2026-07-02T06:00",
+                        ],
+                        "temperature_2m": [40.0, 20.0, 30.0, 25.0, 45.0],
+                        "dew_point_2m": [10.0, 11.0, 12.0, 13.0, 14.0],
+                        "relative_humidity_2m": [50, 51, 52, 53, 54],
+                        "cloud_cover": [10, 20, 30, 40, 50],
+                        "wind_speed_10m": [5, 6, 7, 8, 9],
+                        "wind_gusts_10m": [9, 10, 11, 12, 13],
+                        "precipitation": [0, 0, 0, 0, 0],
+                        "precipitation_probability": [0, 1, 2, 3, 4],
+                    },
+                }
+                return FakeResponse(payload, f"{url}?models={model}")
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            result = fetch_openmeteo_forecasts(
+                ["chicago"],
+                session=FakeSession(),
+                retrieved_at="2026-07-01T12:15:00+00:00",
+                sleep_seconds=0,
+            )
+            with connect(db_path) as conn:
+                runs = conn.execute(
+                    """
+                    SELECT source, model, run_at, mean_high, unit, source_unit, training_eligible, raw_json
+                    FROM forecast_runs
+                    WHERE city = 'chicago' AND target_date = '2026-07-01'
+                    ORDER BY source
+                    """
+                ).fetchall()
+                members = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM forecast_members fm
+                    JOIN forecast_runs fr ON fr.id = fm.run_id
+                    WHERE fr.city = 'chicago' AND fr.target_date = '2026-07-01'
+                    """
+                ).fetchone()[0]
+
+        models = model_allowlist_for_city("chicago")
+        self.assertIn("ncep_hrrr_conus", models)
+        self.assertIn("ncep_nbm_conus", models)
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["runs_upserted"], len(models))
+        sources = {row["source"] for row in runs}
+        self.assertIn("openmeteo_ncep_hrrr_conus", sources)
+        self.assertIn("openmeteo_ncep_nbm_conus", sources)
+        self.assertEqual(len(runs), len(models))
+        self.assertEqual(members, len(models))
+        for row in runs:
+            self.assertEqual(row["run_at"], "")
+            self.assertEqual(row["unit"], "F")
+            self.assertEqual(row["source_unit"], "C")
+            self.assertEqual(row["training_eligible"], 1)
+            self.assertAlmostEqual(row["mean_high"], 86.0, places=1)
+            meta = json.loads(row["raw_json"])["meta"]
+            self.assertTrue(meta["run_at_inferred"])
+            self.assertIn("inferred_run_at", meta)
+
+    def test_openmeteo_ensemble_members_are_persistable(self):
+        payload = {
+            "generationtime_ms": 0.2,
+            "hourly": {
+                "time": ["2026-07-01T15:00", "2026-07-01T21:00"],
+                "temperature_2m": [20.0, 21.0],
+                "temperature_2m_member01": [20.0, 22.0],
+                "temperature_2m_member02": [21.0, 23.0],
+            },
+        }
+
+        runs, members = openmeteo_runs_from_response(
+            "chicago",
+            "gfs_seamless",
+            payload,
+            source_url="https://ensemble-api.open-meteo.com/v1/ensemble",
+            retrieved_at="2026-07-01T12:00:00+00:00",
+            endpoint_kind="ensemble",
+        )
+
+        target_run = next(run for run in runs if run["target_date"] == "2026-07-01")
+        target_members = members[runs.index(target_run)]
+        self.assertEqual(target_run["source"], "openmeteo_ensemble_gfs_seamless")
+        self.assertEqual(target_run["member_count"], 2)
+        self.assertEqual([member["member_id"] for member in target_members], ["member01", "member02"])
+        self.assertAlmostEqual(target_run["mean_high"], 72.5, places=1)
+        self.assertGreater(target_run["std_high"], 0)
+
+    def test_openmeteo_run_key_deduplicates_same_retrieved_hour_not_response_hash(self):
+        db_path = test_db_path("openmeteo_idempotent")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        payload = {
+            "generationtime_ms": 0.1,
+            "hourly": {
+                "time": ["2026-07-01T15:00", "2026-07-01T21:00"],
+                "temperature_2m": [20.0, 30.0],
+            },
+        }
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            first_runs, first_members = openmeteo_runs_from_response(
+                "chicago",
+                "ecmwf_ifs025",
+                payload,
+                retrieved_at="2026-07-01T12:15:00+00:00",
+            )
+            for run, members in zip(first_runs, first_members):
+                if run["target_date"] == "2026-07-01":
+                    insert_forecast_run(run, members)
+            second_payload = {**payload, "generationtime_ms": 0.9}
+            second_runs, second_members = openmeteo_runs_from_response(
+                "chicago",
+                "ecmwf_ifs025",
+                second_payload,
+                retrieved_at="2026-07-01T12:45:00+00:00",
+            )
+            for run, members in zip(second_runs, second_members):
+                if run["target_date"] == "2026-07-01":
+                    insert_forecast_run(run, members)
+            with connect(db_path) as conn:
+                same_hour_count = conn.execute("SELECT COUNT(*) FROM forecast_runs").fetchone()[0]
+            third_runs, third_members = openmeteo_runs_from_response(
+                "chicago",
+                "ecmwf_ifs025",
+                payload,
+                retrieved_at="2026-07-01T13:01:00+00:00",
+            )
+            for run, members in zip(third_runs, third_members):
+                if run["target_date"] == "2026-07-01":
+                    insert_forecast_run(run, members)
+            with connect(db_path) as conn:
+                next_hour_count = conn.execute("SELECT COUNT(*) FROM forecast_runs").fetchone()[0]
+
+        self.assertEqual(same_hour_count, 1)
+        self.assertEqual(next_hour_count, 2)
+
+    def test_openmeteo_missing_temperature_records_failed_parse_without_exception(self):
+        db_path = test_db_path("openmeteo_failed")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        payload = {"hourly": {"time": ["2026-07-01T15:00"]}}
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            runs, members = openmeteo_runs_from_response(
+                "chicago",
+                "ecmwf_ifs025",
+                payload,
+                retrieved_at="2026-07-01T12:00:00+00:00",
+            )
+            insert_forecast_run(runs[0], members[0])
+            with connect(db_path) as conn:
+                row = conn.execute("SELECT parse_status, parse_warnings, training_eligible FROM forecast_runs").fetchone()
+
+        self.assertEqual(row["parse_status"], "failed")
+        self.assertIn("missing_hourly_temperature_2m", row["parse_warnings"])
+        self.assertEqual(row["training_eligible"], 0)
+
+    def test_openmeteo_cli_dry_run_plans_requests_without_writing(self):
+        db_path = test_db_path("openmeteo_cli_dry_run")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            payload = run_openmeteo_fetch("chicago", dry_run=True, limit_cities=1)
+            init_v3_db()
+            with connect(db_path) as conn:
+                run_count = conn.execute("SELECT COUNT(*) FROM forecast_runs").fetchone()[0]
+
+        self.assertTrue(payload["dry_run"])
+        self.assertGreaterEqual(len(payload["requests_planned"]), 5)
+        self.assertEqual(run_count, 0)
+
     def test_forecast_hourly_points_use_latest_source_run(self):
         db_path = test_db_path("forecast_hourly_points")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -2293,14 +3127,175 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(summary["rows"], 1)
         self.assertIsNotNone(row)
         self.assertEqual(row["consensus_version"], "hourly-consensus-v2")
-        self.assertEqual(row["build_status"], "built")
-        self.assertEqual(row["forecast_source"], "polywx_forecast")
+        self.assertEqual(row["build_status"], "fallback_only")
+        self.assertEqual(row["forecast_source"], "polywx_fallback")
+        self.assertIn("fallback_polywx_only", row["build_warnings"])
         self.assertIn("metar", row["observation_sources_json"])
         self.assertIn("pws", row["observation_sources_json"])
         self.assertAlmostEqual(row["forecast_temp"], 87.8, places=1)
         self.assertAlmostEqual(row["observed_temp"], 91.4, places=1)
         self.assertAlmostEqual(row["residual"], 3.6, places=1)
-        self.assertEqual(summary["points"][0]["build_status"], "built")
+        self.assertEqual(summary["points"][0]["build_status"], "fallback_only")
+
+    def test_layer4_openmeteo_primary_excludes_polywx_and_uses_median_spread(self):
+        db_path = test_db_path("layer4_openmeteo_primary")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        valid_time = "2026-07-01T21:00:00+00:00"
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            for source, temp in [
+                ("openmeteo_ncep_hrrr_conus", 70.0),
+                ("openmeteo_ncep_nbm_conus", 75.0),
+                ("openmeteo_ecmwf_ifs025", 80.0),
+                ("openmeteo_gfs_seamless", 85.0),
+            ]:
+                run, members = openmeteo_hourly_run("chicago", "2026-07-01", source, [temp], valid_times=[valid_time])
+                insert_forecast_run(run, members)
+            polywx_run, polywx_members = forecast_run_from_polywx_rows(
+                "chicago",
+                "2026-07-01",
+                [{"hour": "16:00", "temperature_c": 48.9, "fetched_at": "2026-07-01T12:00:00Z"}],
+                source_url="https://api.weather.polywx.xyz/api/forecast?city=chicago-kord&date=2026-07-01",
+            )
+            insert_forecast_run(polywx_run, polywx_members)
+            upsert_metar_report({
+                "city": "chicago",
+                "station_id": "KORD",
+                "report_time": "2026-07-01T21:51:00Z",
+                "temperature": 25.56,
+                "parser_version": "iem-asos-csv-v1",
+                "raw_json": {"normalized_temperature_unit": "C"},
+                "raw_text": "KORD 012151Z 21012KT 10SM 26/21 A2987",
+            })
+
+            result = build_hourly_consensus(["chicago"], target_date="2026-07-01", db_path=db_path)
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT * FROM hourly_consensus WHERE city = ? AND target_date = ? AND local_hour = ?",
+                    ("chicago", "2026-07-01", "16:00"),
+                ).fetchone()
+
+        self.assertTrue(result["ok"])
+        self.assertIsNotNone(row)
+        self.assertEqual(row["forecast_source"], "openmeteo_multi_model")
+        self.assertNotIn("polywx_forecast", row["forecast_sources_json"])
+        self.assertAlmostEqual(row["forecast_temp"], 77.5, places=2)
+        self.assertAlmostEqual(row["observed_temp"], 78.0, places=1)
+        self.assertAlmostEqual(row["residual"], 0.5, places=1)
+        self.assertAlmostEqual(row["forecast_spread"], 7.5, places=2)
+        self.assertEqual(row["forecast_member_count"], 4)
+        self.assertEqual(row["consensus_method"], "median_primary_v1")
+
+    def test_layer4_polywx_fallback_is_explicit(self):
+        db_path = test_db_path("layer4_polywx_fallback")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        forecast_run, forecast_members = forecast_run_from_polywx_rows(
+            "chicago",
+            "2026-07-01",
+            [{"hour": "16:00", "temperature_c": 31.0, "fetched_at": "2026-07-01T12:00:00Z"}],
+            source_url="https://api.weather.polywx.xyz/api/forecast?city=chicago-kord&date=2026-07-01",
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            insert_forecast_run(forecast_run, forecast_members)
+            build_hourly_consensus(["chicago"], target_date="2026-07-01", db_path=db_path)
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT forecast_source, build_status, build_warnings FROM hourly_consensus WHERE city = ?",
+                    ("chicago",),
+                ).fetchone()
+
+        self.assertEqual(row["forecast_source"], "polywx_fallback")
+        self.assertEqual(row["build_status"], "fallback_only")
+        self.assertIn("fallback_polywx_only", row["build_warnings"])
+
+    def test_daily_max_v2_uses_station_local_day_window(self):
+        db_path = test_db_path("daily_max_local_day")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        run, members = openmeteo_hourly_run(
+            "tokyo",
+            "2026-07-02",
+            "openmeteo_jma_seamless",
+            [30.0, 33.0, 40.0],
+            valid_times=[
+                "2026-07-01T16:00:00+00:00",
+                "2026-07-02T14:00:00+00:00",
+                "2026-07-02T16:00:00+00:00",
+            ],
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            insert_forecast_run(run, members)
+            prediction = build_daily_max_prediction("tokyo", "2026-07-02", issued_at="2026-07-02T12:34:00+00:00", path=db_path)
+
+        self.assertTrue(prediction["ok"])
+        self.assertEqual(prediction["deb_version"], "weatherbot-deb-v2")
+        self.assertAlmostEqual(prediction["mu"], 33.0, places=2)
+        self.assertNotIn(40.0, prediction["member_daily_highs"]["openmeteo_jma_seamless"])
+
+    def test_daily_max_v2_applies_observed_floor_and_bias_threshold(self):
+        db_path = test_db_path("daily_max_v2_floor_bias")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        run, members = openmeteo_hourly_run(
+            "chicago",
+            "2026-07-10",
+            "openmeteo_ncep_hrrr_conus",
+            [88.0],
+            valid_times=["2026-07-10T21:00:00+00:00"],
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            insert_forecast_run(run, members)
+            upsert_metar_report({
+                "city": "chicago",
+                "station_id": "KORD",
+                "report_time": "2026-07-10T21:51:00Z",
+                "temperature": 33.33,
+                "parser_version": "iem-asos-csv-v1",
+                "raw_json": {"normalized_temperature_unit": "C"},
+                "raw_text": "KORD 102151Z 21012KT 10SM 33/21 A2987",
+            })
+            first = build_daily_max_prediction("chicago", "2026-07-10", issued_at="2026-07-10T12:00:00Z", path=db_path)
+            for day in range(1, 8):
+                upsert_hourly_consensus({
+                    "city": "chicago",
+                    "city_name": "Chicago",
+                    "target_date": f"2026-07-{day:02d}",
+                    "local_hour": "16:00",
+                    "valid_time": f"2026-07-{day:02d}T16:00:00-05:00",
+                    "station_id": "KORD",
+                    "forecast_temp": 80.0,
+                    "observed_temp": 82.0,
+                    "observation_source": "metar",
+                    "forecast_source": "openmeteo_multi_model",
+                    "source_count": 2,
+                })
+            second = build_daily_max_prediction("chicago", "2026-07-10", issued_at="2026-07-10T13:00:00Z", path=db_path)
+
+        self.assertTrue(first["mu_observed_floor_applied"])
+        self.assertGreaterEqual(first["mu"], 91.9)
+        self.assertEqual(first["bias_correction"], 0.0)
+        self.assertIn("insufficient_settlement_days", first["build_warnings"])
+        self.assertEqual(second["bias_sample_count"], 7)
+        self.assertAlmostEqual(second["bias_correction"], 2.0, places=2)
+        self.assertGreaterEqual(first["sigma"], first["sigma_floor"])
+
+    def test_daily_max_v2_same_issued_hour_is_idempotent(self):
+        db_path = test_db_path("daily_max_v2_idempotent")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        run, members = openmeteo_hourly_run(
+            "chicago",
+            "2026-07-10",
+            "openmeteo_ncep_hrrr_conus",
+            [88.0],
+            valid_times=["2026-07-10T21:00:00+00:00"],
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            insert_forecast_run(run, members)
+            build_and_store_daily_max_prediction("chicago", "2026-07-10", issued_at="2026-07-10T12:10:00Z", path=db_path)
+            build_and_store_daily_max_prediction("chicago", "2026-07-10", issued_at="2026-07-10T12:50:00Z", path=db_path)
+            with connect(db_path) as conn:
+                count = conn.execute("SELECT COUNT(*) FROM daily_max_predictions").fetchone()[0]
+                row = conn.execute("SELECT deb_version, bias_sample_count FROM daily_max_predictions").fetchone()
+
+        self.assertEqual(count, 1)
+        self.assertEqual(row["deb_version"], "weatherbot-deb-v2")
 
     def test_hourly_consensus_api_returns_layer4_rows_without_refreshing(self):
         db_path = test_db_path("hourly_consensus_api")

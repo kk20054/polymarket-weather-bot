@@ -110,17 +110,158 @@ def run_forecast_backfill(cities_arg: str = "", days_arg: int = 4) -> dict:
     }
 
 
-def run_hourly_consensus_build(cities_arg: str = "", target_date: str = "") -> dict:
+def run_hourly_consensus_build(
+    cities_arg: str = "",
+    target_date: str = "",
+    *,
+    days_arg: int | None = None,
+    limit_cities: int = 5,
+    force_rebuild: bool = False,
+) -> dict:
     from .hourly import build_hourly_consensus
 
     cities = [item.strip() for item in cities_arg.split(",") if item.strip()]
-    payload = build_hourly_consensus(cities or None, target_date=target_date or None)
+    if not cities and limit_cities:
+        cities = _default_layer_city_keys(limit_cities)
+    if not target_date and days_arg:
+        targets = _target_dates_from_db(cities, days_arg, forecast_only=False)
+        target_map: dict[str, set[str]] = {}
+        for city, date_value in targets:
+            target_map.setdefault(city, set()).add(date_value)
+        batch = build_hourly_consensus(cities or None, target_dates_by_city=target_map)
+        payload = {
+            "ok": bool(batch.get("ok")),
+            "source": "forecast_members+metar_reports+mesonet_observations",
+            "cities": cities,
+            "target_date": "",
+            "target_pairs": len(targets),
+            "forecast_points": int(batch.get("forecast_points") or 0),
+            "observation_points": int(batch.get("observation_points") or 0),
+            "rows_built": int(batch.get("rows_built") or 0),
+            "rows_upserted": int(batch.get("rows_upserted") or 0),
+            "result": batch,
+        }
+    else:
+        payload = build_hourly_consensus(cities or None, target_date=target_date or None)
+    payload["force_rebuild"] = bool(force_rebuild)
+    payload["days_requested"] = days_arg
     readiness = build_data_readiness()
     persist_data_readiness(readiness)
     payload["hourly_consensus_stage"] = next(
         (stage for stage in readiness.get("stages", []) if stage.get("key") == "hourly_consensus"),
         None,
     )
+    return payload
+
+
+def run_daily_max_build(
+    cities_arg: str = "",
+    target_date: str = "",
+    *,
+    days_arg: int | None = None,
+    dry_run: bool = False,
+    limit_cities: int = 5,
+) -> dict:
+    from .deb import build_daily_max_predictions
+
+    cities = [item.strip() for item in cities_arg.split(",") if item.strip()]
+    if not cities and limit_cities:
+        cities = _default_layer_city_keys(limit_cities)
+    results = []
+    if not target_date and days_arg:
+        targets = _target_dates_from_db(cities, days_arg, forecast_only=True)
+        for city, date_value in targets:
+            results.append(build_daily_max_predictions(
+                city=city,
+                target_date=date_value,
+                limit=1,
+                dry_run=dry_run,
+            ))
+    else:
+        for city in cities or [None]:
+            results.append(build_daily_max_predictions(
+                city=city,
+                target_date=target_date or None,
+                limit=max(1, int(days_arg or 50)),
+                dry_run=dry_run,
+            ))
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    return {
+        "ok": all(item.get("ok") for item in results),
+        "dry_run": dry_run,
+        "cities": cities,
+        "target_date": target_date or "",
+        "days_requested": days_arg,
+        "requested": sum(int(item.get("requested") or 0) for item in results),
+        "stored": sum(int(item.get("stored") or 0) for item in results),
+        "failed": sum(int(item.get("failed") or 0) for item in results),
+        "results": results,
+    }
+
+
+def run_metar_backfill(
+    cities_arg: str = "",
+    *,
+    days_arg: int = 30,
+    dry_run: bool = False,
+    probe_stations: bool = False,
+    all_cities: bool = False,
+    limit_cities: int = 5,
+    output_path: str = "",
+) -> dict:
+    from .metar import backfill_iem_asos_metars, probe_iem_stations
+
+    cities = _cities_from_arg(cities_arg)
+    if all_cities:
+        cities = []
+        limit_cities = 10_000
+    if probe_stations:
+        return probe_iem_stations(
+            cities or None,
+            limit_cities=limit_cities,
+            output_path=output_path or None,
+        )
+    payload = backfill_iem_asos_metars(
+        cities or None,
+        days=days_arg,
+        dry_run=dry_run,
+        limit_cities=limit_cities,
+        probe_report_path=output_path or None,
+    )
+    if payload.get("ok"):
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        payload["observations_stage"] = readiness_stage(readiness, "observations")
+    return payload
+
+
+def run_openmeteo_fetch(
+    cities_arg: str = "",
+    *,
+    ensemble: bool = False,
+    dry_run: bool = False,
+    all_cities: bool = False,
+    limit_cities: int = 5,
+    forecast_days: int = 7,
+) -> dict:
+    from .openmeteo import fetch_openmeteo_forecasts
+
+    cities = _cities_from_arg(cities_arg)
+    if all_cities:
+        cities = []
+        limit_cities = 10_000
+    payload = fetch_openmeteo_forecasts(
+        cities or None,
+        ensemble=ensemble,
+        dry_run=dry_run,
+        limit_cities=limit_cities,
+        forecast_days=forecast_days,
+    )
+    if not dry_run and payload.get("runs_upserted", 0) > 0:
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        payload["forecast_stage"] = readiness_stage(readiness, "forecast_runs")
     return payload
 
 
@@ -189,7 +330,36 @@ def run_orderbook_backfill(limit_arg: int = 50, start_date_arg: str = "", end_da
     }
 
 
-def run_market_buckets_sync(limit_arg: int = 200) -> dict:
+def run_market_buckets_sync(
+    limit_arg: int = 200,
+    *,
+    cities_arg: str = "",
+    days_arg: int | None = None,
+    target_date: str = "",
+    active_weather: bool = False,
+    dry_run: bool = False,
+    limit_cities: int = 5,
+    fetch_orderbooks: bool = True,
+) -> dict:
+    if active_weather:
+        from .market_buckets import sync_active_weather_market_buckets
+
+        cities = _cities_from_arg(cities_arg)
+        target_dates = [target_date] if target_date else None
+        result = sync_active_weather_market_buckets(
+            cities=cities or None,
+            target_dates=target_dates,
+            days=days_arg or 3,
+            limit_cities=limit_cities,
+            limit=limit_arg,
+            dry_run=dry_run,
+            fetch_orderbooks=fetch_orderbooks,
+        )
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        result["market_buckets_stage"] = readiness_stage(readiness, "market_buckets")
+        return result
+
     from .market_buckets import ingest_market_buckets
 
     limit = max(1, min(int(limit_arg or 200), 1000))
@@ -232,12 +402,118 @@ def run_market_buckets_sync(limit_arg: int = 200) -> dict:
     return result
 
 
+def run_signal_decisions_build(
+    cities_arg: str = "",
+    target_date: str = "",
+    *,
+    days_arg: int | None = None,
+    dry_run: bool = False,
+    limit_cities: int = 5,
+    limit: int = 200,
+) -> dict:
+    from .signals import build_signal_decisions_for_targets
+
+    cities = _cities_from_arg(cities_arg)
+    if not cities and limit_cities:
+        cities = _default_layer_city_keys(limit_cities)
+    if target_date:
+        targets = [(city, target_date) for city in cities]
+    else:
+        targets = _signal_decision_targets_from_db(cities, days_arg or 7)
+    payload = build_signal_decisions_for_targets(targets, dry_run=dry_run, limit=limit)
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    payload["signal_decisions_stage"] = readiness_stage(readiness, "signal_decisions")
+    return payload
+
+
 def _json_object(raw: str) -> dict:
     try:
         value = json.loads(raw)
         return value if isinstance(value, dict) else {}
     except Exception:
         return {}
+
+
+def _cities_from_arg(cities_arg: str = "") -> list[str]:
+    return [item.strip() for item in str(cities_arg or "").split(",") if item.strip()]
+
+
+def _default_layer_city_keys(limit_cities: int = 5) -> list[str]:
+    preferred = ["chicago", "tokyo", "atlanta", "nyc", "dallas"]
+    limit = max(1, int(limit_cities or len(preferred)))
+    return preferred[:limit]
+
+
+def _target_dates_from_db(cities: list[str], days: int, *, forecast_only: bool = False) -> list[tuple[str, str]]:
+    selected_cities = cities or _default_layer_city_keys(5)
+    per_city_limit = max(1, int(days or 1))
+    targets: list[tuple[str, str]] = []
+    with connect() as conn:
+        for city in selected_cities:
+            date_rows = []
+            if forecast_only:
+                date_rows = conn.execute(
+                    """
+                    SELECT DISTINCT target_date
+                    FROM forecast_runs
+                    WHERE city = ? AND target_date IS NOT NULL AND target_date != ''
+                    ORDER BY target_date DESC
+                    LIMIT ?
+                    """,
+                    (city, per_city_limit),
+                ).fetchall()
+            else:
+                date_rows = conn.execute(
+                    """
+                    SELECT target_date FROM (
+                        SELECT DISTINCT target_date
+                        FROM forecast_runs
+                        WHERE city = ? AND target_date IS NOT NULL AND target_date != ''
+                        UNION
+                        SELECT DISTINCT date(report_time) AS target_date
+                        FROM metar_reports
+                        WHERE city = ? AND report_time IS NOT NULL AND report_time != ''
+                        UNION
+                        SELECT DISTINCT date(observed_at) AS target_date
+                        FROM mesonet_observations
+                        WHERE city = ? AND observed_at IS NOT NULL AND observed_at != ''
+                    )
+                    WHERE target_date IS NOT NULL AND target_date != ''
+                    ORDER BY target_date DESC
+                    LIMIT ?
+                    """,
+                    (city, city, city, per_city_limit),
+                ).fetchall()
+            targets.extend((city, str(row["target_date"])) for row in date_rows if row["target_date"])
+    return targets
+
+
+def _signal_decision_targets_from_db(cities: list[str], days: int) -> list[tuple[str, str]]:
+    selected_cities = cities or _default_layer_city_keys(5)
+    per_city_limit = max(1, int(days or 1))
+    targets: list[tuple[str, str]] = []
+    with connect() as conn:
+        for city in selected_cities:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT d.city_key, d.target_date
+                FROM daily_max_predictions d
+                INNER JOIN market_buckets m
+                    ON m.city = d.city_key
+                   AND m.target_date = d.target_date
+                WHERE d.city_key = ?
+                  AND d.target_date IS NOT NULL
+                  AND d.target_date != ''
+                ORDER BY d.target_date ASC
+                LIMIT ?
+                """,
+                (city, per_city_limit),
+            ).fetchall()
+            targets.extend((str(row["city_key"]), str(row["target_date"])) for row in rows)
+    if targets:
+        return targets
+    return _target_dates_from_db(selected_cities, days, forecast_only=True)
 
 
 def _orderbook_quote_usable(quote) -> bool:
@@ -436,8 +712,12 @@ def main() -> None:
             "data-readiness",
             "model-dataset-audit",
             "forecast-backfill",
+            "openmeteo-fetch",
+            "metar-backfill",
             "hourly-consensus-build",
+            "daily-max-build",
             "market-buckets-sync",
+            "signal-decisions-build",
             "forecast-archive-import",
             "forecast-archive-manifest",
             "orderbook-backfill",
@@ -450,9 +730,11 @@ def main() -> None:
         ],
     )
     parser.add_argument("--cities", default="", help="Comma-separated city keys; empty means all cities")
-    parser.add_argument("--days", type=int, default=4, help="Local forecast days to persist (1-7)")
+    parser.add_argument("--city", default="", help="Single city key; merged with --cities")
+    parser.add_argument("--days", type=int, default=None, help="Days for supported commands; forecast defaults to 4, METAR backfill defaults to 30")
     parser.add_argument("--limit", type=int, default=50, help="Maximum current/future signal markets to refresh")
     parser.add_argument("--start-date", default="", help="Inclusive local target date filter")
+    parser.add_argument("--target-date", default="", help="Single local target date for Layer 4 build commands")
     parser.add_argument("--end-date", default="", help="Inclusive local target date filter")
     parser.add_argument(
         "--status",
@@ -470,7 +752,17 @@ def main() -> None:
     parser.add_argument("--mature-only", action="store_true", help="Only act on contracts whose local settlement day has ended")
     parser.add_argument("--skip-signal-scan", action="store_true", help="Skip the legacy signal scan during production-refresh")
     parser.add_argument("--include-targets", action="store_true", help="Include full next-action target lists in production-validation output")
+    parser.add_argument("--all-cities", action="store_true", help="Apply supported city commands to all station rows")
+    parser.add_argument("--dry-run", action="store_true", help="Parse and report without writing rows where supported")
+    parser.add_argument("--probe-stations", action="store_true", help="Probe IEM ASOS station= candidates before METAR backfill")
+    parser.add_argument("--limit-cities", type=int, default=5, help="Maximum default cities for METAR probe/backfill")
+    parser.add_argument("--ensemble", action="store_true", help="Fetch Open-Meteo ensemble endpoint where supported")
+    parser.add_argument("--forecast-days", type=int, default=7, help="Forecast days for Open-Meteo fetch")
+    parser.add_argument("--force-rebuild", action="store_true", help="Force upsert/rebuild where supported")
+    parser.add_argument("--active-weather", action="store_true", help="Sync active Polymarket weather events from Gamma/CLOB")
+    parser.add_argument("--skip-orderbooks", action="store_true", help="Skip CLOB orderbook fetches for active weather market buckets")
     args = parser.parse_args()
+    cities_arg = ",".join(item for item in (args.cities, args.city) if item)
 
     if args.command == "init-db":
         init_v3_db()
@@ -488,7 +780,7 @@ def main() -> None:
     elif args.command == "production-refresh":
         payload = run_production_refresh(
             cities=args.cities,
-            days=args.days,
+            days=args.days or 4,
             limit=args.limit,
             start_date=args.start_date,
             end_date=args.end_date,
@@ -523,11 +815,86 @@ def main() -> None:
         payload = build_model_dataset_audit(min_samples=args.limit)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "forecast-backfill":
-        print(json.dumps(run_forecast_backfill(args.cities, args.days), ensure_ascii=False, indent=2))
+        print(json.dumps(run_forecast_backfill(cities_arg, args.days or 4), ensure_ascii=False, indent=2))
+    elif args.command == "openmeteo-fetch":
+        print(json.dumps(
+            run_openmeteo_fetch(
+                cities_arg,
+                ensemble=args.ensemble,
+                dry_run=args.dry_run,
+                all_cities=args.all_cities,
+                limit_cities=args.limit_cities,
+                forecast_days=args.forecast_days,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "metar-backfill":
+        print(json.dumps(
+            run_metar_backfill(
+                cities_arg,
+                days_arg=args.days or 30,
+                dry_run=args.dry_run,
+                probe_stations=args.probe_stations,
+                all_cities=args.all_cities,
+                limit_cities=args.limit_cities,
+                output_path=args.output_path,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
     elif args.command == "hourly-consensus-build":
-        print(json.dumps(run_hourly_consensus_build(args.cities, args.start_date), ensure_ascii=False, indent=2))
+        print(json.dumps(
+            run_hourly_consensus_build(
+                cities_arg,
+                args.target_date or args.start_date,
+                days_arg=args.days,
+                limit_cities=args.limit_cities,
+                force_rebuild=args.force_rebuild,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "daily-max-build":
+        print(json.dumps(
+            run_daily_max_build(
+                cities_arg,
+                args.target_date or args.start_date,
+                days_arg=args.days,
+                dry_run=args.dry_run,
+                limit_cities=args.limit_cities,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
     elif args.command == "market-buckets-sync":
-        print(json.dumps(run_market_buckets_sync(args.limit), ensure_ascii=False, indent=2))
+        print(json.dumps(
+            run_market_buckets_sync(
+                args.limit,
+                cities_arg=cities_arg,
+                days_arg=args.days,
+                target_date=args.target_date or args.start_date,
+                active_weather=args.active_weather,
+                dry_run=args.dry_run,
+                limit_cities=args.limit_cities,
+                fetch_orderbooks=not args.skip_orderbooks,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "signal-decisions-build":
+        print(json.dumps(
+            run_signal_decisions_build(
+                cities_arg,
+                args.target_date or args.start_date,
+                days_arg=args.days,
+                dry_run=args.dry_run,
+                limit_cities=args.limit_cities,
+                limit=args.limit,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
     elif args.command == "forecast-archive-import":
         if not args.archive_path:
             raise SystemExit("--archive-path is required")

@@ -37,10 +37,13 @@ from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
 from weatherbot_v3.db import forecast_summary
 from weatherbot_v3.db import init_v3_db
 from weatherbot_v3.db import insert_event_distribution, latest_event_distribution, latest_signal_decision
+from weatherbot_v3.db import list_signal_decisions
 from weatherbot_v3.db import market_bucket_summary
+from weatherbot_v3.db import daily_max_prediction_summary
 from weatherbot_v3.db import list_data_fetch_logs
 from weatherbot_v3.db import weather_evidence_summary
 from weatherbot_v3.db import bulk_settlement_contract_verification, list_settlement_contracts, set_settlement_contract_verification, truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
+from weatherbot_v3.deb import build_daily_max_predictions, latest_bucket_probabilities
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LiveExecutor, PaperExecutor
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest
@@ -54,8 +57,9 @@ from weatherbot_v3.production_actions import list_production_actions, run_produc
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.stations import list_stations, sync_station_registry
+from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summary
 from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_rule
-from weatherbot_v3.cli import run_production_refresh
+from weatherbot_v3.cli import run_market_buckets_sync, run_production_refresh
 from weatherbot_v3.validation import build_production_validation_report
 
 
@@ -159,6 +163,16 @@ class ProductionActionRequest(BaseModel):
     skip_signal_scan: bool = True
     note: str = ""
     archive_path: str = ""
+
+
+class MarketBucketsSyncRequest(BaseModel):
+    cities: list[str] | None = None
+    days: int = 3
+    target_date: str = ""
+    limit: int = 200
+    limit_cities: int = 5
+    dry_run: bool = False
+    fetch_orderbooks: bool = True
 
 
 class LiveOrderUpdate(BaseModel):
@@ -3818,6 +3832,61 @@ async def market_buckets(city: str = "", target_date: str = "", limit: int = 200
     payload["limit"] = max(1, min(int(limit or 200), 1000))
     payload["latest"] = payload.get("latest", [])[:payload["limit"]]
     return payload
+
+
+@app.post("/api/market-buckets/sync-active")
+async def market_buckets_sync_active(request: MarketBucketsSyncRequest):
+    return run_market_buckets_sync(
+        request.limit,
+        cities_arg=",".join(request.cities or []),
+        days_arg=request.days,
+        target_date=request.target_date,
+        active_weather=True,
+        dry_run=request.dry_run,
+        limit_cities=request.limit_cities,
+        fetch_orderbooks=request.fetch_orderbooks,
+    )
+
+
+@app.get("/api/daily-max-predictions")
+async def daily_max_predictions(city: str = "", target_date: str = ""):
+    return daily_max_prediction_summary(city or None, target_date or None)
+
+
+@app.post("/api/daily-max-predictions/build")
+async def daily_max_predictions_build(city: str = "", target_date: str = "", limit: int = 50):
+    return build_daily_max_predictions(
+        city=city or None,
+        target_date=target_date or None,
+        limit=limit,
+    )
+
+
+@app.get("/api/bucket-probabilities")
+async def bucket_probabilities_api(city: str = "", target_date: str = ""):
+    if not city or not target_date:
+        raise HTTPException(status_code=400, detail="city and target_date are required")
+    return latest_bucket_probabilities(city, target_date)
+
+
+@app.get("/api/signal-decisions")
+async def signal_decisions(city: str = "", target_date: str = "", limit: int = 100):
+    return signal_decisions_summary(city or None, target_date or None, limit=limit)
+
+
+@app.get("/api/signal-decisions/{decision_id}")
+async def signal_decision_detail(decision_id: str):
+    rows = list_signal_decisions(decision_id=decision_id, limit=1)
+    if not rows:
+        raise HTTPException(status_code=404, detail="signal decision not found")
+    return {"ok": True, "decision": rows[0]}
+
+
+@app.post("/api/signal-decisions/build")
+async def signal_decisions_build(city: str = "", target_date: str = "", limit: int = 200, dry_run: bool = False):
+    if not city or not target_date:
+        raise HTTPException(status_code=400, detail="city and target_date are required")
+    return build_signal_decisions(city, target_date, dry_run=dry_run, limit=limit)
 
 
 @app.get("/api/temperature-fit")

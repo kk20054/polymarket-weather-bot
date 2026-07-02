@@ -59,6 +59,11 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         mesonet_observations = [dict(row) for row in conn.execute("SELECT * FROM mesonet_observations").fetchall()]
         hourly_consensus = [dict(row) for row in conn.execute("SELECT * FROM hourly_consensus").fetchall()]
         market_buckets = [dict(row) for row in conn.execute("SELECT * FROM market_buckets").fetchall()]
+        raw_signal_decisions = [dict(row) for row in conn.execute("SELECT * FROM signal_decisions").fetchall()]
+        signal_decisions = [
+            row for row in raw_signal_decisions
+            if str(row.get("decision_version") or "") == "signal-decision-v1"
+        ]
 
     rules_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     contracts_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -209,6 +214,35 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     )
     market_bucket_strict_blocked = max(0, len(market_buckets) - len(matched_market_buckets))
     market_bucket_city_date_gap = max(0, len(forecast_city_dates - market_bucket_city_dates))
+    signal_decision_city_dates = {
+        (str(row.get("city_key") or ""), str(row.get("target_date") or ""))
+        for row in signal_decisions
+        if row.get("city_key") and row.get("target_date")
+    }
+    signal_decision_cities = {city for city, _date in signal_decision_city_dates if city}
+    signal_decision_gate_counts = Counter(str(row.get("gate_status") or "unknown") for row in signal_decisions)
+    signal_decision_paper_counts = Counter(str(row.get("paper_decision") or "unknown") for row in signal_decisions)
+    signal_decision_live_counts = Counter(str(row.get("live_decision") or "unknown") for row in signal_decisions)
+    signal_decision_reason_counts: Counter[str] = Counter()
+    signal_decision_recent_24h = 0
+    for row in signal_decisions:
+        for reason in _json_list(row.get("gate_reasons_json")):
+            signal_decision_reason_counts[str(reason)] += 1
+        updated_at = _parse_time(row.get("updated_at"))
+        if updated_at and (now - updated_at).total_seconds() <= 24 * 60 * 60:
+            signal_decision_recent_24h += 1
+    signal_decision_required_cities = min(5, max(1, len(station_rows)))
+    signal_decision_city_gap = max(0, signal_decision_required_cities - len(signal_decision_cities))
+    signal_decision_missing_distribution = sum(
+        1 for row in signal_decisions
+        if not row.get("model_distribution_json") or not row.get("model_bucket_probs_json")
+    )
+    signal_decision_missing_edge = sum(1 for row in signal_decisions if row.get("edge") is None)
+    signal_decision_live_bias_blocked = sum(
+        1 for row in signal_decisions
+        if str(row.get("live_decision") or "") == "blocked"
+        and "insufficient_bias_samples" in _json_list(row.get("gate_reasons_json"))
+    )
     expected_station_cities = len(SETTLEMENT_REGISTRY)
     station_city_keys = {str(row.get("city_key") or row.get("city") or "") for row in station_rows}
     missing_station_rows = max(0, expected_station_cities - len(station_city_keys))
@@ -459,6 +493,35 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             },
         ),
         _stage(
+            "signal_decisions",
+            "Signal decisions",
+            (
+                len(signal_decisions) > 0
+                and signal_decision_city_gap == 0
+                and signal_decision_missing_distribution == 0
+                and signal_decision_missing_edge == 0
+            ),
+            [
+                ("signal_decisions_missing", 1 if not signal_decisions else 0),
+                ("signal_decision_city_coverage_below_min", signal_decision_city_gap),
+                ("signal_decision_distribution_missing", signal_decision_missing_distribution),
+                ("signal_decision_edge_missing", signal_decision_missing_edge),
+            ],
+            {
+                "decisions": len(signal_decisions),
+                "cities": len(signal_decision_cities),
+                "city_dates": len(signal_decision_city_dates),
+                "required_cities": signal_decision_required_cities,
+                "recent_24h": signal_decision_recent_24h,
+                "gate_status": dict(signal_decision_gate_counts),
+                "paper_decisions": dict(signal_decision_paper_counts),
+                "live_decisions": dict(signal_decision_live_counts),
+                "live_blocked_insufficient_bias_samples": signal_decision_live_bias_blocked,
+                "reason_counts": dict(signal_decision_reason_counts),
+                "parser_contract": "DEB distribution + market bucket probabilities + edge + paper/live gate reasons",
+            },
+        ),
+        _stage(
             "orderbooks",
             "盘口快照",
             len(fresh_clob_with_depth_orderbooks) >= cfg.min_fresh_clob_orderbooks,
@@ -512,6 +575,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             "forecast_members": forecast_member_count,
             "hourly_consensus": len(hourly_consensus),
             "market_buckets": len(market_buckets),
+            "signal_decisions": len(signal_decisions),
             "orderbook_snapshots": len(orderbooks),
         },
     }
@@ -543,6 +607,18 @@ def _json_list_count(raw: Any) -> int:
         return len(value) if isinstance(value, list) else 0
     except Exception:
         return 0
+
+
+def _json_list(raw: Any) -> list[Any]:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return raw
+    try:
+        value = json.loads(str(raw))
+        return value if isinstance(value, list) else []
+    except Exception:
+        return []
 
 
 def _production_phase(
@@ -781,6 +857,24 @@ def _build_next_actions(
             "count": market_bucket_gap,
             "impact": "Persist exact city/date/bucket/token/tick/orderMinSize mappings before signals or execution gates use a market.",
             "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli market-buckets-sync --limit 200",
+            "requires_operator": False,
+            "targets": [],
+        })
+
+    signal_decision_gap = max(
+        int(reason_counts.get("signal_decisions_missing") or 0),
+        int(reason_counts.get("signal_decision_city_coverage_below_min") or 0),
+        int(reason_counts.get("signal_decision_distribution_missing") or 0),
+        int(reason_counts.get("signal_decision_edge_missing") or 0),
+    )
+    if signal_decision_gap:
+        actions.append({
+            "key": "build_signal_decisions",
+            "priority": 4,
+            "label": "Build signal decisions",
+            "count": signal_decision_gap,
+            "impact": "Generate auditable model probability, market implied probability, edge, and paper/live gate reasons. This does not execute paper or live orders.",
+            "command": ".\\.venv\\Scripts\\python.exe -m weatherbot_v3.cli signal-decisions-build --limit-cities 5 --days 7",
             "requires_operator": False,
             "targets": [],
         })
