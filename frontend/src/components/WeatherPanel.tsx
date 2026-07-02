@@ -11,7 +11,7 @@ import {
   YAxis,
 } from 'recharts'
 import { CloudSun, Database, ExternalLink, Signal, ThermometerSun } from 'lucide-react'
-import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, CityEvidenceMarketBucketSummary, CityEvidenceProbabilitySummary, DashboardEvent, DistributionItem, FetchLogRow, HistoricalWeatherPoint, ProductionRefreshResult, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, CityEvidenceMarketBucketSummary, CityEvidenceProbabilitySummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, MarketBucketSummary, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -20,6 +20,10 @@ interface Props {
   events?: DashboardEvent[]
   fetchLog?: FetchLogRow[]
   productionRefresh?: ProductionRefreshResult | null
+  marketBuckets?: MarketBucketSummary | null
+  signalDecisions?: SignalDecisionSummary | null
+  dailyMaxPrediction?: DailyMaxPredictionSummary | null
+  layer7Loading?: boolean
   selectedCity?: string
   onSelectedCity?: (cityKey: string) => void
   selectedDate?: string
@@ -76,6 +80,22 @@ type HourlyWeatherRow = {
   horizon?: string
   member_count?: number
   archive?: boolean
+}
+
+type LayerDistributionItem = DistributionItem & {
+  bucket_label?: string | null
+  bucket_direction?: string | null
+  event_url?: string | null
+  yes_token_id?: string | null
+  order_min_size?: number | null
+  tick_size?: number | null
+  bid_depth?: number | null
+  ask_depth?: number | null
+  gate_status?: string | null
+  gate_reasons?: string[]
+  paper_allowed?: boolean
+  live_allowed?: boolean
+  quote_timestamp?: string | null
 }
 
 type SourceSampleTone = 'green' | 'amber' | 'red' | 'cyan' | 'neutral'
@@ -442,6 +462,170 @@ function latestBy<T>(items: T[], predicate: (item: T) => boolean, getter: (item:
     .sort((a, b) => String(getter(b) ?? '').localeCompare(String(getter(a) ?? '')))[0]
 }
 
+function asNumber(value: unknown) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : null
+}
+
+function decisionBucket(decision?: SignalDecisionRecord) {
+  return decision?.model_bucket_probs ?? {}
+}
+
+function decisionPrice(decision?: SignalDecisionRecord) {
+  return asNumber(decision?.market_ask)
+    ?? asNumber(decision?.model_bucket_probs?.best_ask)
+    ?? asNumber(decision?.model_bucket_probs?.price)
+    ?? asNumber(decision?.market_implied_probability)
+    ?? asNumber(decision?.market_probability)
+}
+
+function decisionBid(decision?: SignalDecisionRecord) {
+  return asNumber(decision?.market_bid) ?? asNumber(decision?.model_bucket_probs?.best_bid)
+}
+
+function decisionSpread(decision?: SignalDecisionRecord) {
+  const ask = decisionPrice(decision)
+  const bid = decisionBid(decision)
+  if (ask === null || bid === null) return null
+  return Math.max(0, ask - bid)
+}
+
+function layerDecisionRank(decision: SignalDecisionRecord) {
+  const paper = decision.paper_allowed ? 1000 : 0
+  const edge = asNumber(decision.edge) ?? asNumber(decision.model_bucket_probs?.edge) ?? -999
+  return paper + edge
+}
+
+function bestLayerDecision(summary?: SignalDecisionSummary | null) {
+  return [...(summary?.decisions ?? [])].sort((a, b) => layerDecisionRank(b) - layerDecisionRank(a))[0]
+}
+
+function findBucketForDecision(decision: SignalDecisionRecord | undefined, buckets?: MarketBucketSummary | null) {
+  if (!decision) return undefined
+  return (buckets?.latest ?? []).find(bucket => {
+    if (decision.market_id && bucket.market_id === decision.market_id) return true
+    if (decision.model_bucket_probs?.bucket_key && bucket.bucket_key === decision.model_bucket_probs.bucket_key) return true
+    return false
+  })
+}
+
+function reasonCountsFromDecisions(decisions: SignalDecisionRecord[]) {
+  const counts = new Map<string, number>()
+  for (const decision of decisions) {
+    for (const reason of decision.gate_reasons ?? decision.reasons ?? []) {
+      counts.set(reason, (counts.get(reason) ?? 0) + 1)
+    }
+  }
+  return [...counts.entries()]
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
+}
+
+function decisionToMarketSignal(decision: SignalDecisionRecord, buckets?: MarketBucketSummary | null) {
+  const bucket = findBucketForDecision(decision, buckets)
+  const modelBucket = decisionBucket(decision)
+  return {
+    signal_id: decision.signal_id ?? undefined,
+    market_id: decision.market_id ?? modelBucket.market_id,
+    event_url: bucket?.event_url ?? null,
+    bucket: modelBucket.bucket_label ?? bucket?.bucket_label ?? '--',
+    price: decisionPrice(decision),
+    bid: decisionBid(decision),
+    spread: decisionSpread(decision),
+    edge: asNumber(decision.edge) ?? asNumber(modelBucket.edge),
+    paper_allowed: decision.paper_allowed,
+    live_allowed: decision.live_allowed,
+    reasons: decision.gate_reasons ?? decision.reasons ?? [],
+  }
+}
+
+function buildLayerMarketSummary(buckets?: MarketBucketSummary | null, decisions?: SignalDecisionSummary | null): CityEvidenceMarketBucketSummary | undefined {
+  const bucketRows = buckets?.latest ?? []
+  const decisionRows = decisions?.decisions ?? []
+  if (bucketRows.length === 0 && decisionRows.length === 0) return undefined
+  const reasonCounts = decisions?.reason_counts?.length ? decisions.reason_counts : reasonCountsFromDecisions(decisionRows)
+  const executable = decisionRows
+    .filter(decision => decision.paper_allowed)
+    .sort((a, b) => (asNumber(b.edge) ?? -999) - (asNumber(a.edge) ?? -999))
+    .map(decision => decisionToMarketSignal(decision, buckets))
+  const blocked = decisionRows
+    .filter(decision => !decision.paper_allowed)
+    .sort((a, b) => (asNumber(b.edge) ?? -999) - (asNumber(a.edge) ?? -999))
+    .map(decision => decisionToMarketSignal(decision, buckets))
+  return {
+    signal_count: decisionRows.length,
+    bucket_count: buckets?.bucket_count ?? bucketRows.length,
+    matched_bucket_count: buckets?.matched_bucket_count ?? bucketRows.filter(row => row.strict_match_status === 'matched').length,
+    actionable_signal_count: executable.length,
+    paper_allowed_count: executable.length,
+    live_allowed_count: decisionRows.filter(row => row.live_allowed).length,
+    blocked_signal_count: decisionRows.filter(row => !row.paper_allowed).length,
+    open_tail_count: bucketRows.filter(row => (row.bucket_low ?? 0) <= -900 || (row.bucket_high ?? 0) >= 900).length,
+    low_price_tail_count: decisionRows.filter(row => (row.gate_reasons ?? []).includes('low_price_tail_bucket')).length,
+    missing_price_count: bucketRows.filter(row => row.best_ask === null || row.best_ask === undefined).length,
+    high_spread_count: decisionRows.filter(row => (row.gate_reasons ?? []).includes('spread_too_wide')).length,
+    stale_book_count: decisionRows.filter(row => (row.gate_reasons ?? []).includes('stale_book')).length,
+    strict_matching_required: true,
+    ready: bucketRows.length > 0 && (buckets?.matched_bucket_count ?? 0) > 0,
+    reason_counts: reasonCounts,
+    top_executable: executable.slice(0, 4),
+    top_blocked: blocked.slice(0, 4),
+  }
+}
+
+function buildLayerDistributionItems(buckets?: MarketBucketSummary | null, decisions?: SignalDecisionSummary | null): LayerDistributionItem[] {
+  const decisionByMarket = new Map<string, SignalDecisionRecord>()
+  const decisionByBucket = new Map<string, SignalDecisionRecord>()
+  for (const decision of decisions?.decisions ?? []) {
+    if (decision.market_id) decisionByMarket.set(String(decision.market_id), decision)
+    const bucketKey = decision.model_bucket_probs?.bucket_key ?? decision.bucket_key
+    if (bucketKey) decisionByBucket.set(String(bucketKey), decision)
+  }
+
+  return [...(buckets?.latest ?? [])]
+    .sort((a, b) => {
+      const low = Number(a.bucket_low ?? -999) - Number(b.bucket_low ?? -999)
+      if (low !== 0) return low
+      return Number(a.bucket_high ?? 999) - Number(b.bucket_high ?? 999)
+    })
+    .map(bucket => {
+      const decision = decisionByMarket.get(String(bucket.market_id)) ?? decisionByBucket.get(String(bucket.bucket_key ?? ''))
+      const modelBucket = decisionBucket(decision)
+      const probability = asNumber(modelBucket.probability) ?? asNumber(decision?.model_probability) ?? 0
+      const ask = asNumber(bucket.best_ask) ?? asNumber(modelBucket.best_ask) ?? asNumber(bucket.price) ?? 0
+      const bid = asNumber(bucket.best_bid) ?? asNumber(modelBucket.best_bid) ?? 0
+      const spread = asNumber(bucket.spread) ?? Math.max(0, ask - bid)
+      const edge = asNumber(decision?.edge) ?? asNumber(modelBucket.edge) ?? (probability - ask)
+      return {
+        market_id: String(bucket.market_id),
+        question: bucket.question ?? '',
+        bucket_low: asNumber(bucket.bucket_low) ?? asNumber(modelBucket.bucket_low) ?? -999,
+        bucket_high: asNumber(bucket.bucket_high) ?? asNumber(modelBucket.bucket_high) ?? 999,
+        probability_raw: asNumber(modelBucket.probability_raw) ?? probability,
+        probability,
+        ask,
+        bid,
+        spread,
+        probability_edge: edge,
+        ev: edge,
+        is_signal: Boolean(decision?.paper_allowed || (edge !== null && edge > 0)),
+        bucket_label: bucket.bucket_label ?? modelBucket.bucket_label,
+        bucket_direction: bucket.bucket_direction ?? modelBucket.bucket_direction,
+        event_url: bucket.event_url ?? null,
+        yes_token_id: bucket.yes_token_id ?? modelBucket.yes_token_id,
+        order_min_size: bucket.order_min_size ?? decision?.order_min_size,
+        tick_size: bucket.tick_size ?? decision?.tick_size,
+        bid_depth: bucket.bid_depth,
+        ask_depth: bucket.ask_depth,
+        gate_status: decision?.gate_status,
+        gate_reasons: decision?.gate_reasons ?? decision?.reasons ?? [],
+        paper_allowed: decision?.paper_allowed,
+        live_allowed: decision?.live_allowed,
+        quote_timestamp: bucket.quote_timestamp,
+      }
+    })
+}
+
 function uniqueCities(citySeries: WeatherCitySeries[], forecasts: WeatherForecast[]) {
   const rows = new Map<string, { key: string; name: string }>()
   for (const row of citySeries) rows.set(row.city_key, { key: row.city_key, name: row.city_name })
@@ -544,6 +728,10 @@ export function WeatherPanel({
   events = [],
   fetchLog = [],
   productionRefresh,
+  marketBuckets,
+  signalDecisions,
+  dailyMaxPrediction,
+  layer7Loading = false,
   selectedCity,
   onSelectedCity,
   selectedDate: controlledSelectedDate,
@@ -622,6 +810,12 @@ export function WeatherPanel({
       })
       .slice(0, 18)
   }, [distributionSignal])
+  const layerDecision = useMemo(() => bestLayerDecision(signalDecisions), [signalDecisions])
+  const layerDecisionBucket = decisionBucket(layerDecision)
+  const layerDecisionMarketBucket = useMemo(() => findBucketForDecision(layerDecision, marketBuckets), [layerDecision, marketBuckets])
+  const layerDistributionItems = useMemo(() => buildLayerDistributionItems(marketBuckets, signalDecisions), [marketBuckets, signalDecisions])
+  const layerMarketSummary = useMemo(() => buildLayerMarketSummary(marketBuckets, signalDecisions), [marketBuckets, signalDecisions])
+  const probabilityItems = layerDistributionItems.length > 0 ? layerDistributionItems : distributionChartItems
   const latestHistory = latestBy<HistoricalWeatherPoint>(
     series?.history_points ?? [],
     point => point.actual_high !== null && point.actual_high !== undefined,
@@ -665,10 +859,29 @@ export function WeatherPanel({
 
   const selectedDateIndex = availableDates.indexOf(selectedDate)
   const selectedDateRow = chartData.find(row => row.date === selectedDate) ?? chartData[chartData.length - 1]
-  const decisionLabel = bestSignal?.actionable ? 'BUY YES' : bestSignal ? '观察' : '等待信号'
-  const decisionTone = bestSignal?.actionable ? 'green' : bestSignal ? 'amber' : 'neutral'
-  const decisionReason = bestSignal?.decision?.reasons?.[0] ?? bestSignal?.status ?? (bestSignal ? '未通过可执行闸门' : '自动抓取后生成')
-  const selectedForecast = selectedDateRow?.forecast_high ?? latestForecast?.best ?? latestForecast?.ensemble_mean ?? forecastFallback?.mean_high
+  const hasLayerDecision = Boolean(layerDecision)
+  const layerPrice = decisionPrice(layerDecision)
+  const layerSpread = decisionSpread(layerDecision)
+  const layerProbability = asNumber(layerDecision?.model_probability) ?? asNumber(layerDecisionBucket.probability)
+  const layerEdge = asNumber(layerDecision?.edge) ?? asNumber(layerDecisionBucket.edge)
+  const layerBucketLabel = layerDecisionBucket.bucket_label ?? layerDecisionMarketBucket?.bucket_label
+  const layerEventUrl = layerDecisionMarketBucket?.event_url
+  const decisionLabel = hasLayerDecision
+    ? layerDecision?.paper_allowed
+      ? 'PAPER BUY'
+      : '观察 / 跳过'
+    : bestSignal?.actionable
+      ? 'BUY YES'
+      : bestSignal
+        ? '观察'
+        : '等待信号'
+  const decisionTone = hasLayerDecision
+    ? layerDecision?.paper_allowed ? 'green' : 'amber'
+    : bestSignal?.actionable ? 'green' : bestSignal ? 'amber' : 'neutral'
+  const decisionReason = hasLayerDecision
+    ? (layerDecision?.gate_reasons?.[0] ?? layerDecision?.blocked_reason_primary ?? layerDecision?.gate_status ?? 'gate recorded')
+    : bestSignal?.decision?.reasons?.[0] ?? bestSignal?.status ?? (bestSignal ? '未通过执行闸门' : '抓取后生成')
+  const selectedForecast = dailyMaxPrediction?.latest?.mu ?? selectedDateRow?.forecast_high ?? latestForecast?.best ?? latestForecast?.ensemble_mean ?? forecastFallback?.mean_high
   const selectedMetar = selectedDateRow?.metar ?? latestMetar?.metar
   const metarGap = selectedForecast !== null && selectedForecast !== undefined && selectedMetar !== null && selectedMetar !== undefined
     ? Number(selectedForecast) - Number(selectedMetar)
@@ -926,12 +1139,24 @@ export function WeatherPanel({
           </div>
           <div className="truncate text-[10px] text-neutral-600" title={decisionReason}>{decisionReason}</div>
         </div>
-        <DecisionMetric label="推荐合约" value={signalBucketLabel(bestSignal, unit)} sub={bestSignal ? (isOpenTailBucket(bestSignal) ? '开放尾桶，需严控' : longDate(bestSignal.target_date)) : longDate(selectedDate)} />
-        <DecisionMetric label="盘口" value={bestSignal?.limit_price !== undefined && bestSignal?.limit_price !== null ? fmtPrice(bestSignal.limit_price) : '--'} sub={bestSignal?.spread !== undefined && bestSignal?.spread !== null ? `spread ${fmtPrice(bestSignal.spread)}` : '等待盘口'} />
-        <DecisionMetric label="模型 / Edge" value={bestSignal ? fmtProb(bestSignal.calibrated_probability ?? bestSignal.model_probability) : '--'} sub={bestSignal ? fmtSignedPct(bestSignal.probability_edge ?? bestSignal.edge) : '无概率'} />
+        <DecisionMetric
+          label="推荐合约"
+          value={hasLayerDecision ? fmtBucketLabel(layerBucketLabel, layerDecision?.bucket_lower, unit) : signalBucketLabel(bestSignal, unit)}
+          sub={hasLayerDecision ? `${layerDecision?.gate_status ?? 'gate'} · ${longDate(layerDecision?.target_date ?? selectedDate)}` : bestSignal ? (isOpenTailBucket(bestSignal) ? '开放尾桶，需严控' : longDate(bestSignal.target_date)) : longDate(selectedDate)}
+        />
+        <DecisionMetric
+          label="盘口"
+          value={hasLayerDecision ? fmtPrice(layerPrice) : bestSignal?.limit_price !== undefined && bestSignal?.limit_price !== null ? fmtPrice(bestSignal.limit_price) : '--'}
+          sub={hasLayerDecision ? `spread ${fmtPrice(layerSpread)} · min ${layerDecision?.order_min_size ?? '--'}` : bestSignal?.spread !== undefined && bestSignal?.spread !== null ? `spread ${fmtPrice(bestSignal.spread)}` : '等待盘口'}
+        />
+        <DecisionMetric
+          label="模型 / Edge"
+          value={hasLayerDecision ? fmtProb(layerProbability) : bestSignal ? fmtProb(bestSignal.calibrated_probability ?? bestSignal.model_probability) : '--'}
+          sub={hasLayerDecision ? fmtSignedPct(layerEdge) : bestSignal ? fmtSignedPct(bestSignal.probability_edge ?? bestSignal.edge) : '无概率'}
+        />
         <DecisionMetric label="预测-METAR" value={metarGap === null ? '--' : fmtTemp(metarGap, unit)} sub={`预测 ${fmtTemp(selectedForecast, unit)}`} />
-        {bestSignal?.event_url ? (
-          <a href={bestSignal.event_url} target="_blank" rel="noreferrer" className="inline-flex min-h-9 items-center justify-center gap-1 border border-cyan-500/30 px-2 text-[10px] text-cyan-300 hover:bg-cyan-500/10">
+        {(layerEventUrl || bestSignal?.event_url) ? (
+          <a href={layerEventUrl || bestSignal?.event_url || undefined} target="_blank" rel="noreferrer" className="inline-flex min-h-9 items-center justify-center gap-1 border border-cyan-500/30 px-2 text-[10px] text-cyan-300 hover:bg-cyan-500/10">
             Polymarket <ExternalLink className="h-3 w-3" />
           </a>
         ) : (
@@ -940,10 +1165,16 @@ export function WeatherPanel({
       </div>
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(92px,1fr))] gap-2">
-        <Metric icon={<ThermometerSun className="h-3.5 w-3.5" />} label="最新预测" value={fmtTemp(latestForecast?.best ?? forecastFallback?.mean_high, unit)} tone="green" sub={freshnessLabel(latestForecast?.timestamp)} />
+        <Metric icon={<ThermometerSun className="h-3.5 w-3.5" />} label="最新预测" value={fmtTemp(selectedForecast, unit)} tone="green" sub={dailyMaxPrediction?.latest?.method ?? freshnessLabel(latestForecast?.timestamp)} />
         <Metric icon={<CloudSun className="h-3.5 w-3.5" />} label="METAR 实测" value={fmtTemp(latestMetar?.metar, unit)} tone="amber" sub={freshnessLabel(latestMetar?.timestamp)} />
         <Metric icon={<Database className="h-3.5 w-3.5" />} label="历史最高" value={fmtTemp(latestHistory?.actual_high, unit)} tone="cyan" sub={latestHistory?.provider || truthTier} />
-        <Metric icon={<Signal className="h-3.5 w-3.5" />} label="可操作信号" value={`${actionableSignals.length}/${citySignals.length}`} tone={actionableSignals.length > 0 ? 'green' : 'neutral'} sub={bestSignal ? `${signalBucketLabel(bestSignal, unit)} · ${(((bestSignal.probability_edge ?? bestSignal.edge) || 0) * 100).toFixed(1)}%` : '暂无'} />
+        <Metric
+          icon={<Signal className="h-3.5 w-3.5" />}
+          label="可操作信号"
+          value={signalDecisions ? `${signalDecisions.paper_counts?.buy ?? signalDecisions.paper_counts?.allowed ?? 0}/${signalDecisions.count}` : `${actionableSignals.length}/${citySignals.length}`}
+          tone={(signalDecisions?.paper_counts?.buy ?? signalDecisions?.paper_counts?.allowed ?? actionableSignals.length) > 0 ? 'green' : 'neutral'}
+          sub={hasLayerDecision ? `${fmtBucketLabel(layerBucketLabel, layerDecision?.bucket_lower, unit)} · ${fmtSignedPct(layerEdge)}` : bestSignal ? `${signalBucketLabel(bestSignal, unit)} · ${(((bestSignal.probability_edge ?? bestSignal.edge) || 0) * 100).toFixed(1)}%` : '暂无'}
+        />
       </div>
 
       <section className="border border-[#2C3445] bg-[#1B212C]">
@@ -981,12 +1212,18 @@ export function WeatherPanel({
             />
             <TemperatureDistributionPanel
               signal={distributionSignal}
-              items={distributionChartItems}
+              decision={layerDecision}
+              items={probabilityItems}
               unit={unit}
               selectedDate={selectedDate}
               actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
+              cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
+              dailyMaxPrediction={dailyMaxPrediction}
+              signalDecisions={signalDecisions}
+              marketBuckets={marketBuckets}
+              loading={layer7Loading}
               evidenceSummary={selectedDateEvidence?.modules?.probability_buckets?.probability_summary}
-              marketSummary={selectedDateEvidence?.modules?.market_buckets?.market_summary}
+              marketSummary={layerMarketSummary ?? selectedDateEvidence?.modules?.market_buckets?.market_summary}
             />
             <ForecastDataTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
             <details className="border border-[#2C3445] bg-[#161A22]">
@@ -1067,6 +1304,17 @@ export function WeatherPanel({
   )
 }
 
+function tabCopy(tab: WeatherWorkbenchTab) {
+  const copy: Record<WeatherWorkbenchTab, { label: string; note: string }> = {
+    forecast: { label: '预报', note: '逐小时气温 + DEB + 分桶' },
+    metar: { label: 'METAR', note: '机场实况观测' },
+    historical: { label: '历史', note: '结算/站点历史' },
+    diff: { label: '偏差统计', note: '实测 - 预报' },
+    fetch: { label: '抓取日志', note: '最近数据任务' },
+  }
+  return copy[tab]
+}
+
 function WorkbenchTabButton({
   tab,
   active,
@@ -1085,10 +1333,10 @@ function WorkbenchTabButton({
           ? 'border-[#2563EB] bg-[#2563EB] text-white'
           : 'border-[#2C3445] bg-[#161A22] text-[#7D8694] hover:bg-[#222A37] hover:text-[#CBD2DC]'
       }`}
-      title={tab.note}
+      title={tabCopy(tab.id).note}
     >
-      <div className="text-[11px] font-medium">{tab.label}</div>
-      <div className="truncate text-[9px] opacity-70">{tab.note}</div>
+      <div className="text-[11px] font-medium">{tabCopy(tab.id).label}</div>
+      <div className="truncate text-[9px] opacity-70">{tabCopy(tab.id).note}</div>
     </button>
   )
 }
@@ -2087,40 +2335,62 @@ function EventTimeline({ events, fetchLog = [] }: { events: DashboardEvent[]; fe
 
 function TemperatureDistributionPanel({
   signal,
+  decision,
   items,
   unit,
   selectedDate,
   actualHigh,
+  cityName,
+  dailyMaxPrediction,
+  signalDecisions,
+  marketBuckets,
+  loading = false,
   evidenceSummary,
   marketSummary,
 }: {
   signal?: WeatherSignal
-  items: DistributionItem[]
+  decision?: SignalDecisionRecord
+  items: LayerDistributionItem[]
   unit: string
   selectedDate: string
   actualHigh?: number | null
+  cityName?: string
+  dailyMaxPrediction?: DailyMaxPredictionSummary | null
+  signalDecisions?: SignalDecisionSummary | null
+  marketBuckets?: MarketBucketSummary | null
+  loading?: boolean
   evidenceSummary?: CityEvidenceProbabilitySummary
   marketSummary?: CityEvidenceMarketBucketSummary
 }) {
   const distribution = signal?.distribution
+  const deb = dailyMaxPrediction?.latest
+  const decisionBucketData = decisionBucket(decision)
+  const decisionMarketBucket = findBucketForDecision(decision, marketBuckets)
   const maxProbability = Math.max(0.01, ...items.map(item => Number(item.probability || 0)))
-  const forecastValue = distribution?.forecast_f === null || distribution?.forecast_f === undefined
+  const forecastValue = deb?.mu !== null && deb?.mu !== undefined
+    ? Number(deb.mu)
+    : distribution?.forecast_f === null || distribution?.forecast_f === undefined
     ? null
     : unit === 'C'
       ? (Number(distribution.forecast_f) - 32) * 5 / 9
       : Number(distribution.forecast_f)
-  const sigmaValue = distribution?.sigma_f === null || distribution?.sigma_f === undefined
+  const sigmaValue = deb?.sigma !== null && deb?.sigma !== undefined
+    ? Number(deb.sigma)
+    : distribution?.sigma_f === null || distribution?.sigma_f === undefined
     ? null
     : unit === 'C'
       ? Number(distribution.sigma_f) * 5 / 9
       : Number(distribution.sigma_f)
   const chartRows = items.map(item => ({
     ...item,
-    label: fmtBucket(item, unit),
+    label: item.bucket_label ? fmtBucketLabel(item.bucket_label, item.bucket_low, unit) : fmtBucket(item, unit),
     probabilityPct: Number(item.probability ?? 0) * 100,
     askPct: Number(item.ask ?? 0) * 100,
     edgePct: Number(item.probability_edge ?? item.ev ?? 0) * 100,
   }))
+  const normalized = decision?.model_distribution?.normalized ?? distribution?.normalized
+  const distributionMethod = decision?.model_distribution?.method ?? deb?.method ?? distribution?.notes?.[0] ?? 'gaussian-cdf'
+  const activeEventUrl = decisionMarketBucket?.event_url ?? signal?.event_url
   const evidenceTopBuckets = evidenceSummary?.top_buckets ?? []
   const evidenceHighestProbability = evidenceSummary?.highest_probability
   const evidenceHighestBucket = evidenceSummary?.highest_bucket
@@ -2141,11 +2411,11 @@ function TemperatureDistributionPanel({
           <div>
             <div className="text-[10px] text-[#7D8694]">当日最高温预测（DEB）</div>
             <div className="text-xs text-[#CBD2DC]">
-              {signal ? signal.city_name : '等待信号'} · {longDate(signal?.target_date ?? selectedDate)}
+              {cityName || signal?.city_name || '等待信号'} · {longDate(decision?.target_date ?? signal?.target_date ?? selectedDate)}
             </div>
           </div>
-          {signal?.event_url && (
-            <a href={signal.event_url} target="_blank" rel="noreferrer" className="shrink-0 text-[10px] text-cyan-300 hover:text-cyan-100">
+          {activeEventUrl && (
+            <a href={activeEventUrl} target="_blank" rel="noreferrer" className="shrink-0 text-[10px] text-cyan-300 hover:text-cyan-100">
               Poly ↗
             </a>
           )}
@@ -2154,7 +2424,9 @@ function TemperatureDistributionPanel({
           <span className="border border-[#2C3445] px-1 py-0.5">μ {fmtTemp(forecastValue, unit)}</span>
           <span className="border border-[#2C3445] px-1 py-0.5">±σ {fmtTemp(sigmaValue, unit)}</span>
           <span className="border border-[#2C3445] px-1 py-0.5">实测 {fmtTemp(actualHigh, unit)}</span>
-          <span className="border border-[#2C3445] px-1 py-0.5">{distribution?.normalized ? '高斯归一' : '未归一'}</span>
+          <span className="border border-[#2C3445] px-1 py-0.5">{normalized ? '高斯归一' : '未归一'}</span>
+          <span className="border border-[#2C3445] px-1 py-0.5">{distributionMethod}</span>
+          {loading && <span className="border border-[#2C3445] px-1 py-0.5 text-cyan-300">刷新中</span>}
         </div>
       </div>
 
@@ -2191,9 +2463,9 @@ function TemperatureDistributionPanel({
           <aside className="border border-[#2C3445] bg-[#161A22]">
             <div className="grid grid-cols-2 gap-1 border-b border-[#2C3445] p-2 text-[10px]">
               <MetricCard label="最高概率" value={fmtProb(evidenceHighestProbability ?? Math.max(...items.map(item => Number(item.probability ?? 0))))} sub={evidenceHighestBucket || '柱色越深概率越高'} />
-              <MetricCard label="信号桶" value={signal ? signalBucketLabel(signal, unit) : '--'} sub={signal?.actionable ? 'BUY YES' : '观察'} />
-              <MetricCard label="分布覆盖" value={`${evidenceSummary?.bucket_count ?? items.length}`} sub={`归一 ${evidenceSummary?.normalized_count ?? (distribution?.normalized ? 1 : 0)} / 信号 ${evidenceSummary?.signal_count ?? (signal ? 1 : 0)}`} />
-              <MetricCard label="可操作" value={`${evidenceSummary?.actionable_signal_count ?? (signal?.actionable ? 1 : 0)}`} sub={evidenceSummary?.strict_matching_required ? '严格匹配' : '观察'} />
+              <MetricCard label="信号桶" value={decision ? fmtBucketLabel(decisionBucketData.bucket_label, decision.bucket_lower, unit) : signal ? signalBucketLabel(signal, unit) : '--'} sub={decision?.paper_allowed ? 'PAPER BUY' : signal?.actionable ? 'BUY YES' : '观察'} />
+              <MetricCard label="分布覆盖" value={`${evidenceSummary?.bucket_count ?? items.length}`} sub={`归一 ${evidenceSummary?.normalized_count ?? (normalized ? 1 : 0)} / 决策 ${signalDecisions?.count ?? (signal ? 1 : 0)}`} />
+              <MetricCard label="可操作" value={`${marketSummary?.paper_allowed_count ?? evidenceSummary?.actionable_signal_count ?? (signal?.actionable ? 1 : 0)}`} sub={marketSummary?.strict_matching_required ?? evidenceSummary?.strict_matching_required ? '严格匹配' : '观察'} />
             </div>
             <div className="max-h-[260px] overflow-auto">
               <table className="w-full border-collapse text-left text-[10px]">
@@ -2208,7 +2480,20 @@ function TemperatureDistributionPanel({
                 <tbody>
                   {items.map(item => (
                     <tr key={item.market_id || `${item.bucket_low}-${item.bucket_high}`} className={`border-b border-[#2C3445]/80 ${item.is_signal ? 'bg-cyan-500/10 text-cyan-200' : 'hover:bg-[#222A37]'}`}>
-                      <td className="max-w-[108px] truncate px-2 py-1" title={item.question}>{fmtBucket(item, unit)}</td>
+                      <td className="max-w-[132px] px-2 py-1" title={item.question}>
+                        <details>
+                          <summary className="cursor-pointer truncate hover:text-cyan-200">
+                            {item.bucket_label ? fmtBucketLabel(item.bucket_label, item.bucket_low, unit) : fmtBucket(item, unit)}
+                          </summary>
+                          <div className="mt-1 space-y-0.5 border border-[#2C3445] bg-[#1B212C] p-1 text-[9px] text-[#7D8694]">
+                            {item.event_url && <a href={item.event_url} target="_blank" rel="noreferrer" className="block truncate text-cyan-300 hover:text-cyan-100">Polymarket ↗</a>}
+                            <div className="truncate" title={item.yes_token_id || ''}>YES {item.yes_token_id || '--'}</div>
+                            <div>min {item.order_min_size ?? '--'} · tick {item.tick_size ?? '--'}</div>
+                            <div>depth {item.bid_depth ?? '--'} / {item.ask_depth ?? '--'}</div>
+                            <div className="truncate" title={(item.gate_reasons || []).join(', ')}>{item.gate_status || 'gate --'} · {(item.gate_reasons || []).slice(0, 2).join(', ') || 'no gate reason'}</div>
+                          </div>
+                        </details>
+                      </td>
                       <td className="px-2 py-1 tabular-nums text-green-300">{fmtProb(item.probability)}</td>
                       <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPrice(item.ask)}</td>
                       <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtSignedPct(item.probability_edge ?? item.ev)}</td>

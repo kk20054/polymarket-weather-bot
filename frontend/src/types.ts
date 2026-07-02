@@ -419,6 +419,188 @@ export interface DistributionItem {
   is_signal?: boolean
 }
 
+export interface MarketBucket {
+  id?: number
+  bucket_key?: string | null
+  market_id: string
+  event_slug?: string | null
+  event_url?: string | null
+  question?: string | null
+  city?: string
+  city_name?: string
+  target_date: string
+  station_id?: string | null
+  unit?: string
+  bucket_label?: string | null
+  bucket_direction?: string | null
+  bucket_low?: number | null
+  bucket_high?: number | null
+  yes_token_id?: string | null
+  token_id?: string | null
+  price?: number | null
+  best_bid?: number | null
+  best_ask?: number | null
+  spread?: number | null
+  volume?: number | null
+  liquidity?: number | null
+  order_min_size?: number | null
+  tick_size?: number | null
+  neg_risk?: boolean
+  enable_order_book?: boolean
+  quote_timestamp?: string | null
+  orderbook_source?: string | null
+  bid_depth?: number | null
+  ask_depth?: number | null
+  strict_match_status?: string | null
+  strict_match_reasons?: string[]
+  updated_at?: string | null
+}
+
+export interface MarketBucketSummary {
+  ok: boolean
+  city?: string
+  target_date?: string
+  bucket_count: number
+  matched_bucket_count: number
+  blocked_bucket_count: number
+  markets: number
+  tokens: number
+  orderbook_enabled: number
+  with_tick_size: number
+  with_order_min_size: number
+  with_two_sided_depth: number
+  reason_counts: CityEvidenceMarketReason[]
+  latest: MarketBucket[]
+  limit?: number
+}
+
+export interface DailyMaxPrediction {
+  id?: number
+  prediction_key?: string
+  city_key: string
+  target_date: string
+  issued_at?: string | null
+  mu?: number | null
+  sigma?: number | null
+  unit?: string
+  method?: string
+  model_weights?: Record<string, number>
+  member_count?: number
+  components?: Array<Record<string, unknown>>
+  source_run_ids?: Array<number | string>
+  observed_floor?: number | null
+  sigma_floor?: number | null
+  time_decay_factor?: number | null
+  mu_observed_floor_applied?: boolean
+  sigma_from_spread?: number | null
+  sigma_from_history?: number | null
+  bias_correction?: number | null
+  bias_sample_count?: number
+  deb_version?: string
+  updated_at?: string | null
+}
+
+export interface DailyMaxPredictionSummary {
+  ok: boolean
+  city_key?: string
+  target_date?: string
+  count: number
+  latest?: DailyMaxPrediction | null
+}
+
+export interface SignalDecisionRecord {
+  id?: number
+  decision_id: string
+  decision_version?: string
+  city_key?: string
+  target_date: string
+  market_id?: string | null
+  signal_id?: number | null
+  bucket_key?: string | null
+  bucket_direction?: string | null
+  bucket_lower?: number | null
+  bucket_upper?: number | null
+  token_id?: string | null
+  yes_token_id?: string | null
+  model_probability?: number | null
+  market_implied_probability?: number | null
+  market_probability?: number | null
+  edge?: number | null
+  edge_percent?: number | null
+  market_bid?: number | null
+  market_ask?: number | null
+  market_mid?: number | null
+  best_bid?: number | null
+  best_ask?: number | null
+  spread_bps?: number | null
+  book_age_seconds?: number | null
+  order_min_size?: number | null
+  tick_size?: number | null
+  neg_risk?: boolean
+  paper_allowed?: boolean
+  live_allowed?: boolean
+  paper_decision?: string
+  live_decision?: string
+  gate_status?: string
+  blocked_reason_primary?: string | null
+  reasons?: string[]
+  cautions?: string[]
+  gate_reasons?: string[]
+  model_distribution?: {
+    method?: string
+    mu?: number | null
+    sigma?: number | null
+    unit?: string
+    normalized?: boolean
+    sum_probability?: number | null
+    item_count?: number
+  }
+  model_bucket_probs?: {
+    bucket_key?: string
+    bucket_label?: string
+    bucket_unit?: string
+    bucket_direction?: string
+    bucket_low?: number | null
+    bucket_high?: number | null
+    probability?: number | null
+    probability_raw?: number | null
+    market_probability?: number | null
+    price?: number | null
+    best_bid?: number | null
+    best_ask?: number | null
+    edge?: number | null
+    market_id?: string
+    yes_token_id?: string
+  }
+  market_bucket_probs?: Array<Record<string, unknown>> | Record<string, unknown>
+  edge_by_bucket?: Record<string, unknown>
+  orderbook_snapshot?: {
+    source?: string
+    snapshot_key?: string
+    quote_timestamp?: string | null
+    best_bid?: number | null
+    best_ask?: number | null
+    spread?: number | null
+    bid_depth?: number | null
+    ask_depth?: number | null
+  }
+  evidence_links?: Record<string, unknown>
+  issued_at?: string | null
+  updated_at?: string | null
+}
+
+export interface SignalDecisionSummary {
+  ok: boolean
+  city_key?: string
+  target_date?: string
+  count: number
+  status_counts: Record<string, number>
+  paper_counts: Record<string, number>
+  live_counts: Record<string, number>
+  reason_counts: CityEvidenceMarketReason[]
+  decisions: SignalDecisionRecord[]
+}
+
 export interface EventDistribution {
   items: DistributionItem[]
   sum_probability: number

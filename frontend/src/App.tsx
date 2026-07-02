@@ -13,8 +13,11 @@ import {
 import {
   backfillWeatherHistory,
   fetchDashboard,
+  fetchDailyMaxPredictions,
   fetchForecastArchiveManifest,
+  fetchMarketBuckets,
   fetchProductionValidation,
+  fetchSignalDecisions,
   fetchSettlementContracts,
   placeLiveOrder,
   resetSimulation,
@@ -707,6 +710,32 @@ function App() {
     refetchInterval: 120000,
   })
 
+  const selectedEvidenceReadyForLayer7 = Boolean(selectedCity && selectedDate)
+
+  const marketBucketsQuery = useQuery({
+    queryKey: ['market-buckets', selectedCity, selectedDate],
+    queryFn: () => fetchMarketBuckets(selectedCity, selectedDate, 120),
+    enabled: selectedEvidenceReadyForLayer7,
+    refetchInterval: 30000,
+    retry: 1,
+  })
+
+  const signalDecisionsQuery = useQuery({
+    queryKey: ['signal-decisions', selectedCity, selectedDate],
+    queryFn: () => fetchSignalDecisions(selectedCity, selectedDate, 120),
+    enabled: selectedEvidenceReadyForLayer7,
+    refetchInterval: 30000,
+    retry: 1,
+  })
+
+  const dailyMaxPredictionQuery = useQuery({
+    queryKey: ['daily-max-predictions', selectedCity, selectedDate],
+    queryFn: () => fetchDailyMaxPredictions(selectedCity, selectedDate),
+    enabled: selectedEvidenceReadyForLayer7,
+    refetchInterval: 60000,
+    retry: 1,
+  })
+
   const stopMutation = useMutation({
     mutationFn: stopBot,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
@@ -744,6 +773,9 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
       queryClient.invalidateQueries({ queryKey: ['production-validation'] })
+      queryClient.invalidateQueries({ queryKey: ['market-buckets'] })
+      queryClient.invalidateQueries({ queryKey: ['signal-decisions'] })
+      queryClient.invalidateQueries({ queryKey: ['daily-max-predictions'] })
     },
   })
 
@@ -788,6 +820,9 @@ function App() {
         queryClient.invalidateQueries({ queryKey: ['dashboard'] })
         queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
         queryClient.invalidateQueries({ queryKey: ['forecast-archive-manifest'] })
+        queryClient.invalidateQueries({ queryKey: ['market-buckets'] })
+        queryClient.invalidateQueries({ queryKey: ['signal-decisions'] })
+        queryClient.invalidateQueries({ queryKey: ['daily-max-predictions'] })
       }
     },
   })
@@ -1325,6 +1360,10 @@ function App() {
               events={events}
               fetchLog={fetchLog}
               productionRefresh={productionRefresh}
+              marketBuckets={marketBucketsQuery.data ?? null}
+              signalDecisions={signalDecisionsQuery.data ?? null}
+              dailyMaxPrediction={dailyMaxPredictionQuery.data ?? null}
+              layer7Loading={marketBucketsQuery.isFetching || signalDecisionsQuery.isFetching || dailyMaxPredictionQuery.isFetching}
               selectedCity={selectedCity}
               onSelectedCity={setSelectedCity}
               selectedDate={selectedDate}
