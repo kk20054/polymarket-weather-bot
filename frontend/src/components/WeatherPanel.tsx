@@ -509,6 +509,7 @@ function latestBy<T>(items: T[], predicate: (item: T) => boolean, getter: (item:
 }
 
 function asNumber(value: unknown) {
+  if (value === null || value === undefined || value === '') return null
   const numeric = Number(value)
   return Number.isFinite(numeric) ? numeric : null
 }
@@ -1747,18 +1748,20 @@ function HourlyEvidencePanel({
   actualHigh?: number | null
   historyProvider?: string
 }) {
-  const forecastValues = rows.map(row => row.forecast).filter((value): value is number => Number.isFinite(Number(value)))
-  const metarValues = rows.map(row => row.metar).filter((value): value is number => Number.isFinite(Number(value)))
-  const cloudValues = rows.map(row => row.cloud_cover).filter((value): value is number => Number.isFinite(Number(value)))
-  const gapValues = rows.map(row => row.gap).filter((value): value is number => Number.isFinite(Number(value)))
+  const numericValues = (values: unknown[]) =>
+    values.map(asNumber).filter((value): value is number => value !== null)
+  const forecastValues = numericValues(rows.map(row => row.forecast))
+  const metarValues = numericValues(rows.map(row => row.metar))
+  const cloudValues = numericValues(rows.map(row => row.cloud_cover))
+  const gapValues = numericValues(rows.map(row => row.gap))
   const forecastMax = forecastValues.length > 0 ? Math.max(...forecastValues) : null
   const metarMax = metarValues.length > 0 ? Math.max(...metarValues) : null
   const avgGap = mean(gapValues)
   const avgCloud = mean(cloudValues)
-  const pairedRows = rows.filter(row => row.forecast !== null && row.forecast !== undefined && row.metar !== null && row.metar !== undefined)
+  const pairedRows = rows.filter(row => asNumber(row.forecast) !== null && asNumber(row.metar) !== null)
   const pearson = pearsonR(
-    pairedRows.map(row => Number(row.forecast)),
-    pairedRows.map(row => Number(row.metar))
+    pairedRows.map(row => asNumber(row.forecast) ?? 0),
+    pairedRows.map(row => asNumber(row.metar) ?? 0)
   )
   const metarCoverage = rows.length > 0 ? metarValues.length / rows.length : null
   const actualMetarDelta = actualHigh !== null && actualHigh !== undefined && metarMax !== null
@@ -1772,8 +1775,13 @@ function HourlyEvidencePanel({
     forecast_value: asNumber(row.forecast),
     metar_value: asNumber(row.metar),
     gap_value: asNumber(row.gap),
-    cloud_pct: row.cloud_cover ?? row.humidity ?? null,
+    cloud_pct: asNumber(row.cloud_cover ?? row.humidity),
   }))
+  const hasChartEvidence = chartRows.some(row =>
+    row.forecast_value !== null
+    || row.metar_value !== null
+    || row.cloud_pct !== null
+  )
   const peakRow = chartRows
     .filter(row => row.forecast_value !== null)
     .sort((a, b) => Number(b.forecast_value ?? -Infinity) - Number(a.forecast_value ?? -Infinity))[0]
@@ -1782,6 +1790,19 @@ function HourlyEvidencePanel({
       <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-center text-neutral-600">
         No hourly rows for this date.
       </div>
+    )
+  }
+  if (!hasChartEvidence) {
+    return (
+      <section className="min-h-0 border border-[#2C3445] bg-[#161A22]">
+        <div className="border-b border-[#2C3445] px-2 py-1.5">
+          <div className="text-[10px] text-[#7D8694]">Hourly Temperature</div>
+          <div className="text-xs text-[#CBD2DC]">{cityName || '褰撳墠鍩庡競'} 路 {longDate(selectedDate)}</div>
+        </div>
+        <div className="flex min-h-[260px] items-center justify-center p-4 text-center text-xs text-[#7D8694]">
+          当前日期存在小时记录，但没有可绘制的温度、METAR 或云量字段。请查看抓取日志，或重新抓取当前城市/日期。
+        </div>
+      </section>
     )
   }
 

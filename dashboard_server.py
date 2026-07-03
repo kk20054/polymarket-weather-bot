@@ -33,6 +33,7 @@ from dashboard_db import (
     upsert_signal_from_market,
 )
 from weatherbot_v3.config import load_config as load_v3_config
+from weatherbot_v3.db import connect
 from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
 from weatherbot_v3.db import forecast_summary
 from weatherbot_v3.db import init_v3_db
@@ -2143,36 +2144,124 @@ def _merge_hourly_points(forecast_points: list[dict], consensus_points: list[dic
     )
 
 
+def _recent_hourly_targets(limit_per_city: int = 10) -> dict[str, set[str]]:
+    """Return recent city/date targets that already exist in the v3 database."""
+    try:
+        init_v3_db()
+        with connect() as conn:
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT LOWER(city) AS city, target_date, MAX(sort_key) AS sort_key
+                    FROM (
+                        SELECT
+                            city,
+                            target_date,
+                            COALESCE(retrieved_at, run_at, created_at, '') AS sort_key
+                        FROM forecast_runs
+                        WHERE COALESCE(run_type, 'forecast') = 'forecast'
+                        UNION ALL
+                        SELECT
+                            city,
+                            target_date,
+                            COALESCE(updated_at, created_at, valid_time, '') AS sort_key
+                        FROM hourly_consensus
+                    )
+                    WHERE city IS NOT NULL
+                      AND TRIM(city) != ''
+                      AND target_date IS NOT NULL
+                      AND TRIM(target_date) != ''
+                    GROUP BY LOWER(city), target_date
+                    ORDER BY target_date DESC, sort_key DESC
+                    """
+                ).fetchall()
+            ]
+    except Exception:
+        return {}
+
+    valid_cities = set(SETTLEMENT_REGISTRY.keys())
+    targets: dict[str, set[str]] = {}
+    for row in rows:
+        city = str(row.get("city") or "").strip().lower()
+        target_date = str(row.get("target_date") or "").strip()
+        if not city or not target_date or city not in valid_cities:
+            continue
+        city_targets = targets.setdefault(city, set())
+        if len(city_targets) >= limit_per_city:
+            continue
+        city_targets.add(target_date)
+    return targets
+
+
+def _hourly_cache_for_targets(targets: dict[str, set[str]], *, allow_forecast_fallback: bool = False) -> dict[str, list[dict]]:
+    if not targets:
+        return {}
+    consensus_cache: dict[str, list[dict]]
+    try:
+        consensus_cache = hourly_consensus_points(targets)
+    except Exception:
+        consensus_cache = {}
+
+    hourly_cache: dict[str, list[dict]] = {}
+    if allow_forecast_fallback:
+        forecast_targets: dict[str, set[str]] = {}
+        for city, dates in targets.items():
+            city_points = list(consensus_cache.get(city) or [])
+            for target_date in dates:
+                date_points = [point for point in city_points if str(point.get("target_date") or "") == str(target_date)]
+                has_forecast = any(_point_forecast_value(point) is not None for point in date_points)
+                if not date_points or not has_forecast:
+                    forecast_targets.setdefault(city, set()).add(target_date)
+
+        try:
+            hourly_cache = forecast_hourly_points(forecast_targets) if forecast_targets else {}
+        except Exception:
+            hourly_cache = {}
+
+    cities = set(hourly_cache.keys()) | set(consensus_cache.keys())
+    return {
+        city: _merge_hourly_points(
+            list(hourly_cache.get(city) or []),
+            list(consensus_cache.get(city) or []),
+        )
+        for city in cities
+    }
+
+
 def _build_weather_city_series(markets):
     """Compact chart-friendly forecast history by city for the dashboard."""
-    by_city = {}
     history_cache = merge_history_points(market_history_points(markets))
-    hourly_targets = {}
+    hourly_targets = {
+        city: set(dates)
+        for city, dates in _recent_hourly_targets().items()
+    }
     for market in markets:
         city_key = market.get("city") or ""
         target_date = market.get("date") or ""
         if city_key and target_date:
             hourly_targets.setdefault(city_key, set()).add(target_date)
-    hourly_cache = forecast_hourly_points(hourly_targets) if hourly_targets else {}
-    consensus_cache = hourly_consensus_points(hourly_targets) if hourly_targets else {}
+    by_city = {row["city_key"]: row for row in _registry_city_series(hourly_targets)}
     for market in markets:
         city_key = market.get("city") or ""
         if not city_key:
             continue
         unit = market.get("unit") or "F"
-        city = by_city.setdefault(city_key, {
-            "city_key": city_key,
-            "city_name": market.get("city_name") or city_key,
-            "station_id": market.get("station") or market.get("actual_station") or "",
-            "unit": unit,
-            "forecast_points": [],
-            "history_points": list(history_cache.get(city_key) or []),
-            "hourly_points": _merge_hourly_points(
-                list(hourly_cache.get(city_key) or []),
-                list(consensus_cache.get(city_key) or []),
-            ),
-            "humidity_status": "not_collected",
-        })
+        city = by_city.setdefault(
+            city_key,
+            {
+                "city_key": city_key,
+                "city_name": market.get("city_name") or city_key,
+                "station_id": market.get("station") or market.get("actual_station") or "",
+                "unit": unit,
+                "forecast_points": [],
+                "history_points": [],
+                "hourly_points": [],
+                "humidity_status": "not_collected",
+            },
+        )
+        city["unit"] = unit
+        city["history_points"] = list(history_cache.get(city_key) or city.get("history_points") or [])
         for snap in market.get("forecast_snapshots") or []:
             ts = snap.get("ts")
             if not ts:
@@ -2208,7 +2297,7 @@ def _build_weather_city_series(markets):
             deduped[f"{point.get('timestamp')}:{point.get('target_date')}"] = point
         points = list(deduped.values())[-80:]
         history_points = sorted(city.get("history_points") or [], key=lambda p: p.get("target_date") or "")[-120:]
-        hourly_points = sorted(city.get("hourly_points") or [], key=lambda p: p.get("timestamp") or "")[-120:]
+        hourly_points = sorted(city.get("hourly_points") or [], key=lambda p: p.get("timestamp") or "")[-240:]
         if not points and not history_points and not hourly_points:
             continue
         latest = points[-1] if points else (hourly_points[-1] if hourly_points else {})
@@ -2225,33 +2314,43 @@ def _build_weather_city_series(markets):
         city["latest_timestamp"] = latest.get("timestamp")
         city["humidity_status"] = "available" if humidity_values else "not_collected"
         city["history_count"] = len(history_points)
-        city["forecast_count"] = len(points)
+        city["forecast_count"] = len(points) + sum(
+            1 for point in hourly_points if _point_forecast_value(point) is not None
+        )
         city["hourly_count"] = len(city["hourly_points"])
         rows.append(city)
     return sorted(rows, key=lambda row: row.get("city_name") or "")
 
 
-def _registry_city_series():
+def _registry_city_series(targets: dict[str, set[str]] | None = None):
     """Lightweight city index used before the first manual data refresh."""
+    hourly_by_city = _hourly_cache_for_targets(targets if targets is not None else _recent_hourly_targets())
     rows = []
     for profile in SETTLEMENT_REGISTRY.values():
+        hourly_points = sorted(
+            list(hourly_by_city.get(profile.city) or []),
+            key=lambda point: str(point.get("timestamp") or point.get("local_hour") or ""),
+        )[-240:]
+        latest = hourly_points[-1] if hourly_points else {}
+        humidity_values = [p.get("humidity") for p in hourly_points if p.get("humidity") is not None]
+        forecast_count = sum(1 for point in hourly_points if _point_forecast_value(point) is not None)
         rows.append({
             "city_key": profile.city,
             "city_name": profile.city_name,
             "station_id": profile.station_id,
             "station_name": profile.station_name,
             "unit": profile.unit,
-            "latest_best": None,
-            "latest_metar": None,
-            "latest_source": None,
-            "latest_timestamp": None,
-            "humidity_status": "not_collected",
+            "latest_best": _point_forecast_value(latest) if latest else None,
+            "latest_metar": latest.get("metar") if latest else None,
+            "latest_source": latest.get("source") or latest.get("forecast_source") if latest else None,
+            "latest_timestamp": latest.get("timestamp") if latest else None,
+            "humidity_status": "available" if humidity_values else "not_collected",
             "history_count": 0,
-            "forecast_count": 0,
-            "hourly_count": 0,
+            "forecast_count": forecast_count,
+            "hourly_count": len(hourly_points),
             "history_points": [],
             "forecast_points": [],
-            "hourly_points": [],
+            "hourly_points": hourly_points,
             "points": [],
         })
     return sorted(rows, key=lambda row: (row.get("city_name") or "").lower())

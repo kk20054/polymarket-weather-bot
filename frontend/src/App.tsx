@@ -37,13 +37,29 @@ import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
-import type { AutoSimulationStatus, BotStats, DataReadiness, ProductionActionRunResult, ProductionValidationAction, ProductionValidationReport } from './types'
+import type { AutoSimulationStatus, BotStats, DataReadiness, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport } from './types'
 
 type TradeMode = 'paper' | 'live'
 type UiLanguage = 'zh' | 'en'
 type ThemeMode = 'light' | 'dark'
+type ProductionRefreshOptions = {
+  cities?: string[]
+  days?: number
+  limit?: number
+  startDate?: string
+  endDate?: string
+  source?: 'manual' | 'auto'
+}
+type RefreshNotice = {
+  id: number
+  tone: 'running' | 'success' | 'warning' | 'error'
+  title: string
+  message: string
+  details?: string[]
+}
 
 const APP_VERSION = 'v6.0'
+const DASHBOARD_AUTO_FETCH_INTERVAL_MS = 15 * 60 * 1000
 
 const UI_COPY = {
   zh: {
@@ -183,6 +199,67 @@ function refreshDaysForDate(date?: string | null) {
   const todayTime = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()
   const diffDays = Math.ceil((selectedTime - todayTime) / 86400000)
   return Math.max(1, Math.min(diffDays + 2, 7))
+}
+
+function productionRefreshTarget(result?: ProductionRefreshResult | null) {
+  if (!result) return '--'
+  const requestCities = result.request?.cities ?? []
+  const cityLabel = requestCities.length === 0
+    ? '全部城市'
+    : requestCities.length === 1
+      ? requestCities[0]
+      : `${requestCities.length} 个城市`
+  const dateLabel = result.target_date || result.request?.start_date || result.request?.end_date || '--'
+  return `${cityLabel} · ${dateLabel}`
+}
+
+function productionRefreshFailures(result?: ProductionRefreshResult | null) {
+  if (!result) return []
+  const explicit = result.failed_stages ?? []
+  if (explicit.length > 0) return explicit
+  return (result.stages ?? [])
+    .filter(stage => stage.ok === false && !stage.running)
+    .map(stage => stage.name)
+}
+
+function productionRefreshNotice(result: ProductionRefreshResult, language: UiLanguage): RefreshNotice {
+  const failed = productionRefreshFailures(result)
+  const okStages = (result.stages ?? []).filter(stage => stage.ok && !stage.running).length
+  const totalStages = (result.stages ?? []).length
+  const target = productionRefreshTarget(result)
+  const nonWeatherStages = new Set(['orderbook_backfill', 'signal_scan', 'signal_migration'])
+  const weatherCriticalFailures = failed.filter(stage => !nonWeatherStages.has(stage))
+  if (result.ok && failed.length === 0) {
+    return {
+      id: Date.now(),
+      tone: 'success',
+      title: language === 'zh' ? '数据自动更新成功' : 'Data refresh completed',
+      message: language === 'zh'
+        ? `${target} 已更新，完成 ${okStages}/${totalStages || okStages} 个阶段。`
+        : `${target} refreshed, ${okStages}/${totalStages || okStages} stages completed.`,
+      details: totalStages ? [`stages: ${okStages}/${totalStages}`] : undefined,
+    }
+  }
+  if (failed.length > 0 && weatherCriticalFailures.length === 0) {
+    return {
+      id: Date.now(),
+      tone: 'warning',
+      title: language === 'zh' ? '天气数据已更新，交易数据异常' : 'Weather data updated, trading data warning',
+      message: language === 'zh'
+        ? `${target} 的 forecast / METAR / DEB 已更新，但盘口或信号后处理阶段失败。`
+        : `${target} forecast / METAR / DEB refreshed, but orderbook or signal post-processing failed.`,
+      details: failed.slice(0, 6),
+    }
+  }
+  return {
+    id: Date.now(),
+    tone: 'error',
+    title: language === 'zh' ? '数据抓取异常' : 'Data refresh failed',
+    message: language === 'zh'
+      ? `${target} 有 ${failed.length || 1} 个阶段失败，请查看抓取日志。`
+      : `${target} has ${failed.length || 1} failed stage(s). Check the fetch log.`,
+    details: failed.length ? failed.slice(0, 6) : [result.message || 'unknown failure'],
+  }
 }
 
 function productionActionSummary(result?: ProductionActionRunResult | null) {
@@ -683,8 +760,28 @@ function App() {
     return window.localStorage.getItem('weatherbot-ui-theme') === 'dark' ? 'dark' : 'light'
   })
   const [productionActionResult, setProductionActionResult] = useState<ProductionActionRunResult | null>(null)
+  const [refreshNotice, setRefreshNotice] = useState<RefreshNotice | null>(null)
+  const [dashboardAutoFetchEnabled, setDashboardAutoFetchEnabled] = useState(false)
   const balanceInitRef = useRef(false)
+  const refreshNoticeTimerRef = useRef<number | null>(null)
+  const dashboardAutoFetchTimerRef = useRef<number | null>(null)
+  const refreshOptionsRef = useRef<ProductionRefreshOptions>({})
+  const productionRefreshRunningRef = useRef(false)
   const copy = UI_COPY[uiLanguage]
+
+  const showRefreshNotice = (notice: RefreshNotice, ttlMs = 7000) => {
+    if (refreshNoticeTimerRef.current !== null) {
+      window.clearTimeout(refreshNoticeTimerRef.current)
+      refreshNoticeTimerRef.current = null
+    }
+    setRefreshNotice(notice)
+    if (ttlMs > 0) {
+      refreshNoticeTimerRef.current = window.setTimeout(() => {
+        setRefreshNotice(current => (current?.id === notice.id ? null : current))
+        refreshNoticeTimerRef.current = null
+      }, ttlMs)
+    }
+  }
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['dashboard'],
@@ -799,7 +896,7 @@ function App() {
   })
 
   const productionRefreshMutation = useMutation({
-    mutationFn: (options: { cities?: string[]; days?: number; limit?: number; startDate?: string; endDate?: string } | undefined) =>
+    mutationFn: (options: ProductionRefreshOptions | undefined) =>
       runProductionRefresh({
         cities: options?.cities ?? [],
         days: options?.days ?? 2,
@@ -808,13 +905,38 @@ function App() {
         endDate: options?.endDate ?? '',
         skipSignalScan: true,
       }),
-    onSuccess: () => {
+    onMutate: options => {
+      const cityLabel = options?.cities?.length ? options.cities.join(', ') : '全部城市'
+      const dateLabel = options?.startDate || options?.endDate || '--'
+      showRefreshNotice({
+        id: Date.now(),
+        tone: 'running',
+        title: uiLanguage === 'zh' ? '数据抓取已启动' : 'Data refresh started',
+        message: uiLanguage === 'zh'
+          ? `${cityLabel} · ${dateLabel} 正在刷新 forecast / METAR / DEB / market buckets。`
+          : `${cityLabel} · ${dateLabel} is refreshing forecast / METAR / DEB / market buckets.`,
+        details: ['production-refresh-v2'],
+      }, 0)
+    },
+    onSuccess: result => {
       queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
       queryClient.invalidateQueries({ queryKey: ['production-validation'] })
       queryClient.invalidateQueries({ queryKey: ['market-buckets'] })
       queryClient.invalidateQueries({ queryKey: ['signal-decisions'] })
       queryClient.invalidateQueries({ queryKey: ['daily-max-predictions'] })
+      queryClient.invalidateQueries({ queryKey: ['production-refresh-status'] })
+      const notice = productionRefreshNotice(result, uiLanguage)
+      showRefreshNotice(notice, result.ok ? 7000 : 14000)
+    },
+    onError: error => {
+      showRefreshNotice({
+        id: Date.now(),
+        tone: 'error',
+        title: uiLanguage === 'zh' ? '数据抓取请求失败' : 'Refresh request failed',
+        message: error instanceof Error ? error.message : String(error),
+        details: ['dashboard_server 或网络连接异常'],
+      }, 14000)
     },
   })
 
@@ -881,6 +1003,13 @@ function App() {
   const productionRefreshStages = productionRefresh?.stages ?? []
   const productionRefreshDone = productionRefreshStages.filter(stage => stage.ok && !stage.running).length
   const productionRefreshCurrent = productionRefreshStages.find(stage => stage.running) ?? productionRefreshStages[productionRefreshStages.length - 1]
+  const currentRefreshOptions = useMemo<ProductionRefreshOptions>(() => ({
+    cities: selectedCity ? [selectedCity] : [],
+    days: refreshDaysForDate(selectedDate),
+    limit: 20,
+    startDate: selectedDate || '',
+    endDate: selectedDate || '',
+  }), [selectedCity, selectedDate])
   const productionValidation = productionValidationQuery.data ?? null
   const modelDatasetAudit = data?.model_dataset_audit ?? null
   const forecastArchiveManifest = forecastArchiveManifestQuery.data ?? null
@@ -1016,6 +1145,88 @@ function App() {
     + (selectedCityMeta?.latestMetar !== null && selectedCityMeta?.latestMetar !== undefined ? 1 : 0)
     + (selectedCityMeta?.humidityStatus === 'available' ? 1 : 0)
   const selectedEvidenceReady = selectedEvidenceCount > 0
+
+  useEffect(() => {
+    refreshOptionsRef.current = currentRefreshOptions
+  }, [currentRefreshOptions])
+
+  useEffect(() => {
+    productionRefreshRunningRef.current = productionRefreshRunning
+  }, [productionRefreshRunning])
+
+  useEffect(() => {
+    if (!dashboardAutoFetchEnabled) {
+      if (dashboardAutoFetchTimerRef.current !== null) {
+        window.clearInterval(dashboardAutoFetchTimerRef.current)
+        dashboardAutoFetchTimerRef.current = null
+      }
+      return
+    }
+
+    dashboardAutoFetchTimerRef.current = window.setInterval(() => {
+      if (productionRefreshRunningRef.current) {
+        showRefreshNotice({
+          id: Date.now(),
+          tone: 'warning',
+          title: uiLanguage === 'zh' ? '自动抓取跳过本轮' : 'Auto fetch skipped',
+          message: uiLanguage === 'zh'
+            ? '上一轮抓取仍在运行，已避免重复请求。'
+            : 'The previous refresh is still running, so this interval was skipped.',
+          details: ['no concurrent production-refresh'],
+        }, 7000)
+        return
+      }
+      productionRefreshMutation.mutate({
+        ...refreshOptionsRef.current,
+        source: 'auto',
+      })
+    }, DASHBOARD_AUTO_FETCH_INTERVAL_MS)
+
+    return () => {
+      if (dashboardAutoFetchTimerRef.current !== null) {
+        window.clearInterval(dashboardAutoFetchTimerRef.current)
+        dashboardAutoFetchTimerRef.current = null
+      }
+    }
+  }, [dashboardAutoFetchEnabled, uiLanguage])
+
+  const runProductionRefreshFromDashboard = (source: 'manual' | 'auto' = 'manual') => {
+    if (productionRefreshRunningRef.current) {
+      showRefreshNotice({
+        id: Date.now(),
+        tone: 'warning',
+        title: uiLanguage === 'zh' ? '已有抓取正在运行' : 'Refresh already running',
+        message: uiLanguage === 'zh'
+          ? '请等待当前 production-refresh 完成；后端锁会阻止重复抓取。'
+          : 'Please wait for the current production-refresh to finish. The backend lock prevents duplicate fetches.',
+        details: ['production-refresh lock'],
+      }, 9000)
+      return
+    }
+    productionRefreshMutation.mutate({
+      ...currentRefreshOptions,
+      source,
+    })
+  }
+
+  const toggleDashboardAutoFetch = () => {
+    if (dashboardAutoFetchEnabled) {
+      setDashboardAutoFetchEnabled(false)
+      showRefreshNotice({
+        id: Date.now(),
+        tone: 'warning',
+        title: uiLanguage === 'zh' ? '自动抓取已关闭' : 'Auto fetch stopped',
+        message: uiLanguage === 'zh'
+          ? '页面定时抓取已停止；后端不会继续自动刷新。'
+          : 'Page-level scheduled refresh is stopped; the backend will not continue auto refresh.',
+        details: ['manual control'],
+      }, 7000)
+      return
+    }
+    setDashboardAutoFetchEnabled(true)
+    runProductionRefreshFromDashboard('auto')
+  }
+
   const filteredCityOptions = cityOptions.filter(city => {
     const query = citySearch.trim().toLowerCase()
     const continentOk = continentFilter === '全部' || city.continent === continentFilter
@@ -1063,6 +1274,14 @@ function App() {
     document.documentElement.style.backgroundColor = background
     document.body.style.backgroundColor = background
   }, [themeMode])
+
+  useEffect(() => {
+    return () => {
+      if (refreshNoticeTimerRef.current !== null) {
+        window.clearTimeout(refreshNoticeTimerRef.current)
+      }
+    }
+  }, [])
 
   if (isLoading) {
     return (
@@ -1164,19 +1383,20 @@ function App() {
           </button>
         </div>
         <button
-          onClick={() => productionRefreshMutation.mutate({
-            cities: selectedCity ? [selectedCity] : [],
-            days: refreshDaysForDate(selectedDate),
-            limit: 20,
-            startDate: selectedDate || '',
-            endDate: selectedDate || '',
-          })}
-          disabled={productionRefreshRunning}
-          className="inline-flex items-center gap-1 whitespace-nowrap border border-green-500/30 px-2 py-1.5 text-[11px] text-green-300 hover:bg-green-500/10 disabled:opacity-40"
-          title="受控刷新：同步合约、Open-Meteo、METAR、小时共识、DEB、市场桶、信号决策和 CLOB 盘口；默认不启动旧版无限扫描。"
+          onClick={toggleDashboardAutoFetch}
+          className={`inline-flex items-center gap-1 whitespace-nowrap border px-2 py-1.5 text-[11px] ${
+            dashboardAutoFetchEnabled
+              ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/15'
+              : 'border-green-500/30 text-green-300 hover:bg-green-500/10'
+          }`}
+          title="受控自动抓取：点击后立即刷新一次，并在当前页面打开期间每 15 分钟刷新当前城市/日期；后端锁会避免重复抓取。"
         >
-          <RefreshCw className={`h-3.5 w-3.5 ${productionRefreshRunning ? 'animate-spin' : ''}`} />
-          {productionRefreshRunning ? copy.fetching : copy.manualFetch}
+          <RefreshCw className={`h-3.5 w-3.5 ${productionRefreshRunning || dashboardAutoFetchEnabled ? 'animate-spin' : ''}`} />
+          {productionRefreshRunning
+            ? copy.fetching
+            : dashboardAutoFetchEnabled
+              ? (uiLanguage === 'zh' ? '自动抓取已开' : 'Auto fetch on')
+              : copy.manualFetch}
         </button>
         {stats.is_running && (
           <button
@@ -1197,6 +1417,70 @@ function App() {
           {copy.refresh}
         </button>
       </header>
+
+      {refreshNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`fixed right-3 top-16 z-50 w-[min(380px,calc(100vw-24px))] border p-3 text-xs shadow-xl ${
+            themeMode === 'dark' ? 'bg-[#1B212C] text-[#CBD2DC]' : 'bg-white text-gray-900'
+          } ${
+            refreshNotice.tone === 'success'
+              ? 'border-green-500/40'
+              : refreshNotice.tone === 'error'
+                ? 'border-red-500/50'
+                : refreshNotice.tone === 'warning'
+                  ? 'border-amber-500/50'
+                  : 'border-cyan-500/40'
+          }`}
+        >
+          <div className="flex items-start gap-2">
+            {refreshNotice.tone === 'success' ? (
+              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-green-400" />
+            ) : refreshNotice.tone === 'error' ? (
+              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+            ) : refreshNotice.tone === 'warning' ? (
+              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+            ) : (
+              <RefreshCw className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-cyan-400" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="font-medium">{refreshNotice.title}</div>
+              <div className={themeMode === 'dark' ? 'mt-1 text-[#7D8694]' : 'mt-1 text-gray-500'}>
+                {refreshNotice.message}
+              </div>
+              {refreshNotice.details?.length ? (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {refreshNotice.details.map(detail => (
+                    <span
+                      key={detail}
+                      className={`border px-1.5 py-0.5 text-[10px] ${
+                        refreshNotice.tone === 'error'
+                          ? 'border-red-500/30 text-red-300'
+                          : refreshNotice.tone === 'success'
+                            ? 'border-green-500/30 text-green-300'
+                            : refreshNotice.tone === 'warning'
+                              ? 'border-amber-500/30 text-amber-300'
+                              : 'border-cyan-500/30 text-cyan-300'
+                      }`}
+                    >
+                      {detail}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              onClick={() => setRefreshNotice(null)}
+              className={themeMode === 'dark' ? 'text-[#7D8694] hover:text-white' : 'text-gray-400 hover:text-gray-900'}
+              aria-label="关闭数据抓取提示"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
 
       <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[260px_minmax(560px,1fr)_340px] xl:overflow-hidden">
         <aside className="order-2 border-b border-neutral-800 bg-neutral-950/40 xl:order-1 xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">

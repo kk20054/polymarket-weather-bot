@@ -30,7 +30,7 @@ from weatherbot_v3.metar import backfill_iem_asos_metars, ingest_iem_asos_csv, p
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from weatherbot_v3.cli import default_orderbook_start_date, run_daily_max_build, run_hourly_consensus_build, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
+from weatherbot_v3.cli import _stage_result, default_orderbook_start_date, run_daily_max_build, run_hourly_consensus_build, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
 from dashboard_server import signal_decision_detail as signal_decision_detail_api
 from dashboard_server import signal_decisions as signal_decisions_api
@@ -796,7 +796,8 @@ class V3CoreTests(unittest.TestCase):
                 start_date="2026-06-27",
                 scan_signals=False,
             )
-        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["failed_stages"], ["orderbook_backfill"])
         self.assertFalse(payload["scan_signals"])
         self.assertEqual(payload["readiness"]["status"], "blocked")
         self.assertEqual(payload["readiness"]["blocked_keys"], ["settlement_contracts", "orderbooks"])
@@ -825,6 +826,18 @@ class V3CoreTests(unittest.TestCase):
         migrate.assert_called_once()
         orderbooks.assert_called_once_with(5, "2026-06-27", "2026-06-27")
         persist.assert_called_once_with(readiness)
+
+    def test_stage_result_respects_nested_payload_failure(self):
+        result = _stage_result("openmeteo_fetch", lambda: {"ok": False, "failed": 7})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["payload"]["failed"], 7)
+
+    def test_stage_result_treats_zero_requested_zero_failed_as_success(self):
+        result = _stage_result("orderbook_backfill", lambda: {"requested": 0, "ok": 0, "failed": 0})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["payload"]["requested"], 0)
 
     def test_dashboard_production_refresh_endpoint_persists_result(self):
         state_path = TEST_DB_DIR / "production-refresh-state.json"
@@ -3495,6 +3508,30 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(payload["points"][0]["forecast_source"], "ecmwf")
         self.assertAlmostEqual(payload["points"][0]["diff"], 3.0)
 
+    def test_hourly_consensus_api_falls_back_to_forecast_members_read_only(self):
+        db_path = test_db_path("hourly_consensus_api_forecast_fallback")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        run, members = openmeteo_hourly_run(
+            "chicago",
+            "2026-07-01",
+            "openmeteo_ecmwf_ifs025",
+            [86.0],
+            valid_times=["2026-07-01T18:00:00+00:00"],
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            insert_forecast_run(run, members)
+            payload = asyncio.run(hourly_consensus_api(city="chicago", target_date="2026-07-01"))
+            with connect(db_path) as conn:
+                persisted = conn.execute("SELECT COUNT(*) FROM hourly_consensus").fetchone()[0]
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["source"], "forecast_members_transient")
+        self.assertEqual(payload["rows"], 1)
+        self.assertEqual(persisted, 0)
+        self.assertFalse(payload["points"][0]["hourly_consensus"])
+        self.assertTrue(payload["points"][0]["transient"])
+        self.assertAlmostEqual(payload["points"][0]["best"], 86.0)
+
     def test_hourly_merge_preserves_forecast_and_adds_metar(self):
         rows = _merge_hourly_points(
             [{
@@ -3560,6 +3597,47 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(day["modules"]["hourly_temperature"]["rows"], 1)
         self.assertEqual(day["modules"]["metar"]["rows"], 1)
         self.assertEqual(day["modules"]["forecast"]["rows"], 0)
+
+    def test_weather_city_series_reads_db_hourly_consensus_without_market_snapshots(self):
+        db_path = test_db_path("weather_city_series_hourly_db")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            upsert_hourly_consensus({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "target_date": "2026-07-03",
+                "local_hour": "13:00",
+                "valid_time": "2026-07-03T13:00:00-05:00",
+                "station_id": "KORD",
+                "forecast_temp": 90.0,
+                "forecast_source": "openmeteo_ecmwf",
+                "consensus_version": "hourly-consensus-v2",
+                "build_status": "built",
+                "source_count": 1,
+            })
+            upsert_hourly_consensus({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "target_date": "2026-07-03",
+                "local_hour": "14:00",
+                "valid_time": "2026-07-03T14:00:00-05:00",
+                "station_id": "KORD",
+                "forecast_temp": 92.0,
+                "forecast_source": "openmeteo_ecmwf",
+                "consensus_version": "hourly-consensus-v2",
+                "build_status": "built",
+                "source_count": 1,
+            })
+            rows = _build_weather_city_series([])
+            payload = _build_city_evidence_payload(rows, [], [])
+
+        chicago = next(row for row in rows if row["city_key"] == "chicago")
+        self.assertEqual(chicago["hourly_count"], 2)
+        self.assertEqual(chicago["forecast_count"], 2)
+        self.assertAlmostEqual(chicago["latest_best"], 92.0)
+        day = next(day for day in payload[0]["dates"] if day["target_date"] == "2026-07-03")
+        self.assertEqual(day["modules"]["hourly_temperature"]["rows"], 2)
+        self.assertEqual(day["modules"]["forecast"]["rows"], 2)
 
     def test_forecast_archive_import_persists_no_leak_members(self):
         db_path = test_db_path("forecast_archive_import")

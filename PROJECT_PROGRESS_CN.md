@@ -550,3 +550,40 @@
 - 当前可用性结论：Layer 7 主看板现在能稳定读取 2026-07-03 的最新 forecast/DEB/Gaussian bucket 数据，2026-07-02 的历史小时图也有完整 24 小时聚合；抓取状态与生产阶段可在日志 tab 里审计。当前仍是观察与模拟验证平台，不证明策略稳定盈利，不允许自动实盘。
 - 剩余阻塞：`/api/dashboard` 本轮一次返回约 3.25 秒，仍需后续继续压缩首页查询成本；`WeatherPanel.tsx` 仍偏大，后续应拆分；Chicago 2026-07-03 当前 METAR 为空是时区/日期进度导致的诚实状态，不应伪造观测；Layer 9 paper validation 与右侧 `/api/paper-orders` UI 接入尚未完成。
 - 下一步：先 push 当前修复，之后建议进入 Layer 7 截图级 QA 或 Layer 9 paper validation；继续保持 `LIVE_TRADING=false`、canary/live locked。
+### 2026-07-03：Layer 7 数据刷新链路与小时图空态修复
+
+- 目标：修复用户反馈的“抓取显示成功但所有城市折线图没有数据/只有 0°C 平线”问题，并让自动抓取成功、失败、部分完成变成可见 toast，而不是只藏在日志里。本轮只改 Layer 7 直接消费路径和 production refresh 状态判断，不改变 live/canary 锁定，不启动 legacy loop，不开启 auto simulation。
+- 根因：
+  - `/api/dashboard` 在 `manual_refresh_required` / warming payload 下只返回 registry 空城市列表，没有从 SQLite 的 `hourly_consensus`/`forecast_runs` 组装最近城市日期，所以前端看起来所有城市无数据。
+  - 前端 `asNumber(null)` 会得到 `0`，导致空字段被画成 0°C 平线。
+  - dashboard 只保留最近 3 个 target dates 和 120 个小时点，未来预报日期会把用户选中的 2026-07-03 挤掉。
+  - `_stage_result()` 把 orderbook payload 的计数字段 `ok=0, failed=0, requested=0` 误判成失败，造成假“抓取异常”。
+- 改动：
+  - `dashboard_server.py` 新增最近 hourly target 读取和 registry city series DB 回填；dashboard 总览优先读取持久化 `hourly_consensus`，避免首页为每城解压大量 `forecast_members`；窗口扩展到每城最多 10 个日期/240 小时点。
+  - `weatherbot_v3/hourly.py` 为 `/api/hourly-consensus` 增加只读 transient forecast fallback：当持久化 Layer 4 为空但 `forecast_members` 有数据时返回 `source=forecast_members_transient`，不写库、不触发扫描。
+  - `weatherbot_v3/cli.py` 修复 production refresh 阶段判断：布尔 `ok=false` 仍然失败；计数型 payload 以 `failed==0` 为成功；`requested=0, failed=0` 不再误报。
+  - `frontend/src/components/WeatherPanel.tsx` 修复空值数值化：`null/undefined/''` 不再画成 0；小时记录存在但没有可绘制字段时显示明确空态。
+  - `frontend/src/App.tsx` 新增抓取 toast：蓝色进行中、绿色成功、琥珀色“天气数据已更新但交易数据异常”、红色关键失败；成功后同步 invalidate dashboard/market buckets/signal decisions/daily max/status。
+  - `tests/test_v3_core.py`、`tests/test_polywx_contract.py` 增加回归：stage false/zero-count 判断、hourly transient fallback、无 market 快照时 city series 读取 Layer 4、toast 和 null 防线合约。
+- 验证：
+  - `python -W ignore::ResourceWarning -m unittest tests.test_v3_core`：139 tests OK。
+  - `python -m unittest tests.test_polywx_contract tests.test_deb_gaussian`：14 tests OK。
+  - `npm run build`：通过；仍有既有 Browserslist 过期和 Vite chunk size warning。
+  - 重启 8765 后 `/api/dashboard`：`scanner_status=stopped`，`is_running=false`；warming payload 也返回 20 个 city series，Ankara 有 51 条 hourly，Chicago 有 232 条 hourly。
+  - 真实 production refresh：POST `/api/production-refresh` for `ankara / 2026-07-03` 用时约 129s，`ok=true`，11 stages，`failed_stages=[]`；`orderbook_backfill requested=0, ok=0, failed=0` 被正确判为 stage ok。
+  - in-app browser：`http://127.0.0.1:5173/?city=ankara-ltac&date=2026-07-03` 页面加载完成后显示 Hourly Temperature 图，不再显示 `No hourly rows` 或“没有可绘制”；顶部为 `抓取 完成 · 2026-07-03`；console warn/error 为空。
+- 当前可用性结论：看板现在能稳定从已持久化 Layer 4 读取小时趋势；点击“自动抓取”是一轮受控 production-refresh-v2，不是无限后台爬虫。后端已有 `WEATHERBOT_AUTO_REFRESH=true` 环境开关可做周期刷新，但默认仍关闭，符合 AGENTS.md 的轻量启动约束。
+- 剩余阻塞：`WeatherPanel.tsx` 仍偏大，后续应拆分；首屏 `/api/dashboard` 仍约 1-2s，后续可继续做 payload 分页/按城市懒加载；周期自动刷新如果要做成 UI 开关，需要单独设计“间隔、下一次时间、停用、失败次数、API 配额”。
+- 下一步：进入 Layer 7 收尾 QA 或 Layer 9 paper validation。若继续优化自动抓取，建议新增“刷新一次”和“定时刷新”两个明确入口，避免用户把单次受控流水线误解为永久爬虫。
+- 相关提交：本提交 `Fix dashboard refresh hourly charts`（最终短号以 `git log -1 --oneline` 为准）。
+### 2026-07-03：Layer 7 受控自动抓取开关验证
+- 目标：回应“点击自动抓取后应该隔一段时间继续更新，并且成功/失败要直观看见”的反馈；本轮不改变后端轻量启动默认，不启用 legacy loop、auto simulation、LIVE_TRADING/canary。
+- 改动：`frontend/src/App.tsx` 新增页面级受控自动抓取开关。点击“自动抓取”会立即触发当前城市/日期的 `production-refresh-v2`，并在当前页面打开期间每 15 分钟重跑一次；如果上一轮仍在运行，则跳过本轮并显示 warning toast，避免重复抓取。再次点击会关闭页面级定时器，后端不会继续自动刷新。
+- 数据留档/去重口径：仍复用既有 `POST /api/production-refresh`、SQLite upsert、`data/production-refresh.json` 历史摘要和后端 `production_refresh_lock`；本轮没有新增独立爬虫、没有绕过现有归档链路。
+- 真实验证：浏览器打开 `http://127.0.0.1:5173/?city=ankara-ltac&date=2026-07-03`，点击“自动抓取”后出现“数据抓取已启动”toast，顶部进入 `抓取中`；后端状态轮询显示 `contracts_sync -> openmeteo_fetch -> metar_refresh -> hourly_consensus -> daily_max_build -> market_buckets_sync -> signal_decisions_build -> signal_migration -> orderbook_backfill`，最终 `ok=True`、`stage_count=11`、`failed_stages=[]`。随后点击“自动抓取已开”关闭，页面显示“自动抓取已关闭”toast。
+- 图表验证：同一页面 `Hourly Temperature` 正常显示 24 行小时表和折线/云量柱，未出现 `No hourly rows` 或 0°C 假线；浏览器 console warn/error 为空。
+- 命令验证：`python -W ignore::ResourceWarning -m unittest tests.test_v3_core` 139 OK；`python -m unittest tests.test_polywx_contract tests.test_deb_gaussian` 14 OK；`npm run build` 通过，仍只有既有 Browserslist 过期和 Vite chunk size warning；`git diff --check` 仅 Windows LF/CRLF warning。
+- 当前可用性结论：看板现在能真实读取已写入的小时数据；“自动抓取”从一次性黑箱按钮升级为可见、可关闭、不会并发的页面级定时刷新。它仍是模拟/观察阶段工具，不代表策略已可稳定赚钱或可开实盘。
+- 剩余阻塞：`WeatherPanel.tsx` 仍偏大；部分 PowerShell 输出中文仍会 mojibake；只有部分主力城市具备完整小时聚合，其他城市还需要继续补 Layer 2/3 覆盖；Layer 9 paper validation 尚未完成。
+- 下一步：提交并推送本轮修复；之后建议进入 Layer 9 paper validation，或者继续拆分 Layer 7 组件并补齐非主力城市的小时数据覆盖。
+- 相关提交：本提交 `Fix dashboard refresh hourly charts`（最终短号以 `git log -1 --oneline` 为准）。

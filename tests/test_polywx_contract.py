@@ -98,6 +98,8 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn('strokeDasharray="4 4"', panel)
         self.assertIn("ReferenceLine", panel)
         self.assertIn("forecast_value", panel)
+        self.assertIn("value === null || value === undefined || value === ''", panel)
+        self.assertIn("hasChartEvidence", panel)
         self.assertIn("tickFormatter={value => `${Number(value).toFixed(0)}°${unit}`}", panel)
         self.assertIn("峰值", panel)
         self.assertNotIn('aria-label="Diff residual bars"', panel)
@@ -127,6 +129,19 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("信号 {actionableCityCount}", app)
         self.assertIn("border-amber-500/25", app)
         self.assertNotIn("evidence-only", app)
+
+    def test_refresh_feedback_toast_is_visible_and_stage_aware(self):
+        app = read_text("frontend/src/App.tsx")
+
+        self.assertIn("type RefreshNotice", app)
+        self.assertIn("productionRefreshNotice", app)
+        self.assertIn("数据自动更新成功", app)
+        self.assertIn("天气数据已更新，交易数据异常", app)
+        self.assertIn("数据抓取异常", app)
+        self.assertIn("production-refresh-v2", app)
+        self.assertIn('role="status"', app)
+        self.assertIn('aria-live="polite"', app)
+        self.assertIn("failed_stages", app)
 
     def test_tables_and_fetch_log_match_polywx_information_architecture(self):
         panel = read_text("frontend/src/components/WeatherPanel.tsx")

@@ -409,11 +409,27 @@ def hourly_consensus_summary(
         targets = {str(city).strip().lower(): dates}
     points = hourly_consensus_points(targets, db_path=db_path)
     selected = points.get(str(city).strip().lower(), []) if city else [point for rows in points.values() for point in rows]
+    source = "hourly_consensus"
+    if city and target_date and not selected:
+        city_key = str(city).strip().lower()
+        forecast_points = forecast_hourly_points({city_key: {str(target_date)}}, db_path=db_path)
+        selected = [
+            {
+                **point,
+                "hourly_consensus": False,
+                "transient": True,
+                "build_status": point.get("build_status") or "transient_forecast_members",
+            }
+            for point in forecast_points.get(city_key, [])
+        ]
+        if selected:
+            source = "forecast_members_transient"
     return {
         "ok": True,
         "city": city or "",
         "target_date": target_date or "",
         "rows": len(selected),
+        "source": source,
         "points": selected,
     }
 

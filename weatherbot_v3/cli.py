@@ -683,11 +683,31 @@ def run_legacy_signal_scan() -> dict:
     }
 
 
+def _stage_payload_ok(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return True
+    ok_value = payload.get("ok")
+    if isinstance(ok_value, bool):
+        return ok_value
+    if "failed" in payload:
+        try:
+            return int(payload.get("failed") or 0) == 0
+        except Exception:
+            return False
+    failed_stages = payload.get("failed_stages")
+    if isinstance(failed_stages, list):
+        return len(failed_stages) == 0
+    if "ok" in payload:
+        return bool(ok_value)
+    return True
+
+
 def _stage_result(name: str, fn) -> dict:
     started = time.perf_counter()
     try:
         payload = fn()
-        return {"name": name, "ok": True, "elapsed_ms": round((time.perf_counter() - started) * 1000), "payload": payload}
+        ok = _stage_payload_ok(payload)
+        return {"name": name, "ok": ok, "elapsed_ms": round((time.perf_counter() - started) * 1000), "payload": payload}
     except Exception as exc:
         return {"name": name, "ok": False, "elapsed_ms": round((time.perf_counter() - started) * 1000), "error": str(exc)}
 
