@@ -118,6 +118,11 @@ export async function fetchProductionValidation(): Promise<ProductionValidationR
   return data
 }
 
+export async function fetchProductionRefreshStatus(): Promise<ProductionRefreshResult> {
+  const { data } = await api.get<ProductionRefreshResult>('/production-refresh/status')
+  return data
+}
+
 export async function fetchMarketBuckets(city: string, targetDate: string, limit = 80): Promise<MarketBucketSummary> {
   const { data } = await api.get<MarketBucketSummary>('/market-buckets', {
     params: { city, target_date: targetDate, limit },
@@ -188,12 +193,16 @@ export async function runProductionRefresh(options: {
   cities?: string[]
   days?: number
   limit?: number
+  startDate?: string
+  endDate?: string
   skipSignalScan?: boolean
 } = {}): Promise<ProductionRefreshResult> {
   const { data } = await api.post<ProductionRefreshResult>('/production-refresh', {
     cities: options.cities ?? [],
     days: options.days ?? 1,
     limit: options.limit ?? 20,
+    start_date: options.startDate ?? '',
+    end_date: options.endDate ?? '',
     skip_signal_scan: options.skipSignalScan ?? true,
   })
   return data

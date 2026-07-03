@@ -16,6 +16,7 @@ import {
   fetchDailyMaxPredictions,
   fetchForecastArchiveManifest,
   fetchMarketBuckets,
+  fetchProductionRefreshStatus,
   fetchProductionValidation,
   fetchSignalDecisions,
   fetchSettlementContracts,
@@ -710,6 +711,13 @@ function App() {
     refetchInterval: 120000,
   })
 
+  const productionRefreshStatusQuery = useQuery({
+    queryKey: ['production-refresh-status'],
+    queryFn: fetchProductionRefreshStatus,
+    refetchInterval: 3000,
+    retry: 1,
+  })
+
   const selectedEvidenceReadyForLayer7 = Boolean(selectedCity && selectedDate)
 
   const marketBucketsQuery = useQuery({
@@ -770,6 +778,7 @@ function App() {
     mutationFn: ({ contractId, note }: { contractId: string; note: string }) =>
       verifySettlementContract(contractId, true, note || 'dashboard manual review'),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['production-refresh-status'] })
       queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
       queryClient.invalidateQueries({ queryKey: ['production-validation'] })
@@ -790,17 +799,22 @@ function App() {
   })
 
   const productionRefreshMutation = useMutation({
-    mutationFn: (options: { cities?: string[]; days?: number; limit?: number } | undefined) =>
+    mutationFn: (options: { cities?: string[]; days?: number; limit?: number; startDate?: string; endDate?: string } | undefined) =>
       runProductionRefresh({
         cities: options?.cities ?? [],
         days: options?.days ?? 2,
         limit: options?.limit ?? 20,
+        startDate: options?.startDate ?? '',
+        endDate: options?.endDate ?? '',
         skipSignalScan: true,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settlement-contracts'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
       queryClient.invalidateQueries({ queryKey: ['production-validation'] })
+      queryClient.invalidateQueries({ queryKey: ['market-buckets'] })
+      queryClient.invalidateQueries({ queryKey: ['signal-decisions'] })
+      queryClient.invalidateQueries({ queryKey: ['daily-max-predictions'] })
     },
   })
 
@@ -862,7 +876,11 @@ function App() {
   const trades = data?.recent_trades ?? []
   const truthHealth = data?.truth_health ?? null
   const dataReadiness = data?.data_readiness ?? null
-  const productionRefresh = productionRefreshMutation.data ?? data?.production_refresh ?? null
+  const productionRefresh = productionRefreshStatusQuery.data ?? productionRefreshMutation.data ?? data?.production_refresh ?? null
+  const productionRefreshRunning = Boolean(productionRefreshMutation.isPending || productionRefresh?.running)
+  const productionRefreshStages = productionRefresh?.stages ?? []
+  const productionRefreshDone = productionRefreshStages.filter(stage => stage.ok && !stage.running).length
+  const productionRefreshCurrent = productionRefreshStages.find(stage => stage.running) ?? productionRefreshStages[productionRefreshStages.length - 1]
   const productionValidation = productionValidationQuery.data ?? null
   const modelDatasetAudit = data?.model_dataset_audit ?? null
   const forecastArchiveManifest = forecastArchiveManifestQuery.data ?? null
@@ -1040,6 +1058,9 @@ function App() {
     if (typeof window === 'undefined') return
     window.localStorage.setItem('weatherbot-ui-theme', themeMode)
     document.documentElement.dataset.theme = themeMode
+    const background = themeMode === 'dark' ? '#161A22' : '#ffffff'
+    document.documentElement.style.backgroundColor = background
+    document.body.style.backgroundColor = background
   }, [themeMode])
 
   if (isLoading) {
@@ -1081,6 +1102,24 @@ function App() {
         </div>
         <div className="order-last flex min-w-0 basis-full flex-nowrap items-center gap-1.5 overflow-x-auto text-[10px] xl:overflow-visible">
           <span className="shrink-0 border border-neutral-800 px-2 py-1 text-neutral-400">{copy.data} {dataAge(stats.data_age_minutes)}</span>
+          <span
+            className={`shrink-0 border px-2 py-1 ${
+              productionRefreshRunning
+                ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
+                : productionRefresh?.ok
+                  ? 'border-green-500/30 text-green-300'
+                  : productionRefresh
+                    ? 'border-amber-500/30 text-amber-300'
+                    : 'border-neutral-800 text-neutral-500'
+            }`}
+            title={(productionRefresh?.failed_stages ?? []).length > 0 ? `失败阶段：${productionRefresh?.failed_stages?.join(', ')}` : `刷新目标：${productionRefresh?.target_date || productionRefresh?.request?.start_date || '--'}`}
+          >
+            {productionRefreshRunning
+              ? `抓取中 ${productionRefreshDone}/${productionRefreshStages.length || 11}${productionRefreshCurrent?.name ? ` · ${productionRefreshCurrent.name}` : ''}`
+              : productionRefresh?.requested_at
+                ? `抓取 ${productionRefresh?.ok ? '完成' : '异常'} · ${productionRefresh?.target_date || productionRefresh?.request?.start_date || '--'}`
+                : '抓取未运行'}
+          </span>
           <span className={`shrink-0 border px-2 py-1 ${stats.is_running ? 'border-green-500/30 text-green-300' : 'border-neutral-800 text-neutral-500'}`}>
             {stats.is_running ? copy.legacyRunning : copy.manual}
           </span>
@@ -1128,13 +1167,15 @@ function App() {
             cities: selectedCity ? [selectedCity] : [],
             days: refreshDaysForDate(selectedDate),
             limit: 20,
+            startDate: selectedDate || '',
+            endDate: selectedDate || '',
           })}
-          disabled={productionRefreshMutation.isPending}
+          disabled={productionRefreshRunning}
           className="inline-flex items-center gap-1 whitespace-nowrap border border-green-500/30 px-2 py-1.5 text-[11px] text-green-300 hover:bg-green-500/10 disabled:opacity-40"
-          title="受控刷新：同步合约、预测快照和 CLOB 盘口；默认不启动旧版无限信号扫描。"
+          title="受控刷新：同步合约、Open-Meteo、METAR、小时共识、DEB、市场桶、信号决策和 CLOB 盘口；默认不启动旧版无限扫描。"
         >
-          <RefreshCw className={`h-3.5 w-3.5 ${productionRefreshMutation.isPending ? 'animate-spin' : ''}`} />
-          {productionRefreshMutation.isPending ? copy.fetching : copy.manualFetch}
+          <RefreshCw className={`h-3.5 w-3.5 ${productionRefreshRunning ? 'animate-spin' : ''}`} />
+          {productionRefreshRunning ? copy.fetching : copy.manualFetch}
         </button>
         {stats.is_running && (
           <button
@@ -1165,26 +1206,31 @@ function App() {
                 event.preventDefault()
                 setSelectedCity(citySummaryCard.key)
               }}
-              className={`m-3 block border p-3 text-left transition ${
-                recommendedCity
-                  ? 'border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/15'
-                  : 'border-neutral-800 bg-black/35 hover:border-neutral-700'
-              }`}
+              className="m-3 block border border-amber-500/35 bg-amber-500/10 p-3 text-left shadow-[inset_0_1px_0_rgba(251,191,36,0.12)] transition hover:border-amber-400/60 hover:bg-amber-500/15"
             >
-              <div className="mb-1 flex items-center justify-between gap-2">
-                <div className={`text-xs font-medium ${recommendedCity ? 'text-emerald-100' : 'text-neutral-300'}`}>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="text-[11px] font-medium text-amber-200">
                   推荐关注
                 </div>
-                <div className={`text-[10px] ${recommendedCity ? 'text-emerald-300' : 'text-neutral-500'}`}>
-                  {citySummaryCard.actionable}/{citySummaryCard.signals} 信号
+                <div className="text-[9px] text-amber-200/70">
+                  数据 {dataAge(stats.data_age_minutes)}
                 </div>
               </div>
-              <div className="truncate text-sm text-neutral-100">{citySummaryCard.name}</div>
-              <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-neutral-500">
-                <span>{citySummaryCard.station || 'station 未映射'}</span>
-                <span className="tabular-nums text-neutral-200">
-                  {citySummaryCard.latest === null || citySummaryCard.latest === undefined ? '--' : `${Number(citySummaryCard.latest).toFixed(1)}°${citySummaryCard.unit}`}
-                </span>
+              <div className="truncate text-lg font-semibold leading-tight text-neutral-50">{citySummaryCard.name}</div>
+              <div className="mt-1 truncate text-[10px] text-amber-100/60">{citySummaryCard.station || 'station 未映射'}</div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <div className="border border-amber-500/20 bg-black/25 px-2 py-1.5">
+                  <div className="text-[9px] text-amber-100/60">现在</div>
+                  <div className="tabular-nums text-sm text-neutral-50">
+                    {citySummaryCard.latestMetar === null || citySummaryCard.latestMetar === undefined ? '--' : `${Number(citySummaryCard.latestMetar).toFixed(1)}°${citySummaryCard.unit}`}
+                  </div>
+                </div>
+                <div className="border border-amber-500/20 bg-black/25 px-2 py-1.5">
+                  <div className="text-[9px] text-amber-100/60">预计最高</div>
+                  <div className="tabular-nums text-sm text-neutral-50">
+                    {citySummaryCard.latest === null || citySummaryCard.latest === undefined ? '--' : `${Number(citySummaryCard.latest).toFixed(1)}°${citySummaryCard.unit}`}
+                  </div>
+                </div>
               </div>
             </a>
           )}
@@ -1244,6 +1290,7 @@ function App() {
                 <a
                   key={city.key}
                   href={cityHref(city)}
+                  title={`预报 ${city.forecastCount} · METAR ${city.latestMetar !== null && city.latestMetar !== undefined ? Number(city.latestMetar).toFixed(1) + '°' + city.unit : '--'} · 历史 ${city.historyCount} · 湿度 ${city.humidityStatus === 'available' ? '可用' : '缺失'} · 信号 ${city.actionable}/${city.signals}`}
                   onClick={event => {
                     event.preventDefault()
                     setSelectedCity(city.key)
@@ -1255,60 +1302,18 @@ function App() {
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${city.actionable > 0 ? 'bg-green-300' : city.forecastCount > 0 ? 'bg-cyan-300' : 'bg-neutral-700'}`} />
+                      <div className="min-w-0">
                       <div className="truncate text-xs font-medium leading-tight">{city.name}</div>
                       <div className="mt-1 truncate text-[10px] leading-tight text-neutral-600">{city.station || 'station 未映射'}</div>
+                      </div>
                     </div>
                     <div className="shrink-0 text-right">
                       <div className="tabular-nums text-[11px] leading-tight text-neutral-200">
                         {city.latest === null || city.latest === undefined ? '--' : `${Number(city.latest).toFixed(1)}°${city.unit}`}
                       </div>
-                      <div className={`mt-1 text-[10px] leading-tight ${city.actionable > 0 ? 'text-green-300' : 'text-neutral-600'}`}>
-                        {city.actionable}/{city.signals}
-                      </div>
                     </div>
-                  </div>
-                  <div className="mt-2 flex items-center gap-1 text-[9px]">
-                    <span
-                      className={`border px-1 py-0.5 ${
-                        city.forecastCount > 0
-                          ? 'border-cyan-500/25 bg-cyan-500/5 text-cyan-200'
-                          : 'border-neutral-800 text-neutral-600'
-                      }`}
-                      title={`预报快照 ${city.forecastCount}`}
-                    >
-                      F {city.forecastCount}
-                    </span>
-                    <span
-                      className={`border px-1 py-0.5 ${
-                        city.latestMetar !== null && city.latestMetar !== undefined
-                          ? 'border-amber-500/25 bg-amber-500/5 text-amber-200'
-                          : 'border-neutral-800 text-neutral-600'
-                      }`}
-                      title={city.latestMetar !== null && city.latestMetar !== undefined ? `METAR ${Number(city.latestMetar).toFixed(1)}°${city.unit}` : '暂无 METAR'}
-                    >
-                      M {city.latestMetar !== null && city.latestMetar !== undefined ? Number(city.latestMetar).toFixed(0) : '--'}
-                    </span>
-                    <span
-                      className={`border px-1 py-0.5 ${
-                        city.historyCount > 0
-                          ? 'border-emerald-500/25 bg-emerald-500/5 text-emerald-200'
-                          : 'border-neutral-800 text-neutral-600'
-                      }`}
-                      title={`历史观测 ${city.historyCount}`}
-                    >
-                      H {city.historyCount}
-                    </span>
-                    {city.humidityStatus === 'available' && (
-                      <span className="border border-blue-500/20 bg-blue-500/5 px-1 py-0.5 text-blue-200" title="湿度数据可用">
-                        RH
-                      </span>
-                    )}
-                    {city.signals > 0 && (
-                      <span className="ml-auto border border-neutral-700 px-1 py-0.5 text-neutral-400">
-                        Poly ↗
-                      </span>
-                    )}
                   </div>
                 </a>
               ))}
@@ -1359,7 +1364,6 @@ function App() {
               citySeries={citySeries}
               events={events}
               fetchLog={fetchLog}
-              productionRefresh={productionRefresh}
               marketBuckets={marketBucketsQuery.data ?? null}
               signalDecisions={signalDecisionsQuery.data ?? null}
               dailyMaxPrediction={dailyMaxPredictionQuery.data ?? null}
@@ -1373,8 +1377,10 @@ function App() {
                 cities: selectedCity ? [selectedCity] : [],
                 days: refreshDaysForDate(selectedDate),
                 limit: 20,
+                startDate: selectedDate || '',
+                endDate: selectedDate || '',
               })}
-              weatherRefreshing={productionRefreshMutation.isPending}
+              weatherRefreshing={productionRefreshRunning}
               onBackfillHistory={() => historyBackfillMutation.mutate()}
               backfilling={historyBackfillMutation.isPending}
               backfillResult={historyBackfillMutation.data}
@@ -1428,12 +1434,14 @@ function App() {
               dataAgeLabel={dataAge(stats.data_age_minutes)}
               signals={signals.length}
               actionable={actionable}
-              refreshing={productionRefreshMutation.isPending}
+              refreshing={productionRefreshRunning}
               language={uiLanguage}
               onRefresh={() => productionRefreshMutation.mutate({
                 cities: selectedCity ? [selectedCity] : [],
                 days: refreshDaysForDate(selectedDate),
                 limit: 20,
+                startDate: selectedDate || '',
+                endDate: selectedDate || '',
               })}
             />
           </div>
@@ -1551,11 +1559,13 @@ function App() {
                     verifyingContractId={verifyContractMutation.variables?.contractId}
                     bulkVerifying={bulkVerifyContractMutation.isPending}
                     productionRefresh={productionRefresh}
-                    productionRefreshing={productionRefreshMutation.isPending}
+                    productionRefreshing={productionRefreshRunning}
                     onProductionRefresh={() => productionRefreshMutation.mutate({
                       cities: selectedCity ? [selectedCity] : [],
                       days: refreshDaysForDate(selectedDate),
                       limit: 20,
+                      startDate: selectedDate || '',
+                      endDate: selectedDate || '',
                     })}
                     onVerifyContract={(contractId, note) => verifyContractMutation.mutate({ contractId, note })}
                     onVerifyVisibleContracts={(contractIds, note) => bulkVerifyContractMutation.mutate({ contractIds, note })}

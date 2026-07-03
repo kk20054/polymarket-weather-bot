@@ -777,6 +777,12 @@ class V3CoreTests(unittest.TestCase):
             patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False),
             patch("weatherbot_v3.cli.sync_settlement_contracts", return_value={"settlement_contracts": 2}),
             patch("weatherbot_v3.cli.run_forecast_backfill", return_value={"ok": 1, "failed": 0}) as forecast,
+            patch("weatherbot_v3.cli.run_openmeteo_fetch", return_value={"runs_upserted": 6, "members_upserted": 24}) as openmeteo,
+            patch("weatherbot_v3.cli._run_recent_metar_refresh", return_value={"reports_upserted": 8}) as metar,
+            patch("weatherbot_v3.cli.run_hourly_consensus_build", return_value={"rows_upserted": 24}) as hourly,
+            patch("weatherbot_v3.cli.run_daily_max_build", return_value={"stored": 1}) as daily_max,
+            patch("weatherbot_v3.cli.run_market_buckets_sync", return_value={"stored": 11}) as buckets,
+            patch("weatherbot_v3.cli.run_signal_decisions_build", return_value={"stored": 11}) as decisions,
             patch("weatherbot_v3.cli.run_legacy_signal_scan") as signal_scan,
             patch("weatherbot_v3.cli.migrate_legacy_signals", return_value={"imported": 3, "skipped": 0}) as migrate,
             patch("weatherbot_v3.cli.run_orderbook_backfill", return_value={"requested": 2, "ok": 1, "failed": 1}) as orderbooks,
@@ -797,15 +803,27 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual([stage["name"] for stage in payload["stages"]], [
             "contracts_sync",
             "forecast_backfill",
+            "openmeteo_fetch",
+            "metar_refresh",
+            "hourly_consensus",
+            "daily_max_build",
+            "market_buckets_sync",
+            "signal_decisions_build",
             "signal_scan",
             "signal_migration",
             "orderbook_backfill",
         ])
-        self.assertTrue(payload["stages"][2]["skipped"])
+        self.assertTrue(payload["stages"][8]["skipped"])
         forecast.assert_called_once_with("nyc", 2)
+        openmeteo.assert_called_once_with("nyc", forecast_days=4, limit_cities=5)
+        metar.assert_called_once_with("nyc", 48.0)
+        hourly.assert_called_once_with("nyc", target_date="2026-06-27", days_arg=None)
+        daily_max.assert_called_once_with("nyc", target_date="2026-06-27", days_arg=None)
+        buckets.assert_called_once()
+        decisions.assert_called_once_with("nyc", target_date="2026-06-27", days_arg=None, limit=5)
         signal_scan.assert_not_called()
         migrate.assert_called_once()
-        orderbooks.assert_called_once_with(5, "2026-06-27", "")
+        orderbooks.assert_called_once_with(5, "2026-06-27", "2026-06-27")
         persist.assert_called_once_with(readiness)
 
     def test_dashboard_production_refresh_endpoint_persists_result(self):

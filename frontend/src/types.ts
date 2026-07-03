@@ -229,6 +229,7 @@ export interface DataReadiness {
 export interface ProductionRefreshStage {
   name: string
   ok: boolean
+  running?: boolean
   elapsed_ms?: number
   skipped?: boolean
   reason?: string
@@ -247,6 +248,7 @@ export interface ProductionRefreshResult {
   message?: string
   failed_stages: string[]
   scan_signals: boolean
+  target_date?: string
   stages: ProductionRefreshStage[]
   requested_at?: string
   request?: {

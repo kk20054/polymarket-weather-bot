@@ -6,6 +6,7 @@ import sys
 import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 from .db import bulk_settlement_contract_verification, connect, dashboard_summary, init_v3_db, list_settlement_contracts, set_settlement_contract_verification
 from .migration import audit_market_files, migrate_legacy_signals, repair_truth_temporal_mismatches, sync_settlement_contracts
@@ -691,6 +692,19 @@ def _stage_result(name: str, fn) -> dict:
         return {"name": name, "ok": False, "elapsed_ms": round((time.perf_counter() - started) * 1000), "error": str(exc)}
 
 
+def _run_recent_metar_refresh(cities_arg: str, hours: float) -> dict:
+    from .metar import refresh_metar_reports
+
+    cities = _cities_from_arg(cities_arg)
+    bounded_hours = max(1.0, min(float(hours or 24.0), 96.0))
+    payload = refresh_metar_reports(cities or None, hours=bounded_hours)
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    payload["observations_stage"] = readiness_stage(readiness, "observations")
+    payload["hours_requested"] = bounded_hours
+    return payload
+
+
 def run_production_refresh(
     *,
     cities: str = "",
@@ -699,25 +713,82 @@ def run_production_refresh(
     start_date: str = "",
     end_date: str = "",
     scan_signals: bool = True,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     init_v3_db()
+    bounded_days = max(1, min(int(days or 4), 7))
+    bounded_limit = max(1, min(int(limit or 50), 500))
+    target_date = (start_date or end_date or "").strip()
+    recent_metar_hours = max(24.0, min(float(bounded_days) * 24.0, 96.0))
     stages = []
-    stages.append(_stage_result("contracts_sync", sync_settlement_contracts))
-    stages.append(_stage_result("forecast_backfill", lambda: run_forecast_backfill(cities, days)))
+
+    def emit_progress() -> None:
+        if not progress_callback:
+            return
+        failed = [stage for stage in stages if stage.get("ok") is False and not stage.get("running")]
+        progress_callback({
+            "refresh_version": "production-refresh-v2",
+            "ok": not failed,
+            "running": True,
+            "failed_stages": [stage["name"] for stage in failed],
+            "scan_signals": scan_signals,
+            "target_date": target_date,
+            "stages": list(stages),
+        })
+
+    def run_stage(name: str, fn) -> None:
+        stages.append({"name": name, "ok": False, "running": True})
+        emit_progress()
+        stages[-1] = _stage_result(name, fn)
+        emit_progress()
+
+    run_stage("contracts_sync", sync_settlement_contracts)
+    run_stage("forecast_backfill", lambda: run_forecast_backfill(cities, bounded_days))
+    run_stage(
+        "openmeteo_fetch",
+        lambda: run_openmeteo_fetch(cities, forecast_days=min(bounded_days + 2, 7), limit_cities=5),
+    )
+    run_stage("metar_refresh", lambda: _run_recent_metar_refresh(cities, recent_metar_hours))
+    run_stage(
+        "hourly_consensus",
+        lambda: run_hourly_consensus_build(cities, target_date=target_date, days_arg=None if target_date else bounded_days),
+    )
+    run_stage(
+        "daily_max_build",
+        lambda: run_daily_max_build(cities, target_date=target_date, days_arg=None if target_date else bounded_days),
+    )
+    run_stage(
+        "market_buckets_sync",
+        lambda: run_market_buckets_sync(
+            bounded_limit,
+            cities_arg=cities,
+            days_arg=bounded_days,
+            target_date=target_date,
+            active_weather=True,
+            limit_cities=5,
+            fetch_orderbooks=True,
+        ),
+    )
+    run_stage(
+        "signal_decisions_build",
+        lambda: run_signal_decisions_build(cities, target_date=target_date, days_arg=None if target_date else bounded_days, limit=bounded_limit),
+    )
     if scan_signals:
-        stages.append(_stage_result("signal_scan", run_legacy_signal_scan))
+        run_stage("signal_scan", run_legacy_signal_scan)
     else:
         stages.append({"name": "signal_scan", "ok": True, "skipped": True, "reason": "skip_signal_scan"})
-        stages.append(_stage_result("signal_migration", migrate_legacy_signals))
-    stages.append(_stage_result("orderbook_backfill", lambda: run_orderbook_backfill(limit, start_date, end_date)))
+        emit_progress()
+        run_stage("signal_migration", migrate_legacy_signals)
+    run_stage("orderbook_backfill", lambda: run_orderbook_backfill(bounded_limit, start_date or target_date, end_date or target_date))
     readiness = build_data_readiness()
     persist_data_readiness(readiness)
     failed = [stage for stage in stages if not stage.get("ok")]
     return {
-        "refresh_version": "production-refresh-v1",
+        "refresh_version": "production-refresh-v2",
         "ok": not failed,
         "failed_stages": [stage["name"] for stage in failed],
         "scan_signals": scan_signals,
+        "target_date": target_date,
         "stages": stages,
         "readiness": {
             "status": readiness.get("status"),

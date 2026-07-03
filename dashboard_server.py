@@ -205,7 +205,19 @@ def _read_json(path, fallback):
 
 def _write_json(path, payload):
     path.parent.mkdir(exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.write_text(json.dumps(_json_safe(payload), indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+
+
+def _json_safe(value):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def _production_refresh_summary(payload):
@@ -228,8 +240,17 @@ def _save_production_refresh_result(payload):
     if current_summary.get("requested_at"):
         history = [current_summary, *history]
     payload["history"] = history[:7]
+    payload["running"] = False
     _write_json(PRODUCTION_REFRESH_PATH, payload)
-    return payload
+    return _json_safe(payload)
+
+
+def _save_production_refresh_progress(payload):
+    previous = _read_json(PRODUCTION_REFRESH_PATH, None) or {}
+    payload["history"] = list(previous.get("history") or [])[:7]
+    payload["running"] = True
+    _write_json(PRODUCTION_REFRESH_PATH, payload)
+    return _json_safe(payload)
 
 
 def _production_refresh_runtime_state(payload):
@@ -241,7 +262,7 @@ def _production_refresh_runtime_state(payload):
     state["auto_refresh_running"] = bool(auto_refresh_task and not auto_refresh_task.done())
     state["production_refresh_running"] = production_refresh_lock.locked()
     state["running"] = production_refresh_lock.locked()
-    return state
+    return _json_safe(state)
 
 
 def _auto_simulation_state():
@@ -3767,8 +3788,26 @@ async def dashboard():
     if DASHBOARD_AUTO_BUILD:
         _ensure_dashboard_refresh()
     if dashboard_payload_cache is not None:
-        return dashboard_payload_cache
-    return _minimal_dashboard_payload()
+        payload = dict(dashboard_payload_cache)
+    else:
+        payload = _minimal_dashboard_payload()
+    latest_refresh = _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None))
+    if latest_refresh is not None:
+        payload["production_refresh"] = latest_refresh
+    return _json_safe(payload)
+
+
+@app.get("/api/production-refresh/status")
+async def production_refresh_status():
+    state = _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None))
+    return state or {
+        "refresh_version": "production-refresh-v2",
+        "ok": None,
+        "running": production_refresh_lock.locked(),
+        "failed_stages": [],
+        "stages": [],
+        "history": [],
+    }
 
 
 @app.get("/api/city-evidence")
@@ -4082,6 +4121,23 @@ async def production_refresh(request: ProductionRefreshRequest):
             "message": "production-refresh is already running",
         }
     cities = ",".join(item.strip() for item in (request.cities or []) if item.strip())
+    request_payload = {
+        "cities": request.cities or [],
+        "days": request.days,
+        "limit": request.limit,
+        "start_date": request.start_date,
+        "end_date": request.end_date,
+        "skip_signal_scan": request.skip_signal_scan,
+    }
+    requested_at = datetime.now(timezone.utc).isoformat()
+
+    def save_progress(progress: dict):
+        _save_production_refresh_progress({
+            **progress,
+            "requested_at": requested_at,
+            "request": request_payload,
+        })
+
     async with production_refresh_lock:
         payload = await asyncio.to_thread(
             run_production_refresh,
@@ -4091,19 +4147,13 @@ async def production_refresh(request: ProductionRefreshRequest):
             start_date=request.start_date or "",
             end_date=request.end_date or "",
             scan_signals=not request.skip_signal_scan,
+            progress_callback=save_progress,
         )
         saved = {
             **payload,
             "running": False,
             "requested_at": datetime.now(timezone.utc).isoformat(),
-            "request": {
-                "cities": request.cities or [],
-                "days": request.days,
-                "limit": request.limit,
-                "start_date": request.start_date,
-                "end_date": request.end_date,
-                "skip_signal_scan": request.skip_signal_scan,
-            },
+            "request": request_payload,
         }
         saved = _save_production_refresh_result(saved)
         log_event(

@@ -70,7 +70,10 @@ body {
 .polywx-light [class*="bg-black"],
 .polywx-light [class*="bg-neutral-950"],
 .polywx-light [class*="bg-neutral-900"],
-.polywx-light [class*="bg-neutral-800"] {
+.polywx-light [class*="bg-neutral-800"],
+.polywx-light [class*="bg-[#161A22]"],
+.polywx-light [class*="bg-[#1B212C]"],
+.polywx-light [class*="bg-[#222A37]"] {
   background-color: #ffffff !important;
 }
 
@@ -78,13 +81,16 @@ body {
 .polywx-light [class*="border-cyan"],
 .polywx-light [class*="border-green"],
 .polywx-light [class*="border-amber"],
-.polywx-light [class*="border-red"] {
+.polywx-light [class*="border-red"],
+.polywx-light [class*="border-[#2C3445]"] {
   border-color: #e5e7eb !important;
 }
 
 .polywx-light [class*="text-neutral-100"],
 .polywx-light [class*="text-neutral-200"],
 .polywx-light [class*="text-neutral-300"],
+.polywx-light [class*="text-[#CBD2DC]"],
+.polywx-light [class*="text-[#F8FAFC]"],
 .polywx-light [class*="text-cyan-"],
 .polywx-light [class*="text-green-"],
 .polywx-light [class*="text-amber-"] {
@@ -93,7 +99,8 @@ body {
 
 .polywx-light [class*="text-neutral-400"],
 .polywx-light [class*="text-neutral-500"],
-.polywx-light [class*="text-neutral-600"] {
+.polywx-light [class*="text-neutral-600"],
+.polywx-light [class*="text-[#7D8694]"] {
   color: #6b7280 !important;
 }
 
