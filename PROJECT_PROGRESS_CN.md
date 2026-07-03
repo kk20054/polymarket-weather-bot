@@ -540,3 +540,13 @@
 - 当前可用性结论：自动抓取现在是可观察的受控手动流水线，不再是按钮闪一下的黑盒；如果用户仍停在旧 URL 日期，顶部会显示抓取目标日期，城市页切到对应日期后能读到最新 DEB/桶数据。当前仍是观察/模拟验证平台，不解锁实盘，也不证明策略稳定盈利。
 - 剩余阻塞：`WeatherPanel.tsx` 仍偏大，后续应拆分；`hourly.py` sqlite `ResourceWarning` 仍需专项清理；部分旧日志中文在 PowerShell 渲染中仍有 mojibake；Layer 9 paper validation 与右侧 `/api/paper-orders` UI 接入尚未完成。
 - 下一步：可以进入 Layer 7 截图级 QA 收尾，或进入 Layer 9 paper validation，开始连续模拟评估胜率、ROI、回撤，继续保持 `LIVE_TRADING=false`。
+
+### 2026-07-03：Layer 7 小时聚合与看板验证收口
+- 目标：继续验证用户截图与 ClaudeCode 建议里提到的“最新数据不明显、Hourly 图为空或错位、推荐关注位置不合理、抓取日志看不出生产阶段、浏览器 console 警告”等问题；本轮只改 Layer 4 直接消费者与 Layer 7 只读看板，不触发抓取、不启动 legacy loop、不打开 auto simulation、不改变 live/canary 锁定。
+- 根因：`hourly_consensus` 重建时会优先选择最新 Open-Meteo primary runs，但这些 run 对本地日期可能只覆盖部分小时；同时旧逻辑直接按 `valid_at` 原始时间分桶，UTC 与 station-local timestamp 混在一起，导致 Chicago 2026-07-02 这类本地日页面在 UI 上像“缺小时/空图”。另外，推荐关注仍在左侧单卡，抓取日志没有把 `production_refresh.stages` 合并展示，Probability bucket 列表在缺少 `signal_id` 时会产生重复 React key warning。
+- 改动：`weatherbot_v3/hourly.py` 增加 station-local 时间归一化，按 `(city, target_date, local_hour)` 聚合 forecast rows；当精确 Open-Meteo primary runs 存在但覆盖不完整时，保留少量 legacy/model supplemental runs，避免重建时抹掉完整历史小时。`frontend/src/App.tsx` 将“推荐关注”移动到中间主板顶部，左侧专注城市导航；`frontend/src/components/WeatherPanel.tsx` 把 `productionRefresh.stages` 接入抓取日志 tab，移除 Hourly 图内 residual bars 以免遮挡横轴，降低 cloud/RH 柱透明度，并修复 probability bucket、reason、executable/blocked signal 列表 key；`tests/test_v3_core.py` 和 `tests/test_polywx_contract.py` 更新对应回归与合约断言。
+- 验证命令：`python -W ignore::ResourceWarning -m unittest tests.test_v3_core tests.test_polywx_contract tests.test_deb_gaussian` 148 OK；`npm run build` 通过，仍只有既有 Browserslist 过期与 Vite chunk size warning；`/api/dashboard` 返回 `scanner_status=stopped`、`is_running=false`、`production_refresh_running=false`，本次测得约 `3251ms`；`/api/hourly-consensus?city=chicago&target_date=2026-07-02` 返回 `rows=24`、23 个 METAR 行、24 个 forecast 行；`/api/hourly-consensus?city=chicago&target_date=2026-07-03` 返回 `rows=24`、forecast-only 24 行，符合当前本地日还未产生 METAR 观测的状态。
+- 浏览器验证：in-app browser 打开 `http://127.0.0.1:5173/?city=chicago-kord&date=2026-07-03`，页面不再显示“正在连接”，有“推荐关注 / 自动抓取 / Hourly Temperature / Daily Max Prediction / Probability buckets / 抓取日志”，旧 `PolyWX-style city workbench` 文案不存在；浅色主题下 `body` 与 `root` 均为白底，无横向溢出；本次刷新后的 console 无新的 warn/error。
+- 当前可用性结论：Layer 7 主看板现在能稳定读取 2026-07-03 的最新 forecast/DEB/Gaussian bucket 数据，2026-07-02 的历史小时图也有完整 24 小时聚合；抓取状态与生产阶段可在日志 tab 里审计。当前仍是观察与模拟验证平台，不证明策略稳定盈利，不允许自动实盘。
+- 剩余阻塞：`/api/dashboard` 本轮一次返回约 3.25 秒，仍需后续继续压缩首页查询成本；`WeatherPanel.tsx` 仍偏大，后续应拆分；Chicago 2026-07-03 当前 METAR 为空是时区/日期进度导致的诚实状态，不应伪造观测；Layer 9 paper validation 与右侧 `/api/paper-orders` UI 接入尚未完成。
+- 下一步：先 push 当前修复，之后建议进入 Layer 7 截图级 QA 或 Layer 9 paper validation；继续保持 `LIVE_TRADING=false`、canary/live locked。

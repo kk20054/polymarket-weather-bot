@@ -12,7 +12,7 @@ import {
   YAxis,
 } from 'recharts'
 import { ExternalLink } from 'lucide-react'
-import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, CityEvidenceMarketBucketSummary, CityEvidenceProbabilitySummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, MarketBucketSummary, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, CityEvidenceMarketBucketSummary, CityEvidenceProbabilitySummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, MarketBucketSummary, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -20,6 +20,7 @@ interface Props {
   citySeries?: WeatherCitySeries[]
   events?: DashboardEvent[]
   fetchLog?: FetchLogRow[]
+  productionRefresh?: ProductionRefreshResult | null
   marketBuckets?: MarketBucketSummary | null
   signalDecisions?: SignalDecisionSummary | null
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
@@ -830,6 +831,7 @@ export function WeatherPanel({
   citySeries = [],
   events = [],
   fetchLog = [],
+  productionRefresh = null,
   marketBuckets,
   signalDecisions,
   dailyMaxPrediction,
@@ -1331,7 +1333,7 @@ export function WeatherPanel({
 
         {activeWorkbenchTab === 'fetch' && (
           <div className="p-2">
-            <EventTimeline events={eventRows} fetchLog={fetchLog} />
+            <EventTimeline events={eventRows} fetchLog={fetchLog} productionRefresh={productionRefresh} />
           </div>
         )}
       </section>
@@ -1772,7 +1774,6 @@ function HourlyEvidencePanel({
     gap_value: asNumber(row.gap),
     cloud_pct: row.cloud_cover ?? row.humidity ?? null,
   }))
-  const maxAbsGap = Math.max(0.1, ...chartRows.map(row => Math.abs(Number(row.gap_value ?? 0))))
   const peakRow = chartRows
     .filter(row => row.forecast_value !== null)
     .sort((a, b) => Number(b.forecast_value ?? -Infinity) - Number(a.forecast_value ?? -Infinity))[0]
@@ -1824,7 +1825,7 @@ function HourlyEvidencePanel({
                 }}
                 labelFormatter={(_, payload) => payload?.[0]?.payload?.timestamp ? shortTime(payload[0].payload.timestamp) : ''}
               />
-              <Bar yAxisId="percent" dataKey="cloud_pct" name="Cloud / RH" fill="#2563EB" fillOpacity={0.22} maxBarSize={22} />
+              <Bar yAxisId="percent" dataKey="cloud_pct" name="Cloud / RH" fill="#2563EB" fillOpacity={0.16} maxBarSize={18} />
               <Line yAxisId="temp" type="monotone" dataKey="metar_value" name="METAR 实测" stroke="#F8FAFC" dot={{ r: 2, fill: '#F8FAFC', strokeWidth: 0 }} strokeWidth={2.2} connectNulls={false} />
               <Line yAxisId="temp" type="monotone" dataKey="forecast_value" name="预报" stroke="#38BDF8" strokeDasharray="4 4" dot={false} strokeWidth={2} connectNulls={false} />
               {peakRow?.label && (
@@ -1838,20 +1839,6 @@ function HourlyEvidencePanel({
               )}
             </ComposedChart>
           </ResponsiveContainer>
-        </div>
-        <div className="mt-1 grid h-8 grid-flow-col auto-cols-fr items-end gap-px border-t border-[#2C3445] px-8 pt-1" aria-label="Diff residual bars">
-          {chartRows.map(row => {
-            const diff = Number(row.gap_value ?? 0)
-            const height = Math.max(2, Math.min(24, Math.abs(diff) / maxAbsGap * 24))
-            return (
-              <div key={`diff-${row.id}`} className="flex h-6 items-end justify-center" title={`${row.label} diff ${fmtSignedTemp(diff, unit)}`}>
-                <div
-                  className={diff >= 0 ? 'w-full bg-red-500' : 'w-full bg-blue-500'}
-                  style={{ height: `${height}px`, opacity: row.gap_value === null || row.gap_value === undefined ? 0 : 0.66 }}
-                />
-              </div>
-            )
-          })}
         </div>
       </div>
 
@@ -2118,7 +2105,15 @@ type NormalizedFetchLogRow = {
   details: string
 }
 
-function EventTimeline({ events, fetchLog = [] }: { events: DashboardEvent[]; fetchLog?: FetchLogRow[] }) {
+function EventTimeline({
+  events,
+  fetchLog = [],
+  productionRefresh,
+}: {
+  events: DashboardEvent[]
+  fetchLog?: FetchLogRow[]
+  productionRefresh?: ProductionRefreshResult | null
+}) {
   const durationLabel = (event: DashboardEvent) => {
     const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data)
       ? event.data as Record<string, unknown>
@@ -2144,7 +2139,23 @@ function EventTimeline({ events, fetchLog = [] }: { events: DashboardEvent[]; fe
     if (tone === 'green' || tone === 'cyan') return 'OK'
     return 'INFO'
   }
-  const rows: NormalizedFetchLogRow[] = fetchLog.length > 0
+  const productionRows: NormalizedFetchLogRow[] = productionRefresh?.stages?.map((stage, index) => {
+    const payload = compactData(stage.payload, 420)
+    const status = stage.running ? 'RUN' : stage.skipped ? 'SKIP' : stage.ok ? 'OK' : 'ERR'
+    const message = stage.error || stage.reason || stage.name
+    return {
+      index: index + 1,
+      key: `production-refresh-${productionRefresh.requested_at || 'current'}-${stage.name}-${index}`,
+      time: productionRefresh.requested_at,
+      source: 'production-refresh',
+      stage: stage.name,
+      status,
+      duration: visibleElapsedLabel(stage.elapsed_ms) || '--',
+      message,
+      details: payload || message || '--',
+    }
+  }) ?? []
+  const sourceRows: NormalizedFetchLogRow[] = fetchLog.length > 0
     ? fetchLog.slice(0, 100).map((row, index) => {
       const duration = visibleElapsedLabel(row.duration) || '--'
       return {
@@ -2174,11 +2185,22 @@ function EventTimeline({ events, fetchLog = [] }: { events: DashboardEvent[]; fe
         details: data || event.type || '--',
       }
     })
+  const rows = [...productionRows, ...sourceRows].slice(0, 120)
   const statusClass = (status: string) => {
+    if (status === 'RUN') return 'text-cyan-300'
     if (status === 'ERR') return 'text-red-300'
     if (status === 'WARN') return 'text-amber-300'
+    if (status === 'SKIP') return 'text-neutral-500'
     if (status === 'OK') return 'text-green-300'
     return 'text-neutral-400'
+  }
+  const stageGroup = (stage: string) => {
+    const lower = stage.toLowerCase()
+    if (/forecast|openmeteo|daily|max|hourly/.test(lower)) return 'weather'
+    if (/metar|truth|observation|historical/.test(lower)) return 'observation'
+    if (/orderbook|bucket|clob|market/.test(lower)) return 'orderbook'
+    if (/signal|decision/.test(lower)) return 'signal'
+    return 'system'
   }
 
   return (
@@ -2198,7 +2220,7 @@ function EventTimeline({ events, fetchLog = [] }: { events: DashboardEvent[]; fe
           ['signal', '信号'],
           ['system', '系统'],
         ].map(([stage, label]) => {
-          const count = rows.filter(row => row.stage === stage).length
+          const count = rows.filter(row => stageGroup(row.stage) === stage).length
           return (
             <div key={stage} className="border border-neutral-800 px-2 py-1 text-neutral-500">
               {label} <span className="tabular-nums text-neutral-200">{count}</span>
@@ -2400,8 +2422,8 @@ function TemperatureDistributionPanel({
                   }}
                 />
                 <Bar dataKey="probabilityPct" name="模型概率" maxBarSize={36} radius={[0, 0, 0, 0]}>
-                  {chartRows.map(row => (
-                    <Cell key={row.market_id || row.label} fill={probabilityFill(row.probability, row.is_signal)} stroke={row.is_signal ? '#22d3ee' : 'transparent'} strokeWidth={row.is_signal ? 1.5 : 0} />
+                  {chartRows.map((row, index) => (
+                    <Cell key={`${row.market_id || row.label || row.bucket_low || 'bucket'}-${index}`} fill={probabilityFill(row.probability, row.is_signal)} stroke={row.is_signal ? '#22d3ee' : 'transparent'} strokeWidth={row.is_signal ? 1.5 : 0} />
                   ))}
                 </Bar>
                 {!fallbackMode && <Line type="monotone" dataKey="askPct" name="卖一" stroke="#f97316" dot={false} strokeWidth={1.4} connectNulls={false} />}
@@ -2427,8 +2449,8 @@ function TemperatureDistributionPanel({
                   </tr>
                 </thead>
                 <tbody>
-                  {displayItems.map(item => (
-                    <tr key={item.market_id || `${item.bucket_low}-${item.bucket_high}`} className={`border-b border-[#2C3445]/80 ${item.is_signal ? 'bg-cyan-500/10 text-cyan-200' : 'hover:bg-[#222A37]'}`}>
+                  {displayItems.map((item, index) => (
+                    <tr key={`${item.market_id || item.bucket_label || `${item.bucket_low}-${item.bucket_high}` || 'bucket'}-${index}`} className={`border-b border-[#2C3445]/80 ${item.is_signal ? 'bg-cyan-500/10 text-cyan-200' : 'hover:bg-[#222A37]'}`}>
                       <td className="max-w-[132px] px-2 py-1" title={item.question}>
                         <span className="block truncate">
                           {item.bucket_label ? fmtBucketLabel(item.bucket_label, item.bucket_low, unit) : fmtBucket(item, unit)}
@@ -2471,8 +2493,8 @@ function TemperatureDistributionPanel({
                 </div>
                 {reasonCounts.length > 0 && (
                   <div className="mt-1 space-y-1">
-                    {reasonCounts.slice(0, 4).map(reason => (
-                      <div key={reason.reason} className="flex items-center justify-between gap-2 border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
+                    {reasonCounts.slice(0, 4).map((reason, index) => (
+                      <div key={`${reason.reason || 'reason'}-${index}`} className="flex items-center justify-between gap-2 border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
                         <span className="min-w-0 truncate" title={reason.reason}>{reason.reason}</span>
                         <span className="shrink-0 tabular-nums text-amber-300">{reason.count}</span>
                       </div>
@@ -2481,8 +2503,8 @@ function TemperatureDistributionPanel({
                 )}
                 {executableSignals.length > 0 && (
                   <div className="mt-1 space-y-1">
-                    {executableSignals.slice(0, 2).map(row => (
-                      <a key={`${row.signal_id}-${row.market_id}`} href={row.event_url || undefined} target="_blank" rel="noreferrer" className="block border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-1 text-emerald-200 hover:bg-emerald-500/15">
+                    {executableSignals.slice(0, 2).map((row, index) => (
+                      <a key={`executable-${row.signal_id || row.market_id || row.event_url || row.bucket || 'signal'}-${index}`} href={row.event_url || undefined} target="_blank" rel="noreferrer" className="block border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-1 text-emerald-200 hover:bg-emerald-500/15">
                         <span className="block truncate" title={row.bucket}>{row.bucket || '--'}</span>
                         <span className="tabular-nums text-emerald-300">{fmtPrice(row.price)} / edge {fmtSignedPct(row.edge)}</span>
                       </a>
@@ -2491,8 +2513,8 @@ function TemperatureDistributionPanel({
                 )}
                 {blockedSignals.length > 0 && executableSignals.length === 0 && (
                   <div className="mt-1 space-y-1">
-                    {blockedSignals.slice(0, 2).map(row => (
-                      <div key={`${row.signal_id}-${row.market_id}`} className="border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
+                    {blockedSignals.slice(0, 2).map((row, index) => (
+                      <div key={`blocked-${row.signal_id || row.market_id || row.event_url || row.bucket || 'signal'}-${index}`} className="border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
                         <div className="truncate text-[#CBD2DC]" title={row.bucket}>{row.bucket || '--'}</div>
                         <div className="truncate text-[#7D8694]" title={(row.reasons || []).join(', ')}>{(row.reasons || []).slice(0, 2).join(', ') || 'blocked'}</div>
                       </div>

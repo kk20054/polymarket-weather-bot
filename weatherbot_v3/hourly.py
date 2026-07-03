@@ -526,12 +526,20 @@ def forecast_hourly_points(
             unit = str(run.get("unit") or "")
             city = str(run.get("city") or "").strip().lower()
             target_date = str(run.get("target_date") or "")
-            key = (city, target_date, valid_at)
+            profile = SETTLEMENT_REGISTRY.get(city)
+            local_parts = _forecast_local_parts(profile, target_date, valid_at)
+            if not local_parts:
+                continue
+            local_date, local_hour, local_timestamp = local_parts
+            if local_date != target_date:
+                continue
+            key = (city, target_date, local_hour)
             bucket = buckets.setdefault(
                 key,
                 {
-                    "timestamp": valid_at,
+                    "timestamp": local_timestamp,
                     "target_date": target_date,
+                    "local_hour": local_hour,
                     "city": city,
                     "values": [],
                     **{f"{field}_values": [] for field in FIELD_KEYS},
@@ -577,6 +585,7 @@ def forecast_hourly_points(
         point = {
             "timestamp": bucket["timestamp"],
             "target_date": bucket["target_date"],
+            "local_hour": bucket["local_hour"],
             "horizon": bucket["horizon"],
             "best": forecast_temp,
             "ensemble_mean": forecast_temp,
@@ -619,7 +628,21 @@ def _select_forecast_runs_for_target(city: str, runs: list[dict[str, Any]]) -> l
     eligible = [run for run in runs if _is_training_eligible(run)]
     exact_primary = [run for run in eligible if _source_label(run) in primary_sources]
     if exact_primary:
-        return [_with_forecast_role(run, "primary") for run in exact_primary]
+        exact_labels = {_source_label(run) for run in exact_primary}
+        supplemental = [
+            run
+            for run in eligible
+            if _source_label(run) not in exact_labels
+            and any(token in _source_label(run).lower() for token in ("ecmwf", "gfs", "hrrr", "nbm", "icon"))
+        ]
+        # Recent Open-Meteo refreshes can contain only the remaining UTC hours
+        # for a local target day. Keep older complete model snapshots as
+        # supplemental evidence so a METAR rebuild never erases populated
+        # forecast hours from the dashboard.
+        return [
+            *(_with_forecast_role(run, "primary") for run in exact_primary),
+            *(_with_forecast_role(run, "supplemental") for run in supplemental[:3]),
+        ]
 
     openmeteo_candidates = [
         run
@@ -1067,6 +1090,43 @@ def _select_profiles(cities: list[str] | None) -> list[CitySettlementProfile]:
         if profile:
             selected.append(profile)
     return selected
+
+
+def _forecast_local_parts(
+    profile: CitySettlementProfile | None,
+    target_date: str,
+    valid_at: str,
+) -> tuple[str, str, str] | None:
+    """Return station-local date/hour for a forecast timestamp.
+
+    Open-Meteo rows fetched with an explicit timezone may persist naive local
+    timestamps, while newer collector rows can persist UTC offsets. Treat naive
+    forecast timestamps as station-local so historical 24h forecast snapshots
+    do not slide into the previous local day.
+    """
+    if not profile:
+        return None
+    text = str(valid_at or "").strip()
+    if not text:
+        return None
+    zone = ZoneInfo(profile.timezone)
+    tail = text[10:]
+    has_timezone = text.endswith("Z") or "+" in tail or "-" in tail
+    try:
+        if has_timezone:
+            parsed = _parse_report_time(text)
+            if parsed is None:
+                return None
+            local_dt = parsed.astimezone(zone)
+        else:
+            local_dt = datetime.fromisoformat(text).replace(tzinfo=zone)
+    except Exception:
+        return None
+    return (
+        local_dt.date().isoformat(),
+        f"{local_dt.hour:02d}:00",
+        local_dt.replace(minute=0, second=0, microsecond=0).isoformat(),
+    )
 
 
 def _parse_report_time(value: Any) -> datetime | None:

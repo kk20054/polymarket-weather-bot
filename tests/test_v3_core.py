@@ -3156,7 +3156,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("chicago", points)
         self.assertEqual(len(points["chicago"]), 1)
         point = points["chicago"][0]
-        self.assertEqual(point["timestamp"], "2026-06-29T12:00:00+00:00")
+        self.assertEqual(point["timestamp"], "2026-06-29T07:00:00-05:00")
+        self.assertEqual(point["local_hour"], "07:00")
         self.assertEqual(point["best"], 81)
         self.assertEqual(point["humidity"], 50)
         self.assertEqual(point["cloud_cover"], 80)
@@ -3169,6 +3170,39 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(point["condition"], "Clear")
         self.assertEqual(point["member_count"], 2)
         self.assertTrue(point["archive"])
+
+    def test_forecast_hourly_points_keep_supplemental_runs_when_primary_is_partial(self):
+        db_path = test_db_path("forecast_hourly_partial_primary")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            primary_run, primary_members = openmeteo_hourly_run(
+                "chicago",
+                "2026-07-02",
+                "openmeteo_ncep_hrrr_conus",
+                [90.0],
+                valid_times=["2026-07-03T00:00:00+00:00"],
+                retrieved_at="2026-07-03T03:20:00+00:00",
+            )
+            insert_forecast_run(primary_run, primary_members)
+            legacy_run, legacy_members = openmeteo_hourly_run(
+                "chicago",
+                "2026-07-02",
+                "ecmwf",
+                [84.0, 86.0],
+                valid_times=["2026-07-02T00:00:00", "2026-07-02T19:00:00"],
+                retrieved_at="2026-07-02T12:00:00+00:00",
+            )
+            insert_forecast_run(legacy_run, legacy_members)
+
+            points = forecast_hourly_points({"chicago": {"2026-07-02"}}, db_path=db_path)
+
+        by_hour = {point["local_hour"]: point for point in points["chicago"]}
+        self.assertIn("00:00", by_hour)
+        self.assertIn("19:00", by_hour)
+        self.assertAlmostEqual(by_hour["00:00"]["best"], 84.0)
+        self.assertAlmostEqual(by_hour["19:00"]["best"], 88.0)
+        self.assertIn("ecmwf", by_hour["00:00"]["forecast_sources"])
+        self.assertIn("openmeteo_ncep_hrrr_conus", by_hour["19:00"]["forecast_sources"])
 
     def test_hourly_consensus_points_read_metar_observations(self):
         db_path = test_db_path("hourly_consensus_points")

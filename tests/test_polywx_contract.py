@@ -100,9 +100,7 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("forecast_value", panel)
         self.assertIn("tickFormatter={value => `${Number(value).toFixed(0)}°${unit}`}", panel)
         self.assertIn("峰值", panel)
-        self.assertIn('aria-label="Diff residual bars"', panel)
-        self.assertIn("bg-red-500", panel)
-        self.assertIn("bg-blue-500", panel)
+        self.assertNotIn('aria-label="Diff residual bars"', panel)
         self.assertIn("No hourly rows for this date.", panel)
         self.assertNotIn("点击“自动抓取”后，这里会按抓取时间展示", panel)
 
@@ -125,8 +123,9 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("暂无匹配市场桶", panel)
         self.assertNotIn("逐小时气温 + DEB + 分桶", panel)
         self.assertIn("推荐关注", app)
-        self.assertIn("预计最高", app)
-        self.assertIn("border-amber-500/35", app)
+        self.assertIn("recommendedCities", app)
+        self.assertIn("信号 {actionableCityCount}", app)
+        self.assertIn("border-amber-500/25", app)
         self.assertNotIn("evidence-only", app)
 
     def test_tables_and_fetch_log_match_polywx_information_architecture(self):

@@ -1007,8 +1007,9 @@ function App() {
   const selectedCityMeta = cityOptions.find(city => city.key === selectedCity)
   const selectedCityEvidence = cityEvidence.find(city => city.city_key === selectedCity)
   const selectedDateEvidence = selectedCityEvidence?.dates.find(item => item.target_date === selectedDate) ?? selectedCityEvidence?.dates[0]
-  const recommendedCity = cityOptions.find(city => city.actionable > 0)
-  const citySummaryCard = recommendedCity ?? selectedCityMeta ?? cityOptions[0]
+  const recommendedCities = cityOptions
+    .filter(city => city.actionable > 0)
+    .slice(0, 4)
   const actionableCityCount = cityOptions.filter(city => city.actionable > 0).length
   const selectedEvidenceCount = (selectedCityMeta?.forecastCount ?? 0)
     + (selectedCityMeta?.historyCount ?? 0)
@@ -1199,43 +1200,7 @@ function App() {
 
       <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[260px_minmax(560px,1fr)_340px] xl:overflow-hidden">
         <aside className="order-2 border-b border-neutral-800 bg-neutral-950/40 xl:order-1 xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
-          {citySummaryCard && (
-            <a
-              href={cityHref(citySummaryCard)}
-              onClick={event => {
-                event.preventDefault()
-                setSelectedCity(citySummaryCard.key)
-              }}
-              className="m-3 block border border-amber-500/35 bg-amber-500/10 p-3 text-left shadow-[inset_0_1px_0_rgba(251,191,36,0.12)] transition hover:border-amber-400/60 hover:bg-amber-500/15"
-            >
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <div className="text-[11px] font-medium text-amber-200">
-                  推荐关注
-                </div>
-                <div className="text-[9px] text-amber-200/70">
-                  数据 {dataAge(stats.data_age_minutes)}
-                </div>
-              </div>
-              <div className="truncate text-lg font-semibold leading-tight text-neutral-50">{citySummaryCard.name}</div>
-              <div className="mt-1 truncate text-[10px] text-amber-100/60">{citySummaryCard.station || 'station 未映射'}</div>
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <div className="border border-amber-500/20 bg-black/25 px-2 py-1.5">
-                  <div className="text-[9px] text-amber-100/60">现在</div>
-                  <div className="tabular-nums text-sm text-neutral-50">
-                    {citySummaryCard.latestMetar === null || citySummaryCard.latestMetar === undefined ? '--' : `${Number(citySummaryCard.latestMetar).toFixed(1)}°${citySummaryCard.unit}`}
-                  </div>
-                </div>
-                <div className="border border-amber-500/20 bg-black/25 px-2 py-1.5">
-                  <div className="text-[9px] text-amber-100/60">预计最高</div>
-                  <div className="tabular-nums text-sm text-neutral-50">
-                    {citySummaryCard.latest === null || citySummaryCard.latest === undefined ? '--' : `${Number(citySummaryCard.latest).toFixed(1)}°${citySummaryCard.unit}`}
-                  </div>
-                </div>
-              </div>
-            </a>
-          )}
-
-          <div className="border-t border-neutral-800 p-3">
+          <div className="p-3">
             <div className="mb-2 flex items-center justify-between">
               <div>
                 <div className="text-sm font-medium text-neutral-100">城市</div>
@@ -1358,12 +1323,51 @@ function App() {
           </div>
 
           <div className="min-h-[720px] overflow-y-auto xl:min-h-0 xl:flex-1">
+            <div className="border-b border-neutral-800 p-2">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <div className="text-[10px] font-medium text-neutral-300">推荐关注</div>
+                <div className="text-[9px] text-neutral-500">信号 {actionableCityCount}</div>
+              </div>
+              {recommendedCities.length > 0 ? (
+                <div className="grid gap-1 md:grid-cols-2 2xl:grid-cols-4">
+                  {recommendedCities.map(city => (
+                    <a
+                      key={city.key}
+                      href={cityHref(city)}
+                      onClick={event => {
+                        event.preventDefault()
+                        setSelectedCity(city.key)
+                      }}
+                      className={`min-w-0 border px-2 py-1.5 transition ${
+                        selectedCity === city.key
+                          ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
+                          : 'border-amber-500/25 bg-amber-500/5 text-neutral-300 hover:border-amber-400/50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate text-[11px] font-medium">{city.name}</span>
+                        <span className="shrink-0 tabular-nums text-[10px] text-green-300">{city.actionable}/{city.signals}</span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between gap-2 text-[9px] text-neutral-500">
+                        <span className="truncate">{city.station || 'station 未映射'}</span>
+                        <span className="shrink-0 tabular-nums">{city.latest === null || city.latest === undefined ? '--' : `${Number(city.latest).toFixed(1)}°${city.unit}`}</span>
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              ) : (
+                <div className="border border-neutral-800 px-2 py-2 text-[10px] text-neutral-500">
+                  暂无可执行信号，优先观察证据完整和盘口可用城市。
+                </div>
+              )}
+            </div>
             <WeatherPanel
               forecasts={forecasts}
               signals={signals}
               citySeries={citySeries}
               events={events}
               fetchLog={fetchLog}
+              productionRefresh={productionRefresh}
               marketBuckets={marketBucketsQuery.data ?? null}
               signalDecisions={signalDecisionsQuery.data ?? null}
               dailyMaxPrediction={dailyMaxPredictionQuery.data ?? null}
