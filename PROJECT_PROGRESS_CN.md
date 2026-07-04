@@ -40,7 +40,7 @@
 - 真实跑数：执行 `signal-decisions-build --city chicago --city nyc --city atlanta --target-date 2026-07-04 --limit 200`，写入 33 条最新决策（每城 11）；最新 issued_at 均为 `2026-07-04T11:00:00+00:00`。最新轮次按策略统计：`single_bucket_ev=33`、`paper_allowed=0`、平均 edge `-0.009212`、平均 Kelly `0.024041`；`ladder_grid=0`，原因是没有 3 桶同时满足 edge/sizing；`tail_buying=0`，原因是未同时满足 ask、edge、历史样本 gate。审计报告写入 `audits/strategy-multiplex-report-2026-07-04.md`，不提交。
 - 结论：策略复用层、Kelly sizing 和 ladder paper 原子执行已落地并有回归测试；真实当日 Chicago/NYC/Atlanta 仍无可执行 paper 候选，主要阻塞是 `insufficient_bias_samples`、`settlement_rule_unverified`、`spread_too_wide`，说明当前不能自动加仓，更不能 live。`LIVE_TRADING=false` 未改变。
 - 下一步：继续补 settlement verification/truth 样本与盘口 replay；若要让 ladder/tail 真正参与 paper validation，需要先改善样本、价差和市场桶匹配，不应通过放宽 gate 伪造候选。
-- 相关提交：`7b2c233`。
+- 相关提交：`dbd3459`。
 
 ### 2026-07-04：Layer 2/4/6 PWS、DEB peak 与摄氏桶口径修正
 
