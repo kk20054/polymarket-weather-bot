@@ -13,6 +13,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -58,7 +59,8 @@ from weatherbot_v3.polymarket import PolymarketDataClient
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
-from weatherbot_v3.stations import list_stations, sync_station_registry
+from weatherbot_v3.scheduler import get_scheduler
+from weatherbot_v3.stations import list_stations, set_station_enabled, sync_station_registry
 from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summary
 from weatherbot_v3.db import paper_execution_summary
 from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_rule
@@ -89,6 +91,7 @@ AUTO_REFRESH_DAYS = max(1, min(int(os.getenv("WEATHERBOT_AUTO_REFRESH_DAYS", "1"
 AUTO_REFRESH_LIMIT = max(1, min(int(os.getenv("WEATHERBOT_AUTO_REFRESH_LIMIT", "20") or "20"), 100))
 AUTO_REFRESH_CITIES = os.getenv("WEATHERBOT_AUTO_REFRESH_CITIES", "").strip()
 AUTO_REFRESH_SIGNAL_SCAN = os.getenv("WEATHERBOT_AUTO_REFRESH_SIGNAL_SCAN", "false").strip().lower() not in {"0", "false", "no", "off"}
+SCHEDULER_AUTO_START = os.getenv("WEATHERBOT_SCHEDULER", "false").strip().lower() not in {"0", "false", "no", "off"}
 RESUME_AUTO_SIMULATION = os.getenv("WEATHERBOT_RESUME_AUTO_SIMULATION", "false").strip().lower() not in {"0", "false", "no", "off"}
 dashboard_payload_cache: dict | None = None
 dashboard_payload_cache_at: datetime | None = None
@@ -118,6 +121,11 @@ class StatusUpdate(BaseModel):
 class WeatherHistoryBackfillRequest(BaseModel):
     days: int = 30
     cities: list[str] | None = None
+
+
+class StationEnabledUpdate(BaseModel):
+    enabled: bool
+    tier: int | None = None
 
 
 class SimulationReset(BaseModel):
@@ -584,6 +592,329 @@ def _data_age_minutes(latest_iso):
         return round((datetime.now(timezone.utc) - latest).total_seconds() / 60.0, 1)
     except Exception:
         return None
+
+
+def _age_seconds(value, *, now: datetime | None = None):
+    parsed = _parse_iso(value)
+    if not parsed:
+        return None
+    current = now or datetime.now(timezone.utc)
+    return max(0.0, (current - parsed).total_seconds())
+
+
+def _temperature_in_unit(value, unit: str):
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    display_unit = str(unit or "").upper()
+    if display_unit == "F" and number < 60:
+        converted = _c_to_f(number)
+        return round(converted, 1) if converted is not None else None
+    if display_unit == "C" and number > 60:
+        return round((number - 32.0) * 5.0 / 9.0, 1)
+    return round(number, 1)
+
+
+def _latest_rows_by_city(rows: list[dict], time_key: str) -> dict[str, dict]:
+    latest: dict[str, dict] = {}
+    for row in rows:
+        city = str(row.get("city") or row.get("city_key") or "").strip().lower()
+        if not city:
+            continue
+        current = latest.get(city)
+        if current is None or str(row.get(time_key) or "") > str(current.get(time_key) or ""):
+            latest[city] = row
+    return latest
+
+
+def _recommendation_reasons(row: dict) -> list[str]:
+    reasons = []
+    for value in row.get("gate_reasons") or _read_json_from_text(row.get("gate_reasons_json"), []):
+        text = str(value or "").strip()
+        if text and text not in reasons:
+            reasons.append(text)
+    primary = str(row.get("blocked_reason_primary") or "").strip()
+    if primary and primary not in reasons:
+        reasons.insert(0, primary)
+    return reasons
+
+
+def _recommendation_is_paper_or_spread_watch(row: dict) -> bool:
+    if bool(row.get("paper_allowed")):
+        return True
+    ignored = {"live_trading_disabled", "paper_gate_not_passed", "insufficient_bias_samples"}
+    blocking = {reason for reason in _recommendation_reasons(row) if reason not in ignored}
+    return bool(blocking) and blocking <= {"spread_too_wide"}
+
+
+def _recommendation_class(target_date: str, station: dict, now: datetime) -> str:
+    tz_name = str(station.get("settlement_timezone") or station.get("timezone") or "UTC")
+    try:
+        local_today = now.astimezone(ZoneInfo(tz_name)).date().isoformat()
+    except Exception:
+        local_today = now.date().isoformat()
+    return "today_observation" if str(target_date or "") <= local_today else "forecast_lead"
+
+
+def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = None, path: Path | None = None) -> dict:
+    """Return PolyWX-style watch cards from persisted Layer 6 decisions only."""
+    init_v3_db(path)
+    now = datetime.now(timezone.utc)
+    today = _today_str()
+    items: list[dict] = []
+    skipped = Counter()
+    with connect(path) as conn:
+        stations = {
+            str(row["city_key"]): dict(row)
+            for row in conn.execute("SELECT * FROM stations").fetchall()
+        }
+        metars = _latest_rows_by_city(
+            [dict(row) for row in conn.execute(
+                """
+                SELECT *
+                FROM metar_reports
+                WHERE city IS NOT NULL AND TRIM(city) != ''
+                ORDER BY report_time DESC, id DESC
+                LIMIT 500
+                """
+            ).fetchall()],
+            "report_time",
+        )
+        china_live = _latest_rows_by_city(
+            [dict(row) for row in conn.execute(
+                """
+                SELECT *
+                FROM mesonet_observations
+                WHERE network = 'china_live'
+                  AND city IS NOT NULL
+                  AND TRIM(city) != ''
+                ORDER BY observed_at DESC, id DESC
+                LIMIT 100
+                """
+            ).fetchall()],
+            "observed_at",
+        )
+        forecast_runs = [
+            dict(row) for row in conn.execute(
+                """
+                SELECT
+                    city,
+                    target_date,
+                    COALESCE(retrieved_at, run_at, created_at) AS forecast_time,
+                    source
+                FROM forecast_runs
+                WHERE target_date >= ?
+                  AND city IS NOT NULL
+                  AND TRIM(city) != ''
+                ORDER BY city, target_date, COALESCE(retrieved_at, run_at, created_at) DESC, id DESC
+                LIMIT 1500
+                """,
+                (today,),
+            ).fetchall()
+        ]
+        predictions = [
+            dict(row) for row in conn.execute(
+                """
+                SELECT *
+                FROM daily_max_predictions
+                WHERE target_date >= ?
+                ORDER BY target_date ASC, issued_at DESC, id DESC
+                LIMIT 500
+                """,
+                (today,),
+            ).fetchall()
+        ]
+        decisions = [
+            dict(row) for row in conn.execute(
+                """
+                SELECT
+                    sd.*,
+                    mb.event_url AS bucket_event_url,
+                    mb.question AS bucket_question,
+                    mb.bucket_label AS market_bucket_label,
+                    mb.strict_match_status AS market_strict_match_status,
+                    mb.strict_match_reasons AS market_strict_match_reasons,
+                    mb.unit AS market_unit,
+                    mb.station_id AS market_station_id,
+                    mb.price AS bucket_price
+                FROM signal_decisions sd
+                LEFT JOIN market_buckets mb ON mb.bucket_key = sd.bucket_key
+                WHERE sd.target_date >= ?
+                ORDER BY sd.city_key, sd.target_date, sd.issued_at DESC, sd.edge DESC, sd.id DESC
+                LIMIT 1500
+                """,
+                (today,),
+            ).fetchall()
+        ]
+
+    latest_prediction_by_city: dict[str, dict] = {}
+    for row in predictions:
+        city = str(row.get("city_key") or "").strip().lower()
+        if city and city not in latest_prediction_by_city:
+            latest_prediction_by_city[city] = row
+
+    latest_forecast_by_city_date: dict[tuple[str, str], dict] = {}
+    for row in forecast_runs:
+        city = str(row.get("city") or "").strip().lower()
+        target_date = str(row.get("target_date") or "")
+        if city and target_date:
+            latest_forecast_by_city_date.setdefault((city, target_date), row)
+
+    latest_issued_by_city_date: dict[tuple[str, str], str] = {}
+    for row in decisions:
+        key = (str(row.get("city_key") or "").strip().lower(), str(row.get("target_date") or ""))
+        if not key[0] or not key[1]:
+            continue
+        latest_issued_by_city_date.setdefault(key, str(row.get("issued_at") or ""))
+
+    candidates: list[dict] = []
+    for row in decisions:
+        city = str(row.get("city_key") or "").strip().lower()
+        target_date = str(row.get("target_date") or "")
+        if not city or not target_date:
+            continue
+        if str(row.get("issued_at") or "") != latest_issued_by_city_date.get((city, target_date)):
+            skipped["older_decision_round"] += 1
+            continue
+        station = stations.get(city) or {}
+        metar = metars.get(city) or {}
+        forecast = latest_forecast_by_city_date.get((city, target_date)) or {}
+        recommendation_class = _recommendation_class(target_date, station, now)
+        metar_age = _age_seconds(metar.get("report_time"), now=now)
+        forecast_age = _age_seconds(forecast.get("forecast_time"), now=now)
+        if recommendation_class == "today_observation" and (metar_age is None or metar_age >= 30 * 60):
+            skipped["metar_stale_or_missing"] += 1
+            continue
+        if recommendation_class == "forecast_lead" and (forecast_age is None or forecast_age >= 90 * 60):
+            skipped["forecast_stale_or_missing"] += 1
+            continue
+        if not str(station.get("settlement_rule_verified_at") or "").strip():
+            skipped["settlement_unverified"] += 1
+            continue
+        if str(row.get("market_strict_match_status") or "") != "matched":
+            skipped["bucket_not_strict_match"] += 1
+            continue
+        if not _recommendation_is_paper_or_spread_watch(row):
+            skipped["paper_gate_blocked"] += 1
+            continue
+        candidates.append(row)
+
+    candidates.sort(key=lambda row: (
+        0 if bool(row.get("paper_allowed")) else 1,
+        -float(row.get("edge") or -999),
+        str(row.get("target_date") or ""),
+    ))
+    seen_cities: set[str] = set()
+    for row in candidates:
+        city = str(row.get("city_key") or "").strip().lower()
+        if city in seen_cities:
+            continue
+        seen_cities.add(city)
+        station = stations.get(city) or {}
+        metar = metars.get(city) or {}
+        forecast = latest_forecast_by_city_date.get((city, str(row.get("target_date") or ""))) or {}
+        prediction = latest_prediction_by_city.get(city) or row
+        unit = str(station.get("settlement_unit") or row.get("market_unit") or "F").upper()
+        reasons = [
+            reason for reason in _recommendation_reasons(row)
+            if reason not in {"live_trading_disabled", "insufficient_bias_samples"}
+        ]
+        items.append({
+            "type": "trade_candidate",
+            "city_key": city,
+            "city_name": station.get("city_name") or city,
+            "station_id": station.get("station_id") or row.get("market_station_id") or "",
+            "settlement_station_id": station.get("settlement_station_id") or station.get("station_id") or "",
+            "verification_status": station.get("verification_status") or "",
+            "settlement_rule_verified_at": station.get("settlement_rule_verified_at") or "",
+            "recommendation_class": _recommendation_class(str(row.get("target_date") or ""), station, now),
+            "metar_age_seconds": _age_seconds(metar.get("report_time"), now=now) if metar else None,
+            "metar_report_time": metar.get("report_time") if metar else None,
+            "forecast_age_seconds": _age_seconds(forecast.get("forecast_time"), now=now) if forecast else None,
+            "forecast_time": forecast.get("forecast_time") if forecast else None,
+            "current_temp": _temperature_in_unit(metar.get("temperature"), unit),
+            "current_temp_unit": unit,
+            "target_date": row.get("target_date"),
+            "deb_mu": _temperature_in_unit(row.get("mu"), unit),
+            "deb_sigma": row.get("sigma"),
+            "deb_unit": unit,
+            "bucket_label": row.get("market_bucket_label") or (row.get("model_bucket_probs") or {}).get("bucket_label") or row.get("bucket_key"),
+            "bucket_key": row.get("bucket_key"),
+            "edge": row.get("edge"),
+            "edge_percent": row.get("edge_percent"),
+            "model_probability": row.get("model_probability"),
+            "market_probability": row.get("market_implied_probability"),
+            "market_ask": row.get("market_ask"),
+            "market_bid": row.get("market_bid"),
+            "paper_allowed": bool(row.get("paper_allowed")),
+            "blocked_reasons": reasons,
+            "polymarket_url": row.get("bucket_event_url"),
+            "market_id": row.get("market_id"),
+            "token_id": row.get("yes_token_id") or row.get("token_id"),
+        })
+        if len(items) >= limit:
+            break
+
+    for city in ("shanghai", "hong-kong"):
+        if len(items) >= limit:
+            break
+        if any(item.get("city_key") == city for item in items):
+            continue
+        station = stations.get(city) or {}
+        if str(station.get("verification_status") or "") != "no_active_market":
+            continue
+        prediction = latest_prediction_by_city.get(city) or {}
+        live_row = china_live.get(city) or metars.get(city) or {}
+        observed_time = live_row.get("observed_at") or live_row.get("report_time")
+        unit = str(station.get("settlement_unit") or station.get("unit") or "C").upper()
+        items.append({
+            "type": "observation_only",
+            "city_key": city,
+            "city_name": station.get("city_name") or city,
+            "station_id": station.get("station_id") or "",
+            "settlement_station_id": station.get("settlement_station_id") or station.get("station_id") or "",
+            "verification_status": "no_active_market",
+            "settlement_rule_verified_at": station.get("settlement_rule_verified_at") or "",
+            "metar_age_seconds": _age_seconds(observed_time, now=now),
+            "metar_report_time": observed_time,
+            "current_temp": _temperature_in_unit(live_row.get("temperature"), unit),
+            "current_temp_unit": unit,
+            "target_date": prediction.get("target_date") or today,
+            "deb_mu": _temperature_in_unit(prediction.get("mu"), unit),
+            "deb_sigma": prediction.get("sigma"),
+            "deb_unit": unit,
+            "china_live_temp": _temperature_in_unit(live_row.get("temperature"), unit),
+            "china_live_observed_at": observed_time,
+            "badge": "仅观测分析（无市场）",
+            "blocked_reasons": ["no_active_market"],
+        })
+
+    scheduler_running = bool((scheduler_status or {}).get("running"))
+    empty_reason = ""
+    if not items:
+        empty_reason = "scheduler_stopped" if not scheduler_running else "no_recommendations_after_gates"
+    return {
+        "ok": True,
+        "recommendation_version": "recommendations-v1",
+        "generated_at": now.isoformat(),
+        "scheduler_running": scheduler_running,
+        "filters": {
+            "today_observation_metar_max_age_seconds": 30 * 60,
+            "forecast_lead_forecast_max_age_seconds": 90 * 60,
+            "settlement_rule_verified_required": True,
+            "strict_match_status": "matched",
+            "paper_allowed_or_spread_watch": True,
+        },
+        "skipped": dict(skipped),
+        "count": len(items),
+        "trade_candidate_count": sum(1 for item in items if item.get("type") == "trade_candidate"),
+        "observation_only_count": sum(1 for item in items if item.get("type") == "observation_only"),
+        "empty_reason": empty_reason,
+        "items": items,
+    }
 
 
 def _parse_iso(value):
@@ -2325,8 +2656,11 @@ def _build_weather_city_series(markets):
 def _registry_city_series(targets: dict[str, set[str]] | None = None):
     """Lightweight city index used before the first manual data refresh."""
     hourly_by_city = _hourly_cache_for_targets(targets if targets is not None else _recent_hourly_targets())
+    station_rows = {str(row.get("city_key") or row.get("city") or ""): row for row in list_stations()}
+    latest_fetch = _latest_fetch_by_city()
     rows = []
     for profile in SETTLEMENT_REGISTRY.values():
+        station_row = station_rows.get(profile.city) or {}
         hourly_points = sorted(
             list(hourly_by_city.get(profile.city) or []),
             key=lambda point: str(point.get("timestamp") or point.get("local_hour") or ""),
@@ -2340,6 +2674,17 @@ def _registry_city_series(targets: dict[str, set[str]] | None = None):
             "station_id": profile.station_id,
             "station_name": profile.station_name,
             "unit": profile.unit,
+            "enabled": bool(station_row.get("enabled")),
+            "tier": int(station_row.get("tier") or 9),
+            "settlement_station_id": station_row.get("settlement_station_id") or profile.station_id,
+            "settlement_station_name": station_row.get("settlement_station_name") or profile.station_name,
+            "settlement_rule_verified_at": station_row.get("settlement_rule_verified_at") or "",
+            "settlement_timezone": station_row.get("settlement_timezone") or station_row.get("timezone") or profile.timezone,
+            "settlement_unit": station_row.get("settlement_unit") or station_row.get("unit") or profile.unit,
+            "settlement_time_basis": station_row.get("settlement_time_basis") or "local_day",
+            "primary_settlement_source": station_row.get("primary_settlement_source") or "",
+            "verification_status": station_row.get("verification_status") or "provisional",
+            "last_refreshed_at": latest_fetch.get(profile.city),
             "latest_best": _point_forecast_value(latest) if latest else None,
             "latest_metar": latest.get("metar") if latest else None,
             "latest_source": latest.get("source") or latest.get("forecast_source") if latest else None,
@@ -2354,6 +2699,24 @@ def _registry_city_series(targets: dict[str, set[str]] | None = None):
             "points": [],
         })
     return sorted(rows, key=lambda row: (row.get("city_name") or "").lower())
+
+
+def _latest_fetch_by_city() -> dict[str, str]:
+    try:
+        with connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT city, MAX(COALESCE(finished_at, created_at)) AS last_refreshed_at
+                FROM data_fetch_logs
+                WHERE city IS NOT NULL
+                  AND city != ''
+                  AND UPPER(COALESCE(status, '')) IN ('OK', 'WARN')
+                GROUP BY city
+                """
+            ).fetchall()
+        return {str(row["city"]): str(row["last_refreshed_at"]) for row in rows if row["last_refreshed_at"]}
+    except Exception:
+        return {}
 
 
 def _distribution_item_count(distribution) -> int:
@@ -3610,6 +3973,7 @@ def build_dashboard_payload():
         "weather_forecasts": list(weather_forecasts_by_city.values()),
         "weather_city_series": weather_city_series,
         "city_evidence": city_evidence,
+        "recommendations": _recommendations_payload(),
         "events": events,
         "fetch_log": fetch_log,
     }
@@ -3671,6 +4035,7 @@ def _minimal_dashboard_payload(reason: str = "cache_warming"):
         "weather_forecasts": [],
         "weather_city_series": city_series,
         "city_evidence": _build_city_evidence_payload(city_series, [], fetch_log),
+        "recommendations": _recommendations_payload(),
         "events": events,
         "fetch_log": fetch_log,
         "_meta": {"cache": "warming", "reason": reason, "generated_at": now},
@@ -3853,6 +4218,8 @@ async def startup():
         _ensure_auto_simulation_task()
     else:
         _disable_persisted_auto_simulation_on_startup()
+    if SCHEDULER_AUTO_START:
+        await get_scheduler().start()
     global dashboard_payload_cache
     dashboard_payload_cache = _minimal_dashboard_payload("manual_refresh_required")
     if DASHBOARD_AUTO_BUILD:
@@ -3863,6 +4230,7 @@ async def startup():
         "auto_refresh_interval_seconds": AUTO_REFRESH_INTERVAL_SECONDS,
         "auto_refresh_signal_scan": AUTO_REFRESH_SIGNAL_SCAN,
         "auto_simulation_resume": RESUME_AUTO_SIMULATION,
+        "scheduler_auto_start": SCHEDULER_AUTO_START,
         "legacy_scanner_auto_start": AUTO_START_SCANNER,
         "dashboard_auto_build": DASHBOARD_AUTO_BUILD,
         "startup_maintenance": STARTUP_MAINTENANCE,
@@ -3871,6 +4239,7 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    await get_scheduler().stop()
     await _stop_auto_refresh_task()
     await _stop_auto_simulation_task()
     if _bot_running():
@@ -3893,6 +4262,9 @@ async def dashboard():
     latest_refresh = _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None))
     if latest_refresh is not None:
         payload["production_refresh"] = latest_refresh
+    scheduler_payload = get_scheduler().status()
+    payload["scheduler_status"] = scheduler_payload
+    payload["recommendations"] = _recommendations_payload(scheduler_status=scheduler_payload)
     return _json_safe(payload)
 
 
@@ -3907,6 +4279,23 @@ async def production_refresh_status():
         "stages": [],
         "history": [],
     }
+
+
+@app.get("/api/scheduler/status")
+async def scheduler_status():
+    return get_scheduler().status()
+
+
+@app.post("/api/scheduler/start")
+async def scheduler_start():
+    payload = await get_scheduler().start()
+    return payload
+
+
+@app.post("/api/scheduler/stop")
+async def scheduler_stop():
+    payload = await get_scheduler().stop()
+    return payload
 
 
 @app.get("/api/city-evidence")
@@ -4094,6 +4483,15 @@ async def stations(region: str = "", city: str = "", sync_registry: bool = True)
         "count": len(rows),
         "stations": rows,
     }
+
+
+@app.post("/api/stations/{city_key}/enabled")
+async def station_enabled(city_key: str, request: StationEnabledUpdate):
+    payload = set_station_enabled(city_key, request.enabled, tier=request.tier)
+    if not payload.get("ok"):
+        raise HTTPException(status_code=404, detail=payload)
+    await _refresh_dashboard_cache_once()
+    return payload
 
 
 @app.get("/api/observations")

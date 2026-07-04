@@ -7,9 +7,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from weatherbot_v3.ai_review import AIReviewer
+from weatherbot_v3.china_weather import hko_rhrread_observation, weathercn_sk2d_observation
 from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, paper_execution_summary, set_settlement_contract_verification, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
+from weatherbot_v3.polymarket_probe import parse_settlement_rule_text, probe_polymarket_markets
 from weatherbot_v3.paper import execute_paper_decision
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
 from weatherbot_v3.distribution import build_event_distribution
@@ -24,14 +26,14 @@ from weatherbot_v3.mesonet import ingest_mesonet_observations, mesonet_observati
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summary
-from weatherbot_v3.stations import list_stations, station_row_from_profile, sync_station_registry
+from weatherbot_v3.stations import apply_market_probe_result, list_stations, station_row_from_profile, sync_station_registry
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.metar import backfill_iem_asos_metars, ingest_iem_asos_csv, parse_iem_asos_csv, probe_iem_stations, fetch_awc_metars, refresh_metar_reports
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from weatherbot_v3.cli import _stage_result, default_orderbook_start_date, run_daily_max_build, run_hourly_consensus_build, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
-from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
+from weatherbot_v3.cli import _stage_result, default_orderbook_start_date, run_china_weather_fetch, run_daily_max_build, run_hourly_consensus_build, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_polymarket_market_probe, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
+from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _recommendations_payload, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
 from dashboard_server import signal_decision_detail as signal_decision_detail_api
 from dashboard_server import signal_decisions as signal_decisions_api
 from dashboard_server import paper_orders as paper_orders_api
@@ -39,7 +41,7 @@ from dashboard_server import paper_orders_execute as paper_orders_execute_api
 from dashboard_server import PaperExecutionRequest
 from dashboard_server import stations as stations_api
 from bot_v2 import bucket_prob, calibrated_bucket_probability, calibration_metric, persist_forecast_batches, target_dates_for_city
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 
 TEST_DB_DIR = Path(__file__).resolve().parents[1] / ".tmp-tests"
@@ -1098,6 +1100,127 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(evidence["latest_mesonet_observations"][0]["network"], "pws")
         self.assertEqual(evidence["latest_mesonet_observations"][0]["parser_version"], "pws-observation-row-v1")
 
+    def test_hko_china_live_parser_converts_hong_kong_record_time_to_utc(self):
+        payload = {
+            "updateTime": "2026-07-04T10:02:00+08:00",
+            "temperature": {
+                "recordTime": "2026-07-04T10:00:00+08:00",
+                "data": [
+                    {"place": "Hong Kong Observatory", "value": 30, "unit": "C"},
+                    {"place": "Chek Lap Kok", "value": 31, "unit": "C"},
+                ],
+            },
+            "humidity": {
+                "recordTime": "2026-07-04T10:00:00+08:00",
+                "data": [{"place": "Hong Kong Observatory", "value": 80, "unit": "percent"}],
+            },
+        }
+        row = hko_rhrread_observation(payload, raw_response=json.dumps(payload), fetched_at="2026-07-04T02:03:00+00:00")
+
+        self.assertEqual(row["city"], "hong-kong")
+        self.assertEqual(row["station_id"], "HKO")
+        self.assertEqual(row["network"], "china_live")
+        self.assertEqual(row["observed_at"], "2026-07-04T02:00:00+00:00")
+        self.assertEqual(row["temperature"], 30.0)
+        self.assertEqual(row["humidity"], 80.0)
+        self.assertEqual(row["parse_status"], "parsed")
+        self.assertIn("not_settlement_truth", row["quality_flags"])
+
+    def test_weathercn_sk2d_parser_reads_shanghai_jsonp_and_preserves_hash(self):
+        raw = 'var dataSK={"city":"101020100","cityname":"上海","temp":"31.2","SD":"70%","qy":"1007","wde":"NW","wse":"3km/h","time":"10:00","date":"07月04日(星期六)"}'
+        row = weathercn_sk2d_observation(
+            raw,
+            station_code="101020100",
+            source_url="http://d1.weather.com.cn/sk_2d/101020100.html?_=1",
+            fetched_at="2026-07-04T02:05:00+00:00",
+        )
+
+        self.assertEqual(row["city"], "shanghai")
+        self.assertEqual(row["station_id"], "101020100")
+        self.assertEqual(row["network"], "china_live")
+        self.assertEqual(row["observed_at"], "2026-07-04T02:00:00+00:00")
+        self.assertEqual(row["temperature"], 31.2)
+        self.assertEqual(row["humidity"], 70.0)
+        self.assertEqual(row["wind_direction"], 315)
+        self.assertEqual(row["wind_speed"], 3.0)
+        self.assertEqual(len(row["raw_response_hash"]), 32)
+        self.assertEqual(row["parse_status"], "parsed")
+
+    def test_weathercn_html_structure_failure_is_failed_not_fake_zero(self):
+        row = weathercn_sk2d_observation(
+            "<html><body>loading</body></html>",
+            fetched_at="2026-07-04T02:05:00+00:00",
+        )
+
+        self.assertEqual(row["parse_status"], "failed")
+        self.assertIn("weathercn_datask_not_found", row["parse_warnings"])
+        self.assertIsNone(row["temperature"])
+
+    def test_china_live_mesonet_upsert_is_station_time_idempotent(self):
+        db_path = test_db_path("china_live_idempotent")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        raw = 'var dataSK={"city":"101020100","cityname":"上海","temp":"31.2","SD":"70%","time":"10:00","date":"07月04日(星期六)"}'
+        row = weathercn_sk2d_observation(raw, fetched_at="2026-07-04T02:05:00+00:00")
+        updated = weathercn_sk2d_observation(raw.replace("31.2", "31.5"), fetched_at="2026-07-04T02:08:00+00:00")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db()
+            first_id = upsert_mesonet_observation(row)
+            second_id = upsert_mesonet_observation(updated)
+            with connect(db_path) as conn:
+                rows = conn.execute("SELECT * FROM mesonet_observations").fetchall()
+
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["network"], "china_live")
+        self.assertEqual(rows[0]["temperature"], 31.5)
+        self.assertIsNotNone(rows[0]["raw_response_hash"])
+
+    def test_china_weather_cli_dry_run_does_not_write_mesonet_rows(self):
+        db_path = test_db_path("china_weather_cli_dry_run")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        hko_payload = {
+            "updateTime": "2026-07-04T10:02:00+08:00",
+            "temperature": {"recordTime": "2026-07-04T10:00:00+08:00", "data": [{"place": "Hong Kong Observatory", "value": 30, "unit": "C"}]},
+            "humidity": {"data": [{"place": "Hong Kong Observatory", "value": 80, "unit": "percent"}]},
+        }
+        raw_hko = json.dumps(hko_payload)
+        raw_sh = 'var dataSK={"city":"101020100","temp":"31.2","SD":"70%","time":"10:00","date":"07月04日(星期六)"}'
+
+        def fake_http_get(url, **_kwargs):
+            return raw_hko if "data.weather.gov.hk" in url else raw_sh
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db()
+            with patch("weatherbot_v3.china_weather._http_get", side_effect=fake_http_get):
+                result = run_china_weather_fetch("shanghai,hongkong", dry_run=True)
+            with connect(db_path) as conn:
+                count = conn.execute("SELECT COUNT(*) FROM mesonet_observations").fetchone()[0]
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["cities"], 2)
+        self.assertEqual(result["rows_upserted"], 0)
+        self.assertEqual(count, 0)
+
+    def test_hourly_consensus_exposes_china_live_without_overwriting_metar(self):
+        db_path = test_db_path("hourly_china_live")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db()
+            upsert_mesonet_observation(weathercn_sk2d_observation(
+                'var dataSK={"city":"101020100","temp":"31.2","SD":"70%","time":"10:00","date":"07月04日(星期六)"}',
+                fetched_at="2026-07-04T02:05:00+00:00",
+            ))
+            result = build_hourly_consensus(["shanghai"], target_date="2026-07-04", db_path=db_path)
+            points = hourly_consensus_points({"shanghai": {"2026-07-04"}}, db_path=db_path)
+            with connect(db_path) as conn:
+                raw_json = conn.execute("SELECT raw_json FROM hourly_consensus WHERE city = 'shanghai'").fetchone()["raw_json"]
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(points["shanghai"][0]["china_live"], 31.2)
+        self.assertIsNone(points["shanghai"][0]["metar"])
+        persisted = json.loads(raw_json)
+        self.assertIn("china_live", persisted["raw_json"]["observation"]["source_temperatures"])
+
     def test_observations_api_returns_layer2_evidence_without_refreshing(self):
         db_path = test_db_path("observations_api")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -1238,7 +1361,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(evidence["latest_hourly_consensus"][0]["observed_temp"], 87.08, places=2)
 
     def test_settlement_registry_has_station_and_timezone_for_all_cities(self):
-        self.assertEqual(len(SETTLEMENT_REGISTRY), 20)
+        self.assertGreaterEqual(len(SETTLEMENT_REGISTRY), 20)
+        self.assertIn("hong-kong", SETTLEMENT_REGISTRY)
         for city, profile in SETTLEMENT_REGISTRY.items():
             self.assertEqual(city, profile.city)
             self.assertTrue(profile.station_id)
@@ -1254,10 +1378,11 @@ class V3CoreTests(unittest.TestCase):
             summary = dashboard_summary()
 
         chicago = next(row for row in rows if row["city_key"] == "chicago")
+        expected_count = len(SETTLEMENT_REGISTRY)
         self.assertTrue(result["ok"])
-        self.assertEqual(result["synced"], 20)
-        self.assertEqual(len(rows), 20)
-        self.assertEqual(summary["stations"], 20)
+        self.assertEqual(result["synced"], expected_count)
+        self.assertEqual(len(rows), expected_count)
+        self.assertEqual(summary["stations"], expected_count)
         self.assertEqual(chicago["station_id"], "KORD")
         self.assertEqual(chicago["icao_id"], "KORD")
         self.assertEqual(chicago["timezone"], "America/Chicago")
@@ -1286,7 +1411,146 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["stations"][0]["city_key"], "chicago")
         self.assertEqual(payload["stations"][0]["station_id"], "KORD")
-        self.assertEqual(payload["sync"]["synced"], 20)
+        self.assertEqual(payload["sync"]["synced"], len(SETTLEMENT_REGISTRY))
+
+    def test_polymarket_resolution_text_parser_extracts_station_source_unit_and_time_basis(self):
+        parsed = parse_settlement_rule_text(
+            city_key="chicago",
+            event_slug="highest-temperature-in-chicago-on-july-4-2026",
+            source_url="https://www.wunderground.com/history/daily/us/il/chicago/KORD",
+            description=(
+                "This market will resolve to the temperature range that contains the highest temperature recorded at "
+                "the Chicago O'Hare Intl Airport Station in degrees Fahrenheit on 4 Jul '26. The resolution source "
+                "for this market will be information from Wunderground, specifically the highest temperature recorded "
+                "for all times on this day for the Chicago O'Hare Intl Airport Station."
+            ),
+        )
+
+        self.assertEqual(parsed["settlement_station_id"], "KORD")
+        self.assertEqual(parsed["settlement_station_name"], "Chicago O'Hare Intl Airport")
+        self.assertEqual(parsed["primary_settlement_source"], "wunderground")
+        self.assertEqual(parsed["settlement_unit"], "F")
+        self.assertEqual(parsed["settlement_timezone"], "America/Chicago")
+        self.assertEqual(parsed["settlement_time_basis"], "local_day")
+
+    def test_polymarket_resolution_text_parser_handles_hong_kong_observatory(self):
+        parsed = parse_settlement_rule_text(
+            city_key="hong-kong",
+            event_slug="highest-temperature-in-hong-kong-on-july-4-2026",
+            source_url="https://www.weather.gov.hk/en/cis/climat.htm",
+            description=(
+                "This market will resolve to the temperature range that contains the highest temperature recorded "
+                "by the Hong Kong Observatory in degrees Celsius on 4 Jul '26. The resolution source for this market "
+                "will be information from the Hong Kong Observatory, specifically the \"Absolute Daily Max (deg. C)\" "
+                "the specified date once information is finalized in the relevant \"Daily Extract\"."
+            ),
+        )
+
+        self.assertEqual(parsed["settlement_station_id"], "HKO")
+        self.assertEqual(parsed["settlement_station_name"], "Hong Kong Observatory")
+        self.assertEqual(parsed["primary_settlement_source"], "hong_kong_observatory")
+        self.assertEqual(parsed["settlement_unit"], "C")
+        self.assertEqual(parsed["settlement_timezone"], "Asia/Hong_Kong")
+
+    def test_polymarket_market_probe_writes_verified_station_rule_idempotently(self):
+        db_path = test_db_path("polymarket_market_probe")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        slug = "highest-temperature-in-shanghai-on-july-4-2026"
+        event_payload = {
+            "slug": slug,
+            "title": "Highest temperature in Shanghai on July 4?",
+            "active": True,
+            "closed": False,
+            "markets": [{
+                "id": "market-shanghai-1",
+                "active": True,
+                "closed": False,
+                "description": (
+                    "This market will resolve to the temperature range that contains the highest temperature recorded "
+                    "at the Shanghai Pudong International Airport Station in degrees Celsius on 4 Jul '26. The resolution "
+                    "source for this market will be information from Wunderground, specifically the highest temperature "
+                    "recorded for all times on this day for the Shanghai Pudong International Airport Station."
+                ),
+                "resolutionSource": "https://www.wunderground.com/history/daily/cn/shanghai/ZSPD",
+            }],
+        }
+
+        def fake_fetch(url: str):
+            self.assertIn(slug, url)
+            return event_payload
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db(db_path)
+            sync_station_registry(path=db_path)
+            first = probe_polymarket_markets(["shanghai"], today=date(2026, 7, 4), fetch_json=fake_fetch, path=db_path, sleep_seconds=0)
+            second = probe_polymarket_markets(["shanghai"], today=date(2026, 7, 4), fetch_json=fake_fetch, path=db_path, sleep_seconds=0)
+            rows = list_stations(db_path, city="shanghai")
+            logs = list_data_fetch_logs(10)
+
+        self.assertEqual(first["active"], 1)
+        self.assertEqual(second["active"], 1)
+        self.assertEqual(first["mismatches"], 0)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["station_id"], "ZSPD")
+        self.assertEqual(row["settlement_station_id"], "ZSPD")
+        self.assertEqual(row["settlement_timezone"], "Asia/Shanghai")
+        self.assertEqual(row["settlement_unit"], "C")
+        self.assertEqual(row["verification_status"], "verified")
+        self.assertEqual(sum(1 for log in logs if log["stage"] == "settlement_rule_probe"), 1)
+
+    def test_polymarket_market_probe_marks_hong_kong_settlement_mismatch(self):
+        db_path = test_db_path("polymarket_market_probe_hk")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        event_payload = {
+            "slug": "highest-temperature-in-hong-kong-on-july-4-2026",
+            "title": "Highest temperature in Hong Kong on July 4?",
+            "active": True,
+            "closed": False,
+            "markets": [{
+                "id": "market-hk-1",
+                "active": True,
+                "closed": False,
+                "description": (
+                    "This market will resolve to the temperature range that contains the highest temperature recorded "
+                    "by the Hong Kong Observatory in degrees Celsius on 4 Jul '26. The resolution source for this market "
+                    "will be information from the Hong Kong Observatory, specifically the \"Absolute Daily Max (deg. C)\" "
+                    "the specified date once information is finalized in the relevant \"Daily Extract\"."
+                ),
+            }],
+        }
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db(db_path)
+            sync_station_registry(path=db_path)
+            result = probe_polymarket_markets(["hong-kong"], today=date(2026, 7, 4), fetch_json=lambda _url: event_payload, path=db_path, sleep_seconds=0)
+            row = list_stations(db_path, city="hong-kong")[0]
+            readiness = build_data_readiness(db_path)
+
+        self.assertEqual(result["mismatches"], 1)
+        self.assertEqual(row["station_id"], "VHHH")
+        self.assertEqual(row["settlement_station_id"], "HKO")
+        self.assertEqual(row["verification_status"], "settlement_mismatch")
+        stations_stage = next(stage for stage in readiness["stages"] if stage["key"] == "stations")
+        self.assertIn("settlement_mismatch", {reason["code"] for reason in stations_stage["reasons"]})
+
+    def test_polymarket_market_probe_records_no_active_market_without_fabricating_station(self):
+        db_path = test_db_path("polymarket_market_probe_no_active")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+
+        def empty_event(_url: str):
+            return {"slug": "highest-temperature-in-chicago-on-july-4-2026", "active": False, "closed": False, "markets": []}
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db(db_path)
+            sync_station_registry(path=db_path)
+            result = probe_polymarket_markets(["chicago"], today=date(2026, 7, 4), fetch_json=empty_event, path=db_path, sleep_seconds=0)
+            row = list_stations(db_path, city="chicago")[0]
+
+        self.assertEqual(result["no_active_market"], 1)
+        self.assertEqual(row["station_id"], "KORD")
+        self.assertEqual(row["settlement_station_id"], "KORD")
+        self.assertEqual(row["verification_status"], "no_active_market")
 
     def test_settlement_rule_infers_station_and_wunderground_confidence(self):
         rule = infer_settlement_rule(
@@ -1381,12 +1645,13 @@ class V3CoreTests(unittest.TestCase):
         self.assertFalse(readiness["live_allowed"])
         stations_stage = next(stage for stage in readiness["stages"] if stage["key"] == "stations")
         observations_stage = next(stage for stage in readiness["stages"] if stage["key"] == "observations")
-        self.assertEqual(stations_stage["status"], "ready")
-        self.assertEqual(stations_stage["metrics"]["stations"], 20)
+        self.assertEqual(stations_stage["status"], "blocked")
+        self.assertEqual(stations_stage["metrics"]["stations"], len(SETTLEMENT_REGISTRY))
+        self.assertIn("settlement_rule_unverified", {item["code"] for item in stations_stage["reasons"]})
         self.assertEqual(observations_stage["status"], "blocked")
         self.assertIn("metar_reports_missing", {item["code"] for item in observations_stage["reasons"]})
         self.assertEqual(readiness["summary"]["market_rules"], 1)
-        self.assertEqual(readiness["summary"]["station_rows"], 20)
+        self.assertEqual(readiness["summary"]["station_rows"], len(SETTLEMENT_REGISTRY))
         self.assertEqual(readiness["production_phase"]["id"], "phase1_5")
         blocker_codes = {item["code"] for item in readiness["blockers"]}
         self.assertIn("metar_reports_missing", blocker_codes)
@@ -1432,11 +1697,13 @@ class V3CoreTests(unittest.TestCase):
         best_bid: float = 0.195,
         token_suffix: str = "mid",
         bias_sample_count: int = 0,
+        target_date: str = "2026-07-02",
     ) -> None:
         quote_timestamp = datetime.now(timezone.utc).isoformat()
+        compact_date = target_date.replace("-", "")
         upsert_daily_max_prediction({
             "city_key": "chicago",
-            "target_date": "2026-07-02",
+            "target_date": target_date,
             "issued_at": "2026-07-02T12:00:00+00:00",
             "mu": 90.0,
             "sigma": 2.0,
@@ -1450,7 +1717,7 @@ class V3CoreTests(unittest.TestCase):
         }, path=db_path)
         for bucket in [
             {
-                "bucket_key": "chicago-20260702-low",
+                "bucket_key": f"chicago-{compact_date}-low",
                 "bucket_direction": "or_below",
                 "bucket_low": None,
                 "bucket_high": 88.0,
@@ -1459,7 +1726,7 @@ class V3CoreTests(unittest.TestCase):
                 "best_bid": 0.195,
             },
             {
-                "bucket_key": f"chicago-20260702-{token_suffix}",
+                "bucket_key": f"chicago-{compact_date}-{token_suffix}",
                 "bucket_direction": bucket_direction,
                 "bucket_low": 89.0,
                 "bucket_high": 91.0,
@@ -1468,7 +1735,7 @@ class V3CoreTests(unittest.TestCase):
                 "best_bid": best_bid,
             },
             {
-                "bucket_key": "chicago-20260702-high",
+                "bucket_key": f"chicago-{compact_date}-high",
                 "bucket_direction": "or_above",
                 "bucket_low": 92.0,
                 "bucket_high": None,
@@ -1479,11 +1746,12 @@ class V3CoreTests(unittest.TestCase):
         ]:
             upsert_market_bucket({
                 "bucket_key": bucket["bucket_key"],
+                "event_url": "https://polymarket.com/event/highest-temperature-in-chicago-on-july-2-2026",
                 "market_id": bucket["bucket_key"],
                 "question": "Will the highest temperature in Chicago match this test bucket?",
                 "city": "chicago",
                 "city_name": "Chicago",
-                "target_date": "2026-07-02",
+                "target_date": target_date,
                 "station_id": "KORD",
                 "unit": "F",
                 "bucket_label": bucket["bucket_key"],
@@ -1561,6 +1829,33 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(mid["blocked_reason_primary"], "bucket_not_strict_match")
         self.assertIn("bucket_not_strict_match", mid["gate_reasons"])
 
+    def test_signal_decisions_keep_paper_but_block_live_on_settlement_mismatch(self):
+        db_path = test_db_path("signal_decision_settlement_mismatch")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "true"}, clear=False):
+            init_v3_db(db_path)
+            sync_station_registry(path=db_path)
+            apply_market_probe_result({
+                "city_key": "chicago",
+                "active_market": True,
+                "settlement_rule_text": "fixture rule says this market settles from station KMDW",
+                "settlement_station_id": "KMDW",
+                "settlement_station_name": "Chicago Midway International Airport",
+                "settlement_timezone": "America/Chicago",
+                "settlement_unit": "F",
+                "settlement_time_basis": "local_day",
+                "primary_settlement_source": "wunderground",
+            }, path=db_path)
+            self._seed_signal_decision_fixture(db_path, bias_sample_count=10)
+            build_signal_decisions("chicago", "2026-07-02", path=db_path)
+            rows = list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
+            mid = next(row for row in rows if row["bucket_key"] == "chicago-20260702-mid")
+
+        self.assertEqual(mid["paper_decision"], "buy")
+        self.assertEqual(mid["gate_status"], "paper_allowed")
+        self.assertEqual(mid["live_decision"], "blocked")
+        self.assertIn("settlement_mismatch", mid["gate_reasons"])
+
     def test_signal_decisions_api_and_readiness_expose_layer6_without_refreshing(self):
         db_path = test_db_path("signal_decision_api_readiness")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -1581,6 +1876,188 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(stage["metrics"]["decisions"], 3)
         self.assertEqual(stage["metrics"]["live_blocked_insufficient_bias_samples"], 3)
         self.assertEqual(readiness["summary"]["signal_decisions"], 3)
+
+    def test_dashboard_recommendations_use_fresh_verified_signal_decisions(self):
+        db_path = test_db_path("dashboard_recommendations")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        target = date.today().isoformat()
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            sync_station_registry(path=db_path)
+            apply_market_probe_result({
+                "city_key": "chicago",
+                "active_market": True,
+                "settlement_rule_text": "fixture rule settles from KORD",
+                "settlement_station_id": "KORD",
+                "settlement_station_name": "Chicago O'Hare International Airport",
+                "settlement_timezone": "America/Chicago",
+                "settlement_unit": "F",
+                "settlement_time_basis": "local_day",
+                "primary_settlement_source": "wunderground",
+            }, path=db_path)
+            self._seed_signal_decision_fixture(db_path, target_date=target)
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": datetime.now(timezone.utc).isoformat(),
+                "raw_text": "KORD fixture METAR",
+                "temperature": 33.0,
+                "parser_version": "fixture",
+            })
+            build_signal_decisions("chicago", target, path=db_path)
+            payload = _recommendations_payload(scheduler_status={"running": True}, path=db_path)
+
+        self.assertEqual(payload["count"], 1)
+        item = payload["items"][0]
+        self.assertEqual(item["type"], "trade_candidate")
+        self.assertEqual(item["city_key"], "chicago")
+        self.assertEqual(item["verification_status"], "verified")
+        self.assertLess(item["metar_age_seconds"], 30 * 60)
+        self.assertTrue(item["paper_allowed"])
+        self.assertIn("polymarket.com", item["polymarket_url"])
+        self.assertIn("bucket_label", item)
+
+    def test_dashboard_recommendations_keep_spread_only_watch_candidate(self):
+        db_path = test_db_path("dashboard_recommendations_spread")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        target = date.today().isoformat()
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            sync_station_registry(path=db_path)
+            apply_market_probe_result({
+                "city_key": "chicago",
+                "active_market": True,
+                "settlement_rule_text": "fixture rule settles from KORD",
+                "settlement_station_id": "KORD",
+                "settlement_station_name": "Chicago O'Hare International Airport",
+                "settlement_timezone": "America/Chicago",
+                "settlement_unit": "F",
+                "settlement_time_basis": "local_day",
+                "primary_settlement_source": "wunderground",
+            }, path=db_path)
+            self._seed_signal_decision_fixture(db_path, best_ask=0.20, best_bid=0.0, target_date=target)
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": datetime.now(timezone.utc).isoformat(),
+                "raw_text": "KORD fixture METAR",
+                "temperature": 33.0,
+                "parser_version": "fixture",
+            })
+            build_signal_decisions("chicago", target, path=db_path)
+            payload = _recommendations_payload(scheduler_status={"running": True}, path=db_path)
+
+        self.assertEqual(payload["count"], 1)
+        item = payload["items"][0]
+        self.assertFalse(item["paper_allowed"])
+        self.assertIn("spread_too_wide", item["blocked_reasons"])
+
+    def test_dashboard_recommendations_use_forecast_freshness_for_lead_dates(self):
+        db_path = test_db_path("dashboard_recommendations_forecast_lead")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        target = (date.today() + timedelta(days=1)).isoformat()
+        now = datetime.now(timezone.utc)
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            sync_station_registry(path=db_path)
+            apply_market_probe_result({
+                "city_key": "chicago",
+                "active_market": True,
+                "settlement_rule_text": "fixture rule settles from KORD",
+                "settlement_station_id": "KORD",
+                "settlement_station_name": "Chicago O'Hare International Airport",
+                "settlement_timezone": "America/Chicago",
+                "settlement_unit": "F",
+                "settlement_time_basis": "local_day",
+                "primary_settlement_source": "wunderground",
+            }, path=db_path)
+            self._seed_signal_decision_fixture(db_path, target_date=target)
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": (now - timedelta(hours=2)).isoformat(),
+                "raw_text": "KORD stale fixture METAR",
+                "temperature": 33.0,
+                "parser_version": "fixture",
+            })
+            insert_forecast_run({
+                "run_key": f"fixture:forecast-lead:{target}",
+                "city": "chicago",
+                "target_date": target,
+                "source": "fixture_forecast",
+                "provider": "fixture",
+                "model": "fixture",
+                "run_type": "deterministic",
+                "run_at": now.isoformat(),
+                "retrieved_at": now.isoformat(),
+                "valid_at": f"{target}T12:00:00+00:00",
+                "horizon": "D+1",
+                "mean_high": 90.0,
+                "std_high": 1.0,
+                "member_count": 1,
+                "parser_version": "fixture",
+                "parse_status": "ok",
+                "training_eligible": True,
+            }, [{"member_id": "deterministic", "member_name": "deterministic", "high_temp": 90.0}])
+            build_signal_decisions("chicago", target, path=db_path)
+            payload = _recommendations_payload(scheduler_status={"running": True}, path=db_path)
+
+        self.assertEqual(payload["count"], 1)
+        item = payload["items"][0]
+        self.assertEqual(item["recommendation_class"], "forecast_lead")
+        self.assertGreater(item["metar_age_seconds"], 30 * 60)
+        self.assertLess(item["forecast_age_seconds"], 90 * 60)
+        self.assertTrue(item["paper_allowed"])
+
+    def test_dashboard_recommendations_render_no_active_market_as_observation_only(self):
+        db_path = test_db_path("dashboard_recommendations_no_market")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        target = date.today().isoformat()
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            sync_station_registry(path=db_path)
+            apply_market_probe_result({
+                "city_key": "shanghai",
+                "active_market": False,
+                "settlement_unit": "C",
+                "settlement_timezone": "Asia/Shanghai",
+            }, path=db_path)
+            upsert_daily_max_prediction({
+                "city_key": "shanghai",
+                "target_date": target,
+                "issued_at": datetime.now(timezone.utc).isoformat(),
+                "mu": 35.2,
+                "sigma": 1.1,
+                "unit": "C",
+                "method": "weatherbot-deb-v2",
+                "deb_version": "weatherbot-deb-v2",
+                "sigma_floor": 0.5,
+                "bias_sample_count": 8,
+            }, path=db_path)
+            upsert_mesonet_observation({
+                "city": "shanghai",
+                "city_name": "Shanghai",
+                "station_id": "101020100",
+                "station_name": "Shanghai",
+                "network": "china_live",
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "temperature": 34.6,
+                "humidity": 60,
+                "raw_response": "{}",
+                "parser_version": "fixture",
+            })
+            payload = _recommendations_payload(scheduler_status={"running": True}, path=db_path)
+
+        self.assertEqual(payload["observation_only_count"], 1)
+        item = payload["items"][0]
+        self.assertEqual(item["type"], "observation_only")
+        self.assertEqual(item["badge"], "仅观测分析（无市场）")
+        self.assertEqual(item["verification_status"], "no_active_market")
+        self.assertNotIn("polymarket_url", item)
+        self.assertEqual(item["china_live_temp"], 34.6)
 
     def test_layer8_paper_execution_fills_decision_and_marks_spread_pnl(self):
         db_path = test_db_path("paper_execution_fill")

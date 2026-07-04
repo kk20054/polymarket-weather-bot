@@ -8,6 +8,7 @@ import {
   PauseCircle,
   RefreshCw,
   ShieldAlert,
+  Star,
   Wallet,
 } from 'lucide-react'
 import {
@@ -18,6 +19,7 @@ import {
   fetchMarketBuckets,
   fetchProductionRefreshStatus,
   fetchProductionValidation,
+  fetchSchedulerStatus,
   fetchSignalDecisions,
   fetchSettlementContracts,
   placeLiveOrder,
@@ -25,7 +27,10 @@ import {
   runProductionAction,
   runProductionRefresh,
   setAutoSimulation,
+  setStationEnabled,
   settleTradesApi,
+  startScheduler,
+  stopScheduler,
   stopBot,
   updateSignalStatus,
   verifySettlementContract,
@@ -37,7 +42,7 @@ import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
-import type { AutoSimulationStatus, BotStats, DataReadiness, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport } from './types'
+import type { AutoSimulationStatus, BotStats, DashboardRecommendationItem, DataReadiness, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerPollerStatus, SchedulerStatus } from './types'
 
 type TradeMode = 'paper' | 'live'
 type UiLanguage = 'zh' | 'en'
@@ -59,7 +64,6 @@ type RefreshNotice = {
 }
 
 const APP_VERSION = 'v6.0'
-const DASHBOARD_AUTO_FETCH_INTERVAL_MS = 15 * 60 * 1000
 
 const UI_COPY = {
   zh: {
@@ -71,7 +75,9 @@ const UI_COPY = {
     autoOff: '一键模拟关闭',
     liveReady: '实盘可用',
     liveLocked: '实盘锁定',
-    manualFetch: '自动抓取',
+    refreshCurrent: '刷新当前城市',
+    schedulerStart: '启动调度器',
+    schedulerStop: '停止调度器',
     fetching: '抓取中',
     refresh: '刷新',
     stopLegacy: '停止旧扫描',
@@ -87,7 +93,9 @@ const UI_COPY = {
     autoOff: 'Auto paper off',
     liveReady: 'Live ready',
     liveLocked: 'Live locked',
-    manualFetch: 'Auto fetch',
+    refreshCurrent: 'Refresh city',
+    schedulerStart: 'Start scheduler',
+    schedulerStop: 'Stop scheduler',
     fetching: 'Fetching',
     refresh: 'Refresh',
     stopLegacy: 'Stop legacy scan',
@@ -134,6 +142,179 @@ function dataAge(minutes?: number | null) {
   if (minutes < 60) return `${minutes.toFixed(0)} 分钟前`
   if (minutes < 1440) return `${(minutes / 60).toFixed(1)} 小时前`
   return `${(minutes / 1440).toFixed(1)} 天前`
+}
+
+function relativeTime(value?: string | null) {
+  if (!value) return '--'
+  const timestamp = new Date(value).getTime()
+  if (!Number.isFinite(timestamp)) return '--'
+  const seconds = Math.max(0, (Date.now() - timestamp) / 1000)
+  if (seconds < 60) return `${Math.round(seconds)} 秒前`
+  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟前`
+  if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} 小时前`
+  return `${(seconds / 86400).toFixed(1)} 天前`
+}
+
+function pollerAgeLabel(poller?: SchedulerPollerStatus | null) {
+  const age = poller?.age_seconds
+  if (age === null || age === undefined || !Number.isFinite(Number(age))) return 'never'
+  if (Number(age) < 60) return `${Math.round(Number(age))}s ago`
+  if (Number(age) < 3600) return `${Math.round(Number(age) / 60)}m ago`
+  if (Number(age) < 86400) return `${(Number(age) / 3600).toFixed(1)}h ago`
+  return `${(Number(age) / 86400).toFixed(1)}d ago`
+}
+
+function durationLabel(ms?: number | null) {
+  if (ms === null || ms === undefined || !Number.isFinite(Number(ms))) return '--ms'
+  if (Number(ms) < 1000) return `${Math.round(Number(ms))}ms`
+  return `${(Number(ms) / 1000).toFixed(1)}s`
+}
+
+function ageSecondsLabel(seconds?: number | null) {
+  if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))) return '--'
+  if (Number(seconds) < 60) return `${Math.round(Number(seconds))}s ago`
+  if (Number(seconds) < 3600) return `${Math.round(Number(seconds) / 60)}m ago`
+  return `${(Number(seconds) / 3600).toFixed(1)}h ago`
+}
+
+function tempLabel(value?: number | null, unit = '') {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--'
+  return `${Number(value).toFixed(1)}°${unit || ''}`
+}
+
+function probabilityLabel(value?: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--'
+  return `${(Number(value) * 100).toFixed(1)}%`
+}
+
+function edgeLabel(value?: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--'
+  const sign = Number(value) >= 0 ? '+' : ''
+  return `${sign}${(Number(value) * 100).toFixed(1)}pp`
+}
+
+function pollerTone(poller?: SchedulerPollerStatus | null) {
+  if (poller?.running) return 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200'
+  const age = poller?.age_seconds
+  if (age === null || age === undefined || !Number.isFinite(Number(age))) return 'border-neutral-800 text-neutral-500'
+  if (Number(age) < 600) return 'border-green-500/30 text-green-300'
+  if (Number(age) < 3600) return 'border-amber-500/30 text-amber-300'
+  return 'border-red-500/30 text-red-300'
+}
+
+function SchedulerBadge({ poller, label }: { poller?: SchedulerPollerStatus | null; label: string }) {
+  const fails = Number(poller?.fails_last_hour ?? 0)
+  return (
+    <span
+      className={`shrink-0 border px-2 py-1 tabular-nums ${pollerTone(poller)}`}
+      title={`${label} next: ${poller?.next_run_at ? timeText(poller.next_run_at) : '--'} · ${poller?.last_message || 'waiting'}`}
+    >
+      {label} {pollerAgeLabel(poller)} ({durationLabel(poller?.last_duration_ms)})
+      {fails > 0 ? ` ⚠ ${fails} fail/hr` : ''}
+    </span>
+  )
+}
+
+function RecommendationCard({
+  item,
+  selected,
+  onSelect,
+}: {
+  item: DashboardRecommendationItem
+  selected: boolean
+  onSelect: () => void
+}) {
+  const isObservationOnly = item.type === 'observation_only'
+  const age = ageSecondsLabel(item.metar_age_seconds)
+  const verified = item.verification_status || (item.settlement_rule_verified_at ? 'verified' : 'unverified')
+  const blocker = item.blocked_reasons?.[0] ? reasonLabel(item.blocked_reasons[0]) : (item.paper_allowed ? 'paper allowed' : 'watch')
+  const cardTone = selected
+    ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-50'
+    : isObservationOnly
+      ? 'border-red-400/30 bg-red-500/5 text-neutral-200 hover:border-red-300/50'
+      : 'border-amber-500/30 bg-amber-500/5 text-neutral-200 hover:border-amber-400/60'
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onSelect()
+        }
+      }}
+      className={`min-w-0 cursor-pointer border p-2 text-left transition ${cardTone}`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate text-[12px] font-semibold">{item.city_name}</div>
+          <div className="mt-0.5 truncate text-[9px] text-neutral-500">
+            {item.station_id || '--'} · METAR age {age} · verified {verified}
+          </div>
+        </div>
+        <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${
+          isObservationOnly ? 'border-red-400/30 text-red-200' : item.paper_allowed ? 'border-green-400/30 text-green-200' : 'border-amber-400/30 text-amber-200'
+        }`}>
+          {isObservationOnly ? '仅观测分析（无市场）' : item.paper_allowed ? 'Paper ok' : 'Spread watch'}
+        </span>
+      </div>
+
+      <div className="mt-2 grid grid-cols-2 gap-1 text-[10px]">
+        <div className="border border-neutral-800/80 px-2 py-1">
+          <div className="text-neutral-500">当前观测</div>
+          <div className="mt-0.5 tabular-nums text-neutral-100">{tempLabel(item.current_temp, item.current_temp_unit)}</div>
+        </div>
+        <div className="border border-neutral-800/80 px-2 py-1">
+          <div className="text-neutral-500">DEB μ±σ</div>
+          <div className="mt-0.5 tabular-nums text-neutral-100">
+            {tempLabel(item.deb_mu, item.deb_unit)} ± {item.deb_sigma === null || item.deb_sigma === undefined ? '--' : Number(item.deb_sigma).toFixed(2)}
+          </div>
+        </div>
+      </div>
+
+      {isObservationOnly ? (
+        <div className="mt-2 border border-neutral-800/80 px-2 py-1.5 text-[10px] text-neutral-400">
+          China Weather Live {tempLabel(item.china_live_temp, item.current_temp_unit)}
+          {item.china_live_observed_at ? ` · ${relativeTime(item.china_live_observed_at)}` : ''} · 交易字段已隐藏
+        </div>
+      ) : (
+        <>
+          <div className="mt-2 grid grid-cols-[minmax(0,1fr)_82px] gap-1 text-[10px]">
+            <div className="min-w-0 border border-neutral-800/80 px-2 py-1">
+              <div className="text-neutral-500">最优桶</div>
+              <div className="mt-0.5 truncate text-neutral-100">{item.bucket_label || item.bucket_key || '--'}</div>
+            </div>
+            <div className="border border-neutral-800/80 px-2 py-1">
+              <div className="text-neutral-500">Edge</div>
+              <div className={`mt-0.5 tabular-nums ${Number(item.edge ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
+                {edgeLabel(item.edge)}
+              </div>
+            </div>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-1 text-[9px]">
+            <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">model {probabilityLabel(item.model_probability)}</span>
+            <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">ask {probabilityLabel(item.market_ask)}</span>
+            {item.blocked_reasons?.length ? (
+              <span className="border border-amber-500/30 px-1.5 py-0.5 text-amber-200">{blocker}</span>
+            ) : null}
+            {item.polymarket_url ? (
+              <a
+                href={item.polymarket_url}
+                target="_blank"
+                rel="noreferrer"
+                onClick={event => event.stopPropagation()}
+                className="border border-cyan-500/30 px-1.5 py-0.5 text-cyan-200 hover:bg-cyan-500/10"
+              >
+                Polymarket
+              </a>
+            ) : null}
+          </div>
+        </>
+      )}
+    </div>
+  )
 }
 
 function reasonLabel(reason: string) {
@@ -760,25 +941,17 @@ function App() {
     return window.localStorage.getItem('weatherbot-ui-theme') === 'dark' ? 'dark' : 'light'
   })
   const [productionActionResult, setProductionActionResult] = useState<ProductionActionRunResult | null>(null)
-  const [refreshNotice, setRefreshNotice] = useState<RefreshNotice | null>(null)
-  const [dashboardAutoFetchEnabled, setDashboardAutoFetchEnabled] = useState(false)
+  const [refreshNotices, setRefreshNotices] = useState<RefreshNotice[]>([])
   const balanceInitRef = useRef(false)
-  const refreshNoticeTimerRef = useRef<number | null>(null)
-  const dashboardAutoFetchTimerRef = useRef<number | null>(null)
-  const refreshOptionsRef = useRef<ProductionRefreshOptions>({})
   const productionRefreshRunningRef = useRef(false)
+  const seenSchedulerRunsRef = useRef<Record<string, string>>({})
   const copy = UI_COPY[uiLanguage]
 
   const showRefreshNotice = (notice: RefreshNotice, ttlMs = 7000) => {
-    if (refreshNoticeTimerRef.current !== null) {
-      window.clearTimeout(refreshNoticeTimerRef.current)
-      refreshNoticeTimerRef.current = null
-    }
-    setRefreshNotice(notice)
+    setRefreshNotices(current => [notice, ...current.filter(item => item.id !== notice.id)].slice(0, 5))
     if (ttlMs > 0) {
-      refreshNoticeTimerRef.current = window.setTimeout(() => {
-        setRefreshNotice(current => (current?.id === notice.id ? null : current))
-        refreshNoticeTimerRef.current = null
+      window.setTimeout(() => {
+        setRefreshNotices(current => current.filter(item => item.id !== notice.id))
       }, ttlMs)
     }
   }
@@ -812,6 +985,13 @@ function App() {
     queryKey: ['production-refresh-status'],
     queryFn: fetchProductionRefreshStatus,
     refetchInterval: 3000,
+    retry: 1,
+  })
+
+  const schedulerStatusQuery = useQuery({
+    queryKey: ['scheduler-status'],
+    queryFn: fetchSchedulerStatus,
+    refetchInterval: 30000,
     retry: 1,
   })
 
@@ -868,6 +1048,83 @@ function App() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
       queryClient.invalidateQueries({ queryKey: ['production-validation'] })
+    },
+  })
+
+  const schedulerStartMutation = useMutation({
+    mutationFn: startScheduler,
+    onMutate: () => {
+      showRefreshNotice({
+        id: Date.now(),
+        tone: 'running',
+        title: uiLanguage === 'zh' ? '调度器启动中' : 'Scheduler starting',
+        message: uiLanguage === 'zh'
+          ? '后端将按源轮询 enabled 城市：METAR 5 分钟、China Live 5 分钟、Forecast 60 分钟、Historical 15 分钟。'
+          : 'Backend pollers will refresh enabled cities by source frequency.',
+        details: ['scheduler'],
+      }, 6000)
+    },
+    onSuccess: result => {
+      queryClient.invalidateQueries({ queryKey: ['scheduler-status'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      showRefreshNotice({
+        id: Date.now() + 1,
+        tone: 'success',
+        title: uiLanguage === 'zh' ? '调度器已启动' : 'Scheduler started',
+        message: result.message || (uiLanguage === 'zh' ? '常驻 poller 已在后端运行。' : 'Server-side pollers are running.'),
+        details: ['METAR', 'China Live', 'Forecast', 'Historical'],
+      }, 8000)
+    },
+    onError: error => {
+      showRefreshNotice({
+        id: Date.now() + 2,
+        tone: 'error',
+        title: uiLanguage === 'zh' ? '调度器启动失败' : 'Scheduler start failed',
+        message: error instanceof Error ? error.message : String(error),
+        details: ['scheduler/start'],
+      }, 12000)
+    },
+  })
+
+  const schedulerStopMutation = useMutation({
+    mutationFn: stopScheduler,
+    onSuccess: result => {
+      queryClient.invalidateQueries({ queryKey: ['scheduler-status'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      showRefreshNotice({
+        id: Date.now() + 3,
+        tone: 'warning',
+        title: uiLanguage === 'zh' ? '调度器已停止' : 'Scheduler stopped',
+        message: result.message || (uiLanguage === 'zh' ? '后端 poller 已停止，数据只会由手动刷新更新。' : 'Backend pollers stopped.'),
+        details: ['scheduler/stop'],
+      }, 8000)
+    },
+  })
+
+  const stationEnabledMutation = useMutation({
+    mutationFn: ({ cityKey, enabled }: { cityKey: string; enabled: boolean }) =>
+      setStationEnabled(cityKey, enabled),
+    onSuccess: result => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['scheduler-status'] })
+      showRefreshNotice({
+        id: Date.now() + 4,
+        tone: result.enabled ? 'success' : 'warning',
+        title: result.enabled
+          ? (uiLanguage === 'zh' ? '城市已加入调度' : 'City enabled')
+          : (uiLanguage === 'zh' ? '城市已暂停调度' : 'City disabled'),
+        message: `${result.city_key} · tier ${result.tier}`,
+        details: ['stations enabled watchlist'],
+      }, 6000)
+    },
+    onError: error => {
+      showRefreshNotice({
+        id: Date.now() + 5,
+        tone: 'error',
+        title: uiLanguage === 'zh' ? '城市调度状态更新失败' : 'City watchlist update failed',
+        message: error instanceof Error ? error.message : String(error),
+        details: ['stations/enabled'],
+      }, 10000)
     },
   })
 
@@ -1003,6 +1260,8 @@ function App() {
   const productionRefreshStages = productionRefresh?.stages ?? []
   const productionRefreshDone = productionRefreshStages.filter(stage => stage.ok && !stage.running).length
   const productionRefreshCurrent = productionRefreshStages.find(stage => stage.running) ?? productionRefreshStages[productionRefreshStages.length - 1]
+  const schedulerStatus: SchedulerStatus | null = schedulerStatusQuery.data ?? data?.scheduler_status ?? null
+  const schedulerRunning = Boolean(schedulerStatus?.running || schedulerStartMutation.isPending)
   const currentRefreshOptions = useMemo<ProductionRefreshOptions>(() => ({
     cities: selectedCity ? [selectedCity] : [],
     days: refreshDaysForDate(selectedDate),
@@ -1039,6 +1298,15 @@ function App() {
       key: string
       name: string
       station?: string
+      stationName?: string
+      settlementStation?: string
+      settlementStationName?: string
+      settlementRuleVerifiedAt?: string | null
+      settlementTimezone?: string
+      settlementUnit?: string
+      settlementTimeBasis?: string
+      primarySettlementSource?: string
+      verificationStatus?: string
       continent: string
       unit: string
       latest?: number | null
@@ -1048,6 +1316,9 @@ function App() {
       humidityStatus?: string
       signals: number
       actionable: number
+      enabled: boolean
+      tier: number
+      lastRefreshedAt?: string | null
     }>()
 
     for (const row of citySeries) {
@@ -1055,6 +1326,15 @@ function App() {
         key: row.city_key,
         name: row.city_name,
         station: row.station_id,
+        stationName: row.station_name,
+        settlementStation: row.settlement_station_id,
+        settlementStationName: row.settlement_station_name,
+        settlementRuleVerifiedAt: row.settlement_rule_verified_at,
+        settlementTimezone: row.settlement_timezone,
+        settlementUnit: row.settlement_unit,
+        settlementTimeBasis: row.settlement_time_basis,
+        primarySettlementSource: row.primary_settlement_source,
+        verificationStatus: row.verification_status,
         continent: cityContinent(row.city_key, row.city_name),
         unit: row.unit || 'F',
         latest: row.latest_best ?? null,
@@ -1064,6 +1344,9 @@ function App() {
         humidityStatus: row.humidity_status,
         signals: 0,
         actionable: 0,
+        enabled: Boolean(row.enabled),
+        tier: row.tier ?? 9,
+        lastRefreshedAt: row.last_refreshed_at ?? row.latest_timestamp ?? null,
       })
     }
 
@@ -1072,6 +1355,16 @@ function App() {
         rows.set(row.city_key, {
           key: row.city_key,
           name: row.city_name,
+          station: undefined,
+          stationName: undefined,
+          settlementStation: undefined,
+          settlementStationName: undefined,
+          settlementRuleVerifiedAt: null,
+          settlementTimezone: undefined,
+          settlementUnit: undefined,
+          settlementTimeBasis: undefined,
+          primarySettlementSource: undefined,
+          verificationStatus: 'unverified',
           continent: cityContinent(row.city_key, row.city_name),
           unit: 'F',
           latest: row.mean_high,
@@ -1081,6 +1374,9 @@ function App() {
           humidityStatus: 'not_collected',
           signals: 0,
           actionable: 0,
+          enabled: false,
+          tier: 9,
+          lastRefreshedAt: null,
         })
       }
     }
@@ -1089,6 +1385,16 @@ function App() {
       const row = rows.get(signal.city_key) ?? {
         key: signal.city_key,
         name: signal.city_name,
+        station: undefined,
+        stationName: undefined,
+        settlementStation: undefined,
+        settlementStationName: undefined,
+        settlementRuleVerifiedAt: null,
+        settlementTimezone: undefined,
+        settlementUnit: undefined,
+        settlementTimeBasis: undefined,
+        primarySettlementSource: undefined,
+        verificationStatus: 'unverified',
         continent: cityContinent(signal.city_key, signal.city_name),
         unit: 'F',
         latest: null,
@@ -1098,6 +1404,9 @@ function App() {
         humidityStatus: 'not_collected',
         signals: 0,
         actionable: 0,
+        enabled: false,
+        tier: 9,
+        lastRefreshedAt: null,
       }
       row.signals += 1
       if (signal.actionable) row.actionable += 1
@@ -1136,10 +1445,9 @@ function App() {
   const selectedCityMeta = cityOptions.find(city => city.key === selectedCity)
   const selectedCityEvidence = cityEvidence.find(city => city.city_key === selectedCity)
   const selectedDateEvidence = selectedCityEvidence?.dates.find(item => item.target_date === selectedDate) ?? selectedCityEvidence?.dates[0]
-  const recommendedCities = cityOptions
-    .filter(city => city.actionable > 0)
-    .slice(0, 4)
-  const actionableCityCount = cityOptions.filter(city => city.actionable > 0).length
+  const recommendations = data?.recommendations ?? null
+  const recommendedItems = recommendations?.items ?? []
+  const actionableCityCount = recommendations?.trade_candidate_count ?? cityOptions.filter(city => city.actionable > 0).length
   const selectedEvidenceCount = (selectedCityMeta?.forecastCount ?? 0)
     + (selectedCityMeta?.historyCount ?? 0)
     + (selectedCityMeta?.latestMetar !== null && selectedCityMeta?.latestMetar !== undefined ? 1 : 0)
@@ -1147,48 +1455,39 @@ function App() {
   const selectedEvidenceReady = selectedEvidenceCount > 0
 
   useEffect(() => {
-    refreshOptionsRef.current = currentRefreshOptions
-  }, [currentRefreshOptions])
-
-  useEffect(() => {
     productionRefreshRunningRef.current = productionRefreshRunning
   }, [productionRefreshRunning])
 
   useEffect(() => {
-    if (!dashboardAutoFetchEnabled) {
-      if (dashboardAutoFetchTimerRef.current !== null) {
-        window.clearInterval(dashboardAutoFetchTimerRef.current)
-        dashboardAutoFetchTimerRef.current = null
-      }
-      return
-    }
-
-    dashboardAutoFetchTimerRef.current = window.setInterval(() => {
-      if (productionRefreshRunningRef.current) {
+    const pollers = schedulerStatus?.pollers ?? {}
+    for (const key of ['forecast_poller', 'metar_poller', 'china_live_poller', 'derive_poller']) {
+      const poller = pollers[key]
+      const runKey = poller?.last_run_at
+      if (!poller || !runKey || seenSchedulerRunsRef.current[key] === runKey) continue
+      seenSchedulerRunsRef.current[key] = runKey
+      const cityResults = poller.last_result?.city_results ?? []
+      for (const [index, result] of cityResults.entries()) {
+        const city = result.city || result.station_id || 'unknown'
+        const ok = Boolean(result.ok)
         showRefreshNotice({
-          id: Date.now(),
-          tone: 'warning',
-          title: uiLanguage === 'zh' ? '自动抓取跳过本轮' : 'Auto fetch skipped',
-          message: uiLanguage === 'zh'
-            ? '上一轮抓取仍在运行，已避免重复请求。'
-            : 'The previous refresh is still running, so this interval was skipped.',
-          details: ['no concurrent production-refresh'],
-        }, 7000)
-        return
-      }
-      productionRefreshMutation.mutate({
-        ...refreshOptionsRef.current,
-        source: 'auto',
-      })
-    }, DASHBOARD_AUTO_FETCH_INTERVAL_MS)
-
-    return () => {
-      if (dashboardAutoFetchTimerRef.current !== null) {
-        window.clearInterval(dashboardAutoFetchTimerRef.current)
-        dashboardAutoFetchTimerRef.current = null
+          id: Date.now() + index + (key === 'metar_poller' ? 100 : key === 'forecast_poller' ? 200 : key === 'china_live_poller' ? 250 : 300),
+          tone: ok ? 'success' : 'error',
+          title: ok
+            ? `${poller.label} ${city} ${uiLanguage === 'zh' ? '更新完成' : 'updated'}`
+            : `${poller.label} ${city} ${uiLanguage === 'zh' ? '更新失败' : 'failed'}`,
+          message: ok
+            ? `${poller.label} · ${durationLabel(poller.last_duration_ms)} · ${relativeTime(runKey)}`
+            : (result.error || poller.last_message || 'scheduler city refresh failed'),
+          details: [
+            result.station_id ? `station ${result.station_id}` : city,
+            result.rows_upserted !== null && result.rows_upserted !== undefined
+              ? `upserted ${result.rows_upserted}`
+              : (result.reports_upserted !== null && result.reports_upserted !== undefined ? `upserted ${result.reports_upserted}` : `poller ${key}`),
+          ],
+        }, ok ? 5000 : 14000)
       }
     }
-  }, [dashboardAutoFetchEnabled, uiLanguage])
+  }, [schedulerStatus, uiLanguage])
 
   const runProductionRefreshFromDashboard = (source: 'manual' | 'auto' = 'manual') => {
     if (productionRefreshRunningRef.current) {
@@ -1207,24 +1506,6 @@ function App() {
       ...currentRefreshOptions,
       source,
     })
-  }
-
-  const toggleDashboardAutoFetch = () => {
-    if (dashboardAutoFetchEnabled) {
-      setDashboardAutoFetchEnabled(false)
-      showRefreshNotice({
-        id: Date.now(),
-        tone: 'warning',
-        title: uiLanguage === 'zh' ? '自动抓取已关闭' : 'Auto fetch stopped',
-        message: uiLanguage === 'zh'
-          ? '页面定时抓取已停止；后端不会继续自动刷新。'
-          : 'Page-level scheduled refresh is stopped; the backend will not continue auto refresh.',
-        details: ['manual control'],
-      }, 7000)
-      return
-    }
-    setDashboardAutoFetchEnabled(true)
-    runProductionRefreshFromDashboard('auto')
   }
 
   const filteredCityOptions = cityOptions.filter(city => {
@@ -1275,14 +1556,6 @@ function App() {
     document.body.style.backgroundColor = background
   }, [themeMode])
 
-  useEffect(() => {
-    return () => {
-      if (refreshNoticeTimerRef.current !== null) {
-        window.clearTimeout(refreshNoticeTimerRef.current)
-      }
-    }
-  }, [])
-
   if (isLoading) {
     return (
       <div className="flex h-screen items-center justify-center bg-black text-neutral-300">
@@ -1322,6 +1595,10 @@ function App() {
         </div>
         <div className="order-last flex min-w-0 basis-full flex-nowrap items-center gap-1.5 overflow-x-auto text-[10px] xl:overflow-visible">
           <span className="shrink-0 border border-neutral-800 px-2 py-1 text-neutral-400">{copy.data} {dataAge(stats.data_age_minutes)}</span>
+          <SchedulerBadge poller={schedulerStatus?.pollers?.forecast_poller} label="Forecast" />
+          <SchedulerBadge poller={schedulerStatus?.pollers?.metar_poller} label="METAR" />
+          <SchedulerBadge poller={schedulerStatus?.pollers?.china_live_poller} label="China Live" />
+          <SchedulerBadge poller={schedulerStatus?.pollers?.derive_poller} label="Historical" />
           <span
             className={`shrink-0 border px-2 py-1 ${
               productionRefreshRunning
@@ -1383,20 +1660,29 @@ function App() {
           </button>
         </div>
         <button
-          onClick={toggleDashboardAutoFetch}
-          className={`inline-flex items-center gap-1 whitespace-nowrap border px-2 py-1.5 text-[11px] ${
-            dashboardAutoFetchEnabled
-              ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/15'
-              : 'border-green-500/30 text-green-300 hover:bg-green-500/10'
-          }`}
-          title="受控自动抓取：点击后立即刷新一次，并在当前页面打开期间每 15 分钟刷新当前城市/日期；后端锁会避免重复抓取。"
+          onClick={() => runProductionRefreshFromDashboard('manual')}
+          disabled={productionRefreshRunning}
+          className="inline-flex items-center gap-1 whitespace-nowrap border border-green-500/30 px-2 py-1.5 text-[11px] text-green-300 hover:bg-green-500/10 disabled:opacity-40"
+          title="刷新当前城市/日期一次：production-refresh-v2。不会启动常驻调度器。"
         >
-          <RefreshCw className={`h-3.5 w-3.5 ${productionRefreshRunning || dashboardAutoFetchEnabled ? 'animate-spin' : ''}`} />
-          {productionRefreshRunning
-            ? copy.fetching
-            : dashboardAutoFetchEnabled
-              ? (uiLanguage === 'zh' ? '自动抓取已开' : 'Auto fetch on')
-              : copy.manualFetch}
+          <RefreshCw className={`h-3.5 w-3.5 ${productionRefreshRunning ? 'animate-spin' : ''}`} />
+          {productionRefreshRunning ? copy.fetching : copy.refreshCurrent}
+        </button>
+        <button
+          onClick={() => {
+            if (schedulerRunning) schedulerStopMutation.mutate()
+            else schedulerStartMutation.mutate()
+          }}
+          disabled={schedulerStartMutation.isPending || schedulerStopMutation.isPending}
+          className={`inline-flex items-center gap-1 whitespace-nowrap border px-2 py-1.5 text-[11px] disabled:opacity-40 ${
+            schedulerRunning
+              ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/15'
+              : 'border-neutral-700 text-neutral-300 hover:bg-neutral-900'
+          }`}
+          title={`后端常驻调度器。下一次 METAR：${schedulerStatus?.pollers?.metar_poller?.next_run_at ? timeText(schedulerStatus.pollers.metar_poller.next_run_at) : '--'}`}
+        >
+          <Activity className={`h-3.5 w-3.5 ${schedulerRunning ? 'animate-pulse' : ''}`} />
+          {schedulerRunning ? copy.schedulerStop : copy.schedulerStart}
         </button>
         {stats.is_running && (
           <button
@@ -1418,67 +1704,74 @@ function App() {
         </button>
       </header>
 
-      {refreshNotice && (
+      {refreshNotices.length > 0 && (
         <div
           role="status"
           aria-live="polite"
-          className={`fixed right-3 top-16 z-50 w-[min(380px,calc(100vw-24px))] border p-3 text-xs shadow-xl ${
-            themeMode === 'dark' ? 'bg-[#1B212C] text-[#CBD2DC]' : 'bg-white text-gray-900'
-          } ${
-            refreshNotice.tone === 'success'
-              ? 'border-green-500/40'
-              : refreshNotice.tone === 'error'
-                ? 'border-red-500/50'
-                : refreshNotice.tone === 'warning'
-                  ? 'border-amber-500/50'
-                  : 'border-cyan-500/40'
-          }`}
+          className="fixed right-3 top-16 z-50 flex w-[min(380px,calc(100vw-24px))] flex-col gap-2"
         >
-          <div className="flex items-start gap-2">
-            {refreshNotice.tone === 'success' ? (
-              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-green-400" />
-            ) : refreshNotice.tone === 'error' ? (
-              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
-            ) : refreshNotice.tone === 'warning' ? (
-              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
-            ) : (
-              <RefreshCw className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-cyan-400" />
-            )}
-            <div className="min-w-0 flex-1">
-              <div className="font-medium">{refreshNotice.title}</div>
-              <div className={themeMode === 'dark' ? 'mt-1 text-[#7D8694]' : 'mt-1 text-gray-500'}>
-                {refreshNotice.message}
-              </div>
-              {refreshNotice.details?.length ? (
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {refreshNotice.details.map(detail => (
-                    <span
-                      key={detail}
-                      className={`border px-1.5 py-0.5 text-[10px] ${
-                        refreshNotice.tone === 'error'
-                          ? 'border-red-500/30 text-red-300'
-                          : refreshNotice.tone === 'success'
-                            ? 'border-green-500/30 text-green-300'
-                            : refreshNotice.tone === 'warning'
-                              ? 'border-amber-500/30 text-amber-300'
-                              : 'border-cyan-500/30 text-cyan-300'
-                      }`}
-                    >
-                      {detail}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-            <button
-              type="button"
-              onClick={() => setRefreshNotice(null)}
-              className={themeMode === 'dark' ? 'text-[#7D8694] hover:text-white' : 'text-gray-400 hover:text-gray-900'}
-              aria-label="关闭数据抓取提示"
+          {refreshNotices.map(refreshNotice => (
+            <div
+              key={refreshNotice.id}
+              className={`border p-3 text-xs shadow-xl ${
+                themeMode === 'dark' ? 'bg-[#1B212C] text-[#CBD2DC]' : 'bg-white text-gray-900'
+              } ${
+                refreshNotice.tone === 'success'
+                  ? 'border-green-500/40'
+                  : refreshNotice.tone === 'error'
+                    ? 'border-red-500/50'
+                    : refreshNotice.tone === 'warning'
+                      ? 'border-amber-500/50'
+                      : 'border-cyan-500/40'
+              }`}
             >
-              ×
-            </button>
-          </div>
+              <div className="flex items-start gap-2">
+                {refreshNotice.tone === 'success' ? (
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-green-400" />
+                ) : refreshNotice.tone === 'error' ? (
+                  <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+                ) : refreshNotice.tone === 'warning' ? (
+                  <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+                ) : (
+                  <RefreshCw className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-cyan-400" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium">{refreshNotice.title}</div>
+                  <div className={themeMode === 'dark' ? 'mt-1 text-[#7D8694]' : 'mt-1 text-gray-500'}>
+                    {refreshNotice.message}
+                  </div>
+                  {refreshNotice.details?.length ? (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {refreshNotice.details.map(detail => (
+                        <span
+                          key={detail}
+                          className={`border px-1.5 py-0.5 text-[10px] ${
+                            refreshNotice.tone === 'error'
+                              ? 'border-red-500/30 text-red-300'
+                              : refreshNotice.tone === 'success'
+                                ? 'border-green-500/30 text-green-300'
+                                : refreshNotice.tone === 'warning'
+                                  ? 'border-amber-500/30 text-amber-300'
+                                  : 'border-cyan-500/30 text-cyan-300'
+                          }`}
+                        >
+                          {detail}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRefreshNotices(current => current.filter(item => item.id !== refreshNotice.id))}
+                  className={themeMode === 'dark' ? 'text-[#7D8694] hover:text-white' : 'text-gray-400 hover:text-gray-900'}
+                  aria-label="关闭数据抓取提示"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -1536,35 +1829,60 @@ function App() {
                 </div>
               )}
               {filteredCityOptions.map(city => (
-                <a
+                <div
                   key={city.key}
-                  href={cityHref(city)}
                   title={`预报 ${city.forecastCount} · METAR ${city.latestMetar !== null && city.latestMetar !== undefined ? Number(city.latestMetar).toFixed(1) + '°' + city.unit : '--'} · 历史 ${city.historyCount} · 湿度 ${city.humidityStatus === 'available' ? '可用' : '缺失'} · 信号 ${city.actionable}/${city.signals}`}
-                  onClick={event => {
-                    event.preventDefault()
-                    setSelectedCity(city.key)
-                  }}
-                  className={`block min-h-[54px] w-full border px-2 py-2 text-left transition ${
+                  className={`flex min-h-[58px] w-full items-stretch gap-2 border px-2 py-2 text-left transition ${
                     selectedCity === city.key
                       ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
                       : 'border-neutral-800 bg-black/40 text-neutral-300 hover:border-neutral-700'
                   }`}
                 >
-                  <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={event => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      stationEnabledMutation.mutate({ cityKey: city.key, enabled: !city.enabled })
+                    }}
+                    disabled={stationEnabledMutation.isPending}
+                    className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center border disabled:opacity-40 ${
+                      city.enabled
+                        ? 'border-amber-400/40 bg-amber-400/10 text-amber-300'
+                        : 'border-neutral-800 text-neutral-600 hover:text-neutral-200'
+                    }`}
+                    aria-label={`${city.enabled ? '暂停' : '启用'} ${city.name} 调度`}
+                    title={city.enabled ? '点击后暂停该城市调度' : '点击后加入后端调度 watchlist'}
+                  >
+                    <Star className="h-3.5 w-3.5" fill={city.enabled ? 'currentColor' : 'none'} />
+                  </button>
+                  <a
+                    href={cityHref(city)}
+                    onClick={event => {
+                      event.preventDefault()
+                      setSelectedCity(city.key)
+                    }}
+                    className="min-w-0 flex-1"
+                  >
+                    <div className="flex items-center justify-between gap-2">
                     <div className="flex min-w-0 items-center gap-2">
-                      <span className={`h-2 w-2 shrink-0 rounded-full ${city.actionable > 0 ? 'bg-green-300' : city.forecastCount > 0 ? 'bg-cyan-300' : 'bg-neutral-700'}`} />
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${city.enabled ? 'bg-amber-300' : city.actionable > 0 ? 'bg-green-300' : city.forecastCount > 0 ? 'bg-cyan-300' : 'bg-neutral-700'}`} />
                       <div className="min-w-0">
-                      <div className="truncate text-xs font-medium leading-tight">{city.name}</div>
-                      <div className="mt-1 truncate text-[10px] leading-tight text-neutral-600">{city.station || 'station 未映射'}</div>
+                        <div className="truncate text-xs font-medium leading-tight">{city.name}</div>
+                        <div className="mt-1 truncate text-[10px] leading-tight text-neutral-600">
+                          {city.station || 'station 未映射'} · {city.enabled ? `已启用 · ${relativeTime(city.lastRefreshedAt)}` : '未调度'}
+                        </div>
                       </div>
                     </div>
                     <div className="shrink-0 text-right">
                       <div className="tabular-nums text-[11px] leading-tight text-neutral-200">
                         {city.latest === null || city.latest === undefined ? '--' : `${Number(city.latest).toFixed(1)}°${city.unit}`}
                       </div>
+                      <div className="mt-1 text-[9px] tabular-nums text-neutral-600">T{city.tier}</div>
                     </div>
-                  </div>
-                </a>
+                    </div>
+                  </a>
+                </div>
               ))}
             </div>
           </div>
@@ -1595,6 +1913,29 @@ function App() {
                   信号 {actionable}/{signals.length}
                 </span>
               </div>
+              <div className="mt-1 flex flex-wrap gap-1.5 text-[9px]">
+                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500" title={selectedCityMeta?.settlementStationName || selectedCityMeta?.stationName || ''}>
+                  Settlement station {selectedCityMeta?.settlementStation || selectedCityMeta?.station || '--'}
+                </span>
+                <span className={`border px-1.5 py-0.5 ${
+                  selectedCityMeta?.verificationStatus === 'verified'
+                    ? 'border-green-500/30 text-green-300'
+                    : selectedCityMeta?.verificationStatus === 'settlement_mismatch'
+                      ? 'border-red-500/30 text-red-300'
+                      : 'border-amber-500/30 text-amber-300'
+                }`}>
+                  Rule verified {selectedCityMeta?.settlementRuleVerifiedAt ? relativeTime(selectedCityMeta.settlementRuleVerifiedAt) : 'unverified'}
+                </span>
+                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">
+                  Timezone {selectedCityMeta?.settlementTimezone || '--'}
+                </span>
+                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">
+                  Truth source {selectedCityMeta?.primarySettlementSource || 'pending'}
+                </span>
+                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-600">
+                  Non-truth metar_reports/IEM display only
+                </span>
+              </div>
             </div>
             <div className="flex flex-wrap gap-1.5 text-[10px]">
               {needsManualRefresh && (
@@ -1610,38 +1951,38 @@ function App() {
             <div className="border-b border-neutral-800 p-2">
               <div className="mb-1 flex items-center justify-between gap-2">
                 <div className="text-[10px] font-medium text-neutral-300">推荐关注</div>
-                <div className="text-[9px] text-neutral-500">信号 {actionableCityCount}</div>
+                <div className="text-[9px] text-neutral-500">
+                  信号 {recommendations?.trade_candidate_count ?? 0} · 观察 {recommendations?.observation_only_count ?? 0}
+                </div>
               </div>
-              {recommendedCities.length > 0 ? (
+              {recommendedItems.length > 0 ? (
                 <div className="grid gap-1 md:grid-cols-2 2xl:grid-cols-4">
-                  {recommendedCities.map(city => (
-                    <a
-                      key={city.key}
-                      href={cityHref(city)}
-                      onClick={event => {
-                        event.preventDefault()
-                        setSelectedCity(city.key)
+                  {recommendedItems.map(item => (
+                    <RecommendationCard
+                      key={`${item.type}-${item.city_key}-${item.target_date}-${item.bucket_key ?? item.metar_report_time ?? 'latest'}`}
+                      item={item}
+                      selected={selectedCity === item.city_key}
+                      onSelect={() => {
+                        setSelectedCity(item.city_key)
+                        if (item.target_date) setSelectedDate(item.target_date)
                       }}
-                      className={`min-w-0 border px-2 py-1.5 transition ${
-                        selectedCity === city.key
-                          ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
-                          : 'border-amber-500/25 bg-amber-500/5 text-neutral-300 hover:border-amber-400/50'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-[11px] font-medium">{city.name}</span>
-                        <span className="shrink-0 tabular-nums text-[10px] text-green-300">{city.actionable}/{city.signals}</span>
-                      </div>
-                      <div className="mt-1 flex items-center justify-between gap-2 text-[9px] text-neutral-500">
-                        <span className="truncate">{city.station || 'station 未映射'}</span>
-                        <span className="shrink-0 tabular-nums">{city.latest === null || city.latest === undefined ? '--' : `${Number(city.latest).toFixed(1)}°${city.unit}`}</span>
-                      </div>
-                    </a>
+                    />
                   ))}
                 </div>
               ) : (
                 <div className="border border-neutral-800 px-2 py-2 text-[10px] text-neutral-500">
-                  暂无可执行信号，优先观察证据完整和盘口可用城市。
+                  {recommendations?.empty_reason === 'scheduler_stopped'
+                    ? '启动调度器以获取实时推荐。'
+                    : '暂无通过 METAR age / verified / strict match / paper gate 的实时推荐。'}
+                  {recommendations?.skipped ? (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {Object.entries(recommendations.skipped).slice(0, 5).map(([reason, count]) => (
+                        <span key={reason} className="border border-neutral-800 px-1.5 py-0.5">
+                          {reason} {count}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>
