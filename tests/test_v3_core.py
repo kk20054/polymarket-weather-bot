@@ -17,6 +17,7 @@ from weatherbot_v3.production_actions import list_production_actions, run_produc
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
 from weatherbot_v3.forecast import ingest_polywx_forecasts, forecast_run_from_polywx_rows
+from weatherbot_v3.history import fetch_open_meteo_historical_backfill, open_meteo_historical_rows_from_response
 from weatherbot_v3.hourly import build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary
 from weatherbot_v3.deb import bucket_probabilities, build_and_store_daily_max_prediction, build_daily_max_prediction
 from weatherbot_v3.market_buckets import ingest_market_buckets, market_bucket_from_payload, parse_temperature_bucket, sync_active_weather_market_buckets
@@ -192,7 +193,7 @@ class V3CoreTests(unittest.TestCase):
         payload = _build_city_evidence_payload(city_series, signals, fetch_log)
 
         self.assertEqual(len(payload), 1)
-        day = payload[0]["dates"][0]
+        day = next(item for item in payload[0]["dates"] if item["target_date"] == "2026-06-29")
         modules = day["modules"]
         self.assertEqual(day["target_date"], "2026-06-29")
         self.assertEqual(modules["hourly_temperature"]["rows"], 1)
@@ -1104,6 +1105,110 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(evidence["mesonet_observations"], 1)
         self.assertEqual(evidence["latest_mesonet_observations"][0]["network"], "pws")
         self.assertEqual(evidence["latest_mesonet_observations"][0]["parser_version"], "pws-observation-row-v1")
+
+    def test_openmeteo_historical_backfill_persists_display_only_mesonet_rows(self):
+        db_path = test_db_path("openmeteo_historical_backfill")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        payload = {
+            "hourly": {
+                "time": ["2026-07-01T00:00", "2026-07-01T01:00"],
+                "temperature_2m": [77.0, 78.0],
+                "relative_humidity_2m": [55, 56],
+                "dew_point_2m": [60.0, 61.0],
+                "cloud_cover": [20, 30],
+                "wind_speed_10m": [10, 11],
+                "wind_direction_10m": [180, 190],
+                "wind_gusts_10m": [20, 21],
+                "surface_pressure": [1000, 1001],
+                "pressure_msl": [1012, 1013],
+                "precipitation": [0, 0.1],
+                "weather_code": [1, 2],
+            },
+            "daily": {
+                "time": ["2026-07-01"],
+                "temperature_2m_max": [81.0],
+            },
+        }
+
+        class FakeResponse:
+            status_code = 200
+            url = "https://archive-api.open-meteo.com/v1/archive?city=chicago"
+
+            def json(self):
+                return payload
+
+            def raise_for_status(self):
+                return None
+
+        class FakeSession:
+            trust_env = True
+
+            def get(self, url, params, headers, timeout):
+                self.url = url
+                self.params = params
+                return FakeResponse()
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            result = fetch_open_meteo_historical_backfill(
+                ["chicago"],
+                start_date="2026-07-01",
+                end_date="2026-07-01",
+                session=FakeSession(),
+                history_cache_path=db_path.with_suffix(".history.json"),
+            )
+            evidence = weather_evidence_summary("chicago")
+            with connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT network, raw_unit, quality_flags, temperature, humidity, dew_point, pressure FROM mesonet_observations ORDER BY observed_at"
+                ).fetchall()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["hourly_rows_upserted"], 2)
+        self.assertEqual(evidence["mesonet_observations"], 2)
+        self.assertEqual(rows[0]["network"], "open_meteo_historical")
+        self.assertEqual(rows[0]["raw_unit"], "F")
+        self.assertIn("not_settlement_truth", rows[0]["quality_flags"])
+        self.assertAlmostEqual(rows[0]["temperature"], 77.0)
+        self.assertEqual(rows[0]["humidity"], 55)
+        self.assertAlmostEqual(rows[0]["dew_point"], 60.0)
+        self.assertEqual(rows[0]["pressure"], 1012)
+
+    def test_hourly_consensus_exposes_historical_and_pws_without_metar_aliasing(self):
+        db_path = test_db_path("hourly_historical_pws_sources")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            upsert_mesonet_observation({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "network": "open_meteo_historical",
+                "station_id": "KORD",
+                "observed_at": "2026-07-01T16:00:00+00:00",
+                "temperature": 84.0,
+                "humidity": 50,
+                "parser_version": "openmeteo-historical-v1",
+                "parse_status": "parsed",
+                "raw_unit": "F",
+                "quality_flags": ["display_only", "research_truth", "not_settlement_truth"],
+            })
+            upsert_mesonet_observation({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "network": "wunderground_pws",
+                "station_id": "KORD-PWS",
+                "observed_at": "2026-07-01T16:10:00+00:00",
+                "temperature": 86.0,
+                "parser_version": "pws-wunderground-current-v1",
+                "parse_status": "parsed",
+                "raw_unit": "F",
+                "quality_flags": ["display_only", "not_settlement_truth"],
+            })
+            build_hourly_consensus(["chicago"], target_date="2026-07-01", db_path=db_path)
+            points = hourly_consensus_points({"chicago": {"2026-07-01"}}, db_path=db_path)
+
+        point = points["chicago"][0]
+        self.assertIsNone(point["metar"])
+        self.assertAlmostEqual(point["historical"], 84.0)
+        self.assertAlmostEqual(point["pws"], 86.0)
 
     def test_wunderground_pws_payload_aggregates_as_display_only_mesonet(self):
         payload = {
@@ -4265,7 +4370,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(rows[0]["hourly_count"], 1)
         self.assertAlmostEqual(rows[0]["latest_metar"], 91.94, places=2)
         self.assertEqual(rows[0]["humidity_status"], "available")
-        day = payload[0]["dates"][0]
+        day = next(item for item in payload[0]["dates"] if item["target_date"] == "2026-06-29")
         self.assertEqual(day["modules"]["hourly_temperature"]["rows"], 1)
         self.assertEqual(day["modules"]["metar"]["rows"], 1)
         self.assertEqual(day["modules"]["forecast"]["rows"], 0)

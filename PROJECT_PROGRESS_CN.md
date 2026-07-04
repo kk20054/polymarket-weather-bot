@@ -32,6 +32,15 @@
 
 ## 最近 5 条完整 ledger
 
+### 2026-07-04：Layer 2/7 Historical display-only 回填入口与 PolyWX benchmark 工具
+
+- 目标：结合本地实现与 PolyWX 对照建议，不把 PolyWX 展示值导入生产 truth，而是补齐 WeatherBot 自己的历史小时密度入口、诚实区分 METAR/Historical/PWS 系列，并提供 audit-only 的 PolyWX benchmark 与 scheduler 长跑采样工具。
+- 改动：`weatherbot_v3/history.py` 新增 Open-Meteo Historical collector，使用 `archive-api.open-meteo.com/v1/archive` 拉取 hourly temperature、humidity、dew point、cloud、wind、pressure、precipitation 等字段，写入 `mesonet_observations.network=open_meteo_historical`，并标记 `display_only/research_truth/not_settlement_truth/open_meteo_archive_grid`；CLI 新增 `history-backfill`，必须显式手动运行，不接入启动流程。`weatherbot_v3/hourly.py` 改为把 `open_meteo_historical`、`wunderground_pws` 与 `china_live` 作为独立系列输出，且不再把非 METAR mesonet 数据冒充成 METAR。前端 `WeatherPanel.tsx` 的 METAR/Historical 表格补齐 humidity、cloud、weather、visibility、wind、pressure、dew、fetched 等列，Historical tab 新增小时级历史表。新增 `tools/scheduler_longrun_probe.py` 用于采样 `/api/scheduler/status` 与 `/api/dashboard`，新增 `tools/polywx_benchmark_snapshot.py` 仅把 PolyWX 页面/API 证据保存到 `audits/`，脚本内明确禁止把 PolyWX 值导入 truth/mesonet/hourly/forecast/trading 表。
+- 验证：`.venv\Scripts\python.exe -m unittest tests.test_v3_core tests.test_polywx_contract` 通过 174 tests OK，仍有既有 SQLite connection ResourceWarning；`npm run build` 通过，仍有既有 Browserslist/chunk warning；`git diff --check` 通过，仅 Windows LF/CRLF warning。测试覆盖 Open-Meteo Historical display-only 入库、Historical/PWS 不冒充 METAR、PolyWX contract 中的 history-backfill/benchmark disclaimer/scheduler probe 关键词。
+- 结论：本轮提高了历史/展示数据密度和对照工具质量，但没有把 Open-Meteo Historical 或 PolyWX 当成 settlement truth，也没有解锁 live。若用户看到折线图没有 METAR 白线，现在系统会更诚实地区分：METAR 缺失就是缺失，Historical/PWS/China Live 会作为独立系列出现，不能填充 METAR gate。
+- 下一步：如需真实补历史密度，手动运行 `python -m weatherbot_v3.cli history-backfill --city chicago --days 30` 或限定 7 城批量回填，再重建 `hourly-consensus`；如需验证 scheduler 稳定性，运行 `python tools/scheduler_longrun_probe.py --duration-minutes 60 --sample-seconds 300 --start-scheduler --stop-scheduler`。PolyWX 只能用 `tools/polywx_benchmark_snapshot.py` 做 audit 对照，不得导入生产库。
+- 相关提交：本轮最终提交。
+
 ### 2026-07-04：Layer 6/8 策略复用层、Kelly 仓位与 Ladder Paper 原子执行
 
 - 目标：只改 Layer 6/8，不改前端、不解锁 live；把原本唯一的单桶 EV 策略扩展为可组合策略层，并加入 Kelly 仓位建议。新增三类策略：`single_bucket_ev`、`ladder_grid`、`tail_buying`。

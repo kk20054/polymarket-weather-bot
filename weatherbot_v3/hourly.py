@@ -367,10 +367,18 @@ def hourly_consensus_points(
             else {}
         )
         china_live_temp = _float(source_temperatures.get("china_live")) if source_temperatures else None
-        if source_temperatures and "china_live" in source_temperatures and "metar" not in source_temperatures:
-            metar_temp = None
-        elif source_temperatures and "metar" in source_temperatures:
+        historical_temp = _float(source_temperatures.get("open_meteo_historical")) if source_temperatures else None
+        pws_temp = None
+        if source_temperatures:
+            pws_temp = _float(
+                source_temperatures.get("wunderground_pws")
+                if "wunderground_pws" in source_temperatures
+                else source_temperatures.get("pws")
+            )
+        if source_temperatures and "metar" in source_temperatures:
             metar_temp = _float(source_temperatures.get("metar"))
+        elif source_temperatures:
+            metar_temp = None
         else:
             metar_temp = observed_temp
         by_city[city].append({
@@ -380,7 +388,9 @@ def hourly_consensus_points(
             "best": forecast_temp,
             "ensemble_mean": forecast_temp,
             "metar": metar_temp,
+            "historical": historical_temp,
             "china_live": china_live_temp,
+            "pws": pws_temp,
             "humidity": _float(row.get("humidity")),
             "cloud_cover": _float(row.get("cloud_cover")),
             "precipitation": _float(row.get("precipitation")),

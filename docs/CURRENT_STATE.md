@@ -13,23 +13,24 @@
 - Wunderground/Weather.com PWS collector 已接入为 display-only mesonet：`pws-fetch` 与 METAR poller 同频路径可用；当前未配置 API key，5 个美国城市真实命令返回 skipped，不造假数据。
 - DEB `peak_hour` 已改用 hourly_consensus 混合曲线：过去小时用观测覆盖 forecast，并列取最晚；Chicago 2026-07-02 已验证为 mixed `16:00`。
 - Layer 6/8 已接入策略复用层：`single_bucket_ev`、`ladder_grid`、`tail_buying` 三策略可组合产出 `signal_decisions`，并持久化 `strategy_name/kelly_fraction/position_size_usd/ladder_group_id`；paper ladder 支持三桶原子执行，live 仍锁定。
+- 本轮补齐了 Open-Meteo Historical display-only 回填入口、PolyWX audit-only benchmark 工具和 scheduler 长跑采样工具；小时聚合已区分 METAR/Historical/PWS，避免非 METAR 数据伪装成 METAR。
 - `LIVE_TRADING=false`，实盘仍锁定；当前不能承诺自动赚钱或无人值守实盘。
 - 本轮文档治理复核后，开工只读本文件；历史细节按需看 `PROJECT_PROGRESS_CN.md` 或 `docs/PROGRESS_ARCHIVE_CN.md`。
 
 ## 最近 5 条 ledger 摘要
 
+- 2026-07-04 / Layer 2/7 Historical display-only + PolyWX benchmark 工具 / 结论：新增 Open-Meteo Historical 回填 CLI，把历史小时数据写入 `mesonet_observations.network=open_meteo_historical` 并明确 `not_settlement_truth`；小时图数据不再把 Historical/PWS 冒充为 METAR；Historical 表格补齐湿度、云量、风、气压、露点等字段；新增 scheduler 长跑采样与 PolyWX audit-only benchmark 脚本。
 - 2026-07-04 / Layer 6/8 策略复用与 Kelly / 结论：单桶 EV 阈值从 3% 提到 5%，新增 Ladder Grid 与 Tail Buying 策略、Kelly sizing、signal_decisions 策略字段和 paper ladder 原子执行；Chicago/NYC/Atlanta 当日真实构建最新 33 行仅触发 single_bucket_ev，0 paper allowed，主因仍是样本不足、settlement unverified、spread too wide。
 - 2026-07-04 / Layer 2/4/6 PWS、DEB peak 与 C 桶口径 / 结论：Chicago 2026-07-02 审计确认 forecast-only 15:00 与 observed tie 13-16 的差异，DEB 已改 mixed curve argmax 并落 `peak_hour=16:00`；新增 `wunderground_pws` collector/CLI/scheduler 接入，当前缺 API key 所以真实 5 城 skipped；C 桶概率改为截断 `[23,24)`。
 - 2026-07-04 / Git 落盘 + 推荐 gate 诊断 / 结论：四个 Layer commit 已落盘；诊断脚本确认推荐=0 不是前端问题，且发现少量 D+1/D+2 被 D+0 METAR freshness 误杀，已拆成 `today_observation` 与 `forecast_lead` gate。
 - 2026-07-04 / Layer 6/7 推荐关注闭环 / 结论：推荐卡改由最新 `signal_decisions` 生成，METAR age、verified、DEB、bucket、edge、Polymarket 链接和无市场观察分支已接入；30 分钟 scheduler 实测 METAR 7/7 OK，但 derive 后推荐从 5/2 个降为 0，下一步查 `paper_gate_blocked` 和 `settlement_rule_unverified`。
-- 2026-07-04 / Layer 7 PolyWX 图表整改 / 结论：Hourly Temperature 与 Probability buckets 已按 PolyWX 风格重做，Chicago 与 Shanghai 浏览器截图通过，无 console error/横向溢出；下一步：继续组件拆分或查 current date 数据完整性。
-- 2026-07-04 / Layer 2 China Weather Live mesonet / 结论：HKO rhrread 与 weather.com.cn sk_2d 已写入 mesonet，小时图输出 `china_live` 红线值；display only，不覆盖 METAR，不解锁 live；下一步：browser QA 或 HKO truth collector 单独轮次。
 
 ## 生产阻塞项清单
 
 - truth 独立结算日样本不足，不能解锁实盘校准。
 - 仍有未核验城市 `settlement_rule_unverified`；Hong Kong 为 HKO 结算但当前观测站是 VHHH，必须补 HKO truth collector 后才可讨论 live。
 - China Weather Live 当前是 `display_only/not_settlement_truth`，不能作为解锁 live 的 truth 证据。
+- Open-Meteo Historical 当前是 `display_only/research_truth/not_settlement_truth`，可补足 UI 历史密度和人工对照，但不能替代机场/官方 settlement truth。
 - Wunderground PWS 当前缺 `WUNDERGROUND_API_KEY` 或 `WEATHER_COM_API_KEY`，只能保持 collector/CLI/scheduler 路径就绪，不能产生 PWS 实况点。
 - 多模型 forecast archive 与 station truth 的 walk-forward 验证还不够。
 - orderbook 级 replay、滑点、退出流动性和成交失败模拟仍需补强。
@@ -50,6 +51,7 @@
 - 若查 PWS，先确认 `WUNDERGROUND_API_KEY` 或 `WEATHER_COM_API_KEY`，再跑 `python -m weatherbot_v3.cli pws-fetch --city chicago --dry-run`。
 - 若查推荐为空，先跑 `python tools/diagnose_recommendation_gate.py`，再看 `/api/dashboard.recommendations.skipped`；重点区分 scheduler 停跑导致的 stale 与 signal decision 自身 gate。
 - 若查刷新问题，先看 `/api/scheduler/status` 是否 running、last_run_at、fails_last_hour 和 next_run_at。
+- 若补历史小时密度，显式运行 `python -m weatherbot_v3.cli history-backfill --city chicago --days 30`；该数据只进 display-only history，不解锁 live。
 - 若改 UI，先验证 `/api/dashboard` 与浏览器实际状态；本轮截图在 `audits/layer7-polywx-visual-2026-07-04/`。
 - 若改数据/策略，按 Build Order 一次只动一个 layer 加直接消费者。
 - 若查策略输出，优先看 `signal_decisions.strategy_name`、`kelly_fraction`、`position_size_usd`、`ladder_group_id` 和 `audits/strategy-multiplex-report-2026-07-04.md`。

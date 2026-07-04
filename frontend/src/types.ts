@@ -896,6 +896,7 @@ export interface WeatherCityPoint {
   precipitation_probability?: number | null
   wind_speed?: number | null
   wind_direction?: number | null
+  visibility?: number | null
   pressure?: number | null
   dew_point?: number | null
   shortwave_radiation?: number | null

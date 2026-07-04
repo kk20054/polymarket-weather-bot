@@ -76,6 +76,7 @@ type HourlyWeatherRow = {
   precipitation_probability?: number | null
   wind_speed?: number | null
   wind_direction?: number | null
+  visibility?: number | null
   pressure?: number | null
   dew_point?: number | null
   shortwave_radiation?: number | null
@@ -178,6 +179,11 @@ function fmtPrecip(value?: number | null) {
 function fmtPressure(value?: number | null) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
   return Number(value).toFixed(0)
+}
+
+function fmtVisibility(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  return Number(value).toFixed(1)
 }
 
 function fmtWind(speed?: number | null, direction?: number | null) {
@@ -428,6 +434,7 @@ function placeholderHourlyRow(targetDate: string, hour: number): HourlyWeatherRo
     precipitation_probability: null,
     wind_speed: null,
     wind_direction: null,
+    visibility: null,
     pressure: null,
     dew_point: null,
     shortwave_radiation: null,
@@ -966,6 +973,7 @@ function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): Hou
       precipitation_probability: point.precipitation_probability ?? null,
       wind_speed: point.wind_speed ?? null,
       wind_direction: point.wind_direction ?? null,
+      visibility: point.visibility ?? null,
       pressure: point.pressure ?? null,
       dew_point: point.dew_point ?? null,
       shortwave_radiation: point.shortwave_radiation ?? null,
@@ -1443,6 +1451,7 @@ export function WeatherPanel({
 
         {activeWorkbenchTab === 'historical' && (
           <div className="space-y-2 p-2">
+            <HistoricalHourlyObservationTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
             <HistoricalObservationTable rows={historyRows} unit={unit} stationId={series?.station_id} />
             <details className="border border-[#2C3445] bg-[#161A22]">
               <summary className="cursor-pointer select-none px-2 py-2 text-xs text-[#CBD2DC] hover:bg-[#222A37]">
@@ -1616,6 +1625,7 @@ function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRo
 
 function MetarObservationTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRow[]; unit: string; selectedDate: string }) {
   const metarRows = rows.filter(row => row.metar !== null && row.metar !== undefined)
+  const columns = ['Time', 'Observed', 'Forecast', 'Delta', 'Humidity', 'Cloud', 'Wx', 'Vis', 'Wind', 'Pres', 'Dew', 'Fetched']
 
   return (
     <section className="min-w-0 border border-neutral-800 bg-black">
@@ -1628,17 +1638,17 @@ function MetarObservationTable({ rows, unit, selectedDate }: { rows: HourlyWeath
       </div>
       {metarRows.length === 0 ? (
         <div className="max-h-[560px] overflow-auto">
-          <table className="min-w-[760px] w-full border-collapse text-left text-[10px]">
+          <table className="min-w-[1080px] w-full border-collapse text-left text-[10px]">
             <thead className="sticky top-0 bg-black text-neutral-500">
               <tr className="border-b border-neutral-900">
-                {['Time', 'Observed', 'Forecast', 'Delta', 'Humidity', 'Source', 'Fetched'].map(column => (
+                {columns.map(column => (
                   <th key={column} className="px-2 py-1 font-normal">{column}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td colSpan={7} className="px-2 py-12 text-center text-neutral-600">
+                <td colSpan={columns.length} className="px-2 py-12 text-center text-neutral-600">
                   No METAR observations for this date yet.
                 </td>
               </tr>
@@ -1647,10 +1657,10 @@ function MetarObservationTable({ rows, unit, selectedDate }: { rows: HourlyWeath
         </div>
       ) : (
         <div className="max-h-[560px] overflow-auto">
-          <table className="min-w-[760px] w-full border-collapse text-left text-[10px]">
+          <table className="min-w-[1080px] w-full border-collapse text-left text-[10px]">
             <thead className="sticky top-0 bg-black text-neutral-500">
               <tr className="border-b border-neutral-900">
-                {['Time', 'Observed', 'Forecast', 'Delta', 'Humidity', 'Source', 'Fetched'].map(column => (
+                {columns.map(column => (
                   <th key={column} className="px-2 py-1 font-normal">{column}</th>
                 ))}
               </tr>
@@ -1663,7 +1673,12 @@ function MetarObservationTable({ rows, unit, selectedDate }: { rows: HourlyWeath
                   <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-300">{fmtSignedTemp(row.gap, unit)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.humidity)}</td>
-                  <td className="max-w-[140px] truncate px-2 py-1 text-neutral-500" title={`${row.source || '--'} · ${row.horizon || '--'}`}>{row.source || '--'}</td>
+                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.cloud_cover)}</td>
+                  <td className="max-w-[140px] truncate px-2 py-1 text-neutral-500" title={`${row.condition || row.source || '--'} · ${row.horizon || '--'}`}>{row.condition || row.source || '--'}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtVisibility(row.visibility)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.timestamp)}</td>
                 </tr>
               ))}
@@ -1735,6 +1750,63 @@ function HistoricalObservationTable({ rows, unit, stationId }: { rows: Historica
           </table>
         </div>
       )}
+    </section>
+  )
+}
+
+function HistoricalHourlyObservationTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRow[]; unit: string; selectedDate: string }) {
+  const historicalRows = rows.filter(row => row.historical !== null && row.historical !== undefined)
+  const columns = ['Time', 'Historical', 'Forecast', 'Delta', 'Humidity', 'Cloud', 'Wx', 'Vis', 'Wind', 'Pres', 'Dew', 'Fetched']
+
+  return (
+    <section className="min-w-0 border border-neutral-800 bg-black">
+      <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
+        <div>
+          <div className="text-[10px] text-neutral-500">Historical hourly</div>
+          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {historicalRows.length} rows</div>
+        </div>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">display-only research</span>
+      </div>
+      <div className="max-h-[560px] overflow-auto">
+        <table className="min-w-[1080px] w-full border-collapse text-left text-[10px]">
+          <thead className="sticky top-0 bg-black text-neutral-500">
+            <tr className="border-b border-neutral-900">
+              {columns.map(column => (
+                <th key={column} className="px-2 py-1 font-normal">{column}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {historicalRows.length === 0 ? (
+              <tr>
+                <td colSpan={columns.length} className="px-2 py-12 text-center text-neutral-600">
+                  No historical hourly observations for this date. Run Open-Meteo history backfill to populate this table.
+                </td>
+              </tr>
+            ) : historicalRows.map(row => {
+              const delta = row.forecast !== null && row.forecast !== undefined && row.historical !== null && row.historical !== undefined
+                ? Number(row.historical) - Number(row.forecast)
+                : null
+              return (
+                <tr key={`historical-${row.id}`} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
+                  <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
+                  <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.historical, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-blue-300">{fmtTemp(row.forecast, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-300">{fmtSignedTemp(delta, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.humidity)}</td>
+                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.cloud_cover)}</td>
+                  <td className="max-w-[140px] truncate px-2 py-1 text-neutral-500" title={`${row.condition || row.source || '--'} · ${row.horizon || '--'}`}>{row.condition || row.source || '--'}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtVisibility(row.visibility)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.timestamp)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
     </section>
   )
 }

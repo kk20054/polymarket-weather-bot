@@ -315,6 +315,37 @@ def run_pws_fetch(
     return payload
 
 
+def run_history_backfill(
+    cities_arg: str = "",
+    *,
+    days_arg: int = 30,
+    start_date: str = "",
+    end_date: str = "",
+    dry_run: bool = False,
+    all_cities: bool = False,
+    limit_cities: int = 7,
+) -> dict:
+    from .history import fetch_open_meteo_historical_backfill
+
+    cities = _cities_from_arg(cities_arg)
+    if all_cities:
+        cities = []
+        limit_cities = 10_000
+    payload = fetch_open_meteo_historical_backfill(
+        cities or None,
+        days=days_arg,
+        start_date=start_date,
+        end_date=end_date,
+        dry_run=dry_run,
+        limit_cities=limit_cities,
+    )
+    if payload.get("ok") and not dry_run:
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        payload["observations_stage"] = readiness_stage(readiness, "observations")
+    return payload
+
+
 def run_orderbook_backfill(limit_arg: int = 50, start_date_arg: str = "", end_date_arg: str = "") -> dict:
     from .polymarket import PolymarketDataClient
 
@@ -910,6 +941,7 @@ def main() -> None:
             "openmeteo-fetch",
             "china-weather-fetch",
             "pws-fetch",
+            "history-backfill",
             "metar-refresh",
             "metar-backfill",
             "hourly-consensus-build",
@@ -1063,6 +1095,20 @@ def main() -> None:
                 all_cities=args.all_cities,
                 limit_cities=args.limit_cities,
                 station_limit=args.station_limit,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "history-backfill":
+        print(json.dumps(
+            run_history_backfill(
+                cities_arg,
+                days_arg=args.days or 30,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                dry_run=args.dry_run,
+                all_cities=args.all_cities,
+                limit_cities=args.limit_cities,
             ),
             ensure_ascii=False,
             indent=2,
