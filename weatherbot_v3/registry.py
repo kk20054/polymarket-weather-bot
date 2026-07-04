@@ -41,6 +41,7 @@ _PROFILES = (
     CitySettlementProfile("seoul", "Seoul", "RKSI", "Incheon International Airport", "Asia/Seoul", "C", 37.4691, 126.4505, "asia"),
     CitySettlementProfile("tokyo", "Tokyo", "RJTT", "Tokyo Haneda Airport", "Asia/Tokyo", "C", 35.7647, 140.3864, "asia"),
     CitySettlementProfile("shanghai", "Shanghai", "ZSPD", "Shanghai Pudong International Airport", "Asia/Shanghai", "C", 31.1443, 121.8083, "asia"),
+    CitySettlementProfile("hong-kong", "Hong Kong", "VHHH", "Hong Kong International Airport", "Asia/Hong_Kong", "C", 22.3080, 113.9185, "asia"),
     CitySettlementProfile("singapore", "Singapore", "WSSS", "Singapore Changi Airport", "Asia/Singapore", "C", 1.3502, 103.9940, "asia"),
     CitySettlementProfile("lucknow", "Lucknow", "VILK", "Chaudhary Charan Singh International Airport", "Asia/Kolkata", "C", 26.7606, 80.8893, "asia"),
     CitySettlementProfile("tel-aviv", "Tel Aviv", "LLBG", "Ben Gurion Airport", "Asia/Jerusalem", "C", 32.0114, 34.8867, "asia"),

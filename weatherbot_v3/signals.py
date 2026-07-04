@@ -16,6 +16,7 @@ from .db import (
     upsert_signal_decision_record,
 )
 from .deb import bucket_probabilities
+from .stations import get_station
 
 
 DECISION_VERSION = "signal-decision-v1"
@@ -70,8 +71,16 @@ def build_signal_decisions(
         if item.get("bucket_key")
     }
     evidence = _evidence_links(city, date, prediction, buckets, path)
+    station_live_reasons = _station_live_gate_reasons(city, path)
     decisions = [
-        _decision_for_bucket(bucket, probabilities.get(str(bucket.get("bucket_key") or ""), {}), prediction, distribution, evidence)
+        _decision_for_bucket(
+            bucket,
+            probabilities.get(str(bucket.get("bucket_key") or ""), {}),
+            prediction,
+            distribution,
+            evidence,
+            station_live_reasons=station_live_reasons,
+        )
         for bucket in buckets
     ]
     stored = 0
@@ -166,6 +175,8 @@ def _decision_for_bucket(
     prediction: dict[str, Any],
     distribution: dict[str, Any],
     evidence: dict[str, Any],
+    *,
+    station_live_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
     model_probability = _optional_float(probability_item.get("probability"))
     market_bid = _optional_float(bucket.get("best_bid"))
@@ -227,6 +238,7 @@ def _decision_for_bucket(
     live_reasons = []
     if int(prediction.get("bias_sample_count") or 0) < MIN_BIAS_SAMPLE_DAYS:
         live_reasons.append("insufficient_bias_samples")
+    live_reasons.extend(station_live_reasons or [])
     if not paper_allowed:
         live_reasons.append("paper_gate_not_passed")
     if not getattr(load_config(), "live_trading", False):
@@ -307,6 +319,22 @@ def _decision_for_bucket(
         },
     }
     return decision
+
+
+def _station_live_gate_reasons(city_key: str, path: Path | None = None) -> list[str]:
+    row = get_station(city_key, path)
+    if not row:
+        return ["station_row_missing"]
+    reasons: list[str] = []
+    if not str(row.get("settlement_rule_text") or "").strip():
+        reasons.append("settlement_rule_text_missing")
+    if str(row.get("verification_status") or "") != "verified":
+        reasons.append("settlement_rule_unverified")
+    settlement_station = str(row.get("settlement_station_id") or row.get("station_id") or "").upper()
+    observation_station = str(row.get("station_id") or "").upper()
+    if settlement_station and observation_station and settlement_station != observation_station:
+        reasons.append("settlement_mismatch")
+    return _unique(reasons)
 
 
 def _list_market_buckets(city: str, target_date: str, *, limit: int, path: Path | None) -> list[dict[str, Any]]:

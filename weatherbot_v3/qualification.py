@@ -120,7 +120,16 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         )
         verified_rules = sum(1 for row in city_contracts if row.get("manual_verified_at"))
         auto_verified_rules = sum(1 for row in city_contracts if row.get("auto_verified_at"))
+        station_verification_status = str(station_row.get("verification_status") or "")
+        settlement_station_id = str(station_row.get("settlement_station_id") or station_row.get("station_id") or "").upper()
+        observation_station_id = str(station_row.get("station_id") or "").upper()
         reasons = []
+        if not str(station_row.get("settlement_rule_text") or "").strip():
+            reasons.append("settlement_rule_text_missing")
+        if station_verification_status != "verified":
+            reasons.append("settlement_rule_unverified")
+        if settlement_station_id and observation_station_id and settlement_station_id != observation_station_id:
+            reasons.append("settlement_mismatch")
         if not city_contracts:
             reasons.append("settlement_contract_missing")
         if station_mismatch:
@@ -154,6 +163,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             "truth_providers": dict(providers),
             "forecast_runs": len(city_runs),
             "fresh_forecast_runs": len(fresh_city_runs),
+            "settlement_station_id": settlement_station_id,
+            "settlement_verification_status": station_verification_status,
             "status": "eligible" if not reasons else "blocked",
             "reasons": reasons,
         })
@@ -276,6 +287,14 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     timezone_missing = sum(1 for row in station_rows if not row.get("timezone"))
     unit_missing = sum(1 for row in station_rows if row.get("unit") not in {"F", "C"})
     wmo_missing = sum(1 for row in station_rows if not row.get("wmo_id"))
+    settlement_rule_text_missing = sum(1 for row in station_rows if not str(row.get("settlement_rule_text") or "").strip())
+    settlement_rule_unverified = sum(1 for row in station_rows if str(row.get("verification_status") or "") != "verified")
+    settlement_mismatch = sum(
+        1 for row in station_rows
+        if str(row.get("settlement_station_id") or row.get("station_id") or "").upper()
+        and str(row.get("station_id") or "").upper()
+        and str(row.get("settlement_station_id") or row.get("station_id") or "").upper() != str(row.get("station_id") or "").upper()
+    )
     metar_cities = {str(row.get("city") or "") for row in metar_reports if row.get("city")}
     mesonet_cities = {str(row.get("city") or "") for row in mesonet_observations if row.get("city")}
     metar_station_ids = {str(row.get("station_id") or "").upper() for row in metar_reports if row.get("station_id")}
@@ -323,6 +342,9 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 and icao_missing == 0
                 and timezone_missing == 0
                 and unit_missing == 0
+                and settlement_rule_text_missing == 0
+                and settlement_rule_unverified == 0
+                and settlement_mismatch == 0
             ),
             [
                 ("station_rows_missing", missing_station_rows),
@@ -330,10 +352,15 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 ("icao_id_missing", icao_missing),
                 ("timezone_missing", timezone_missing),
                 ("unit_missing", unit_missing),
+                ("settlement_rule_text_missing", settlement_rule_text_missing),
+                ("settlement_rule_unverified", settlement_rule_unverified),
+                ("settlement_mismatch", settlement_mismatch),
             ],
             {
                 "expected_cities": expected_station_cities,
                 "stations": len(station_rows),
+                "verified_settlement_rules": len(station_rows) - settlement_rule_unverified,
+                "settlement_mismatch": settlement_mismatch,
                 "regions": dict(Counter(str(row.get("region") or "unknown") for row in station_rows)),
                 "wmo_id_missing": wmo_missing,
                 "registry_version": REGISTRY_VERSION,
