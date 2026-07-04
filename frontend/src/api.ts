@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary } from './types'
+import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary, SchedulerStatus, WeatherCitySeries } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -120,6 +120,28 @@ export async function fetchProductionValidation(): Promise<ProductionValidationR
 
 export async function fetchProductionRefreshStatus(): Promise<ProductionRefreshResult> {
   const { data } = await api.get<ProductionRefreshResult>('/production-refresh/status')
+  return data
+}
+
+export async function fetchSchedulerStatus(): Promise<SchedulerStatus> {
+  const { data } = await api.get<SchedulerStatus>('/scheduler/status')
+  return data
+}
+
+export async function startScheduler(): Promise<SchedulerStatus> {
+  const { data } = await api.post<SchedulerStatus>('/scheduler/start')
+  return data
+}
+
+export async function stopScheduler(): Promise<SchedulerStatus> {
+  const { data } = await api.post<SchedulerStatus>('/scheduler/stop')
+  return data
+}
+
+export async function setStationEnabled(cityKey: string, enabled: boolean, tier?: number): Promise<{ ok: boolean; city_key: string; enabled: boolean; tier: number; station?: WeatherCitySeries }> {
+  const payload: { enabled: boolean; tier?: number } = { enabled }
+  if (tier !== undefined) payload.tier = tier
+  const { data } = await api.post(`/stations/${encodeURIComponent(cityKey)}/enabled`, payload)
   return data
 }
 

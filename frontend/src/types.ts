@@ -603,6 +603,54 @@ export interface SignalDecisionSummary {
   decisions: SignalDecisionRecord[]
 }
 
+export interface DashboardRecommendationItem {
+  type: 'trade_candidate' | 'observation_only' | string
+  city_key: string
+  city_name: string
+  station_id?: string
+  settlement_station_id?: string
+  verification_status?: string
+  settlement_rule_verified_at?: string | null
+  metar_age_seconds?: number | null
+  metar_report_time?: string | null
+  current_temp?: number | null
+  current_temp_unit?: string
+  target_date?: string
+  deb_mu?: number | null
+  deb_sigma?: number | null
+  deb_unit?: string
+  bucket_label?: string | null
+  bucket_key?: string | null
+  edge?: number | null
+  edge_percent?: number | null
+  model_probability?: number | null
+  market_probability?: number | null
+  market_ask?: number | null
+  market_bid?: number | null
+  paper_allowed?: boolean
+  blocked_reasons?: string[]
+  polymarket_url?: string | null
+  market_id?: string | null
+  token_id?: string | null
+  china_live_temp?: number | null
+  china_live_observed_at?: string | null
+  badge?: string
+}
+
+export interface DashboardRecommendations {
+  ok: boolean
+  recommendation_version: string
+  generated_at?: string
+  scheduler_running?: boolean
+  count: number
+  trade_candidate_count?: number
+  observation_only_count?: number
+  empty_reason?: 'scheduler_stopped' | 'no_recommendations_after_gates' | string
+  filters?: Record<string, unknown>
+  skipped?: Record<string, number>
+  items: DashboardRecommendationItem[]
+}
+
 export interface EventDistribution {
   items: DistributionItem[]
   sum_probability: number
@@ -839,6 +887,7 @@ export interface WeatherCityPoint {
   ecmwf?: number | null
   hrrr?: number | null
   metar?: number | null
+  china_live?: number | null
   ensemble_mean?: number | null
   ensemble_std?: number | null
   humidity?: number | null
@@ -875,7 +924,19 @@ export interface WeatherCitySeries {
   city_key: string
   city_name: string
   station_id?: string
+  station_name?: string
+  settlement_station_id?: string
+  settlement_station_name?: string
+  settlement_rule_verified_at?: string | null
+  settlement_timezone?: string
+  settlement_unit?: string
+  settlement_time_basis?: string
+  primary_settlement_source?: string
+  verification_status?: string
   unit: string
+  enabled?: boolean
+  tier?: number
+  last_refreshed_at?: string | null
   latest_best?: number | null
   latest_metar?: number | null
   latest_source?: string | null
@@ -888,6 +949,52 @@ export interface WeatherCitySeries {
   forecast_points?: WeatherCityPoint[]
   hourly_points?: WeatherCityPoint[]
   points: WeatherCityPoint[]
+}
+
+export interface SchedulerCityResult {
+  city?: string | null
+  station_id?: string | null
+  ok: boolean
+  error?: string | null
+  reports_upserted?: number | null
+  reports_fetched?: number | null
+  rows_upserted?: number | null
+  failed?: number | null
+}
+
+export interface SchedulerPollerStatus {
+  key: 'forecast_poller' | 'metar_poller' | 'derive_poller' | string
+  label: string
+  interval_seconds: number
+  running: boolean
+  last_run_at?: string | null
+  last_started_at?: string | null
+  age_seconds?: number | null
+  last_duration_ms?: number | null
+  fails_last_hour: number
+  next_run_at?: string | null
+  last_status?: string
+  last_message?: string
+  run_count?: number
+  consecutive_failures?: number
+  last_result?: {
+    ok?: boolean
+    cities?: number
+    ok_cities?: number
+    failed_cities?: number
+    result_count?: number
+    city_results?: SchedulerCityResult[]
+  }
+}
+
+export interface SchedulerStatus {
+  ok: boolean
+  scheduler_version: string
+  running: boolean
+  started_at?: string | null
+  message?: string
+  city_concurrency?: number
+  pollers: Record<string, SchedulerPollerStatus>
 }
 
 export interface CityEvidenceModule {
@@ -1201,6 +1308,8 @@ export interface DashboardData {
   weather_forecasts: WeatherForecast[]
   weather_city_series?: WeatherCitySeries[]
   city_evidence?: CityEvidence[]
+  recommendations?: DashboardRecommendations
+  scheduler_status?: SchedulerStatus
   events?: DashboardEvent[]
   fetch_log?: FetchLogRow[]
   _meta?: {

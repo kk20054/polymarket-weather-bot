@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  Area,
   Bar,
   CartesianGrid,
   Cell,
@@ -64,6 +65,9 @@ type HourlyWeatherRow = {
   label: string
   forecast?: number | null
   metar?: number | null
+  historical?: number | null
+  china_live?: number | null
+  pws?: number | null
   ecmwf?: number | null
   hrrr?: number | null
   humidity?: number | null
@@ -123,6 +127,7 @@ const WORKBENCH_TABS: Array<{ id: WeatherWorkbenchTab; label: string }> = [
 ]
 
 const CONTINENTS = ['全部', 'Americas', 'Europe', 'Asia', 'Pacific', 'Africa', 'Other'] as const
+const HOUR_LABELS = Array.from({ length: 24 }, (_, hour) => `${String(hour).padStart(2, '0')}:00`)
 
 function cityContinent(cityKey?: string, cityName?: string) {
   const value = `${cityKey || ''} ${cityName || ''}`.toLowerCase()
@@ -145,6 +150,19 @@ function fmtBucketTemp(value?: number | null, unit = 'F') {
   const rounded = Math.round(numeric)
   const text = Math.abs(numeric - rounded) < 0.05 ? String(rounded) : numeric.toFixed(1)
   return `${text}°${unit}`
+}
+
+function fmtBucketAxisTemp(value?: number | null, unit = 'F', tail = false) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
+  const numeric = Number(value)
+  if (tail && Math.abs(numeric - Math.round(numeric)) < 0.05) return `${Math.round(numeric)}°${unit}`
+  return `${numeric.toFixed(1)}°${unit}`
+}
+
+function fmtBucketAxisLabel(item: DistributionItem, unit: string) {
+  if (item.bucket_low <= -900) return `${fmtBucketAxisTemp(item.bucket_high, unit, true)} or below`
+  if (item.bucket_high >= 900) return `${fmtBucketAxisTemp(item.bucket_low, unit, true)} or above`
+  return `${fmtBucketAxisTemp(item.bucket_low, unit)}–${fmtBucketAxisTemp(item.bucket_high, unit)}`
 }
 
 function fmtPct(value?: number | null) {
@@ -305,12 +323,6 @@ function eventStage(event: DashboardEvent) {
   return event.type || '事件'
 }
 
-function fmtBucket(item: DistributionItem, unit: string) {
-  if (item.bucket_low <= -900) return `${fmtBucketTemp(item.bucket_high, unit)} or below`
-  if (item.bucket_high >= 900) return `${fmtBucketTemp(item.bucket_low, unit)} or above`
-  return `${fmtBucketTemp(item.bucket_low, unit)}–${fmtBucketTemp(item.bucket_high, unit)}`
-}
-
 function fmtBucketLabel(raw?: string | null, fallback?: number | null, unit = 'F') {
   const fallbackNative =
     fallback === null || fallback === undefined || Number.isNaN(Number(fallback))
@@ -405,6 +417,9 @@ function placeholderHourlyRow(targetDate: string, hour: number): HourlyWeatherRo
     label,
     forecast: null,
     metar: null,
+    historical: null,
+    china_live: null,
+    pws: null,
     ecmwf: null,
     hrrr: null,
     humidity: null,
@@ -512,6 +527,140 @@ function asNumber(value: unknown) {
   if (value === null || value === undefined || value === '') return null
   const numeric = Number(value)
   return Number.isFinite(numeric) ? numeric : null
+}
+
+type DotShapeProps = {
+  cx?: number
+  cy?: number
+  fill?: string
+  stroke?: string
+  active?: boolean
+}
+
+function SquareDot({ cx, cy, fill = '#EF4444', active = false }: DotShapeProps) {
+  if (cx === undefined || cy === undefined) return null
+  const size = active ? 8 : 6
+  return <rect x={cx - size / 2} y={cy - size / 2} width={size} height={size} fill={fill} stroke="#FEE2E2" strokeWidth={active ? 1.5 : 1} />
+}
+
+function TriangleDot({ cx, cy, fill = '#A855F7', active = false }: DotShapeProps) {
+  if (cx === undefined || cy === undefined) return null
+  const size = active ? 7 : 5
+  return <path d={`M ${cx} ${cy - size} L ${cx + size} ${cy + size} L ${cx - size} ${cy + size} Z`} fill={fill} stroke="#F3E8FF" strokeWidth={active ? 1.5 : 1} />
+}
+
+function HollowCircleDot({ cx, cy, stroke = '#3B82F6', active = false }: DotShapeProps) {
+  if (cx === undefined || cy === undefined) return null
+  return <circle cx={cx} cy={cy} r={active ? 5 : 3} fill="transparent" stroke={stroke} strokeWidth={active ? 2 : 1.5} />
+}
+
+function PeakReferenceLabel({ viewBox, value }: { viewBox?: { x?: number; y?: number }; value?: string }) {
+  const x = viewBox?.x
+  const y = viewBox?.y
+  if (x === undefined || y === undefined || !value) return null
+  const width = Math.max(64, value.length * 6.4)
+  return (
+    <g transform={`translate(${x - width / 2}, ${Math.max(0, y - 18)})`}>
+      <rect width={width} height={16} rx={2} fill="#EC4899" />
+      <text x={width / 2} y={11.5} fill="#FFFFFF" fontSize={10} textAnchor="middle">
+        {value}
+      </text>
+    </g>
+  )
+}
+
+function normalizePeakHour(value: unknown) {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const hour = Math.max(0, Math.min(23, Math.round(value)))
+    return hourLabel(hour)
+  }
+  const text = String(value)
+  const match = text.match(/\b(?:H)?([01]?\d|2[0-3])(?::\d{2})?\b/i)
+  if (!match) return null
+  return hourLabel(Number(match[1]))
+}
+
+function dailyMaxPeakHour(prediction?: DailyMaxPredictionSummary | null, fallback?: string | null) {
+  const latest = prediction?.latest as (Record<string, unknown> & { components?: Array<Record<string, unknown>> }) | null | undefined
+  const direct = normalizePeakHour(latest?.peak_hour)
+    ?? normalizePeakHour(latest?.peakHour)
+    ?? normalizePeakHour(latest?.peak_local_hour)
+    ?? normalizePeakHour(latest?.peak_local_time)
+  if (direct) return direct
+  for (const component of latest?.components ?? []) {
+    const fromComponent = normalizePeakHour(component.peak_hour)
+      ?? normalizePeakHour(component.peakHour)
+      ?? normalizePeakHour(component.peak_local_hour)
+      ?? normalizePeakHour(component.peak_local_time)
+    if (fromComponent) return fromComponent
+  }
+  return normalizePeakHour(fallback)
+}
+
+type SourceStats = {
+  n: number
+  avgDelta: number | null
+  pearson: number | null
+  lastHour: string | null
+}
+
+function sourceStats(rows: Array<Record<string, unknown>>, observedKey: string): SourceStats {
+  const pairs = rows
+    .map(row => ({
+      observed: asNumber(row[observedKey]),
+      forecast: asNumber(row.forecast_value),
+      label: typeof row.label === 'string' ? row.label : null,
+    }))
+    .filter((row): row is { observed: number; forecast: number; label: string | null } => row.observed !== null && row.forecast !== null)
+  if (pairs.length === 0) return { n: 0, avgDelta: null, pearson: null, lastHour: null }
+  const deltas = pairs.map(row => row.observed - row.forecast)
+  const latest = pairs[pairs.length - 1]?.label
+  const hour = latest?.match(/^(\d{2})/)?.[1] ?? null
+  return {
+    n: pairs.length,
+    avgDelta: mean(deltas),
+    pearson: pearsonR(pairs.map(row => row.forecast), pairs.map(row => row.observed)),
+    lastHour: hour ? `@H${hour}` : null,
+  }
+}
+
+function statDeltaPill(label: string, stats: SourceStats, unit: string) {
+  if (stats.n === 0) return null
+  return `${label} ${fmtSignedTemp(stats.avgDelta, unit)} n=${stats.n}${stats.lastHour ? ` ${stats.lastHour}` : ''}`
+}
+
+function statAccuracyPill(label: string, stats: SourceStats) {
+  if (stats.n === 0) return null
+  return `${label} ${fmtPearson(stats.pearson)} n=${stats.n}`
+}
+
+function overlapPill(rows: Array<Record<string, unknown>>) {
+  const historicalRows = rows.filter(row => asNumber(row.historical_value) !== null)
+  const paired = rows.filter(row => asNumber(row.historical_value) !== null && asNumber(row.metar_value) !== null)
+  if (historicalRows.length === 0 || paired.length === 0) return null
+  const latest = paired[paired.length - 1]
+  const upTo = typeof latest.label === 'string' ? latest.label.replace(':00', ':00') : '--'
+  return `${Math.round((paired.length / historicalRows.length) * 100)}% (${paired.length}/${historicalRows.length} pts, up to ${upTo})`
+}
+
+function StatBadgeRow({ label, items, empty, tone = 'green' }: { label: string; items: Array<string | null>; empty: string; tone?: 'green' | 'orange' }) {
+  const visible = items.filter((item): item is string => Boolean(item))
+  const toneClass = tone === 'orange'
+    ? 'border-orange-500/25 bg-orange-500/10 text-orange-200'
+    : 'border-green-500/25 bg-green-500/10 text-green-200'
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-t border-[#2C3445] px-2 py-1.5 text-[10px]">
+      <span className="min-w-[150px] text-[#7D8694]">{label}</span>
+      {visible.length > 0 ? visible.map(item => (
+        <span key={`${label}-${item}`} className={`rounded-full border px-2 py-0.5 tabular-nums ${toneClass}`}>
+          {item}
+        </span>
+      )) : (
+        <span className="text-[#7D8694]">{empty}</span>
+      )}
+    </div>
+  )
 }
 
 function decisionBucket(decision?: SignalDecisionRecord) {
@@ -784,6 +933,12 @@ function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): Hou
   for (const point of sourcePoints) {
     if (selectedDate && point.target_date !== selectedDate) continue
     if (!point.timestamp) continue
+    const extendedPoint = point as WeatherCityPoint & {
+      historical?: number | null
+      historical_temp?: number | null
+      pws?: number | null
+      pws_temp?: number | null
+    }
     const hour = rawHourIndex(point.timestamp)
     if (hour === null) continue
     const forecast = point.best ?? point.ensemble_mean ?? null
@@ -800,6 +955,9 @@ function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): Hou
       label,
       forecast,
       metar,
+      historical: extendedPoint.historical ?? extendedPoint.historical_temp ?? null,
+      china_live: point.china_live ?? null,
+      pws: extendedPoint.pws ?? extendedPoint.pws_temp ?? null,
       ecmwf: point.ecmwf ?? null,
       hrrr: point.hrrr ?? null,
       humidity: point.humidity ?? null,
@@ -1240,6 +1398,7 @@ export function WeatherPanel({
               selectedDate={selectedDate}
               actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
               historyProvider={latestHistory?.provider || truthTier}
+              dailyMaxPrediction={dailyMaxPrediction}
             />
             <TemperatureDistributionPanel
               signal={distributionSignal}
@@ -1740,6 +1899,7 @@ function HourlyEvidencePanel({
   selectedDate,
   actualHigh,
   historyProvider,
+  dailyMaxPrediction,
 }: {
   rows: HourlyWeatherRow[]
   unit: string
@@ -1747,44 +1907,49 @@ function HourlyEvidencePanel({
   selectedDate: string
   actualHigh?: number | null
   historyProvider?: string
+  dailyMaxPrediction?: DailyMaxPredictionSummary | null
 }) {
   const numericValues = (values: unknown[]) =>
     values.map(asNumber).filter((value): value is number => value !== null)
   const forecastValues = numericValues(rows.map(row => row.forecast))
   const metarValues = numericValues(rows.map(row => row.metar))
+  const historicalValues = numericValues(rows.map(row => row.historical))
+  const chinaLiveValues = numericValues(rows.map(row => row.china_live))
+  const pwsValues = numericValues(rows.map(row => row.pws))
   const cloudValues = numericValues(rows.map(row => row.cloud_cover))
-  const gapValues = numericValues(rows.map(row => row.gap))
   const forecastMax = forecastValues.length > 0 ? Math.max(...forecastValues) : null
   const metarMax = metarValues.length > 0 ? Math.max(...metarValues) : null
-  const avgGap = mean(gapValues)
+  const historicalMax = historicalValues.length > 0 ? Math.max(...historicalValues) : null
+  const chinaLiveMax = chinaLiveValues.length > 0 ? Math.max(...chinaLiveValues) : null
   const avgCloud = mean(cloudValues)
-  const pairedRows = rows.filter(row => asNumber(row.forecast) !== null && asNumber(row.metar) !== null)
-  const pearson = pearsonR(
-    pairedRows.map(row => asNumber(row.forecast) ?? 0),
-    pairedRows.map(row => asNumber(row.metar) ?? 0)
-  )
-  const metarCoverage = rows.length > 0 ? metarValues.length / rows.length : null
-  const actualMetarDelta = actualHigh !== null && actualHigh !== undefined && metarMax !== null
-    ? Number(metarMax) - Number(actualHigh)
-    : null
-  const overlapLabel = actualMetarDelta === null
-    ? (metarCoverage === null ? '--' : `${Math.round(metarCoverage * 100)}%`)
-    : fmtSignedTemp(actualMetarDelta, unit)
   const chartRows = rows.map(row => ({
     ...row,
     forecast_value: asNumber(row.forecast),
     metar_value: asNumber(row.metar),
+    historical_value: asNumber(row.historical),
+    china_live_value: asNumber(row.china_live),
+    pws_value: asNumber(row.pws),
     gap_value: asNumber(row.gap),
     cloud_pct: asNumber(row.cloud_cover ?? row.humidity),
   }))
   const hasChartEvidence = chartRows.some(row =>
     row.forecast_value !== null
     || row.metar_value !== null
+    || row.historical_value !== null
+    || row.china_live_value !== null
+    || row.pws_value !== null
     || row.cloud_pct !== null
   )
+  const metarStats = sourceStats(chartRows, 'metar_value')
+  const historicalStats = sourceStats(chartRows, 'historical_value')
+  const overlapStats = overlapPill(chartRows)
+  const hasHistorical = historicalValues.length > 0
+  const hasChinaLive = chinaLiveValues.length > 0
+  const hasPws = pwsValues.length > 0
   const peakRow = chartRows
     .filter(row => row.forecast_value !== null)
     .sort((a, b) => Number(b.forecast_value ?? -Infinity) - Number(a.forecast_value ?? -Infinity))[0]
+  const peakHour = dailyMaxPeakHour(dailyMaxPrediction, peakRow?.label)
   if (rows.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-center text-neutral-600">
@@ -1823,39 +1988,48 @@ function HourlyEvidencePanel({
       <div
         className="p-2"
         role="img"
-        aria-label={`${cityName || '当前城市'} Hourly Temperature chart. METAR is a solid light line, forecast is a dashed blue line, cloud or humidity is shown as bars, and the forecast peak is marked with a pink vertical line.`}
+        aria-label={`${cityName || '当前城市'} Hourly Temperature chart. METAR is an orange solid line, Historical is a green solid line, China Weather Live is a red square-marker line when present, PWS is a purple triangle-marker line when present, Forecast is a dashed blue hollow-dot line, Cloud Cover is a translucent area, and the forecast peak is marked with a pink vertical line.`}
       >
-        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-[#7D8694]">
-          <span className="inline-flex items-center gap-1"><span className="h-0.5 w-5 bg-[#F8FAFC]" />METAR（本地时）</span>
-          <span className="inline-flex items-center gap-1"><span className="h-0.5 w-5 border-t border-dashed border-[#38BDF8]" />预报（本地时）</span>
-          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-3 bg-[#2563EB]/30" />云量 / 湿度</span>
-          <span className="inline-flex items-center gap-1"><span className="h-3.5 w-px border-l border-dashed border-pink-300" />峰值标记</span>
+        <div className="mb-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[10px] text-[#7D8694]">
+          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full bg-[#F97316]" />METAR</span>
+          <span className={`inline-flex items-center gap-1 ${hasHistorical ? '' : 'opacity-45'}`}><span className="h-2.5 w-2.5 rounded-full bg-[#22C55E]" />Historical</span>
+          <span className={`inline-flex items-center gap-1 ${hasChinaLive ? '' : 'opacity-45'}`}><span className="h-2.5 w-2.5 bg-[#EF4444]" />China Weather Live</span>
+          <span className={`inline-flex items-center gap-1 ${hasPws ? '' : 'opacity-45'}`}><span className="h-0 w-0 border-x-[5px] border-b-[9px] border-x-transparent border-b-[#A855F7]" />PWS</span>
+          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full border border-[#3B82F6]" />Forecast</span>
+          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-3 bg-[#94A3B8]/30" />Cloud Cover %</span>
         </div>
         <div className="relative h-[320px]">
           <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={chartRows} margin={{ top: 14, right: 18, bottom: 4, left: -6 }}>
+            <ComposedChart data={chartRows} margin={{ top: 22, right: 18, bottom: 0, left: -6 }}>
               <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" />
-              <XAxis dataKey="label" stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} minTickGap={8} />
+              <XAxis dataKey="label" ticks={HOUR_LABELS} interval={0} stroke="#7D8694" fontSize={9} tickLine={false} axisLine={false} minTickGap={0} height={34} />
               <YAxis yAxisId="temp" stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°${unit}`} />
               <YAxis yAxisId="percent" orientation="right" domain={[0, 100]} stroke="#475569" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}%`} />
               <Tooltip
                 contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
                 formatter={(value: any, name: any) => {
-                  if (name === 'Cloud / RH') return [`${Number(value).toFixed(0)}%`, name]
+                  if (name === 'Cloud Cover %') return [`${Number(value).toFixed(0)}%`, name]
                   return [fmtTemp(Number(value), unit), name]
                 }}
                 labelFormatter={(_, payload) => payload?.[0]?.payload?.timestamp ? shortTime(payload[0].payload.timestamp) : ''}
               />
-              <Bar yAxisId="percent" dataKey="cloud_pct" name="Cloud / RH" fill="#2563EB" fillOpacity={0.16} maxBarSize={18} />
-              <Line yAxisId="temp" type="monotone" dataKey="metar_value" name="METAR 实测" stroke="#F8FAFC" dot={{ r: 2, fill: '#F8FAFC', strokeWidth: 0 }} strokeWidth={2.2} connectNulls={false} />
-              <Line yAxisId="temp" type="monotone" dataKey="forecast_value" name="预报" stroke="#38BDF8" strokeDasharray="4 4" dot={false} strokeWidth={2} connectNulls={false} />
-              {peakRow?.label && (
+              <Area yAxisId="percent" type="monotone" dataKey="cloud_pct" name="Cloud Cover %" stroke="#94A3B8" fill="#94A3B8" fillOpacity={0.25} strokeOpacity={0.65} connectNulls={false} />
+              <Line yAxisId="temp" type="monotone" dataKey="metar_value" name="METAR" stroke="#F97316" dot={{ r: 3, fill: '#F97316', stroke: '#F97316', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />
+              <Line yAxisId="temp" type="monotone" dataKey="historical_value" name="Historical" stroke="#22C55E" dot={{ r: 3, fill: '#22C55E', stroke: '#22C55E', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />
+              {hasChinaLive && (
+                <Line yAxisId="temp" type="monotone" dataKey="china_live_value" name="China Weather Live" stroke="#EF4444" dot={<SquareDot fill="#EF4444" />} activeDot={<SquareDot fill="#EF4444" active />} strokeWidth={2} connectNulls={false} />
+              )}
+              {hasPws && (
+                <Line yAxisId="temp" type="monotone" dataKey="pws_value" name="PWS" stroke="#A855F7" dot={<TriangleDot fill="#A855F7" />} activeDot={<TriangleDot fill="#A855F7" active />} strokeWidth={2} connectNulls={false} />
+              )}
+              <Line yAxisId="temp" type="monotone" dataKey="forecast_value" name="Forecast" stroke="#3B82F6" strokeDasharray="4 4" dot={<HollowCircleDot stroke="#3B82F6" />} activeDot={<HollowCircleDot stroke="#3B82F6" active />} strokeWidth={2} connectNulls={false} />
+              {peakHour && (
                 <ReferenceLine
                   yAxisId="temp"
-                  x={peakRow.label}
-                  stroke="#F9A8D4"
-                  strokeDasharray="3 3"
-                  label={{ value: `峰值 ${peakRow.label}`, position: 'top', fill: '#F9A8D4', fontSize: 10 }}
+                  x={peakHour}
+                  stroke="#EC4899"
+                  strokeDasharray="4 4"
+                  label={<PeakReferenceLabel value={`peak ${peakHour}`} />}
                 />
               )}
             </ComposedChart>
@@ -1863,19 +2037,21 @@ function HourlyEvidencePanel({
         </div>
       </div>
 
-      <div className="grid gap-1 border-t border-[#2C3445] p-2 md:grid-cols-3">
-        <DecisionMetric label="平均 Δ" value={fmtSignedTemp(avgGap, unit)} sub="实测 - 预报" />
-        <DecisionMetric label="准确度" value={fmtPearson(pearson)} sub={`Pearson R · n=${pairedRows.length}`} />
-        <DecisionMetric label="历史↔METAR" value={overlapLabel} sub={actualMetarDelta === null ? `覆盖 ${metarValues.length}/${rows.length}` : historyProvider || '日高温差'} />
-      </div>
+      <StatBadgeRow label="AVG Δ (OBS−FC)" items={[statDeltaPill('METAR', metarStats, unit), statDeltaPill('Historical', historicalStats, unit)]} empty="No diff stats yet" tone="green" />
+      <StatBadgeRow label="ACCURACY (PEARSON R)" items={[statAccuracyPill('METAR', metarStats), statAccuracyPill('Historical', historicalStats)]} empty="No accuracy stats yet" tone="orange" />
+      <StatBadgeRow label="HIST↔METAR OVERLAP" items={[overlapStats]} empty="No overlap data yet" tone="green" />
 
       <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
         <summary className="cursor-pointer select-none hover:text-neutral-400">数据说明 / 额外指标</summary>
         <div className="mt-1 grid gap-1 md:grid-cols-3">
           <DetailLine label="Cloud/RH" value={fmtPct(avgCloud)} />
+          <DetailLine label="Actual high" value={fmtTemp(actualHigh, unit)} />
           <DetailLine label="预报高点" value={fmtTemp(forecastMax, unit)} />
           <DetailLine label="METAR高点" value={fmtTemp(metarMax, unit)} />
-          <DetailLine label="说明" value="亮白线为 METAR，蓝色虚线为模型预报，蓝色柱为云量或湿度，底部红/蓝柱为实测减预报残差；暂未接入的 PWS/中国天气源不会伪造曲线。" wide />
+          <DetailLine label="Historical高点" value={fmtTemp(historicalMax, unit)} />
+          <DetailLine label="China Live高点" value={fmtTemp(chinaLiveMax, unit)} />
+          <DetailLine label="History provider" value={historyProvider || '--'} />
+          <DetailLine label="说明" value="橙线为 METAR，绿线为 Historical，红色方块为 China Weather Live，紫色三角为 PWS，蓝色空心圆虚线为 Forecast，灰色面积为 Cloud Cover %；China Live 不作为 settlement truth，也不会解锁实盘。" wide />
         </div>
       </details>
     </section>
@@ -2355,14 +2531,19 @@ function TemperatureDistributionPanel({
   const fallbackItems = items.length === 0 && deb ? buildGaussianFallbackItems(forecastValue, sigmaValue, unit) : []
   const displayItems = items.length > 0 ? items : fallbackItems
   const fallbackMode = items.length === 0 && fallbackItems.length > 0
-  const maxProbability = Math.max(0.01, ...displayItems.map(item => Number(item.probability || 0)))
   const chartRows = displayItems.map(item => ({
     ...item,
-    label: item.bucket_label ? fmtBucketLabel(item.bucket_label, item.bucket_low, unit) : fmtBucket(item, unit),
+    label: fmtBucketAxisLabel(item, unit),
     probabilityPct: Number(item.probability ?? 0) * 100,
-    askPct: item.ask === null || item.ask === undefined ? null : Number(item.ask) * 100,
     edgePct: Number(item.probability_edge ?? item.ev ?? 0) * 100,
   }))
+  const topBucketIndexes = new Set(
+    chartRows
+      .map((row, index) => ({ index, probability: Number(row.probability ?? 0) }))
+      .sort((a, b) => b.probability - a.probability)
+      .slice(0, Math.min(2, chartRows.length))
+      .map(row => row.index)
+  )
   const normalized = decision?.model_distribution?.normalized ?? distribution?.normalized
   const distributionMethod = decision?.model_distribution?.method ?? deb?.method ?? distribution?.notes?.[0] ?? 'gaussian-cdf'
   const activeEventUrl = decisionMarketBucket?.event_url ?? signal?.event_url
@@ -2377,12 +2558,6 @@ function TemperatureDistributionPanel({
     : `实测 ${fmtDualTemp(actualHigh, unit)} (metar, ${deb?.member_count ?? '--'} 样本)`
   const debVersionLabel = deb?.deb_version || distributionMethod || 'DEB-v1'
   const debUpdatedLabel = freshnessLabel(deb?.updated_at ?? deb?.issued_at)
-
-  const probabilityFill = (probability?: number | null, selected = false) => {
-    const ratio = Math.max(0.18, Math.min(1, Number(probability ?? 0) / maxProbability))
-    if (selected) return `rgba(34, 211, 238, ${0.35 + ratio * 0.55})`
-    return `rgba(34, 197, 94, ${0.18 + ratio * 0.72})`
-  }
 
   return (
     <section className="border border-[#2C3445] bg-[#161A22]" aria-label="当日最高温概率分布">
@@ -2428,12 +2603,12 @@ function TemperatureDistributionPanel({
         </div>
       ) : (
         <div className="grid gap-2 p-2">
-          <div className="h-[300px] xl:h-[420px]">
+          <div className="h-[260px] max-h-[300px]">
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={chartRows} margin={{ top: 8, right: 14, bottom: 12, left: -8 }}>
                 <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" />
                 <XAxis dataKey="label" stroke="#7D8694" fontSize={9} tickLine={false} axisLine={false} interval={0} angle={-18} textAnchor="end" height={38} />
-                <YAxis stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}%`} />
+                <YAxis domain={[0, 25]} ticks={[0, 5, 10, 15, 20, 25]} stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}%`} />
                 <Tooltip
                   contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
                   formatter={(value: any, name: any) => {
@@ -2444,21 +2619,14 @@ function TemperatureDistributionPanel({
                 />
                 <Bar dataKey="probabilityPct" name="模型概率" maxBarSize={36} radius={[0, 0, 0, 0]}>
                   {chartRows.map((row, index) => (
-                    <Cell key={`${row.market_id || row.label || row.bucket_low || 'bucket'}-${index}`} fill={probabilityFill(row.probability, row.is_signal)} stroke={row.is_signal ? '#22d3ee' : 'transparent'} strokeWidth={row.is_signal ? 1.5 : 0} />
+                    <Cell key={`${row.market_id || row.label || row.bucket_low || 'bucket'}-${index}`} fill={topBucketIndexes.has(index) ? '#2563EB' : '#4B5563'} stroke={row.is_signal ? '#22d3ee' : 'transparent'} strokeWidth={row.is_signal ? 1.5 : 0} />
                   ))}
                 </Bar>
-                {!fallbackMode && <Line type="monotone" dataKey="askPct" name="卖一" stroke="#f97316" dot={false} strokeWidth={1.4} connectNulls={false} />}
               </ComposedChart>
             </ResponsiveContainer>
           </div>
 
           <aside className="border border-[#2C3445] bg-[#161A22]">
-            <div className="grid grid-cols-2 gap-1 border-b border-[#2C3445] p-2 text-[10px] xl:grid-cols-4">
-              <MetricCard label="最高概率" value={fmtProb(evidenceHighestProbability ?? Math.max(...displayItems.map(item => Number(item.probability ?? 0))))} sub={fallbackMode ? '暂无匹配市场桶' : evidenceHighestBucket || '柱色越深概率越高'} />
-              <MetricCard label="信号桶" value={decision ? fmtBucketLabel(decisionBucketData.bucket_label, decision.bucket_lower, unit) : signal ? signalBucketLabel(signal, unit) : '--'} sub={decision?.paper_allowed ? 'PAPER BUY' : signal?.actionable ? 'BUY YES' : '观察'} />
-              <MetricCard label="分布覆盖" value={`${evidenceSummary?.bucket_count ?? displayItems.length}`} sub={`归一 ${evidenceSummary?.normalized_count ?? (normalized || fallbackMode ? 1 : 0)} / 决策 ${signalDecisions?.count ?? (signal ? 1 : 0)}`} />
-              <MetricCard label="可操作" value={`${marketSummary?.paper_allowed_count ?? evidenceSummary?.actionable_signal_count ?? (signal?.actionable ? 1 : 0)}`} sub={marketSummary?.strict_matching_required ?? evidenceSummary?.strict_matching_required ? '严格匹配' : '观察'} />
-            </div>
             <div className="max-h-[260px] overflow-auto xl:max-h-[320px]">
               <table className="w-full border-collapse text-left text-[10px]">
                 <thead className="sticky top-0 bg-[#1B212C] text-[#7D8694]">
@@ -2474,7 +2642,7 @@ function TemperatureDistributionPanel({
                     <tr key={`${item.market_id || item.bucket_label || `${item.bucket_low}-${item.bucket_high}` || 'bucket'}-${index}`} className={`border-b border-[#2C3445]/80 ${item.is_signal ? 'bg-cyan-500/10 text-cyan-200' : 'hover:bg-[#222A37]'}`}>
                       <td className="max-w-[132px] px-2 py-1" title={item.question}>
                         <span className="block truncate">
-                          {item.bucket_label ? fmtBucketLabel(item.bucket_label, item.bucket_low, unit) : fmtBucket(item, unit)}
+                          {fmtBucketAxisLabel(item, unit)}
                         </span>
                       </td>
                       <td className="px-2 py-1 tabular-nums text-green-300">{fmtProb(item.probability)}</td>
@@ -2484,6 +2652,12 @@ function TemperatureDistributionPanel({
                   ))}
                 </tbody>
               </table>
+            </div>
+            <div className="grid grid-cols-2 gap-1 border-t border-[#2C3445] p-2 text-[10px] xl:grid-cols-4">
+              <MetricCard label="最高概率" value={fmtProb(evidenceHighestProbability ?? Math.max(...displayItems.map(item => Number(item.probability ?? 0))))} sub={fallbackMode ? '暂无匹配市场桶' : evidenceHighestBucket || '柱色越深概率越高'} />
+              <MetricCard label="信号桶" value={decision ? fmtBucketLabel(decisionBucketData.bucket_label, decision.bucket_lower, unit) : signal ? signalBucketLabel(signal, unit) : '--'} sub={decision?.paper_allowed ? 'PAPER BUY' : signal?.actionable ? 'BUY YES' : '观察'} />
+              <MetricCard label="分布覆盖" value={`${evidenceSummary?.bucket_count ?? displayItems.length}`} sub={`归一 ${evidenceSummary?.normalized_count ?? (normalized || fallbackMode ? 1 : 0)} / 决策 ${signalDecisions?.count ?? (signal ? 1 : 0)}`} />
+              <MetricCard label="可操作" value={`${marketSummary?.paper_allowed_count ?? evidenceSummary?.actionable_signal_count ?? (signal?.actionable ? 1 : 0)}`} sub={marketSummary?.strict_matching_required ?? evidenceSummary?.strict_matching_required ? '严格匹配' : '观察'} />
             </div>
             {evidenceTopBuckets.length > 0 && (
               <details className="border-t border-[#2C3445] px-2 py-1 text-[9px] text-[#7D8694]">

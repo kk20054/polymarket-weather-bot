@@ -12,28 +12,38 @@ def read_text(relative_path: str) -> str:
 class PolyWXDashboardContractTests(unittest.TestCase):
     def test_agents_records_polywx_and_firecrawl_contracts(self):
         agents = read_text("AGENTS.md")
+        detail = read_text("docs/AGENTS_DETAIL_CN.md")
+        cli = read_text("weatherbot_v3/cli.py")
 
-        self.assertIn("PolyWX Workbench Theme Contract", agents)
-        self.assertIn("Firecrawl-extracted PolyWX branding", agents)
-        self.assertIn("#161A22", agents)
-        self.assertIn("#222A37", agents)
-        self.assertIn("City switching", agents)
-        self.assertIn("Continent filtering", agents)
-        self.assertIn("date switcher", agents)
-        self.assertIn("firecrawl_map", agents)
-        self.assertIn("schema-scoped `firecrawl_scrape`", agents)
+        self.assertIn("docs/CURRENT_STATE.md", agents)
+        self.assertIn("docs/AGENTS_DETAIL_CN.md", agents)
+        self.assertIn("docs/PROGRESS_ARCHIVE_CN.md", agents)
+        self.assertIn("Read only `docs/CURRENT_STATE.md`", agents)
+        self.assertIn("state-print", cli)
+        self.assertIn("print_current_state", cli)
+        self.assertIn("PolyWX Workbench Theme Contract", detail)
+        self.assertIn("Firecrawl-extracted PolyWX branding", detail)
+        self.assertIn("#161A22", detail)
+        self.assertIn("#222A37", detail)
+        self.assertIn("City switching", detail)
+        self.assertIn("Continent filtering", detail)
+        self.assertIn("date switcher", detail)
+        self.assertIn("firecrawl_map", detail)
+        self.assertIn("schema-scoped `firecrawl_scrape`", detail)
 
     def test_agents_records_reference_fusion_architecture(self):
         agents = read_text("AGENTS.md")
+        detail = read_text("docs/AGENTS_DETAIL_CN.md")
 
         self.assertIn("Reference Fusion Architecture", agents)
+        self.assertIn("Reference Fusion Architecture", detail)
         for reference in (
             "punkpeye/awesome-mcp-servers",
             "python-metar/python-metar",
             "Polymarket/*",
             "yangyuan-zhen/PolyWeather",
         ):
-            self.assertIn(reference, agents)
+            self.assertIn(reference, detail)
 
         for table in (
             "stations",
@@ -45,7 +55,7 @@ class PolyWXDashboardContractTests(unittest.TestCase):
             "market_buckets",
             "signal_decisions",
         ):
-            self.assertIn(table, agents)
+            self.assertIn(table, detail)
 
         for contract in (
             "METAR/SPECI",
@@ -55,7 +65,7 @@ class PolyWXDashboardContractTests(unittest.TestCase):
             "strict market-bucket matching",
             "observed minus forecast",
         ):
-            self.assertIn(contract, agents)
+            self.assertIn(contract, detail)
 
     def test_theme_toggle_preserves_polywx_light_and_dark_modes(self):
         app = read_text("frontend/src/App.tsx")
@@ -86,23 +96,45 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn('type="date"', panel)
         self.assertIn('aria-label="选择日期"', panel)
 
-    def test_hourly_temperature_chart_keeps_linechart_and_residual_contract(self):
+    def test_hourly_temperature_chart_matches_polywx_series_contract(self):
         panel = read_text("frontend/src/components/WeatherPanel.tsx")
 
         self.assertIn("function placeholderHourlyRow", panel)
+        self.assertIn("const HOUR_LABELS", panel)
         self.assertIn("Array.from({ length: 24 }", panel)
         self.assertIn("<ComposedChart data={chartRows}", panel)
-        self.assertIn('name="METAR 实测" stroke="#F8FAFC"', panel)
-        self.assertIn('name="预报" stroke="#38BDF8"', panel)
-        self.assertIn('dataKey="cloud_pct" name="Cloud / RH"', panel)
+        self.assertIn('name="METAR" stroke="#F97316"', panel)
+        self.assertIn("dot={{ r: 3, fill: '#F97316'", panel)
+        self.assertIn('name="Historical" stroke="#22C55E"', panel)
+        self.assertIn("dot={{ r: 3, fill: '#22C55E'", panel)
+        self.assertIn('name="China Weather Live" stroke="#EF4444"', panel)
+        self.assertIn("SquareDot", panel)
+        self.assertIn('name="PWS" stroke="#A855F7"', panel)
+        self.assertIn("TriangleDot", panel)
+        self.assertIn('name="Forecast" stroke="#3B82F6"', panel)
+        self.assertIn("HollowCircleDot", panel)
+        self.assertIn("activeDot={{ r: 5 }}", panel)
+        self.assertIn('ticks={HOUR_LABELS}', panel)
+        self.assertIn('<Area yAxisId="percent"', panel)
+        self.assertIn('dataKey="cloud_pct" name="Cloud Cover %"', panel)
+        self.assertIn('fill="#94A3B8" fillOpacity={0.25}', panel)
         self.assertIn('strokeDasharray="4 4"', panel)
         self.assertIn("ReferenceLine", panel)
+        self.assertIn('stroke="#EC4899"', panel)
+        self.assertIn("PeakReferenceLabel", panel)
+        self.assertIn("`peak ${peakHour}`", panel)
         self.assertIn("forecast_value", panel)
         self.assertIn("value === null || value === undefined || value === ''", panel)
         self.assertIn("hasChartEvidence", panel)
         self.assertIn("tickFormatter={value => `${Number(value).toFixed(0)}°${unit}`}", panel)
-        self.assertIn("峰值", panel)
+        self.assertIn("AVG Δ (OBS−FC)", panel)
+        self.assertIn("ACCURACY (PEARSON R)", panel)
+        self.assertIn("HIST↔METAR OVERLAP", panel)
+        self.assertIn("No diff stats yet", panel)
+        self.assertIn("No accuracy stats yet", panel)
+        self.assertIn("No overlap data yet", panel)
         self.assertNotIn('aria-label="Diff residual bars"', panel)
+        self.assertNotIn('name="Cloud / RH" fill="#2563EB"', panel)
         self.assertIn("No hourly rows for this date.", panel)
         self.assertNotIn("点击“自动抓取”后，这里会按抓取时间展示", panel)
 
@@ -113,6 +145,8 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("Daily Max Prediction (DEB)", panel)
         self.assertIn("Probability buckets (Gaussian)", panel)
         self.assertIn("fmtBucketTemp", panel)
+        self.assertIn("fmtBucketAxisLabel", panel)
+        self.assertIn("fmtBucketAxisTemp", panel)
         self.assertIn("or above", panel)
         self.assertIn("or below", panel)
         self.assertIn("–", panel)
@@ -121,19 +155,30 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("μ ± σ", panel)
         self.assertIn("fmtDualTemp", panel)
         self.assertIn("fmtDualDelta", panel)
+        self.assertIn("normalCdf", panel)
         self.assertIn("buildGaussianFallbackItems", panel)
+        self.assertIn("topBucketIndexes", panel)
+        self.assertIn("'#2563EB' : '#4B5563'", panel)
+        self.assertIn("domain={[0, 25]}", panel)
+        self.assertIn("ticks={[0, 5, 10, 15, 20, 25]}", panel)
+        self.assertIn('className="h-[260px] max-h-[300px]"', panel)
         self.assertIn("暂无匹配市场桶", panel)
         self.assertNotIn("逐小时气温 + DEB + 分桶", panel)
         self.assertIn("推荐关注", app)
-        self.assertIn("recommendedCities", app)
-        self.assertIn("信号 {actionableCityCount}", app)
-        self.assertIn("border-amber-500/25", app)
-        self.assertNotIn("evidence-only", app)
+        self.assertIn("recommendations?.items", app)
+        self.assertIn("RecommendationCard", app)
+        self.assertIn("METAR age", app)
+        self.assertIn("verified", app)
+        self.assertIn("仅观测分析（无市场）", app)
+        self.assertIn("启动调度器以获取实时推荐", app)
+        self.assertIn("polymarket_url", app)
+        self.assertNotIn("recommendedCities", app)
 
     def test_refresh_feedback_toast_is_visible_and_stage_aware(self):
         app = read_text("frontend/src/App.tsx")
 
         self.assertIn("type RefreshNotice", app)
+        self.assertIn("refreshNotices.map", app)
         self.assertIn("productionRefreshNotice", app)
         self.assertIn("数据自动更新成功", app)
         self.assertIn("天气数据已更新，交易数据异常", app)
@@ -142,6 +187,87 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn('role="status"', app)
         self.assertIn('aria-live="polite"', app)
         self.assertIn("failed_stages", app)
+
+    def test_scheduler_status_contract_is_visible_to_dashboard(self):
+        app = read_text("frontend/src/App.tsx")
+        api = read_text("frontend/src/api.ts")
+        types = read_text("frontend/src/types.ts")
+        server = read_text("dashboard_server.py")
+
+        self.assertIn('@app.get("/api/scheduler/status")', server)
+        self.assertIn('@app.post("/api/scheduler/start")', server)
+        self.assertIn('@app.post("/api/scheduler/stop")', server)
+        self.assertIn('"scheduler_status"', server)
+        self.assertIn("fetchSchedulerStatus", api)
+        self.assertIn("startScheduler", api)
+        self.assertIn("stopScheduler", api)
+        self.assertIn("setStationEnabled", api)
+        self.assertIn("export interface SchedulerStatus", types)
+        self.assertIn("export interface SchedulerPollerStatus", types)
+        self.assertIn("scheduler_status?: SchedulerStatus", types)
+        for label in ("Forecast", "METAR", "China Live", "Historical"):
+            self.assertIn(label, app)
+        self.assertIn("china_live_poller", app)
+        self.assertIn("SchedulerBadge", app)
+        self.assertIn("fails_last_hour", app)
+        self.assertIn("schedulerStatusQuery", app)
+        self.assertIn("schedulerStartMutation", app)
+        self.assertIn("schedulerStopMutation", app)
+        self.assertIn("stationEnabledMutation", app)
+
+    def test_settlement_station_truth_contract_is_visible_to_dashboard(self):
+        app = read_text("frontend/src/App.tsx")
+        types = read_text("frontend/src/types.ts")
+        server = read_text("dashboard_server.py")
+        stations = read_text("weatherbot_v3/stations.py")
+        probe = read_text("weatherbot_v3/polymarket_probe.py")
+        cli = read_text("weatherbot_v3/cli.py")
+
+        self.assertIn("polymarket-market-probe", cli)
+        self.assertIn("probe_polymarket_markets", probe)
+        self.assertIn("parse_settlement_rule_text", probe)
+        for field in (
+            "settlement_station_id",
+            "settlement_rule_verified_at",
+            "settlement_timezone",
+            "settlement_unit",
+            "primary_settlement_source",
+            "verification_status",
+        ):
+            self.assertIn(field, server)
+            self.assertIn(field, types)
+        self.assertIn("apply_market_probe_result", stations)
+        self.assertIn("Settlement station", app)
+        self.assertIn("Rule verified", app)
+        self.assertIn("Timezone", app)
+        self.assertIn("Truth source", app)
+        self.assertIn("Non-truth metar_reports/IEM display only", app)
+
+    def test_china_weather_live_contract_is_mesonet_display_only(self):
+        app = read_text("frontend/src/App.tsx")
+        panel = read_text("frontend/src/components/WeatherPanel.tsx")
+        types = read_text("frontend/src/types.ts")
+        scheduler = read_text("weatherbot_v3/scheduler.py")
+        collector = read_text("weatherbot_v3/china_weather.py")
+        hourly = read_text("weatherbot_v3/hourly.py")
+        db = read_text("weatherbot_v3/db.py")
+        cli = read_text("weatherbot_v3/cli.py")
+
+        self.assertIn("china-weather-fetch", cli)
+        self.assertIn("HKO_RHRREAD_URL", collector)
+        self.assertIn("WEATHERCN_SK2D_URL_TEMPLATE", collector)
+        self.assertIn("network\": CHINA_LIVE_NETWORK", collector)
+        self.assertIn("not_settlement_truth", collector)
+        self.assertIn("mesonet_observations", db)
+        self.assertIn("raw_response_hash", db)
+        self.assertIn("fetched_at", db)
+        self.assertIn("china_live_poller", scheduler)
+        self.assertIn("run_china_weather_fetch", scheduler)
+        self.assertIn("source_temperatures", hourly)
+        self.assertIn("china_live", types)
+        self.assertIn("China Weather Live", panel)
+        self.assertIn("china_live_value", panel)
+        self.assertIn("China Live", app)
 
     def test_tables_and_fetch_log_match_polywx_information_architecture(self):
         panel = read_text("frontend/src/components/WeatherPanel.tsx")
