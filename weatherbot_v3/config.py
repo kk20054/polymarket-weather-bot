@@ -58,6 +58,9 @@ class V3Config:
     minimax_base_url: str
     minimax_model: str
     feishu_webhook_url: str
+    bankroll_usd: float
+    kelly_multiplier: float
+    max_per_trade_usd: float
     max_bet: float
     live_max_order_usd: float
     live_daily_max_usd: float
@@ -98,6 +101,9 @@ def load_config() -> V3Config:
         minimax_base_url=str(get("MINIMAX_BASE_URL", "https://api.minimax.io/v1") or "https://api.minimax.io/v1").rstrip("/"),
         minimax_model=str(get("MINIMAX_MODEL", "MiniMax-M3") or "MiniMax-M3"),
         feishu_webhook_url=str(get("FEISHU_WEBHOOK_URL", "") or ""),
+        bankroll_usd=_float(get("BANKROLL_USD", file_cfg.get("balance", file_cfg.get("starting_balance", 40.0))), 40.0),
+        kelly_multiplier=_float(get("KELLY_MULTIPLIER", 0.15), 0.15),
+        max_per_trade_usd=_float(get("MAX_PER_TRADE_USD", max_bet), max_bet),
         max_bet=max_bet,
         live_max_order_usd=_float(get("LIVE_MAX_ORDER_USD", max_bet), max_bet),
         live_daily_max_usd=_float(get("LIVE_DAILY_MAX_USD", 10.0), 10.0),

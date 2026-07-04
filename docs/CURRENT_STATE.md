@@ -12,11 +12,13 @@
 - China Weather Live 已接入：Hong Kong 用 HKO rhrread，Shanghai 用 weather.com.cn `sk_2d/101020100`；只写 `mesonet_observations` 做展示/证据，不解锁 live gate。
 - Wunderground/Weather.com PWS collector 已接入为 display-only mesonet：`pws-fetch` 与 METAR poller 同频路径可用；当前未配置 API key，5 个美国城市真实命令返回 skipped，不造假数据。
 - DEB `peak_hour` 已改用 hourly_consensus 混合曲线：过去小时用观测覆盖 forecast，并列取最晚；Chicago 2026-07-02 已验证为 mixed `16:00`。
+- Layer 6/8 已接入策略复用层：`single_bucket_ev`、`ladder_grid`、`tail_buying` 三策略可组合产出 `signal_decisions`，并持久化 `strategy_name/kelly_fraction/position_size_usd/ladder_group_id`；paper ladder 支持三桶原子执行，live 仍锁定。
 - `LIVE_TRADING=false`，实盘仍锁定；当前不能承诺自动赚钱或无人值守实盘。
 - 本轮文档治理复核后，开工只读本文件；历史细节按需看 `PROJECT_PROGRESS_CN.md` 或 `docs/PROGRESS_ARCHIVE_CN.md`。
 
 ## 最近 5 条 ledger 摘要
 
+- 2026-07-04 / Layer 6/8 策略复用与 Kelly / 结论：单桶 EV 阈值从 3% 提到 5%，新增 Ladder Grid 与 Tail Buying 策略、Kelly sizing、signal_decisions 策略字段和 paper ladder 原子执行；Chicago/NYC/Atlanta 当日真实构建最新 33 行仅触发 single_bucket_ev，0 paper allowed，主因仍是样本不足、settlement unverified、spread too wide。
 - 2026-07-04 / Layer 2/4/6 PWS、DEB peak 与 C 桶口径 / 结论：Chicago 2026-07-02 审计确认 forecast-only 15:00 与 observed tie 13-16 的差异，DEB 已改 mixed curve argmax 并落 `peak_hour=16:00`；新增 `wunderground_pws` collector/CLI/scheduler 接入，当前缺 API key 所以真实 5 城 skipped；C 桶概率改为截断 `[23,24)`。
 - 2026-07-04 / Git 落盘 + 推荐 gate 诊断 / 结论：四个 Layer commit 已落盘；诊断脚本确认推荐=0 不是前端问题，且发现少量 D+1/D+2 被 D+0 METAR freshness 误杀，已拆成 `today_observation` 与 `forecast_lead` gate。
 - 2026-07-04 / Layer 6/7 推荐关注闭环 / 结论：推荐卡改由最新 `signal_decisions` 生成，METAR age、verified、DEB、bucket、edge、Polymarket 链接和无市场观察分支已接入；30 分钟 scheduler 实测 METAR 7/7 OK，但 derive 后推荐从 5/2 个降为 0，下一步查 `paper_gate_blocked` 和 `settlement_rule_unverified`。
@@ -50,5 +52,6 @@
 - 若查刷新问题，先看 `/api/scheduler/status` 是否 running、last_run_at、fails_last_hour 和 next_run_at。
 - 若改 UI，先验证 `/api/dashboard` 与浏览器实际状态；本轮截图在 `audits/layer7-polywx-visual-2026-07-04/`。
 - 若改数据/策略，按 Build Order 一次只动一个 layer 加直接消费者。
+- 若查策略输出，优先看 `signal_decisions.strategy_name`、`kelly_fraction`、`position_size_usd`、`ladder_group_id` 和 `audits/strategy-multiplex-report-2026-07-04.md`。
 - 不跑 Firecrawl，除非任务明确要求或现有 evidence 不足。
 - 收尾必须更新 `PROJECT_PROGRESS_CN.md` 和本文件。

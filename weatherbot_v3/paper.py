@@ -51,6 +51,19 @@ def execute_paper_decision_record(
     dry_run: bool = False,
     path: Path | None = None,
 ) -> dict[str, Any]:
+    ladder_group_id = str(decision.get("ladder_group_id") or "").strip()
+    if ladder_group_id:
+        return execute_paper_ladder_group(ladder_group_id, amount=amount, dry_run=dry_run, path=path, seed_decision=decision)
+    return _execute_single_paper_decision_record(decision, amount=amount, dry_run=dry_run, path=path)
+
+
+def _execute_single_paper_decision_record(
+    decision: dict[str, Any],
+    *,
+    amount: float | None = None,
+    dry_run: bool = False,
+    path: Path | None = None,
+) -> dict[str, Any]:
     cfg = load_config()
     now = datetime.now(timezone.utc).isoformat()
     order = _base_order(decision, amount, now)
@@ -146,10 +159,18 @@ def execute_paper_decisions(
     dry_run: bool = True,
     path: Path | None = None,
 ) -> dict[str, Any]:
-    rows = [
-        row for row in list_signal_decisions(city_key=city_key, target_date=target_date, limit=limit, path=path)
-        if bool(row.get("paper_allowed")) and str(row.get("paper_decision") or "") == "buy"
-    ]
+    selected: list[dict[str, Any]] = []
+    seen_ladder_groups: set[str] = set()
+    for row in list_signal_decisions(city_key=city_key, target_date=target_date, limit=limit, path=path):
+        if not bool(row.get("paper_allowed")) or str(row.get("paper_decision") or "") != "buy":
+            continue
+        ladder_group_id = str(row.get("ladder_group_id") or "")
+        if ladder_group_id:
+            if ladder_group_id in seen_ladder_groups:
+                continue
+            seen_ladder_groups.add(ladder_group_id)
+        selected.append(row)
+    rows = selected
     results = [
         execute_paper_decision_record(row, amount=amount, dry_run=dry_run, path=path)
         for row in rows[: max(1, min(int(limit or 20), 100))]
@@ -167,13 +188,106 @@ def execute_paper_decisions(
     }
 
 
+def execute_paper_ladder_group(
+    ladder_group_id: str,
+    *,
+    amount: float | None = None,
+    dry_run: bool = False,
+    path: Path | None = None,
+    seed_decision: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    group_id = str(ladder_group_id or "").strip()
+    if not group_id:
+        return {"ok": False, "status": "blocked", "reason": "ladder_group_id_required"}
+    all_rows = list_signal_decisions(
+        city_key=(seed_decision or {}).get("city_key"),
+        target_date=(seed_decision or {}).get("target_date"),
+        limit=1000,
+        path=path,
+    )
+    rows = [row for row in all_rows if str(row.get("ladder_group_id") or "") == group_id]
+    rows.sort(key=lambda row: (_num(row.get("bucket_lower"), -9999.0) or -9999.0, _num(row.get("bucket_upper"), 9999.0) or 9999.0))
+    if len(rows) != 3:
+        return {
+            "ok": False,
+            "status": "rejected",
+            "reason": "ladder_group_incomplete",
+            "dry_run": dry_run,
+            "ladder_group_id": group_id,
+            "group_size": len(rows),
+        }
+
+    cfg = load_config()
+    now = datetime.now(timezone.utc).isoformat()
+    allocations = _ladder_allocations(rows, amount)
+    orders = [_base_order(row, allocations.get(str(row.get("decision_id") or ""), None), now) for row in rows]
+    existing = [get_paper_order_by_idempotency_key(order["idempotency_key"], path=path) for order in orders]
+    existing_count = sum(1 for item in existing if item)
+    if existing_count == len(rows):
+        return {
+            "ok": True,
+            "status": "duplicate",
+            "reason": "paper_ladder_group_already_exists",
+            "dry_run": dry_run,
+            "ladder_group_id": group_id,
+            "orders": [item for item in existing if item],
+        }
+    if existing_count:
+        return {
+            "ok": False,
+            "status": "rejected",
+            "reason": "paper_ladder_group_partially_exists",
+            "dry_run": dry_run,
+            "ladder_group_id": group_id,
+            "existing": existing_count,
+        }
+
+    grouped_reasons: dict[str, list[str]] = {}
+    for row, order in zip(rows, orders):
+        reasons = _risk_reasons(row, order, cfg, path=path)
+        if reasons:
+            grouped_reasons[str(row.get("decision_id") or row.get("bucket_key") or "")] = reasons
+    if grouped_reasons:
+        payload = {
+            "ladder_group_id": group_id,
+            "risk_reasons_by_decision": grouped_reasons,
+            "decision_ids": [row.get("decision_id") for row in rows],
+        }
+        if not dry_run:
+            log_risk("paper_ladder_group_rejected", "ladder_group_atomic_precheck_failed", payload=payload)
+        return {
+            "ok": False,
+            "status": "rejected",
+            "reason": "ladder_group_atomic_precheck_failed",
+            "dry_run": dry_run,
+            "ladder_group_id": group_id,
+            "risk_reasons_by_decision": grouped_reasons,
+        }
+
+    results = [
+        _execute_single_paper_decision_record(row, amount=allocations.get(str(row.get("decision_id") or ""), None), dry_run=dry_run, path=path)
+        for row in rows
+    ]
+    return {
+        "ok": all(result.get("ok") or result.get("status") == "duplicate" for result in results),
+        "status": "paper_ladder_filled" if not dry_run else "paper_ladder_dry_run",
+        "reason": None,
+        "dry_run": dry_run,
+        "ladder_group_id": group_id,
+        "requested": len(rows),
+        "executed": sum(1 for result in results if result.get("ok") and result.get("status") != "duplicate"),
+        "results": results,
+    }
+
+
 def _base_order(decision: dict[str, Any], amount: float | None, opened_at: str) -> dict[str, Any]:
     cfg = load_config()
     market_ask = _num(decision.get("market_ask"))
     market_bid = _num(decision.get("market_bid"))
     tick_size = _num(decision.get("tick_size"))
     order_min_size = _num(decision.get("order_min_size"))
-    requested_amount = _requested_amount(amount, cfg.max_bet)
+    default_amount = decision.get("position_size_usd") if amount is None else amount
+    requested_amount = _requested_amount(default_amount, cfg.max_bet)
     limit_price = market_ask if market_ask is not None else 0.0
     shares = requested_amount / limit_price if limit_price > 0 else 0.0
     decision_id = str(decision.get("decision_id") or "")
@@ -333,6 +447,22 @@ def _idempotency_key(decision: dict[str, Any], amount: float, limit_price: float
         f"{limit_price:.6f}",
     ])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
+
+
+def _ladder_allocations(rows: list[dict[str, Any]], amount: float | None) -> dict[str, float | None]:
+    if amount is None:
+        return {
+            str(row.get("decision_id") or ""): _num(row.get("position_size_usd"))
+            for row in rows
+        }
+    total = sum(max(0.0, _num(row.get("position_size_usd"), 0.0) or 0.0) for row in rows)
+    if total <= 0:
+        each = max(0.0, float(amount)) / max(1, len(rows))
+        return {str(row.get("decision_id") or ""): each for row in rows}
+    return {
+        str(row.get("decision_id") or ""): max(0.0, float(amount)) * max(0.0, _num(row.get("position_size_usd"), 0.0) or 0.0) / total
+        for row in rows
+    }
 
 
 def _num(value: Any, default: float | None = None) -> float | None:

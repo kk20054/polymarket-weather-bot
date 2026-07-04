@@ -32,6 +32,16 @@
 
 ## 最近 5 条完整 ledger
 
+### 2026-07-04：Layer 6/8 策略复用层、Kelly 仓位与 Ladder Paper 原子执行
+
+- 目标：只改 Layer 6/8，不改前端、不解锁 live；把原本唯一的单桶 EV 策略扩展为可组合策略层，并加入 Kelly 仓位建议。新增三类策略：`single_bucket_ev`、`ladder_grid`、`tail_buying`。
+- 改动：新增 `weatherbot_v3/sizing.py`，按二元 YES 合约计算 Kelly fraction，并以 `kelly_multiplier=0.15`、`min(bankroll*0.05, max_per_trade_usd)` 做硬上限；`config.py` 增加 `bankroll_usd`、`kelly_multiplier`、`max_per_trade_usd`，兼容现有 `config.json.balance/max_bet`。新增 `weatherbot_v3/strategies/`：`StrategyBase.evaluate()`、`SingleBucketEVStrategy`（MIN_EDGE 0.05）、`LadderGridStrategy`（μ 附近 3 桶、每桶 edge >=3%、总仓位为中心桶 Kelly 的 0.6 并按 CDF 权重分配）、`TailBuyingStrategy`（ask <=0.15、edge >=10%、独立结算日 >=20、单笔 cap $50、日候选 cap 5）。`signals.py` 改为统一调用策略层，保留 single bucket 旧 decision_id 稳定性；`signal_decisions` 自动迁移并持久化 `strategy_name`、`kelly_fraction`、`position_size_usd`、`ladder_group_id`。`paper.py` 支持 ladder group 原子执行：同组 3 桶全组预检查，任一盘口/风控失败则不写任何订单。`dashboard_server.py` 后端推荐 payload 增加策略标签、Kelly/仓位和 ladder `sub_buckets`，但本轮未改 React 前端。
+- 验证：新增 `tests/test_kelly_sizing.py` 与 `tests/test_strategies.py`；`.venv\Scripts\python.exe -m unittest tests.test_kelly_sizing tests.test_strategies` 通过 8 tests OK；`.venv\Scripts\python.exe -m unittest tests.test_v3_core` 通过 160 tests OK，仍有既有 SQLite ResourceWarning；`.venv\Scripts\python.exe -m unittest tests.test_polywx_contract tests.test_kelly_sizing tests.test_strategies` 通过 20 tests OK。未运行 `npm run build`，因为本轮没有改前端文件。
+- 真实跑数：执行 `signal-decisions-build --city chicago --city nyc --city atlanta --target-date 2026-07-04 --limit 200`，写入 33 条最新决策（每城 11）；最新 issued_at 均为 `2026-07-04T11:00:00+00:00`。最新轮次按策略统计：`single_bucket_ev=33`、`paper_allowed=0`、平均 edge `-0.009212`、平均 Kelly `0.024041`；`ladder_grid=0`，原因是没有 3 桶同时满足 edge/sizing；`tail_buying=0`，原因是未同时满足 ask、edge、历史样本 gate。审计报告写入 `audits/strategy-multiplex-report-2026-07-04.md`，不提交。
+- 结论：策略复用层、Kelly sizing 和 ladder paper 原子执行已落地并有回归测试；真实当日 Chicago/NYC/Atlanta 仍无可执行 paper 候选，主要阻塞是 `insufficient_bias_samples`、`settlement_rule_unverified`、`spread_too_wide`，说明当前不能自动加仓，更不能 live。`LIVE_TRADING=false` 未改变。
+- 下一步：继续补 settlement verification/truth 样本与盘口 replay；若要让 ladder/tail 真正参与 paper validation，需要先改善样本、价差和市场桶匹配，不应通过放宽 gate 伪造候选。
+- 相关提交：`7b2c233`。
+
 ### 2026-07-04：Layer 2/4/6 PWS、DEB peak 与摄氏桶口径修正
 
 - 目标：落实第二轮修改建议：导出 Chicago 2026-07-02 峰值差异审计；DEB `peak_hour` 改为混合曲线 argmax；新增 Wunderground PWS 聚合 collector 写入 `mesonet_observations`；核对并测试摄氏度市场桶按截断口径积分；本轮结束提交。

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.china_weather import hko_rhrread_observation, weathercn_sk2d_observation
-from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, paper_execution_summary, set_settlement_contract_verification, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, weather_evidence_summary
+from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, paper_execution_summary, set_settlement_contract_verification, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, upsert_signal_decision_record, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.polymarket_probe import parse_settlement_rule_text, probe_polymarket_markets
@@ -965,6 +965,10 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("model_probability", decision_columns)
         self.assertIn("market_implied_probability", decision_columns)
         self.assertIn("edge", decision_columns)
+        self.assertIn("strategy_name", decision_columns)
+        self.assertIn("kelly_fraction", decision_columns)
+        self.assertIn("position_size_usd", decision_columns)
+        self.assertIn("ladder_group_id", decision_columns)
         self.assertIn("gate_status", decision_columns)
         self.assertIn("paper_decision", decision_columns)
         self.assertIn("live_decision", decision_columns)
@@ -2142,6 +2146,105 @@ class V3CoreTests(unittest.TestCase):
         self.assertTrue(first["ok"])
         self.assertEqual(second["status"], "duplicate")
         self.assertEqual(len(orders), 1)
+
+    def test_layer8_paper_execution_runs_ladder_group_atomically(self):
+        db_path = test_db_path("paper_execution_ladder")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "10.0"}, clear=False):
+            init_v3_db(db_path)
+            for index, bucket in enumerate(("low", "mid", "high")):
+                upsert_signal_decision_record({
+                    "decision_id": f"ladder-{bucket}",
+                    "bucket_key": bucket,
+                    "city_key": "chicago",
+                    "target_date": "2026-07-02",
+                    "issued_at": "2026-07-02T12:00:00+00:00",
+                    "market_id": f"market-{bucket}",
+                    "yes_token_id": f"yes-{bucket}",
+                    "token_id": f"yes-{bucket}",
+                    "bucket_lower": 88 + index,
+                    "bucket_upper": 89 + index,
+                    "model_probability": 0.25,
+                    "market_ask": 0.2,
+                    "market_bid": 0.195,
+                    "market_implied_probability": 0.2,
+                    "edge": 0.05,
+                    "strategy_name": "ladder_grid",
+                    "kelly_fraction": 0.0625,
+                    "position_size_usd": 5.0,
+                    "ladder_group_id": "ladder-group-1",
+                    "tick_size": 0.01,
+                    "order_min_size": 5.0,
+                    "book_age_seconds": 0,
+                    "spread_bps": 250,
+                    "paper_allowed": True,
+                    "paper_decision": "buy",
+                    "live_allowed": False,
+                    "live_decision": "blocked",
+                    "gate_status": "paper_allowed",
+                    "gate_reasons": ["live_trading_disabled"],
+                    "orderbook_snapshot": {"best_ask": 0.2, "best_bid": 0.195, "spread": 0.005, "ask_depth": 100},
+                }, path=db_path)
+
+            result = execute_paper_decision("ladder-mid", path=db_path)
+            orders = list_paper_orders(city_key="chicago", target_date="2026-07-02", path=db_path)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "paper_ladder_filled")
+        self.assertEqual(len(orders), 3)
+        self.assertEqual({order["fill_status"] for order in orders}, {"filled"})
+
+    def test_layer8_paper_execution_rejects_ladder_group_without_partial_orders(self):
+        db_path = test_db_path("paper_execution_ladder_reject")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "10.0"}, clear=False):
+            init_v3_db(db_path)
+            for index, bucket in enumerate(("low", "mid", "high")):
+                upsert_signal_decision_record({
+                    "decision_id": f"bad-ladder-{bucket}",
+                    "bucket_key": bucket,
+                    "city_key": "chicago",
+                    "target_date": "2026-07-02",
+                    "issued_at": "2026-07-02T12:00:00+00:00",
+                    "market_id": f"market-{bucket}",
+                    "yes_token_id": f"bad-yes-{bucket}",
+                    "token_id": f"bad-yes-{bucket}",
+                    "bucket_lower": 88 + index,
+                    "bucket_upper": 89 + index,
+                    "model_probability": 0.25,
+                    "market_ask": 0.2,
+                    "market_bid": 0.195,
+                    "market_implied_probability": 0.2,
+                    "edge": 0.05,
+                    "strategy_name": "ladder_grid",
+                    "kelly_fraction": 0.0625,
+                    "position_size_usd": 5.0,
+                    "ladder_group_id": "bad-ladder-group-1",
+                    "tick_size": 0.01,
+                    "order_min_size": 5.0,
+                    "book_age_seconds": 0,
+                    "spread_bps": 250,
+                    "paper_allowed": True,
+                    "paper_decision": "buy",
+                    "live_allowed": False,
+                    "live_decision": "blocked",
+                    "gate_status": "paper_allowed",
+                    "gate_reasons": ["live_trading_disabled"],
+                    "orderbook_snapshot": {
+                        "best_ask": 0.2,
+                        "best_bid": 0.195,
+                        "spread": 0.005,
+                        "ask_depth": 0 if bucket == "high" else 100,
+                    },
+                }, path=db_path)
+
+            result = execute_paper_decision("bad-ladder-mid", path=db_path)
+            orders = list_paper_orders(city_key="chicago", target_date="2026-07-02", path=db_path)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["reason"], "ladder_group_atomic_precheck_failed")
+        self.assertEqual(len(orders), 0)
 
     def test_layer8_paper_execution_rejects_blocked_decision_without_fill(self):
         db_path = test_db_path("paper_execution_reject")

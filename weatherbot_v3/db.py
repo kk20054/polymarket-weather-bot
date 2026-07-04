@@ -649,6 +649,10 @@ def init_v3_db(path: Path | None = None) -> None:
                 market_implied_probability REAL,
                 edge REAL,
                 edge_percent REAL,
+                strategy_name TEXT,
+                kelly_fraction REAL,
+                position_size_usd REAL,
+                ladder_group_id TEXT,
                 orderbook_snapshot_json TEXT,
                 tick_size REAL,
                 order_min_size REAL,
@@ -895,6 +899,10 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "market_implied_probability": "REAL",
             "edge": "REAL",
             "edge_percent": "REAL",
+            "strategy_name": "TEXT",
+            "kelly_fraction": "REAL",
+            "position_size_usd": "REAL",
+            "ladder_group_id": "TEXT",
             "orderbook_snapshot_json": "TEXT",
             "tick_size": "REAL",
             "order_min_size": "REAL",
@@ -1018,6 +1026,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_decisions_decision_id ON signal_decisions(decision_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_city_date ON signal_decisions(city_key, target_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_bucket ON signal_decisions(bucket_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_strategy ON signal_decisions(strategy_name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_ladder_group ON signal_decisions(ladder_group_id)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_orders_idempotency ON paper_orders(idempotency_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_decision ON paper_orders(decision_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_city_date ON paper_orders(city_key, target_date)")
@@ -2981,6 +2991,10 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
         "market_implied_probability": _nullable_num(decision.get("market_implied_probability")),
         "edge": _nullable_num(decision.get("edge")),
         "edge_percent": _nullable_num(decision.get("edge_percent")),
+        "strategy_name": str(decision.get("strategy_name") or "single_bucket_ev"),
+        "kelly_fraction": _nullable_num(decision.get("kelly_fraction")),
+        "position_size_usd": _nullable_num(decision.get("position_size_usd")),
+        "ladder_group_id": str(decision.get("ladder_group_id") or ""),
         "orderbook_snapshot_json": dump_json(decision.get("orderbook_snapshot", decision.get("orderbook_snapshot_json", {}))),
         "tick_size": _nullable_num(decision.get("tick_size")),
         "order_min_size": _nullable_num(decision.get("order_min_size")),
@@ -3014,7 +3028,8 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
                 target_date, issued_at, token_id, yes_token_id, bucket_direction,
                 bucket_lower, bucket_upper, mu, sigma, deb_version,
                 model_probability, market_ask, market_bid, market_mid,
-                market_implied_probability, edge, edge_percent, orderbook_snapshot_json,
+                market_implied_probability, edge, edge_percent, strategy_name,
+                kelly_fraction, position_size_usd, ladder_group_id, orderbook_snapshot_json,
                 tick_size, order_min_size, neg_risk, book_age_seconds, spread_bps,
                 gate_status, paper_decision, live_decision, blocked_reason_primary,
                 evidence_links_json, decision_version, action, live_allowed, paper_allowed,
@@ -3026,7 +3041,8 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
                 :target_date, :issued_at, :token_id, :yes_token_id, :bucket_direction,
                 :bucket_lower, :bucket_upper, :mu, :sigma, :deb_version,
                 :model_probability, :market_ask, :market_bid, :market_mid,
-                :market_implied_probability, :edge, :edge_percent, :orderbook_snapshot_json,
+                :market_implied_probability, :edge, :edge_percent, :strategy_name,
+                :kelly_fraction, :position_size_usd, :ladder_group_id, :orderbook_snapshot_json,
                 :tick_size, :order_min_size, :neg_risk, :book_age_seconds, :spread_bps,
                 :gate_status, :paper_decision, :live_decision, :blocked_reason_primary,
                 :evidence_links_json, :decision_version, :action, :live_allowed, :paper_allowed,
@@ -3057,6 +3073,10 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
                 market_implied_probability=excluded.market_implied_probability,
                 edge=excluded.edge,
                 edge_percent=excluded.edge_percent,
+                strategy_name=excluded.strategy_name,
+                kelly_fraction=excluded.kelly_fraction,
+                position_size_usd=excluded.position_size_usd,
+                ladder_group_id=excluded.ladder_group_id,
                 orderbook_snapshot_json=excluded.orderbook_snapshot_json,
                 tick_size=excluded.tick_size,
                 order_min_size=excluded.order_min_size,
@@ -3127,6 +3147,8 @@ def list_signal_decisions(
         row["live_allowed"] = bool(row.get("live_allowed"))
         row["paper_allowed"] = bool(row.get("paper_allowed"))
         row["neg_risk"] = bool(row.get("neg_risk"))
+        row["strategy_name"] = row.get("strategy_name") or "single_bucket_ev"
+        row["ladder_group_id"] = row.get("ladder_group_id") or ""
         row["reasons"] = _loads_list(row.get("reasons"))
         row["cautions"] = _loads_list(row.get("cautions"))
         row["gate_reasons"] = _loads_list(row.get("gate_reasons_json"))

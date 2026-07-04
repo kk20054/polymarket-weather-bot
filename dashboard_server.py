@@ -807,6 +807,13 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         -float(row.get("edge") or -999),
         str(row.get("target_date") or ""),
     ))
+    ladder_rows_by_group: dict[str, list[dict]] = {}
+    for row in candidates:
+        group_id = str(row.get("ladder_group_id") or "")
+        if group_id:
+            ladder_rows_by_group.setdefault(group_id, []).append(row)
+    for group_rows in ladder_rows_by_group.values():
+        group_rows.sort(key=lambda item: (float(item.get("bucket_lower") or -9999), float(item.get("bucket_upper") or 9999)))
     seen_cities: set[str] = set()
     for row in candidates:
         city = str(row.get("city_key") or "").strip().lower()
@@ -822,6 +829,9 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             reason for reason in _recommendation_reasons(row)
             if reason not in {"live_trading_disabled", "insufficient_bias_samples"}
         ]
+        strategy_name = str(row.get("strategy_name") or "single_bucket_ev")
+        ladder_group_id = str(row.get("ladder_group_id") or "")
+        sub_rows = ladder_rows_by_group.get(ladder_group_id, []) if strategy_name == "ladder_grid" and ladder_group_id else []
         items.append({
             "type": "trade_candidate",
             "city_key": city,
@@ -843,6 +853,32 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             "deb_unit": unit,
             "bucket_label": row.get("market_bucket_label") or (row.get("model_bucket_probs") or {}).get("bucket_label") or row.get("bucket_key"),
             "bucket_key": row.get("bucket_key"),
+            "strategy_name": strategy_name,
+            "strategy_label": {
+                "single_bucket_ev": "Single Bucket EV",
+                "ladder_grid": "Ladder Grid",
+                "tail_buying": "Tail Buying",
+            }.get(strategy_name, strategy_name),
+            "kelly_fraction": row.get("kelly_fraction"),
+            "position_size_usd": row.get("position_size_usd"),
+            "ladder_group_id": ladder_group_id,
+            "sub_buckets": [
+                {
+                    "bucket_key": sub.get("bucket_key"),
+                    "bucket_label": sub.get("market_bucket_label") or sub.get("bucket_key"),
+                    "model_probability": sub.get("model_probability"),
+                    "market_ask": sub.get("market_ask"),
+                    "edge": sub.get("edge"),
+                    "kelly_fraction": sub.get("kelly_fraction"),
+                    "position_size_usd": sub.get("position_size_usd"),
+                    "paper_allowed": bool(sub.get("paper_allowed")),
+                    "blocked_reasons": [
+                        reason for reason in _recommendation_reasons(sub)
+                        if reason not in {"live_trading_disabled", "insufficient_bias_samples"}
+                    ],
+                }
+                for sub in sub_rows
+            ],
             "edge": row.get("edge"),
             "edge_percent": row.get("edge_percent"),
             "model_probability": row.get("model_probability"),

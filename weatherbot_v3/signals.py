@@ -17,10 +17,12 @@ from .db import (
 )
 from .deb import bucket_probabilities
 from .stations import get_station
+from .strategies import LadderGridStrategy, SingleBucketEVStrategy, TailBuyingStrategy
 
 
 DECISION_VERSION = "signal-decision-v1"
-MIN_EDGE = 0.03
+SINGLE_BUCKET_ID_VERSION = "signal-decision-v1"
+MIN_EDGE = 0.05
 MAX_SPREAD_BPS = 500.0
 STALE_BOOK_SECONDS = 300.0
 MIN_BIAS_SAMPLE_DAYS = 7
@@ -72,17 +74,25 @@ def build_signal_decisions(
     }
     evidence = _evidence_links(city, date, prediction, buckets, path)
     station_live_reasons = _station_live_gate_reasons(city, path)
-    decisions = [
-        _decision_for_bucket(
-            bucket,
-            probabilities.get(str(bucket.get("bucket_key") or ""), {}),
-            prediction,
-            distribution,
-            evidence,
-            station_live_reasons=station_live_reasons,
-        )
-        for bucket in buckets
-    ]
+    cfg = load_config()
+    context = {
+        "decision_version": DECISION_VERSION,
+        "single_bucket_id_version": SINGLE_BUCKET_ID_VERSION,
+        "distribution": distribution,
+        "evidence": evidence,
+        "station_live_reasons": station_live_reasons,
+        "max_spread_bps": MAX_SPREAD_BPS,
+        "stale_book_seconds": STALE_BOOK_SECONDS,
+        "min_bias_sample_days": MIN_BIAS_SAMPLE_DAYS,
+        "bankroll": getattr(cfg, "bankroll_usd", getattr(cfg, "max_bet", 0.0)),
+        "kelly_multiplier": getattr(cfg, "kelly_multiplier", 0.15),
+        "max_per_trade_usd": getattr(cfg, "max_per_trade_usd", getattr(cfg, "max_bet", 0.0)),
+        "independent_settlement_days": _independent_settlement_days(city, path, prediction),
+    }
+    strategies = [SingleBucketEVStrategy(), LadderGridStrategy(), TailBuyingStrategy()]
+    decisions: list[dict[str, Any]] = []
+    for strategy in strategies:
+        decisions.extend(strategy.evaluate_many(buckets, probabilities, prediction, context))
     stored = 0
     if not dry_run:
         for decision in decisions:
@@ -91,10 +101,13 @@ def build_signal_decisions(
     status_counts: dict[str, int] = {}
     paper_counts: dict[str, int] = {}
     live_counts: dict[str, int] = {}
+    strategy_counts: dict[str, int] = {}
     for decision in decisions:
         status_counts[decision["gate_status"]] = status_counts.get(decision["gate_status"], 0) + 1
         paper_counts[decision["paper_decision"]] = paper_counts.get(decision["paper_decision"], 0) + 1
         live_counts[decision["live_decision"]] = live_counts.get(decision["live_decision"], 0) + 1
+        strategy = str(decision.get("strategy_name") or "single_bucket_ev")
+        strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
     return {
         "ok": True,
         "dry_run": dry_run,
@@ -108,6 +121,7 @@ def build_signal_decisions(
         "status_counts": status_counts,
         "paper_counts": paper_counts,
         "live_counts": live_counts,
+        "strategy_counts": strategy_counts,
         "model_distribution": _distribution_summary(distribution),
         "decisions": decisions,
     }
@@ -146,11 +160,14 @@ def signal_decisions_summary(
     status_counts: dict[str, int] = {}
     paper_counts: dict[str, int] = {}
     live_counts: dict[str, int] = {}
+    strategy_counts: dict[str, int] = {}
     reason_counts: dict[str, int] = {}
     for row in rows:
         status_counts[str(row.get("gate_status") or "")] = status_counts.get(str(row.get("gate_status") or ""), 0) + 1
         paper_counts[str(row.get("paper_decision") or "")] = paper_counts.get(str(row.get("paper_decision") or ""), 0) + 1
         live_counts[str(row.get("live_decision") or "")] = live_counts.get(str(row.get("live_decision") or ""), 0) + 1
+        strategy = str(row.get("strategy_name") or "single_bucket_ev")
+        strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
         for reason in row.get("gate_reasons") or []:
             reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + 1
     return {
@@ -161,164 +178,13 @@ def signal_decisions_summary(
         "status_counts": status_counts,
         "paper_counts": paper_counts,
         "live_counts": live_counts,
+        "strategy_counts": strategy_counts,
         "reason_counts": [
             {"reason": reason, "count": count}
             for reason, count in sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))
         ],
         "decisions": rows,
     }
-
-
-def _decision_for_bucket(
-    bucket: dict[str, Any],
-    probability_item: dict[str, Any],
-    prediction: dict[str, Any],
-    distribution: dict[str, Any],
-    evidence: dict[str, Any],
-    *,
-    station_live_reasons: list[str] | None = None,
-) -> dict[str, Any]:
-    model_probability = _optional_float(probability_item.get("probability"))
-    market_bid = _optional_float(bucket.get("best_bid"))
-    market_ask = _optional_float(bucket.get("best_ask"))
-    price = _optional_float(bucket.get("price"))
-    market_mid = (market_bid + market_ask) / 2.0 if market_bid is not None and market_ask is not None else None
-    market_probability = market_ask if market_ask is not None else (price if price is not None else market_mid)
-    edge = None if model_probability is None or market_probability is None else model_probability - market_probability
-    edge_percent = None
-    if edge is not None and market_probability and market_probability > 0:
-        edge_percent = edge / market_probability
-    spread = _optional_float(bucket.get("spread"))
-    spread_bps = _spread_bps(spread, market_ask, market_bid)
-    book_age_seconds = _book_age_seconds(bucket.get("quote_timestamp"))
-
-    gate_reasons: list[str] = []
-    cautions: list[str] = []
-    hard_blocks: list[str] = []
-    skip_reasons: list[str] = []
-    if bucket.get("strict_match_status") != "matched":
-        hard_blocks.append("bucket_not_strict_match")
-        gate_reasons.extend(_as_list(bucket.get("strict_match_reasons")) or ["bucket_not_strict_match"])
-    if not bucket.get("yes_token_id"):
-        hard_blocks.append("yes_token_missing")
-    if _optional_float(bucket.get("tick_size")) is None:
-        hard_blocks.append("tick_size_missing")
-    if _optional_float(bucket.get("order_min_size")) is None:
-        hard_blocks.append("order_min_size_missing")
-    if not bool(bucket.get("enable_order_book")):
-        hard_blocks.append("orderbook_disabled")
-    if market_probability is None:
-        hard_blocks.append("market_probability_missing")
-    if model_probability is None:
-        hard_blocks.append("model_probability_missing")
-    if _is_low_price_tail(bucket, market_ask):
-        hard_blocks.append("low_price_tail_bucket")
-    if spread_bps is not None and spread_bps > MAX_SPREAD_BPS:
-        hard_blocks.append("spread_too_wide")
-    if book_age_seconds is None:
-        cautions.append("book_timestamp_missing")
-    elif book_age_seconds > STALE_BOOK_SECONDS:
-        cautions.append("stale_book")
-    if str(prediction.get("deb_version") or prediction.get("method") or "") != "weatherbot-deb-v2":
-        hard_blocks.append("deb_version_not_v2")
-    if int(prediction.get("bias_sample_count") or 0) < MIN_BIAS_SAMPLE_DAYS:
-        gate_reasons.append("insufficient_bias_samples")
-    if edge is None or edge < MIN_EDGE:
-        skip_reasons.append("edge_below_min")
-
-    gate_reasons.extend(hard_blocks)
-    gate_reasons.extend(skip_reasons)
-    gate_reasons = _unique(gate_reasons)
-    hard_blocks = _unique(hard_blocks)
-    skip_reasons = _unique(skip_reasons)
-    paper_allowed = not hard_blocks and not skip_reasons
-    paper_decision = "buy" if paper_allowed else ("blocked" if hard_blocks else "skip")
-    live_allowed = False
-    live_decision = "blocked"
-    live_reasons = []
-    if int(prediction.get("bias_sample_count") or 0) < MIN_BIAS_SAMPLE_DAYS:
-        live_reasons.append("insufficient_bias_samples")
-    live_reasons.extend(station_live_reasons or [])
-    if not paper_allowed:
-        live_reasons.append("paper_gate_not_passed")
-    if not getattr(load_config(), "live_trading", False):
-        live_reasons.append("live_trading_disabled")
-    gate_reasons = _unique(gate_reasons + live_reasons)
-    gate_status = "paper_allowed" if paper_allowed else ("paper_blocked" if hard_blocks else "skip")
-    primary_reason = (hard_blocks or skip_reasons or live_reasons or gate_reasons or [""])[0]
-    decision = {
-        "decision_id": _decision_id(bucket, prediction),
-        "bucket_id": bucket.get("id"),
-        "bucket_key": bucket.get("bucket_key") or "",
-        "city_key": bucket.get("city") or prediction.get("city_key") or "",
-        "target_date": bucket.get("target_date") or prediction.get("target_date") or "",
-        "issued_at": prediction.get("issued_at") or "",
-        "market_id": bucket.get("market_id") or "",
-        "token_id": bucket.get("yes_token_id") or bucket.get("token_id") or "",
-        "yes_token_id": bucket.get("yes_token_id") or "",
-        "bucket_direction": bucket.get("bucket_direction") or "",
-        "bucket_lower": bucket.get("bucket_low"),
-        "bucket_upper": bucket.get("bucket_high"),
-        "mu": prediction.get("mu"),
-        "sigma": prediction.get("sigma"),
-        "deb_version": prediction.get("deb_version") or prediction.get("method") or "",
-        "model_probability": model_probability,
-        "market_ask": market_ask,
-        "market_bid": market_bid,
-        "market_mid": market_mid,
-        "market_implied_probability": market_probability,
-        "edge": edge,
-        "edge_percent": edge_percent,
-        "orderbook_snapshot": {
-            "best_bid": market_bid,
-            "best_ask": market_ask,
-            "spread": spread,
-            "bid_depth": bucket.get("bid_depth"),
-            "ask_depth": bucket.get("ask_depth"),
-            "quote_timestamp": bucket.get("quote_timestamp"),
-            "source": bucket.get("orderbook_source"),
-            "snapshot_key": bucket.get("orderbook_snapshot_key"),
-        },
-        "tick_size": bucket.get("tick_size"),
-        "order_min_size": bucket.get("order_min_size"),
-        "neg_risk": bool(bucket.get("neg_risk")),
-        "book_age_seconds": book_age_seconds,
-        "spread_bps": spread_bps,
-        "gate_status": gate_status,
-        "gate_reasons": gate_reasons,
-        "paper_allowed": paper_allowed,
-        "live_allowed": live_allowed,
-        "paper_decision": paper_decision,
-        "live_decision": live_decision,
-        "blocked_reason_primary": primary_reason,
-        "reasons": gate_reasons,
-        "cautions": _unique(cautions),
-        "action": "buy_yes" if paper_allowed else "observe",
-        "decision_version": DECISION_VERSION,
-        "model_distribution": _distribution_summary(distribution),
-        "model_bucket_probs": probability_item,
-        "market_bucket_probs": [{
-            "bucket_key": bucket.get("bucket_key"),
-            "market_probability": market_probability,
-            "best_bid": market_bid,
-            "best_ask": market_ask,
-            "price": price,
-        }],
-        "edge_by_bucket": {
-            str(bucket.get("bucket_key") or bucket.get("market_id") or ""): {
-                "model_probability": model_probability,
-                "market_probability": market_probability,
-                "edge": edge,
-                "edge_percent": edge_percent,
-            }
-        },
-        "evidence_links": {
-            **evidence,
-            "market_bucket_id": bucket.get("id"),
-            "daily_max_prediction_id": prediction.get("id"),
-        },
-    }
-    return decision
 
 
 def _station_live_gate_reasons(city_key: str, path: Path | None = None) -> list[str]:
@@ -335,6 +201,36 @@ def _station_live_gate_reasons(city_key: str, path: Path | None = None) -> list[
     if settlement_station and observation_station and settlement_station != observation_station:
         reasons.append("settlement_mismatch")
     return _unique(reasons)
+
+
+def _independent_settlement_days(city_key: str, path: Path | None, prediction: dict[str, Any]) -> int:
+    city = str(city_key or "").strip().lower()
+    counts: list[int] = []
+    try:
+        with connect(path) as conn:
+            counts.append(int(conn.execute(
+                """
+                SELECT COUNT(DISTINCT target_date)
+                FROM truth_observations
+                WHERE city = ?
+                  AND COALESCE(calibration_eligible, 0) = 1
+                  AND actual_temp IS NOT NULL
+                """,
+                (city,),
+            ).fetchone()[0] or 0))
+            counts.append(int(conn.execute(
+                """
+                SELECT COUNT(DISTINCT target_date)
+                FROM settlements
+                WHERE city = ?
+                  AND actual_temp IS NOT NULL
+                """,
+                (city,),
+            ).fetchone()[0] or 0))
+    except Exception:
+        pass
+    counts.append(int(prediction.get("bias_sample_count") or 0))
+    return max(counts or [0])
 
 
 def _list_market_buckets(city: str, target_date: str, *, limit: int, path: Path | None) -> list[dict[str, Any]]:
