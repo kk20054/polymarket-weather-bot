@@ -194,6 +194,14 @@ def build_daily_max_prediction(
     observed_floor = _observed_floor(city_key, target_date, unit, path)
     time_decay = _time_decay_factor(target_date, profile.timezone if profile else "UTC", observed_floor is not None)
     sigma = sigma_with_floor(sigma_raw * time_decay, sigma_floor)
+    mixed_peak = _mixed_curve_peak(
+        city_key,
+        target_date,
+        unit,
+        profile.timezone if profile else "UTC",
+        issued,
+        path,
+    )
 
     mu = mu_bias_adjusted
     floor_applied = False
@@ -228,6 +236,10 @@ def build_daily_max_prediction(
         "mu_bias_adjusted": mu_bias_adjusted,
         "sigma_raw": sigma_raw,
         "build_warnings": sorted(set(warnings)),
+        "peak_hour": mixed_peak.get("peak_hour") or "",
+        "peak_temp": mixed_peak.get("peak_temp"),
+        "peak_source": mixed_peak.get("peak_source") or "",
+        "mixed_peak": mixed_peak,
     }
     return prediction
 
@@ -594,6 +606,85 @@ def _bias_correction(city_key: str, target_date: str, residual_days: int, path: 
     return {"bias": bias, "residual_std": residual_std, "sample_count": len(residuals)}
 
 
+def _mixed_curve_peak(
+    city_key: str,
+    target_date: str,
+    unit: str,
+    timezone_name: str,
+    issued_at: str,
+    path: Path | None,
+) -> dict[str, Any]:
+    """Return the daily peak hour from a forecast/observation mixed curve.
+
+    Past hours prefer observed temperature when available; future hours use the
+    forecast curve. Ties intentionally choose the latest local hour, matching
+    the visual "peak marker" behavior users expect on an intraday chart.
+    """
+    issued = _parse_datetime(issued_at) or datetime.now(timezone.utc)
+    default_unit = _clean_unit((get_city_profile(city_key).unit if get_city_profile(city_key) else unit) or unit)
+    with connect(path) as conn:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT local_hour, valid_time, forecast_temp, observed_temp,
+                       observation_source, forecast_source
+                FROM hourly_consensus
+                WHERE city = ? AND target_date = ?
+                ORDER BY local_hour
+                """,
+                (city_key, target_date),
+            ).fetchall()
+        ]
+    curve: list[dict[str, Any]] = []
+    best: dict[str, Any] | None = None
+    for row in rows:
+        local_hour = str(row.get("local_hour") or "")
+        if not local_hour:
+            continue
+        valid = _parse_datetime(row.get("valid_time")) or _local_hour_datetime(target_date, local_hour, timezone_name)
+        is_past = bool(valid and valid <= issued)
+        observed = _optional_float(row.get("observed_temp"))
+        forecast = _optional_float(row.get("forecast_temp"))
+        source = "forecast"
+        value = forecast
+        if is_past and observed is not None:
+            source = str(row.get("observation_source") or "observation")
+            value = observed
+        if value is None or not _plausible_temp(value):
+            continue
+        converted = convert_temp(value, default_unit, unit)
+        point = {
+            "local_hour": local_hour,
+            "valid_time": row.get("valid_time") or "",
+            "value": converted,
+            "source": source,
+            "is_past": is_past,
+            "observed_temp": None if observed is None else convert_temp(observed, default_unit, unit),
+            "forecast_temp": None if forecast is None else convert_temp(forecast, default_unit, unit),
+        }
+        curve.append(point)
+        if best is None:
+            best = point
+            continue
+        best_value = float(best.get("value") or -math.inf)
+        if converted > best_value + 1e-9 or (abs(converted - best_value) <= 1e-9 and local_hour >= str(best.get("local_hour") or "")):
+            best = point
+    if not best:
+        return {"ok": False, "reason": "missing_hourly_consensus", "curve_points": 0}
+    return {
+        "ok": True,
+        "method": "mixed_curve_argmax_v1",
+        "issued_at": issued.isoformat(),
+        "peak_hour": best["local_hour"],
+        "peak_temp": best["value"],
+        "peak_source": best["source"],
+        "tie_policy": "latest_local_hour",
+        "curve_points": len(curve),
+        "curve": curve,
+    }
+
+
 def _metar_temperature_unit(row: dict[str, Any], default_unit: str) -> str:
     data = dict(row) if not isinstance(row, dict) else row
     parser_version = str(data.get("parser_version") or "").lower()
@@ -641,6 +732,21 @@ def _parse_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _local_hour_datetime(target_date: str, local_hour: str, timezone_name: str) -> datetime | None:
+    try:
+        hour = int(str(local_hour).split(":", 1)[0])
+        local = datetime.fromisoformat(str(target_date)).replace(
+            hour=hour,
+            minute=0,
+            second=0,
+            microsecond=0,
+            tzinfo=ZoneInfo(timezone_name) if ZoneInfo else timezone.utc,
+        )
+        return local.astimezone(timezone.utc)
+    except Exception:
+        return None
 
 
 def _loads(raw: Any, default: Any) -> Any:
@@ -708,8 +814,11 @@ def _bucket_bounds_in_prediction_unit(bucket: dict[str, Any], prediction_unit: s
     low_raw = _optional_float(bucket.get("bucket_low"))
     high_raw = _optional_float(bucket.get("bucket_high"))
     direction = str(bucket.get("bucket_direction") or "").lower()
+    truncates_celsius = bucket_unit == "C"
 
     if direction in {"or_below", "below", "under", "at_or_below"}:
+        if truncates_celsius and high_raw is not None:
+            high_raw += 1.0
         low_raw = None
     if direction in {"or_above", "above", "over", "at_or_above"}:
         high_raw = None
@@ -722,11 +831,20 @@ def _bucket_bounds_in_prediction_unit(bucket: dict[str, Any], prediction_unit: s
         value = _optional_float(bucket.get("bucket_value"))
         if value is None:
             return None
-        low_raw = value - 0.5
-        high_raw = value + 0.5
+        if truncates_celsius:
+            low_raw = value
+            high_raw = value + 1.0
+        else:
+            low_raw = value - 0.5
+            high_raw = value + 0.5
     elif low_raw is not None and high_raw is not None and low_raw == high_raw:
-        low_raw -= 0.5
-        high_raw += 0.5
+        if truncates_celsius:
+            high_raw += 1.0
+        else:
+            low_raw -= 0.5
+            high_raw += 0.5
+    elif truncates_celsius and low_raw is not None and high_raw is not None:
+        high_raw += 1.0
 
     low = -math.inf if low_raw is None else convert_temp(low_raw, bucket_unit, prediction_unit)
     high = math.inf if high_raw is None else convert_temp(high_raw, bucket_unit, prediction_unit)

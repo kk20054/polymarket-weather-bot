@@ -18,11 +18,12 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
 from weatherbot_v3.forecast import ingest_polywx_forecasts, forecast_run_from_polywx_rows
 from weatherbot_v3.hourly import build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary
-from weatherbot_v3.deb import build_and_store_daily_max_prediction, build_daily_max_prediction
+from weatherbot_v3.deb import bucket_probabilities, build_and_store_daily_max_prediction, build_daily_max_prediction
 from weatherbot_v3.market_buckets import ingest_market_buckets, market_bucket_from_payload, parse_temperature_bucket, sync_active_weather_market_buckets
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
 from weatherbot_v3.openmeteo import fetch_openmeteo_forecasts, model_allowlist_for_city, openmeteo_runs_from_response
 from weatherbot_v3.mesonet import ingest_mesonet_observations, mesonet_observation_from_pws_row
+from weatherbot_v3.pws import aggregate_pws_observations, parse_pws_current_payload
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summary
@@ -1099,6 +1100,39 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(evidence["mesonet_observations"], 1)
         self.assertEqual(evidence["latest_mesonet_observations"][0]["network"], "pws")
         self.assertEqual(evidence["latest_mesonet_observations"][0]["parser_version"], "pws-observation-row-v1")
+
+    def test_wunderground_pws_payload_aggregates_as_display_only_mesonet(self):
+        payload = {
+            "observations": [
+                {
+                    "stationID": "KILCHICA1",
+                    "neighborhood": "Near KORD 1",
+                    "obsTimeUtc": "2026-07-04T18:10:00Z",
+                    "humidity": 51,
+                    "winddir": 210,
+                    "metric": {"temp": 30.0, "dewpt": 20.0, "windSpeed": 12, "windGust": 18, "pressure": 1012.3},
+                },
+                {
+                    "stationID": "KILCHICA2",
+                    "neighborhood": "Near KORD 2",
+                    "obsTimeUtc": "2026-07-04T18:12:00Z",
+                    "humidity": 55,
+                    "winddir": 220,
+                    "metric": {"temp": 31.0, "dewpt": 21.0, "windSpeed": 14, "windGust": 19, "pressure": 1011.9},
+                },
+            ]
+        }
+        rows = parse_pws_current_payload(payload, station_id="KILCHICA1")
+        aggregate = aggregate_pws_observations(rows, SETTLEMENT_REGISTRY["chicago"], source_url="https://api.weather.com/v2/pws/observations/current")
+
+        self.assertEqual(len(rows), 2)
+        self.assertIsNotNone(aggregate)
+        self.assertEqual(aggregate["network"], "wunderground_pws")
+        self.assertEqual(aggregate["station_id"], "WU_PWS_KORD")
+        self.assertAlmostEqual(aggregate["temperature"], 86.9, places=1)
+        self.assertEqual(aggregate["raw_unit"], "F")
+        self.assertIn("display_only", aggregate["quality_flags"])
+        self.assertIn("not_settlement_truth", aggregate["quality_flags"])
 
     def test_hko_china_live_parser_converts_hong_kong_record_time_to_utc(self):
         payload = {
@@ -3956,6 +3990,64 @@ class V3CoreTests(unittest.TestCase):
 
         self.assertEqual(count, 1)
         self.assertEqual(row["deb_version"], "weatherbot-deb-v2")
+
+    def test_daily_max_peak_hour_uses_mixed_curve_and_latest_tie(self):
+        db_path = test_db_path("daily_max_mixed_peak")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        valid_times = [f"2026-07-02T{hour:02d}:00:00+00:00" for hour in range(24)]
+        run, members = openmeteo_hourly_run(
+            "chicago",
+            "2026-07-02",
+            "openmeteo_ncep_hrrr_conus",
+            [88.0] * 24,
+            valid_times=valid_times,
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            insert_forecast_run(run, members)
+            for hour in range(24):
+                local_hour = f"{hour:02d}:00"
+                forecast = 94.5 if hour == 15 else 90.0
+                observed = 93.92 if hour in {13, 14, 15, 16} else 88.0
+                upsert_hourly_consensus({
+                    "city": "chicago",
+                    "city_name": "Chicago",
+                    "target_date": "2026-07-02",
+                    "local_hour": local_hour,
+                    "valid_time": f"2026-07-02T{hour:02d}:00:00-05:00",
+                    "station_id": "KORD",
+                    "forecast_temp": forecast,
+                    "observed_temp": observed,
+                    "observation_source": "metar",
+                    "forecast_source": "openmeteo_multi_model",
+                    "source_count": 2,
+                })
+            prediction = build_daily_max_prediction("chicago", "2026-07-02", issued_at="2026-07-03T05:00:00Z", path=db_path)
+
+        self.assertTrue(prediction["ok"])
+        self.assertEqual(prediction["peak_hour"], "16:00")
+        self.assertEqual(prediction["peak_source"], "metar")
+        self.assertAlmostEqual(prediction["peak_temp"], 93.92, places=2)
+
+    def test_celsius_bucket_probability_uses_truncation_not_rounding_window(self):
+        result = bucket_probabilities(
+            23.9,
+            0.1,
+            [{
+                "bucket_key": "tokyo-23c",
+                "unit": "C",
+                "bucket_low": 23,
+                "bucket_high": 23,
+                "bucket_direction": "range",
+            }],
+            unit="C",
+            sigma_floor=0.01,
+            normalize=False,
+        )
+
+        item = result["items"][0]
+        self.assertEqual(item["bucket_low"], 23.0)
+        self.assertEqual(item["bucket_high"], 24.0)
+        self.assertGreater(item["probability"], 0.80)
 
     def test_hourly_consensus_api_returns_layer4_rows_without_refreshing(self):
         db_path = test_db_path("hourly_consensus_api")

@@ -288,6 +288,33 @@ def run_china_weather_fetch(
     return payload
 
 
+def run_pws_fetch(
+    cities_arg: str = "",
+    *,
+    dry_run: bool = False,
+    all_cities: bool = False,
+    limit_cities: int = 5,
+    station_limit: int = 5,
+) -> dict:
+    from .pws import fetch_wunderground_pws
+
+    cities = _cities_from_arg(cities_arg)
+    if all_cities:
+        cities = []
+        limit_cities = 10_000
+    payload = fetch_wunderground_pws(
+        cities or None,
+        dry_run=dry_run,
+        limit_cities=limit_cities,
+        station_limit=station_limit,
+    )
+    if payload.get("ok") and not dry_run:
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        payload["observations_stage"] = readiness_stage(readiness, "observations")
+    return payload
+
+
 def run_orderbook_backfill(limit_arg: int = 50, start_date_arg: str = "", end_date_arg: str = "") -> dict:
     from .polymarket import PolymarketDataClient
 
@@ -882,6 +909,7 @@ def main() -> None:
             "forecast-backfill",
             "openmeteo-fetch",
             "china-weather-fetch",
+            "pws-fetch",
             "metar-refresh",
             "metar-backfill",
             "hourly-consensus-build",
@@ -905,6 +933,7 @@ def main() -> None:
     parser.add_argument("--city", action="append", default=[], help="Single city key; can be repeated and is merged with --cities")
     parser.add_argument("--days", type=int, default=None, help="Days for supported commands; forecast defaults to 4, METAR backfill defaults to 30")
     parser.add_argument("--recent-hours", type=float, default=6.0, help="Recent METAR hours for metar-refresh")
+    parser.add_argument("--station-limit", type=int, default=5, help="Maximum PWS stations per city")
     parser.add_argument("--limit", type=int, default=50, help="Maximum current/future signal markets to refresh")
     parser.add_argument("--start-date", default="", help="Inclusive local target date filter")
     parser.add_argument("--target-date", default="", help="Single local target date for Layer 4 build commands")
@@ -1022,6 +1051,18 @@ def main() -> None:
             run_china_weather_fetch(
                 cities_arg,
                 dry_run=args.dry_run,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "pws-fetch":
+        print(json.dumps(
+            run_pws_fetch(
+                cities_arg,
+                dry_run=args.dry_run,
+                all_cities=args.all_cities,
+                limit_cities=args.limit_cities,
+                station_limit=args.station_limit,
             ),
             ensure_ascii=False,
             indent=2,

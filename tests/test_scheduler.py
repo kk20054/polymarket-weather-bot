@@ -58,12 +58,16 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             init_v3_db()
             configure_enabled_cities(["chicago", "tokyo", "atlanta"])
             scheduler = WeatherBotScheduler(city_concurrency=2)
-            with patch("weatherbot_v3.scheduler.fetch_recent_hours", side_effect=fake_recent):
+            with patch("weatherbot_v3.scheduler.fetch_recent_hours", side_effect=fake_recent), patch(
+                "weatherbot_v3.scheduler.run_pws_fetch",
+                return_value={"ok": True, "source": "wunderground_pws", "skipped": 1, "rows_upserted": 0},
+            ) as pws_fetch:
                 result = await scheduler.run_once("metar_poller")
 
             self.assertTrue(result["ok"])
             self.assertGreaterEqual(result["cities"], 3)
             self.assertLessEqual(max_active, 2)
+            self.assertEqual(pws_fetch.call_count, result["cities"])
             status = scheduler.status()["pollers"]["metar_poller"]
             self.assertEqual(status["last_result"]["result_count"], result["cities"])
             self.assertEqual(len(status["last_result"]["city_results"]), result["cities"])

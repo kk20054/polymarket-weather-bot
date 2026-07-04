@@ -12,6 +12,8 @@
 - 已接入默认关闭的 server-side scheduler：可手动启动/停止，按 enabled 城市分频率刷新 METAR、forecast 和派生层，并在看板顶部显示 PolyWX 风格状态徽章。
 - 已新增 Polymarket Gamma 结算源核验：7 个重点城市均找到活跃天气市场，其中 6 个与本地观测站一致；Hong Kong 市场按 HKO 天文台结算，与 VHHH 观测站不一致，live gate 已阻塞但 paper/观察保留。
 - 已接入 China Weather Live 展示实况：Hong Kong 使用 HKO 官方 rhrread API，Shanghai 使用 weather.com.cn `sk_2d/101020100` JSONP；数据只写 `mesonet_observations`，仅作为 observation evidence，不解锁 live gate。
+- 已接入 Wunderground/Weather.com PWS collector 骨架：写 `mesonet_observations.network=wunderground_pws`，display-only/not-settlement-truth，随 METAR poller 同频；当前本机未配置 API key，真实 5 城命令已审计为 skipped 不造数。
+- DEB 峰值小时已改为 hourly_consensus 混合曲线 argmax：过去小时用观测覆盖 forecast，并列取最晚；Chicago 2026-07-02 已从 forecast-only 15:00 修正为 mixed 16:00。
 - 可以继续做 paper/simulation 验证、数据链路排查、UI 生产化和策略研究。
 - 不能声称无人值守自动实盘赚钱；不能直接用当前 EV 信号加仓；不能用局部回测证明稳定 edge。
 - 一句话：**现在是可观察、可模拟、可继续生产化验证的天气交易平台雏形；还不是可放心实盘自动赚钱的机器人。**
@@ -28,7 +30,18 @@
 8. scheduler 真实长跑还未完成 60 分钟 forecast 周期观测；当前只完成 2 个 METAR 周期冒烟。
 9. `dashboard_server.py` 仍有测试期 SQLite connection ResourceWarning，后续非文档轮次应修。
 
-## 最近 4 条完整 ledger
+## 最近 5 条完整 ledger
+
+### 2026-07-04：Layer 2/4/6 PWS、DEB peak 与摄氏桶口径修正
+
+- 目标：落实第二轮修改建议：导出 Chicago 2026-07-02 峰值差异审计；DEB `peak_hour` 改为混合曲线 argmax；新增 Wunderground PWS 聚合 collector 写入 `mesonet_observations`；核对并测试摄氏度市场桶按截断口径积分；本轮结束提交。
+- 改动：新增 `audits/peak-diff-chicago-2026-07-02.md`，导出 24 行 `hourly_consensus` 并逐源标注 forecast/observed/mixed 最大值。`weatherbot_v3/deb.py` 新增 `mixed_curve_argmax_v1`：以 build `issued_at` 为分界，已发生小时优先 `observed_temp`，未来或缺观测小时用 `forecast_temp`，并列最大值取最新本地小时；`daily_max_predictions` 增加 `peak_hour`、`peak_temp`、`peak_source` 持久化字段。新增 `weatherbot_v3/pws.py`，通过 Weather.com/Wunderground PWS API 发现/拉取邻近 PWS，聚合为 `wunderground_pws`，并标记 `display_only`、`not_settlement_truth`；CLI 增加 `pws-fetch`，scheduler 的 `metar_poller` 同频调用但 PWS 缺 key 不拖垮 METAR。`bucket_probabilities()` 的摄氏度整数桶改为截断口径，例如 `23°C` 为 `[23,24)`，不是 `23±0.5`。
+- 审计结论：WeatherBot 本地 DB 中 Chicago 2026-07-02 forecast-only max 为 `94.50°F @15:00`，METAR observed max 为 `93.92°F @13:00/14:00/15:00/16:00`，mixed tie policy 选择 `16:00`；本地 PolyWX corpus 未捕获 2026-07-02 peak-marker XHR，因此外部 `17:00` 说法仍需 fresh capture 后才能作为源证据。重新跑 `daily-max-build --city chicago --target-date 2026-07-02` 后落库 `peak_hour=16:00`、`peak_source=metar`。
+- PWS 跑数：真实执行 `pws-fetch --city chicago --city nyc --city dallas --city atlanta --city miami --station-limit 5`，5 城均返回 `missing_wunderground_api_key`，`rows_upserted=0`、`skipped=5`、`failed=0`；取证写入 `audits/pws-wunderground-fetch-2026-07-04.md`。这是预期行为：未配置 `WUNDERGROUND_API_KEY` 或 `WEATHER_COM_API_KEY` 时不抓不造假数据。
+- 验证：`.venv\Scripts\python.exe -m unittest tests.test_v3_core tests.test_scheduler` 通过 164 tests OK，仍有既有 SQLite ResourceWarning；`.venv\Scripts\python.exe -m unittest tests.test_polywx_contract` 通过 12 tests OK；`npm run build` 通过，仍有既有 Browserslist/chunk warning；`git diff --check` 通过，仅 Windows LF/CRLF warning。
+- 结论：峰值标记口径、PWS display-only 数据入口和 C 桶概率边界已补齐；PWS 真实入库仍阻塞于本机未配置 Wunderground/Weather.com API key。该轮不改变 live gate，实盘继续锁定。
+- 下一步：若要让 PWS 紫色三角真实出现，需要配置 `WUNDERGROUND_API_KEY` 或 `WEATHER_COM_API_KEY` 并重跑 `pws-fetch`/scheduler；若要核对 PolyWX 17:00，需要重新捕获 2026-07-02 Chicago 的 PolyWX peak-marker XHR。
+- 相关提交：本轮最终提交。
 
 ### 2026-07-04：Git 落盘与推荐 gate 根因诊断
 

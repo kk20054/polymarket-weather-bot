@@ -541,6 +541,9 @@ def init_v3_db(path: Path | None = None) -> None:
                 sigma_floor REAL,
                 time_decay_factor REAL,
                 mu_observed_floor_applied INTEGER,
+                peak_hour TEXT,
+                peak_temp REAL,
+                peak_source TEXT,
                 raw_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -811,6 +814,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "sigma_floor": "REAL",
             "time_decay_factor": "REAL",
             "mu_observed_floor_applied": "INTEGER",
+            "peak_hour": "TEXT",
+            "peak_temp": "REAL",
+            "peak_source": "TEXT",
         },
         "market_buckets": {
             "bucket_key": "TEXT",
@@ -1417,6 +1423,9 @@ def upsert_daily_max_prediction(prediction: dict[str, Any], path: Path | None = 
         "sigma_floor": _nullable_num(prediction.get("sigma_floor")),
         "time_decay_factor": _nullable_num(prediction.get("time_decay_factor")),
         "mu_observed_floor_applied": 1 if prediction.get("mu_observed_floor_applied") else 0,
+        "peak_hour": str(prediction.get("peak_hour") or ""),
+        "peak_temp": _nullable_num(prediction.get("peak_temp")),
+        "peak_source": str(prediction.get("peak_source") or ""),
         "raw_json": dump_json(prediction),
         "created_at": now,
         "updated_at": now,
@@ -1430,14 +1439,16 @@ def upsert_daily_max_prediction(prediction: dict[str, Any], path: Path | None = 
                 source_run_ids_json, member_daily_highs_json, sigma_from_spread,
                 sigma_from_history, bias_correction, bias_sample_count, deb_version,
                 observed_floor, sigma_floor, time_decay_factor,
-                mu_observed_floor_applied, raw_json, created_at, updated_at
+                mu_observed_floor_applied, peak_hour, peak_temp, peak_source,
+                raw_json, created_at, updated_at
             ) VALUES (
                 :prediction_key, :city_key, :target_date, :issued_at, :mu, :sigma, :unit,
                 :method, :model_weights_json, :member_count, :components_json,
                 :source_run_ids_json, :member_daily_highs_json, :sigma_from_spread,
                 :sigma_from_history, :bias_correction, :bias_sample_count, :deb_version,
                 :observed_floor, :sigma_floor, :time_decay_factor,
-                :mu_observed_floor_applied, :raw_json, :created_at, :updated_at
+                :mu_observed_floor_applied, :peak_hour, :peak_temp, :peak_source,
+                :raw_json, :created_at, :updated_at
             )
             ON CONFLICT(prediction_key) DO UPDATE SET
                 mu=excluded.mu,
@@ -1458,6 +1469,9 @@ def upsert_daily_max_prediction(prediction: dict[str, Any], path: Path | None = 
                 sigma_floor=excluded.sigma_floor,
                 time_decay_factor=excluded.time_decay_factor,
                 mu_observed_floor_applied=excluded.mu_observed_floor_applied,
+                peak_hour=excluded.peak_hour,
+                peak_temp=excluded.peak_temp,
+                peak_source=excluded.peak_source,
                 raw_json=excluded.raw_json,
                 updated_at=excluded.updated_at
             """,

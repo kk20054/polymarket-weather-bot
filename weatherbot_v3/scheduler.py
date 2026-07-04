@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from .cli import run_china_weather_fetch, run_daily_max_build, run_hourly_consensus_build, run_market_buckets_sync, run_openmeteo_fetch, run_signal_decisions_build
+from .cli import run_china_weather_fetch, run_daily_max_build, run_hourly_consensus_build, run_market_buckets_sync, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build
 from .db import log_data_fetch, utc_now
 from .metar import fetch_recent_hours
 from .stations import enabled_station_rows, sync_station_registry
@@ -202,10 +202,30 @@ class WeatherBotScheduler:
 
     async def _run_metar_poller(self) -> dict[str, Any]:
         rows = _enabled_rows()
+
+        async def run_city(row: dict[str, Any]) -> dict[str, Any]:
+            city = str(row.get("city_key") or row.get("city"))
+            metar = await asyncio.to_thread(fetch_recent_hours, city, hours=6.0)
+            pws = await asyncio.to_thread(
+                run_pws_fetch,
+                city,
+                dry_run=False,
+                all_cities=False,
+                limit_cities=1,
+                station_limit=5,
+            )
+            return {
+                "ok": _payload_ok(metar) and _payload_ok(pws),
+                "city": city,
+                "station_id": row.get("station_id"),
+                "metar": metar,
+                "pws": pws,
+            }
+
         return await _run_city_batch(
             rows,
             self.city_concurrency,
-            lambda row: asyncio.to_thread(fetch_recent_hours, str(row.get("city_key") or row.get("city")), hours=6.0),
+            run_city,
         )
 
     async def _run_forecast_poller(self) -> dict[str, Any]:
