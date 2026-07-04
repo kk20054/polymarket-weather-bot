@@ -357,13 +357,30 @@ def hourly_consensus_points(
         forecast_temp = _float(row.get("forecast_temp"))
         observed_temp = _float(row.get("observed_temp"))
         residual = _float(row.get("residual"))
+        raw_payload = _loads(row.get("raw_json"), {})
+        observation_payload = raw_payload.get("observation") if isinstance(raw_payload, dict) else {}
+        if not observation_payload and isinstance(raw_payload, dict) and isinstance(raw_payload.get("raw_json"), dict):
+            observation_payload = raw_payload["raw_json"].get("observation")
+        source_temperatures = (
+            observation_payload.get("source_temperatures")
+            if isinstance(observation_payload, dict) and isinstance(observation_payload.get("source_temperatures"), dict)
+            else {}
+        )
+        china_live_temp = _float(source_temperatures.get("china_live")) if source_temperatures else None
+        if source_temperatures and "china_live" in source_temperatures and "metar" not in source_temperatures:
+            metar_temp = None
+        elif source_temperatures and "metar" in source_temperatures:
+            metar_temp = _float(source_temperatures.get("metar"))
+        else:
+            metar_temp = observed_temp
         by_city[city].append({
             "timestamp": row.get("valid_time") or row.get("local_hour") or "",
             "target_date": target_date,
             "local_hour": row.get("local_hour"),
             "best": forecast_temp,
             "ensemble_mean": forecast_temp,
-            "metar": observed_temp,
+            "metar": metar_temp,
+            "china_live": china_live_temp,
             "humidity": _float(row.get("humidity")),
             "cloud_cover": _float(row.get("cloud_cover")),
             "precipitation": _float(row.get("precipitation")),
@@ -842,6 +859,11 @@ def _observation_hourly_points(
             "pressure": _mean(bucket["pressure_values"]),
             "dew_point": _mean(bucket["dew_point_values"]),
             "sources": sorted(bucket["sources"]),
+            "source_temperatures": {
+                source: max(values)
+                for source, values in sorted(bucket["source_temperature_values"].items())
+                if values
+            },
             "station_id": bucket["station_id"],
             "source_count": len(temps),
         })
@@ -919,11 +941,13 @@ def _append_observation_bucket(
             "pressure_values": [],
             "dew_point_values": [],
             "sources": set(),
+            "source_temperature_values": defaultdict(list),
             "station_id": point["station_id"],
         },
     )
     bucket["temperatures"].append(float(point["temperature"]))
     bucket["sources"].add(str(point["source"]))
+    bucket["source_temperature_values"][str(point["source"])].append(float(point["temperature"]))
     bucket["station_id"] = point["station_id"] or bucket["station_id"]
     for field in ("humidity", "cloud_cover", "wind_speed", "wind_direction", "pressure", "dew_point"):
         value = point.get(field)
@@ -1004,17 +1028,39 @@ def _combined_observation(points: list[dict[str, Any]]) -> dict[str, Any]:
     values = [_float(point.get("temperature")) for point in points]
     values = [value for value in values if value is not None]
     source_set: set[str] = set()
+    source_temperature_values: dict[str, list[float]] = defaultdict(list)
     for point in points:
         raw_sources = point.get("sources")
         if isinstance(raw_sources, list):
             source_set.update(str(source) for source in raw_sources if source)
         elif point.get("source"):
             source_set.add(str(point.get("source")))
+        raw_source_temperatures = point.get("source_temperatures")
+        if isinstance(raw_source_temperatures, dict):
+            for source, value in raw_source_temperatures.items():
+                numeric = _float(value)
+                if numeric is not None:
+                    source_temperature_values[str(source)].append(numeric)
+        elif point.get("source"):
+            numeric = _float(point.get("temperature"))
+            if numeric is not None:
+                source_temperature_values[str(point.get("source"))].append(numeric)
     sources = sorted(source_set)
     latest_timestamp = sorted((str(point.get("timestamp") or "") for point in points if point.get("timestamp")), reverse=True)
     station_ids = [str(point.get("station_id") or "") for point in points if point.get("station_id")]
+    source_temperatures = {
+        source: max(items)
+        for source, items in sorted(source_temperature_values.items())
+        if items
+    }
+    if "metar" in source_temperatures:
+        primary_temperature = source_temperatures["metar"]
+    elif "china_live" in source_temperatures and len(source_temperatures) == 1:
+        primary_temperature = None
+    else:
+        primary_temperature = max(values) if values else None
     return {
-        "temperature": max(values) if values else None,
+        "temperature": primary_temperature,
         "timestamp": latest_timestamp[0] if latest_timestamp else "",
         "humidity": _mean([value for value in (_float(point.get("humidity")) for point in points) if value is not None]),
         "cloud_cover": _mean([value for value in (_float(point.get("cloud_cover")) for point in points) if value is not None]),
@@ -1023,6 +1069,7 @@ def _combined_observation(points: list[dict[str, Any]]) -> dict[str, Any]:
         "pressure": _mean([value for value in (_float(point.get("pressure")) for point in points) if value is not None]),
         "dew_point": _mean([value for value in (_float(point.get("dew_point")) for point in points) if value is not None]),
         "sources": sources,
+        "source_temperatures": source_temperatures,
         "station_id": station_ids[0] if station_ids else "",
     }
 

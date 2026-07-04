@@ -6,6 +6,7 @@ import sys
 import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
 
 from .db import bulk_settlement_contract_verification, connect, dashboard_summary, init_v3_db, list_settlement_contracts, set_settlement_contract_verification
@@ -13,7 +14,7 @@ from .migration import audit_market_files, migrate_legacy_signals, repair_truth_
 from .model_dataset import build_model_dataset_audit, is_settlement_pending
 from .notifier import FeishuNotifier
 from .qualification import build_data_readiness, persist_data_readiness
-from .stations import list_stations, sync_station_registry
+from .stations import list_stations, set_station_enabled, sync_station_registry
 from .validation import build_production_validation_report
 
 
@@ -75,6 +76,11 @@ def select_orderbook_backfill_markets(
 
 def readiness_stage(readiness: dict, key: str) -> dict | None:
     return next((stage for stage in readiness.get("stages", []) if stage.get("key") == key), None)
+
+
+def print_current_state() -> None:
+    state_path = Path(__file__).resolve().parents[1] / "docs" / "CURRENT_STATE.md"
+    print(state_path.read_text(encoding="utf-8"))
 
 
 def run_forecast_backfill(cities_arg: str = "", days_arg: int = 4) -> dict:
@@ -263,6 +269,22 @@ def run_openmeteo_fetch(
         readiness = build_data_readiness()
         persist_data_readiness(readiness)
         payload["forecast_stage"] = readiness_stage(readiness, "forecast_runs")
+    return payload
+
+
+def run_china_weather_fetch(
+    cities_arg: str = "",
+    *,
+    dry_run: bool = False,
+) -> dict:
+    from .china_weather import fetch_china_weather
+
+    cities = _cities_from_arg(cities_arg)
+    payload = fetch_china_weather(cities or None, dry_run=dry_run)
+    if payload.get("ok") and not dry_run:
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        payload["observations_stage"] = readiness_stage(readiness, "observations")
     return payload
 
 
@@ -669,6 +691,19 @@ def run_truth_backfill(
     }
 
 
+def run_polymarket_market_probe(cities_arg: str = "", *, apply: bool = True, days_ahead: int = 3) -> dict:
+    from .polymarket_probe import probe_polymarket_markets
+
+    cities = _cities_from_arg(cities_arg)
+    if not cities:
+        raise SystemExit("--city or --cities is required")
+    payload = probe_polymarket_markets(cities, days_ahead=days_ahead, apply=apply)
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    payload["stations_stage"] = readiness_stage(readiness, "stations")
+    return payload
+
+
 def run_legacy_signal_scan() -> dict:
     from bot_v2 import scan_and_update
 
@@ -824,6 +859,9 @@ def run_production_refresh(
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if len(sys.argv) > 1 and sys.argv[1] == "state-print":
+        print_current_state()
+        return
     parser = argparse.ArgumentParser(description="WeatherBot v3 utilities")
     parser.add_argument(
         "command",
@@ -831,19 +869,25 @@ def main() -> None:
             "init-db",
             "migrate",
             "summary",
+            "state-print",
             "notify-daily",
             "production-refresh",
             "production-validation",
             "stations-sync",
             "stations-list",
+            "stations-enable",
+            "stations-disable",
             "data-readiness",
             "model-dataset-audit",
             "forecast-backfill",
             "openmeteo-fetch",
+            "china-weather-fetch",
+            "metar-refresh",
             "metar-backfill",
             "hourly-consensus-build",
             "daily-max-build",
             "market-buckets-sync",
+            "polymarket-market-probe",
             "signal-decisions-build",
             "paper-execute",
             "forecast-archive-import",
@@ -858,8 +902,9 @@ def main() -> None:
         ],
     )
     parser.add_argument("--cities", default="", help="Comma-separated city keys; empty means all cities")
-    parser.add_argument("--city", default="", help="Single city key; merged with --cities")
+    parser.add_argument("--city", action="append", default=[], help="Single city key; can be repeated and is merged with --cities")
     parser.add_argument("--days", type=int, default=None, help="Days for supported commands; forecast defaults to 4, METAR backfill defaults to 30")
+    parser.add_argument("--recent-hours", type=float, default=6.0, help="Recent METAR hours for metar-refresh")
     parser.add_argument("--limit", type=int, default=50, help="Maximum current/future signal markets to refresh")
     parser.add_argument("--start-date", default="", help="Inclusive local target date filter")
     parser.add_argument("--target-date", default="", help="Single local target date for Layer 4 build commands")
@@ -892,7 +937,7 @@ def main() -> None:
     parser.add_argument("--active-weather", action="store_true", help="Sync active Polymarket weather events from Gamma/CLOB")
     parser.add_argument("--skip-orderbooks", action="store_true", help="Skip CLOB orderbook fetches for active weather market buckets")
     args = parser.parse_args()
-    cities_arg = ",".join(item for item in (args.cities, args.city) if item)
+    cities_arg = ",".join(item for item in [args.cities, *args.city] if item)
 
     if args.command == "init-db":
         init_v3_db()
@@ -903,6 +948,8 @@ def main() -> None:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "summary":
         print(json.dumps(dashboard_summary(), ensure_ascii=False, indent=2))
+    elif args.command == "state-print":
+        print_current_state()
     elif args.command == "notify-daily":
         summary = dashboard_summary()
         sent = FeishuNotifier().daily_summary(summary)
@@ -937,6 +984,17 @@ def main() -> None:
             "count": len(stations),
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.command in {"stations-enable", "stations-disable"}:
+        cities = _cities_from_arg(cities_arg)
+        if not cities:
+            raise SystemExit("--city or --cities is required")
+        enabled = args.command == "stations-enable"
+        results = [set_station_enabled(city, enabled) for city in cities]
+        print(json.dumps({
+            "ok": all(row.get("ok") for row in results),
+            "enabled": enabled,
+            "results": results,
+        }, ensure_ascii=False, indent=2))
     elif args.command == "data-readiness":
         payload = build_data_readiness()
         persist_data_readiness(payload)
@@ -959,6 +1017,17 @@ def main() -> None:
             ensure_ascii=False,
             indent=2,
         ))
+    elif args.command == "china-weather-fetch":
+        print(json.dumps(
+            run_china_weather_fetch(
+                cities_arg,
+                dry_run=args.dry_run,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "metar-refresh":
+        print(json.dumps(_run_recent_metar_refresh(cities_arg, args.recent_hours), ensure_ascii=False, indent=2))
     elif args.command == "metar-backfill":
         print(json.dumps(
             run_metar_backfill(
@@ -1008,6 +1077,16 @@ def main() -> None:
                 dry_run=args.dry_run,
                 limit_cities=args.limit_cities,
                 fetch_orderbooks=not args.skip_orderbooks,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "polymarket-market-probe":
+        print(json.dumps(
+            run_polymarket_market_probe(
+                cities_arg,
+                apply=not args.dry_run,
+                days_ahead=args.days if args.days is not None else 3,
             ),
             ensure_ascii=False,
             indent=2,

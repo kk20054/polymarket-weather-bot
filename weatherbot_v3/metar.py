@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import csv
-import hashlib
 import io
 import json
 import re
@@ -106,6 +105,27 @@ def refresh_metar_reports(
         "reports_skipped": skipped,
         "failures": failures,
     }
+
+
+def fetch_recent_hours(
+    city: str | list[str] | None = None,
+    *,
+    hours: float = 6.0,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    cities: list[str] | None
+    if city is None:
+        cities = None
+    elif isinstance(city, list):
+        cities = [str(item).strip() for item in city if str(item).strip()]
+    else:
+        cities = [str(city).strip()] if str(city).strip() else None
+    bounded_hours = max(1.0, min(float(hours or 6.0), 24.0))
+    payload = refresh_metar_reports(cities, hours=bounded_hours, session=session)
+    payload["mode"] = "recent_hours"
+    payload["recent_hours"] = bounded_hours
+    payload["idempotency"] = "station_id+report_time"
+    return payload
 
 
 def fetch_awc_metars(
@@ -922,9 +942,7 @@ def _select_profiles(cities: list[str] | None) -> list[CitySettlementProfile]:
 def _report_key(item: dict[str, Any]) -> str:
     station_id = str(item.get("stationId") or item.get("icaoId") or "").upper()
     observed_at = _report_time(item)
-    raw_text = str(item.get("rawOb") or "")
-    raw_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()[:16]
-    return f"awc:{station_id}:{observed_at}:{raw_hash}"
+    return f"awc:{station_id}:{observed_at}"
 
 
 def _report_time(item: dict[str, Any]) -> str:

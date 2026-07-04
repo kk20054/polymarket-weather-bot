@@ -27,8 +27,21 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     cfg = load_config()
     db_path = path or cfg.v3_db_path
     db_path.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(db_path, factory=ClosingConnection)
+    timeout_seconds = 30.0
+    try:
+        import os
+
+        timeout_seconds = max(1.0, float(os.getenv("WEATHERBOT_SQLITE_TIMEOUT_SECONDS", "30")))
+    except Exception:
+        timeout_seconds = 30.0
+    conn = sqlite3.connect(db_path, timeout=timeout_seconds, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(f"PRAGMA busy_timeout={int(timeout_seconds * 1000)}")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+    except sqlite3.DatabaseError:
+        pass
     return conn
 
 
@@ -132,10 +145,18 @@ def init_v3_db(path: Path | None = None) -> None:
                 region TEXT,
                 expected_metric TEXT,
                 settlement_rule_text TEXT,
+                settlement_station_id TEXT,
+                settlement_station_name TEXT,
+                settlement_timezone TEXT,
+                settlement_unit TEXT,
+                settlement_time_basis TEXT,
+                settlement_rule_verified_at TEXT,
                 primary_settlement_source TEXT,
                 nearby_observation_networks_json TEXT,
                 confidence REAL,
                 verification_status TEXT,
+                enabled INTEGER DEFAULT 0,
+                tier INTEGER DEFAULT 9,
                 registry_version TEXT,
                 raw_json TEXT,
                 updated_at TEXT NOT NULL
@@ -444,11 +465,14 @@ def init_v3_db(path: Path | None = None) -> None:
                 pressure REAL,
                 precipitation REAL,
                 source_url TEXT,
+                raw_response TEXT,
+                raw_response_hash TEXT,
                 parser_version TEXT,
                 parse_status TEXT,
                 parse_warnings TEXT,
                 raw_unit TEXT,
                 quality_flags TEXT,
+                fetched_at TEXT,
                 raw_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -919,10 +943,13 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "source": "TEXT",
         },
         "mesonet_observations": {
+            "raw_response": "TEXT",
+            "raw_response_hash": "TEXT",
             "parser_version": "TEXT",
             "parse_status": "TEXT",
             "parse_warnings": "TEXT",
             "raw_unit": "TEXT",
+            "fetched_at": "TEXT",
         },
         "stations": {
             "icao_id": "TEXT",
@@ -930,10 +957,18 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "provider_station_ids_json": "TEXT",
             "expected_metric": "TEXT",
             "settlement_rule_text": "TEXT",
+            "settlement_station_id": "TEXT",
+            "settlement_station_name": "TEXT",
+            "settlement_timezone": "TEXT",
+            "settlement_unit": "TEXT",
+            "settlement_time_basis": "TEXT",
+            "settlement_rule_verified_at": "TEXT",
             "primary_settlement_source": "TEXT",
             "nearby_observation_networks_json": "TEXT",
             "confidence": "REAL",
             "verification_status": "TEXT",
+            "enabled": "INTEGER DEFAULT 0",
+            "tier": "INTEGER DEFAULT 9",
             "registry_version": "TEXT",
         },
     }
@@ -1008,6 +1043,12 @@ def _stable_key(*parts: Any) -> str:
     if text.strip("|"):
         return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
     return hashlib.sha256(utc_now().encode("utf-8")).hexdigest()[:32]
+
+
+def _hash_text(text: Any) -> str:
+    if text is None:
+        return ""
+    return hashlib.sha256(str(text).encode("utf-8")).hexdigest()[:32]
 
 
 def upsert_signal(signal: dict[str, Any], legacy_signal_id: int | None = None) -> int:
@@ -2272,7 +2313,7 @@ def upsert_metar_report(report: dict[str, Any]) -> int:
     raw_text = str(report.get("raw_text") or report.get("raw") or report.get("metar") or "")
     report_key = str(
         report.get("report_key")
-        or _stable_key("metar", station_id, report_time, raw_text)
+        or _stable_key("metar", station_id, report_time)
     )
     with connect() as conn:
         conn.execute(
@@ -2363,9 +2404,10 @@ def upsert_mesonet_observation(observation: dict[str, Any]) -> int:
                 observation_key, city, city_name, station_id, station_name, network,
                 observed_at, temperature, humidity, dew_point, wind_direction,
                 wind_speed, wind_gust, pressure, precipitation, source_url,
-                parser_version, parse_status, parse_warnings, raw_unit,
-                quality_flags, raw_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                raw_response, raw_response_hash, parser_version, parse_status,
+                parse_warnings, raw_unit, quality_flags, fetched_at, raw_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(observation_key) DO UPDATE SET
                 city=excluded.city,
                 city_name=excluded.city_name,
@@ -2382,11 +2424,14 @@ def upsert_mesonet_observation(observation: dict[str, Any]) -> int:
                 pressure=excluded.pressure,
                 precipitation=excluded.precipitation,
                 source_url=excluded.source_url,
+                raw_response=excluded.raw_response,
+                raw_response_hash=excluded.raw_response_hash,
                 parser_version=excluded.parser_version,
                 parse_status=excluded.parse_status,
                 parse_warnings=excluded.parse_warnings,
                 raw_unit=excluded.raw_unit,
                 quality_flags=excluded.quality_flags,
+                fetched_at=excluded.fetched_at,
                 raw_json=excluded.raw_json,
                 updated_at=excluded.updated_at
             """,
@@ -2398,20 +2443,23 @@ def upsert_mesonet_observation(observation: dict[str, Any]) -> int:
                 observation.get("station_name"),
                 network,
                 observed_at,
-                _num(observation.get("temperature"), 0.0),
-                _num(observation.get("humidity"), 0.0),
-                _num(observation.get("dew_point"), 0.0),
-                _num(observation.get("wind_direction"), 0.0),
-                _num(observation.get("wind_speed"), 0.0),
-                _num(observation.get("wind_gust"), 0.0),
-                _num(observation.get("pressure"), 0.0),
-                _num(observation.get("precipitation"), 0.0),
+                _nullable_num(observation.get("temperature")),
+                _nullable_num(observation.get("humidity")),
+                _nullable_num(observation.get("dew_point")),
+                _nullable_num(observation.get("wind_direction")),
+                _nullable_num(observation.get("wind_speed")),
+                _nullable_num(observation.get("wind_gust")),
+                _nullable_num(observation.get("pressure")),
+                _nullable_num(observation.get("precipitation")),
                 observation.get("source_url"),
+                observation.get("raw_response") or "",
+                observation.get("raw_response_hash") or _hash_text(observation.get("raw_response") or ""),
                 observation.get("parser_version") or "weatherbot-mesonet-v1",
                 observation.get("parse_status") or "parsed",
                 dump_json(observation.get("parse_warnings", [])),
                 observation.get("raw_unit") or observation.get("source_unit") or "",
                 dump_json(observation.get("quality_flags", [])),
+                observation.get("fetched_at") or now,
                 dump_json(observation),
                 now,
                 now,
