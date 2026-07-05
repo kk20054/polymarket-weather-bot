@@ -964,6 +964,7 @@ class V3CoreTests(unittest.TestCase):
         with connect(db_path) as conn:
             decision_columns = {row["name"] for row in conn.execute("PRAGMA table_info(signal_decisions)").fetchall()}
         self.assertIn("decision_id", decision_columns)
+        self.assertIn("forecast_algo", decision_columns)
         self.assertIn("model_probability", decision_columns)
         self.assertIn("market_implied_probability", decision_columns)
         self.assertIn("edge", decision_columns)
@@ -975,6 +976,10 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("paper_decision", decision_columns)
         self.assertIn("live_decision", decision_columns)
         self.assertIn("evidence_links_json", decision_columns)
+        with connect(db_path) as conn:
+            reprice_columns = {row["name"] for row in conn.execute("PRAGMA table_info(model_reprice_events)").fetchall()}
+        self.assertIn("event_key", reprice_columns)
+        self.assertIn("alpha_candidate", reprice_columns)
         with connect(db_path) as conn:
             paper_columns = {row["name"] for row in conn.execute("PRAGMA table_info(paper_orders)").fetchall()}
         self.assertIn("decision_id", paper_columns)
@@ -5324,6 +5329,196 @@ class V3CoreTests(unittest.TestCase):
         )
         self.assertFalse(spread_cost["live_allowed"])
         self.assertIn("spread_cost_too_high", spread_cost["live_block_reasons"])
+
+    def test_truth_iem_asos_daily_parser_persists_daily_and_hourly(self):
+        from weatherbot_v3.truth.iem_asos import parse_iem_asos_daily_csv, persist_iem_asos_daily
+
+        path = test_db_path("truth_iem_asos_daily")
+        init_v3_db(path)
+        csv_text = "\n".join([
+            "station,valid,tmpf,metar",
+            "ZBAA,2026-06-27 00:00,77.0,METAR ZBAA 270000Z 00000KT 9999 SKC 25/12 Q1010",
+            "ZBAA,2026-06-27 14:00,95.0,METAR ZBAA 271400Z 00000KT 9999 SKC 35/12 Q1008",
+            "ZBAA,2026-06-27 23:00,89.6,METAR ZBAA 272300Z 00000KT 9999 SKC 32/12 Q1007",
+        ])
+        result = parse_iem_asos_daily_csv(
+            csv_text,
+            "ZBAA",
+            "2026-06-27",
+            "Asia/Shanghai",
+            source_url="https://mesonet.example/asos.csv",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertAlmostEqual(result["high_c"], 35.0, places=1)
+        self.assertAlmostEqual(result["all_hourly"][0]["temp_c"], 25.0, places=1)
+        self.assertEqual(result["settlement_truth_type"], "iem_asos_approximation")
+        persist_iem_asos_daily(result, path=path)
+
+        with connect(path) as conn:
+            daily = conn.execute("SELECT high_c, obs_count FROM truth_iem_daily WHERE icao='ZBAA'").fetchone()
+            hourly_count = conn.execute("SELECT COUNT(*) FROM truth_iem_hourly WHERE icao='ZBAA'").fetchone()[0]
+        self.assertAlmostEqual(float(daily["high_c"]), 35.0, places=1)
+        self.assertEqual(int(daily["obs_count"]), 3)
+        self.assertEqual(hourly_count, 3)
+
+    def test_truth_hko_daily_extract_parser_handles_hko_json_payload(self):
+        from weatherbot_v3.truth.hko import parse_hko_daily_extract, persist_hko_daily
+
+        path = test_db_path("truth_hko_daily")
+        init_v3_db(path)
+        payload = {
+            "stn": {
+                "data": [{
+                    "month": 7,
+                    "dayData": [
+                        ["03", "1007.5", "32.1", "29.8", "27.9", "26.0", "82", "88", "0.0"],
+                        ["04", "1008.0", "33.5", "30.3", "28.2", "26.4", "80", "87", "Trace"],
+                    ],
+                }]
+            }
+        }
+
+        result = parse_hko_daily_extract(json.dumps(payload), "2026-07-04", source_url="https://hko.example/daily.json")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["settlement_truth_type"], "hong_kong_observatory_daily_extract")
+        self.assertAlmostEqual(result["high_c"], 33.5)
+        persist_hko_daily(result, path=path)
+        with connect(path) as conn:
+            row = conn.execute("SELECT high_c, parser_version FROM truth_hko_daily WHERE date_local='2026-07-04'").fetchone()
+        self.assertAlmostEqual(float(row["high_c"]), 33.5)
+        self.assertEqual(row["parser_version"], "truth-hko-daily-extract-v1")
+
+    def test_truth_wunderground_returns_structured_skip_when_no_endpoint_has_daily_high(self):
+        from weatherbot_v3.truth.wunderground import fetch_wunderground_daily_result
+
+        class EmptyResponse:
+            status_code = 200
+            text = "{}"
+            url = "https://api.weather.com/empty"
+
+        class EmptySession:
+            def get(self, *args, **kwargs):
+                return EmptyResponse()
+
+        with patch.dict(os.environ, {"WEATHER_COM_API_KEY": "", "WUNDERGROUND_API_KEY": ""}, clear=False):
+            result = fetch_wunderground_daily_result("ZBAA", "2026-06-27", country_code="CN", session=EmptySession())
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["icao"], "ZBAA")
+        self.assertIn("no_daily_high_in_payload", result["skip_reasons"])
+        self.assertTrue(result["attempts"])
+
+    def test_gamma_celsius_bucket_parser_supports_dynamic_asian_bucket_shapes(self):
+        from weatherbot_v3.polymarket_gamma import parse_celsius_bucket_boundary
+
+        labels_11 = [
+            "Will the highest temperature in Shanghai be 27°C or lower on July 5?",
+            *[f"Will the highest temperature in Shanghai be {value}°C on July 5?" for value in range(28, 37)],
+            "Will the highest temperature in Shanghai be 37°C or higher on July 5?",
+        ]
+        parsed_11 = [parse_celsius_bucket_boundary(label) for label in labels_11]
+        self.assertEqual(len(parsed_11), 11)
+        self.assertEqual(parsed_11[0]["lower_c"], None)
+        self.assertEqual(parsed_11[0]["upper_c"], 28)
+        self.assertTrue(parsed_11[0]["is_tail"])
+        self.assertEqual(parsed_11[1]["lower_c"], 28)
+        self.assertEqual(parsed_11[1]["upper_c"], 29)
+        self.assertEqual(parsed_11[-1]["lower_c"], 37)
+        self.assertEqual(parsed_11[-1]["upper_c"], None)
+        self.assertTrue(parsed_11[-1]["is_tail"])
+
+        labels_6 = [
+            "Will the highest temperature in Beijing be 23°C or below on July 5?",
+            "Will the highest temperature in Beijing be 24°C on July 5?",
+            "Will the highest temperature in Beijing be 25°C on July 5?",
+            "Will the highest temperature in Beijing be 26°C on July 5?",
+            "Will the highest temperature in Beijing be 27°C on July 5?",
+            "Will the highest temperature in Beijing be 28°C or above on July 5?",
+        ]
+        parsed_6 = [parse_celsius_bucket_boundary(label) for label in labels_6]
+        self.assertEqual(len(parsed_6), 6)
+        self.assertEqual(parsed_6[0]["upper_c"], 24)
+        self.assertEqual(parsed_6[-1]["lower_c"], 28)
+        self.assertEqual(
+            parse_celsius_bucket_boundary("highest-temperature-in-shanghai-on-july-6-2026-37corhigher")["upper_c"],
+            None,
+        )
+        self.assertEqual(
+            parse_celsius_bucket_boundary("highest-temperature-in-shanghai-on-july-6-2026-27corlower")["upper_c"],
+            28,
+        )
+
+    def test_gamma_structured_sync_persists_events_markets_and_orderbooks(self):
+        from weatherbot_v3.polymarket_gamma import sync_asian_weather_markets
+
+        path = test_db_path("gamma_structured_sync")
+        init_v3_db(path)
+        sync_station_registry(path)
+        event_payload = {
+            "id": "event-shanghai-20260706",
+            "slug": "highest-temperature-in-shanghai-on-july-6-2026",
+            "active": True,
+            "closed": False,
+            "volume24hr": 1234.5,
+            "openInterest": 678.9,
+            "resolutionSource": "https://www.wunderground.com/history/daily/cn/shanghai/ZSPD/date/2026-7-6",
+            "markets": [
+                {
+                    "id": "market-shanghai-28",
+                    "slug": "will-the-highest-temperature-in-shanghai-be-28c-on-july-6",
+                    "question": "Will the highest temperature in Shanghai be 28°C on July 6?",
+                    "active": True,
+                    "closed": False,
+                    "outcomePrices": json.dumps(["0.21", "0.79"]),
+                    "clobTokenIds": json.dumps(["token-yes-28", "token-no-28"]),
+                    "orderMinSize": "5",
+                    "orderPriceMinTickSize": "0.01",
+                    "enableOrderBook": True,
+                },
+                {
+                    "id": "market-shanghai-29",
+                    "slug": "will-the-highest-temperature-in-shanghai-be-29c-on-july-6",
+                    "question": "Will the highest temperature in Shanghai be 29°C on July 6?",
+                    "active": True,
+                    "closed": False,
+                    "outcomePrices": json.dumps(["0.32", "0.68"]),
+                    "clobTokenIds": json.dumps(["token-yes-29", "token-no-29"]),
+                    "orderMinSize": "5",
+                    "orderPriceMinTickSize": "0.01",
+                    "enableOrderBook": True,
+                },
+            ],
+        }
+        session = FakePolymarketSession(
+            event_payload,
+            {
+                "token-yes-28": {"bids": [{"price": "0.20", "size": "10"}], "asks": [{"price": "0.22", "size": "11"}]},
+                "token-yes-29": {"bids": [{"price": "0.31", "size": "9"}], "asks": [{"price": "0.33", "size": "12"}]},
+            },
+        )
+
+        result = sync_asian_weather_markets(
+            cities=["shanghai"],
+            target_dates=["2026-07-06"],
+            fetch_orderbooks=True,
+            session=session,
+            path=path,
+        )
+
+        self.assertTrue(result["events_seen"])
+        self.assertEqual(result["events_stored"], 1)
+        self.assertEqual(result["markets_stored"], 2)
+        self.assertEqual(result["orderbooks_stored"], 2)
+        with connect(path) as conn:
+            event_count = conn.execute("SELECT COUNT(*) FROM polymarket_events").fetchone()[0]
+            market = conn.execute("SELECT bucket_lower_c, bucket_upper_c FROM polymarket_markets WHERE market_id='market-shanghai-28'").fetchone()
+            book_count = conn.execute("SELECT COUNT(*) FROM polymarket_orderbook").fetchone()[0]
+        self.assertEqual(event_count, 1)
+        self.assertEqual(float(market["bucket_lower_c"]), 28.0)
+        self.assertEqual(float(market["bucket_upper_c"]), 29.0)
+        self.assertEqual(book_count, 2)
 
 
 if __name__ == "__main__":

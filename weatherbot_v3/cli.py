@@ -5,7 +5,7 @@ import json
 import sys
 import time
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -207,6 +207,22 @@ def run_daily_max_build(
     }
 
 
+def run_model_timing_reprice(
+    cities_arg: str = "",
+    *,
+    days_arg: int = 2,
+    dry_run: bool = False,
+) -> dict:
+    from .forecasts.ensemble import build_model_reprice_events
+
+    cities = [item.strip() for item in cities_arg.split(",") if item.strip()]
+    payload = build_model_reprice_events(cities=cities or None, days=max(1, int(days_arg or 2)), dry_run=dry_run)
+    readiness = build_data_readiness()
+    persist_data_readiness(readiness)
+    payload["signal_decisions_stage"] = readiness_stage(readiness, "signal_decisions")
+    return payload
+
+
 def run_metar_backfill(
     cities_arg: str = "",
     *,
@@ -264,6 +280,52 @@ def run_openmeteo_fetch(
         dry_run=dry_run,
         limit_cities=limit_cities,
         forecast_days=forecast_days,
+    )
+    if not dry_run and payload.get("runs_upserted", 0) > 0:
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        payload["forecast_stage"] = readiness_stage(readiness, "forecast_runs")
+    return payload
+
+
+def run_openmeteo_previous_runs(
+    cities_arg: str = "",
+    *,
+    target_date: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    days_arg: int | None = None,
+    previous_days_arg: str = "",
+    models_arg: str = "",
+    dry_run: bool = False,
+    all_cities: bool = False,
+    limit_cities: int = 5,
+) -> dict:
+    from .openmeteo import fetch_openmeteo_previous_runs
+
+    cities = _cities_from_arg(cities_arg)
+    if all_cities:
+        cities = []
+        limit_cities = 10_000
+    target_dates = _cli_date_window(
+        target_date=target_date,
+        start_date=start_date,
+        end_date=end_date,
+        days=days_arg or 1,
+    )
+    previous_days = [
+        int(item)
+        for item in str(previous_days_arg or "1,2,3").split(",")
+        if str(item).strip().isdigit()
+    ]
+    models = [item.strip() for item in str(models_arg or "").split(",") if item.strip()]
+    payload = fetch_openmeteo_previous_runs(
+        cities or None,
+        target_dates=target_dates,
+        models=models or None,
+        previous_days=previous_days or None,
+        dry_run=dry_run,
+        limit_cities=limit_cities,
     )
     if not dry_run and payload.get("runs_upserted", 0) > 0:
         readiness = build_data_readiness()
@@ -556,6 +618,31 @@ def _cities_from_arg(cities_arg: str = "") -> list[str]:
     return [item.strip() for item in str(cities_arg or "").split(",") if item.strip()]
 
 
+def _cli_date_window(
+    *,
+    target_date: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    days: int = 1,
+) -> list[str]:
+    if target_date:
+        return [date.fromisoformat(target_date).isoformat()]
+    if start_date or end_date:
+        start = date.fromisoformat(start_date or end_date)
+        end = date.fromisoformat(end_date or start_date)
+        if end < start:
+            start, end = end, start
+        rows = []
+        cursor = start
+        while cursor <= end:
+            rows.append(cursor.isoformat())
+            cursor += timedelta(days=1)
+        return rows
+    count = max(1, min(int(days or 1), 90))
+    today = date.today()
+    return [(today - timedelta(days=offset)).isoformat() for offset in range(count)]
+
+
 def _default_layer_city_keys(limit_cities: int = 5) -> list[str]:
     preferred = ["chicago", "tokyo", "atlanta", "nyc", "dallas"]
     limit = max(1, int(limit_cities or len(preferred)))
@@ -749,6 +836,141 @@ def run_truth_backfill(
     }
 
 
+def run_iem_asos_truth_fetch(
+    cities_arg: str = "",
+    *,
+    target_date: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    days: int = 1,
+    all_cities: bool = False,
+    limit_cities: int = 10,
+    dry_run: bool = False,
+) -> dict:
+    from .truth.iem_asos import fetch_iem_asos_daily
+
+    sync_station_registry()
+    requested = _cities_from_arg(cities_arg)
+    rows = list_stations()
+    if requested:
+        wanted = {item.lower() for item in requested}
+        rows = [row for row in rows if str(row.get("city_key") or "").lower() in wanted or str(row.get("station_id") or "").lower() in wanted]
+    elif not all_cities:
+        rows = [row for row in rows if row.get("enabled")][: max(1, int(limit_cities or 10))]
+    targets = _cli_date_window(target_date=target_date, start_date=start_date, end_date=end_date, days=days)
+    results = []
+    for row in rows:
+        station = str(row.get("settlement_station_id") or row.get("station_id") or "").upper()
+        tz = str(row.get("settlement_timezone") or row.get("timezone") or "UTC")
+        for target in targets:
+            if station == "HKO":
+                continue
+            results.append(fetch_iem_asos_daily(station, target, tz, persist=not dry_run))
+    return {
+        "ok": all(item.get("ok") for item in results) if results else False,
+        "source": "iem_asos",
+        "stage": "truth_iem_daily",
+        "dry_run": dry_run,
+        "cities": [row.get("city_key") for row in rows],
+        "target_dates": targets,
+        "stored": 0 if dry_run else sum(1 for item in results if item.get("ok")),
+        "results": results,
+    }
+
+
+def run_hko_truth_fetch(
+    *,
+    target_date: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    days: int = 1,
+    dry_run: bool = False,
+) -> dict:
+    from .truth.hko import fetch_hko_daily_extract
+
+    targets = _cli_date_window(target_date=target_date, start_date=start_date, end_date=end_date, days=days)
+    results = [fetch_hko_daily_extract(target, persist=not dry_run) for target in targets]
+    return {
+        "ok": all(item.get("ok") for item in results) if results else False,
+        "source": "hko",
+        "stage": "truth_hko_daily",
+        "dry_run": dry_run,
+        "target_dates": targets,
+        "stored": 0 if dry_run else sum(1 for item in results if item.get("ok")),
+        "results": results,
+    }
+
+
+def run_wunderground_truth_fetch(
+    cities_arg: str = "",
+    *,
+    target_date: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    days: int = 1,
+    all_cities: bool = False,
+    limit_cities: int = 10,
+    dry_run: bool = False,
+) -> dict:
+    from .truth.wunderground import fetch_wunderground_daily_result, persist_wunderground_daily
+
+    sync_station_registry()
+    requested = _cities_from_arg(cities_arg)
+    rows = list_stations()
+    if requested:
+        wanted = {item.lower() for item in requested}
+        rows = [row for row in rows if str(row.get("city_key") or "").lower() in wanted or str(row.get("station_id") or "").lower() in wanted]
+    elif not all_cities:
+        rows = [row for row in rows if row.get("enabled")][: max(1, int(limit_cities or 10))]
+    targets = _cli_date_window(target_date=target_date, start_date=start_date, end_date=end_date, days=days)
+    results = []
+    for row in rows:
+        station = str(row.get("settlement_station_id") or row.get("station_id") or "").upper()
+        if station == "HKO":
+            continue
+        for target in targets:
+            result = fetch_wunderground_daily_result(station, target)
+            if result.get("ok") and not dry_run:
+                persist_wunderground_daily(result)
+            results.append(result)
+    return {
+        "ok": all(item.get("ok") for item in results) if results else False,
+        "source": "wunderground",
+        "stage": "truth_wunderground_daily",
+        "dry_run": dry_run,
+        "target_dates": targets,
+        "stored": 0 if dry_run else sum(1 for item in results if item.get("ok")),
+        "skipped": sum(1 for item in results if not item.get("ok")),
+        "results": results,
+    }
+
+
+def run_truth_delta_build(limit: int = 500) -> dict:
+    from .truth.delta import rebuild_truth_delta_from_tables
+
+    return rebuild_truth_delta_from_tables(limit=limit)
+
+
+def run_gamma_structured_sync(
+    cities_arg: str = "",
+    *,
+    days: int = 3,
+    target_date: str = "",
+    dry_run: bool = False,
+    fetch_orderbooks: bool = True,
+) -> dict:
+    from .polymarket_gamma import sync_asian_weather_markets
+
+    targets = [target_date] if target_date else None
+    return sync_asian_weather_markets(
+        cities=_cities_from_arg(cities_arg) or None,
+        target_dates=targets,
+        days=days,
+        fetch_orderbooks=fetch_orderbooks,
+        dry_run=dry_run,
+    )
+
+
 def run_polymarket_market_probe(cities_arg: str = "", *, apply: bool = True, days_ahead: int = 3) -> dict:
     from .polymarket_probe import probe_polymarket_markets
 
@@ -939,6 +1161,7 @@ def main() -> None:
             "model-dataset-audit",
             "forecast-backfill",
             "openmeteo-fetch",
+            "openmeteo-previous-runs",
             "china-weather-fetch",
             "pws-fetch",
             "history-backfill",
@@ -949,6 +1172,7 @@ def main() -> None:
             "market-buckets-sync",
             "polymarket-market-probe",
             "signal-decisions-build",
+            "model-timing-reprice",
             "paper-execute",
             "forecast-archive-import",
             "forecast-archive-manifest",
@@ -959,6 +1183,11 @@ def main() -> None:
             "contracts-bulk-verify",
             "truth-backfill",
             "truth-audit",
+            "iem-asos-fetch",
+            "hko-truth-fetch",
+            "wunderground-truth-fetch",
+            "truth-delta-build",
+            "gamma-structured-sync",
         ],
     )
     parser.add_argument("--cities", default="", help="Comma-separated city keys; empty means all cities")
@@ -994,6 +1223,8 @@ def main() -> None:
     parser.add_argument("--limit-cities", type=int, default=5, help="Maximum default cities for METAR probe/backfill")
     parser.add_argument("--ensemble", action="store_true", help="Fetch Open-Meteo ensemble endpoint where supported")
     parser.add_argument("--forecast-days", type=int, default=7, help="Forecast days for Open-Meteo fetch")
+    parser.add_argument("--previous-days", default="1,2,3", help="Comma-separated Open-Meteo Previous Runs lead days, 1-7")
+    parser.add_argument("--models", default="", help="Comma-separated model names for Open-Meteo Previous Runs")
     parser.add_argument("--force-rebuild", action="store_true", help="Force upsert/rebuild where supported")
     parser.add_argument("--active-weather", action="store_true", help="Sync active Polymarket weather events from Gamma/CLOB")
     parser.add_argument("--skip-orderbooks", action="store_true", help="Skip CLOB orderbook fetches for active weather market buckets")
@@ -1074,6 +1305,23 @@ def main() -> None:
                 all_cities=args.all_cities,
                 limit_cities=args.limit_cities,
                 forecast_days=args.forecast_days,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "openmeteo-previous-runs":
+        print(json.dumps(
+            run_openmeteo_previous_runs(
+                cities_arg,
+                target_date=args.target_date,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                days_arg=args.days,
+                previous_days_arg=args.previous_days,
+                models_arg=args.models,
+                dry_run=args.dry_run,
+                all_cities=args.all_cities,
+                limit_cities=args.limit_cities,
             ),
             ensure_ascii=False,
             indent=2,
@@ -1191,6 +1439,16 @@ def main() -> None:
             ensure_ascii=False,
             indent=2,
         ))
+    elif args.command == "model-timing-reprice":
+        print(json.dumps(
+            run_model_timing_reprice(
+                cities_arg,
+                days_arg=args.days if args.days is not None else 2,
+                dry_run=args.dry_run,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
     elif args.command == "paper-execute":
         print(json.dumps(
             run_paper_execute(
@@ -1303,6 +1561,62 @@ def main() -> None:
                 None,
             ),
         }, ensure_ascii=False, indent=2))
+    elif args.command == "iem-asos-fetch":
+        print(json.dumps(
+            run_iem_asos_truth_fetch(
+                cities_arg,
+                target_date=args.target_date or "",
+                start_date=args.start_date,
+                end_date=args.end_date,
+                days=args.days or 1,
+                all_cities=args.all_cities,
+                limit_cities=args.limit_cities,
+                dry_run=args.dry_run,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "hko-truth-fetch":
+        print(json.dumps(
+            run_hko_truth_fetch(
+                target_date=args.target_date or "",
+                start_date=args.start_date,
+                end_date=args.end_date,
+                days=args.days or 1,
+                dry_run=args.dry_run,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "wunderground-truth-fetch":
+        print(json.dumps(
+            run_wunderground_truth_fetch(
+                cities_arg,
+                target_date=args.target_date or "",
+                start_date=args.start_date,
+                end_date=args.end_date,
+                days=args.days or 1,
+                all_cities=args.all_cities,
+                limit_cities=args.limit_cities,
+                dry_run=args.dry_run,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "truth-delta-build":
+        print(json.dumps(run_truth_delta_build(args.limit), ensure_ascii=False, indent=2))
+    elif args.command == "gamma-structured-sync":
+        print(json.dumps(
+            run_gamma_structured_sync(
+                cities_arg,
+                days=args.days or 3,
+                target_date=args.target_date or args.start_date,
+                dry_run=args.dry_run,
+                fetch_orderbooks=not args.skip_orderbooks,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
 
 
 if __name__ == "__main__":

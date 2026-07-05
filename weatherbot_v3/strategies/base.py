@@ -98,8 +98,9 @@ class StrategyBase:
             cautions.append("book_timestamp_missing")
         elif book_age_seconds > float(context.get("stale_book_seconds") or 300.0):
             cautions.append("stale_book")
-        if str(prediction.get("deb_version") or prediction.get("method") or "") != "weatherbot-deb-v2":
-            hard_blocks.append("deb_version_not_v2")
+        forecast_algo = str(prediction.get("forecast_algo") or prediction.get("method") or prediction.get("deb_version") or "")
+        if forecast_algo not in {"weatherbot-deb-v2", "ensemble_v1"}:
+            hard_blocks.append("forecast_algo_not_supported")
         if int(prediction.get("bias_sample_count") or 0) < int(context.get("min_bias_sample_days") or 7):
             gate_reasons.append("insufficient_bias_samples")
         if edge is None or edge < float(min_edge):
@@ -155,6 +156,7 @@ class StrategyBase:
             "mu": prediction.get("mu"),
             "sigma": prediction.get("sigma"),
             "deb_version": prediction.get("deb_version") or prediction.get("method") or "",
+            "forecast_algo": forecast_algo,
             "model_probability": model_probability,
             "market_ask": market_ask,
             "market_bid": market_bid,

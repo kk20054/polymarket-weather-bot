@@ -11,6 +11,23 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 CONFIG_PATH = ROOT / "config.json"
 
+ASIAN_CITY_PRIORITY = {
+    "shanghai": {"rank": 1, "volume_usd": 246000, "settlement": "verified_wunderground", "mode": "fully_active"},
+    "hong-kong": {"rank": 2, "volume_usd": 160000, "settlement": "hko_mismatch", "mode": "paper_only"},
+    "seoul": {"rank": 3, "volume_usd": 142000, "settlement": "verified_wunderground", "mode": "monitor_only"},
+    "tokyo": {"rank": 4, "volume_usd": 113000, "settlement": "verified_wunderground", "mode": "fully_active"},
+    "beijing": {"rank": 5, "volume_usd": 111000, "settlement": "verified_wunderground", "mode": "fully_active"},
+    "singapore": {"rank": 6, "volume_usd": 68000, "settlement": "verified_wunderground", "mode": "fully_active"},
+    "taipei": {"rank": 7, "volume_usd": 67000, "settlement": "verified_wunderground_rcss", "mode": "fully_active"},
+    "shenzhen": {"rank": 8, "volume_usd": 66000, "settlement": "verified_wunderground", "mode": "fully_active"},
+    "wuhan": {"rank": 9, "volume_usd": 64000, "settlement": "verified_wunderground", "mode": "fully_active"},
+    "qingdao": {"rank": 10, "volume_usd": 38000, "settlement": "verified_wunderground", "mode": "fully_active"},
+}
+
+
+def asian_city_priority_config() -> dict[str, dict[str, Any]]:
+    return {city: dict(meta) for city, meta in ASIAN_CITY_PRIORITY.items()}
+
 
 def _read_config() -> dict[str, Any]:
     try:

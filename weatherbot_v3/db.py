@@ -18,6 +18,12 @@ class ClosingConnection(sqlite3.Connection):
         finally:
             self.close()
 
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -597,6 +603,151 @@ def init_v3_db(path: Path | None = None) -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS truth_iem_daily (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                truth_key TEXT UNIQUE,
+                icao TEXT,
+                date_local TEXT,
+                timezone TEXT,
+                high_c REAL,
+                low_c REAL,
+                high_time_local TEXT,
+                low_time_local TEXT,
+                obs_count INTEGER,
+                source_url TEXT,
+                settlement_truth_type TEXT,
+                parser_version TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS truth_iem_hourly (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_key TEXT UNIQUE,
+                icao TEXT,
+                date_local TEXT,
+                timezone TEXT,
+                observed_at_local TEXT,
+                observed_at_utc TEXT,
+                temp_c REAL,
+                tmpf REAL,
+                raw_text TEXT,
+                source_url TEXT,
+                parser_version TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS truth_wunderground_daily (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                truth_key TEXT UNIQUE,
+                icao TEXT,
+                date_local TEXT,
+                timezone TEXT,
+                high_c REAL,
+                low_c REAL,
+                source_url TEXT,
+                method TEXT,
+                settlement_truth_type TEXT,
+                skip_reasons_json TEXT,
+                parser_version TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS truth_hko_daily (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                truth_key TEXT UNIQUE,
+                date_local TEXT,
+                high_c REAL,
+                low_c REAL,
+                mean_c REAL,
+                source_url TEXT,
+                settlement_truth_type TEXT,
+                parser_version TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS truth_delta_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                audit_key TEXT UNIQUE,
+                icao TEXT,
+                city TEXT,
+                date_local TEXT,
+                wu_high_c REAL,
+                iem_high_c REAL,
+                hko_high_c REAL,
+                polymarket_resolved_bucket TEXT,
+                delta_wu_minus_iem REAL,
+                resolved_at TEXT,
+                notes TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS polymarket_events (
+                event_id TEXT PRIMARY KEY,
+                slug TEXT UNIQUE,
+                city TEXT,
+                target_date TEXT,
+                resolution_station TEXT,
+                resolution_source TEXT,
+                resolution_source_url TEXT,
+                settlement_unit TEXT,
+                volume_24h REAL,
+                open_interest REAL,
+                buckets_json TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS polymarket_markets (
+                market_id TEXT PRIMARY KEY,
+                event_id TEXT,
+                event_slug TEXT,
+                market_slug TEXT,
+                city TEXT,
+                target_date TEXT,
+                bucket_label TEXT,
+                bucket_lower_c REAL,
+                bucket_upper_c REAL,
+                is_tail INTEGER,
+                outcome_yes_token_id TEXT,
+                outcome_no_token_id TEXT,
+                order_min_size REAL,
+                tick_size REAL,
+                enable_order_book INTEGER,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS polymarket_orderbook (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_key TEXT UNIQUE,
+                market_id TEXT,
+                event_id TEXT,
+                token_id TEXT,
+                ts TEXT,
+                best_bid REAL,
+                best_ask REAL,
+                spread REAL,
+                volume_24h REAL,
+                bid_depth REAL,
+                ask_depth REAL,
+                source_url TEXT,
+                raw_response_hash TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS data_fetch_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 log_key TEXT UNIQUE,
@@ -642,6 +793,7 @@ def init_v3_db(path: Path | None = None) -> None:
                 mu REAL,
                 sigma REAL,
                 deb_version TEXT,
+                forecast_algo TEXT,
                 model_probability REAL,
                 market_ask REAL,
                 market_bid REAL,
@@ -676,6 +828,26 @@ def init_v3_db(path: Path | None = None) -> None:
                 edge_by_bucket_json TEXT,
                 gate_reasons_json TEXT,
                 raw_json TEXT,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS model_reprice_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT UNIQUE,
+                city_key TEXT,
+                target_date TEXT,
+                market_id TEXT,
+                bucket_key TEXT,
+                triggered_at TEXT,
+                model_source TEXT,
+                previous_model_prob REAL,
+                model_prob REAL,
+                delta_prob REAL,
+                market_mid REAL,
+                edge REAL,
+                alpha_candidate INTEGER,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
 
@@ -892,6 +1064,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "mu": "REAL",
             "sigma": "REAL",
             "deb_version": "TEXT",
+            "forecast_algo": "TEXT",
             "model_probability": "REAL",
             "market_ask": "REAL",
             "market_bid": "REAL",
@@ -1023,11 +1196,23 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_buckets_city_date ON market_buckets(city, target_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_buckets_market ON market_buckets(market_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_market_buckets_token ON market_buckets(yes_token_id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_truth_iem_daily_station_date ON truth_iem_daily(icao, date_local)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_truth_iem_hourly_station_date ON truth_iem_hourly(icao, date_local)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_truth_wu_daily_station_date ON truth_wunderground_daily(icao, date_local)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_truth_hko_daily_date ON truth_hko_daily(date_local)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_truth_delta_audit_station_date ON truth_delta_audit(icao, date_local)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_polymarket_events_city_date ON polymarket_events(city, target_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_polymarket_markets_event ON polymarket_markets(event_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_polymarket_markets_city_date ON polymarket_markets(city, target_date)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_polymarket_orderbook_snapshot ON polymarket_orderbook(snapshot_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_polymarket_orderbook_market_ts ON polymarket_orderbook(market_id, ts)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_decisions_decision_id ON signal_decisions(decision_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_city_date ON signal_decisions(city_key, target_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_bucket ON signal_decisions(bucket_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_strategy ON signal_decisions(strategy_name)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_ladder_group ON signal_decisions(ladder_group_id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_model_reprice_event_key ON model_reprice_events(event_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_model_reprice_city_date ON model_reprice_events(city_key, target_date)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_orders_idempotency ON paper_orders(idempotency_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_decision ON paper_orders(decision_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_city_date ON paper_orders(city_key, target_date)")
@@ -1531,6 +1716,13 @@ def list_daily_max_predictions(
         row["source_run_ids"] = _loads_list(row.get("source_run_ids_json"))
         row["member_daily_highs"] = _loads_obj(row.get("member_daily_highs_json"))
         row["mu_observed_floor_applied"] = bool(row.get("mu_observed_floor_applied"))
+        raw_payload = _loads_obj(row.get("raw_json"))
+        row["raw"] = raw_payload
+        row["forecast_algo"] = row.get("forecast_algo") or raw_payload.get("forecast_algo") or raw_payload.get("algo") or row.get("method")
+        if "ensemble_samples" in raw_payload:
+            row["ensemble_samples"] = raw_payload.get("ensemble_samples") or []
+        if "ensemble_sample_weights" in raw_payload:
+            row["ensemble_sample_weights"] = raw_payload.get("ensemble_sample_weights") or []
     return rows
 
 
@@ -2984,6 +3176,7 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
         "mu": _nullable_num(decision.get("mu")),
         "sigma": _nullable_num(decision.get("sigma")),
         "deb_version": str(decision.get("deb_version") or ""),
+        "forecast_algo": str(decision.get("forecast_algo") or decision.get("algo") or decision.get("deb_version") or ""),
         "model_probability": _nullable_num(decision.get("model_probability")),
         "market_ask": _nullable_num(decision.get("market_ask")),
         "market_bid": _nullable_num(decision.get("market_bid")),
@@ -3026,7 +3219,7 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
             INSERT INTO signal_decisions (
                 decision_id, signal_id, market_id, bucket_id, bucket_key, city_key,
                 target_date, issued_at, token_id, yes_token_id, bucket_direction,
-                bucket_lower, bucket_upper, mu, sigma, deb_version,
+                bucket_lower, bucket_upper, mu, sigma, deb_version, forecast_algo,
                 model_probability, market_ask, market_bid, market_mid,
                 market_implied_probability, edge, edge_percent, strategy_name,
                 kelly_fraction, position_size_usd, ladder_group_id, orderbook_snapshot_json,
@@ -3039,7 +3232,7 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
             ) VALUES (
                 :decision_id, :signal_id, :market_id, :bucket_id, :bucket_key, :city_key,
                 :target_date, :issued_at, :token_id, :yes_token_id, :bucket_direction,
-                :bucket_lower, :bucket_upper, :mu, :sigma, :deb_version,
+                :bucket_lower, :bucket_upper, :mu, :sigma, :deb_version, :forecast_algo,
                 :model_probability, :market_ask, :market_bid, :market_mid,
                 :market_implied_probability, :edge, :edge_percent, :strategy_name,
                 :kelly_fraction, :position_size_usd, :ladder_group_id, :orderbook_snapshot_json,
@@ -3066,6 +3259,7 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
                 mu=excluded.mu,
                 sigma=excluded.sigma,
                 deb_version=excluded.deb_version,
+                forecast_algo=excluded.forecast_algo,
                 model_probability=excluded.model_probability,
                 market_ask=excluded.market_ask,
                 market_bid=excluded.market_bid,
@@ -3148,6 +3342,7 @@ def list_signal_decisions(
         row["paper_allowed"] = bool(row.get("paper_allowed"))
         row["neg_risk"] = bool(row.get("neg_risk"))
         row["strategy_name"] = row.get("strategy_name") or "single_bucket_ev"
+        row["forecast_algo"] = row.get("forecast_algo") or row.get("deb_version") or ""
         row["ladder_group_id"] = row.get("ladder_group_id") or ""
         row["reasons"] = _loads_list(row.get("reasons"))
         row["cautions"] = _loads_list(row.get("cautions"))
@@ -3159,6 +3354,66 @@ def list_signal_decisions(
         row["orderbook_snapshot"] = _loads_obj(row.get("orderbook_snapshot_json"))
         row["evidence_links"] = _loads_obj(row.get("evidence_links_json"))
     return rows
+
+
+def upsert_model_reprice_event(event: dict[str, Any], path: Path | None = None) -> int:
+    init_v3_db(path)
+    now = utc_now()
+    event_key = str(event.get("event_key") or _stable_key(
+        "model_reprice",
+        event.get("city_key") or event.get("city") or "",
+        event.get("target_date") or "",
+        event.get("market_id") or "",
+        event.get("bucket_key") or "",
+        event.get("triggered_at") or now,
+        event.get("model_source") or "",
+    ))
+    row = {
+        "event_key": event_key,
+        "city_key": str(event.get("city_key") or event.get("city") or ""),
+        "target_date": str(event.get("target_date") or ""),
+        "market_id": str(event.get("market_id") or ""),
+        "bucket_key": str(event.get("bucket_key") or ""),
+        "triggered_at": str(event.get("triggered_at") or now),
+        "model_source": str(event.get("model_source") or event.get("forecast_algo") or ""),
+        "previous_model_prob": _nullable_num(event.get("previous_model_prob")),
+        "model_prob": _nullable_num(event.get("model_prob")),
+        "delta_prob": _nullable_num(event.get("delta_prob")),
+        "market_mid": _nullable_num(event.get("market_mid")),
+        "edge": _nullable_num(event.get("edge")),
+        "alpha_candidate": 1 if event.get("alpha_candidate") else 0,
+        "raw_json": dump_json(event),
+        "created_at": now,
+        "updated_at": now,
+    }
+    with connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO model_reprice_events (
+                event_key, city_key, target_date, market_id, bucket_key,
+                triggered_at, model_source, previous_model_prob, model_prob,
+                delta_prob, market_mid, edge, alpha_candidate, raw_json,
+                created_at, updated_at
+            ) VALUES (
+                :event_key, :city_key, :target_date, :market_id, :bucket_key,
+                :triggered_at, :model_source, :previous_model_prob, :model_prob,
+                :delta_prob, :market_mid, :edge, :alpha_candidate, :raw_json,
+                :created_at, :updated_at
+            )
+            ON CONFLICT(event_key) DO UPDATE SET
+                previous_model_prob=excluded.previous_model_prob,
+                model_prob=excluded.model_prob,
+                delta_prob=excluded.delta_prob,
+                market_mid=excluded.market_mid,
+                edge=excluded.edge,
+                alpha_candidate=excluded.alpha_candidate,
+                raw_json=excluded.raw_json,
+                updated_at=excluded.updated_at
+            """,
+            row,
+        )
+        found = conn.execute("SELECT id FROM model_reprice_events WHERE event_key = ?", (event_key,)).fetchone()
+        return int(found["id"]) if found else 0
 
 
 def latest_event_distribution(market_id: str) -> dict[str, Any] | None:

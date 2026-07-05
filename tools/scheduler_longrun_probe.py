@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
+import statistics
+import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib import request
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from weatherbot_v3.config import load_config
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8765"
@@ -28,6 +38,9 @@ def run_probe(
     stop_scheduler: bool = False,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    samples_jsonl = output_dir / "samples.jsonl"
+    if samples_jsonl.exists():
+        samples_jsonl.unlink()
     samples: list[dict[str, Any]] = []
     started_at = utc_now()
     start_payload: dict[str, Any] | None = None
@@ -35,15 +48,18 @@ def run_probe(
     if start_scheduler:
         start_payload = fetch_json(f"{base_url.rstrip('/')}/api/scheduler/start", method="POST")
     deadline = time.monotonic() + max(0.0, duration_minutes) * 60.0
-    while True:
-        sample = collect_sample(base_url)
-        samples.append(sample)
-        write_json(output_dir / "samples.json", samples)
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(max(1.0, sample_seconds))
-    if stop_scheduler:
-        stop_payload = fetch_json(f"{base_url.rstrip('/')}/api/scheduler/stop", method="POST")
+    try:
+        while True:
+            sample = collect_sample(base_url)
+            samples.append(sample)
+            append_jsonl(samples_jsonl, sample)
+            write_json(output_dir / "samples.json", samples)
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(max(1.0, sample_seconds))
+    finally:
+        if stop_scheduler:
+            stop_payload = fetch_json(f"{base_url.rstrip('/')}/api/scheduler/stop", method="POST")
     finished_at = utc_now()
     report = build_report(
         started_at=started_at,
@@ -54,7 +70,9 @@ def run_probe(
         stop_payload=stop_payload,
     )
     write_json(output_dir / "summary.json", report)
-    (output_dir / "README.md").write_text(render_markdown(report), encoding="utf-8")
+    markdown = render_markdown(report)
+    (output_dir / "summary.md").write_text(markdown, encoding="utf-8")
+    (output_dir / "README.md").write_text(markdown, encoding="utf-8")
     return report
 
 
@@ -65,6 +83,12 @@ def collect_sample(base_url: str) -> dict[str, Any]:
     dashboard = fetch_json(f"{root}/api/dashboard")
     recommendations = (dashboard.get("recommendations") or {}) if isinstance(dashboard, dict) else {}
     city_series = dashboard.get("city_series") or [] if isinstance(dashboard, dict) else []
+    freshness = db_freshness_snapshot()
+    skipped = recommendations.get("skipped") or recommendations.get("skip_reasons") or {}
+    if isinstance(skipped, dict) and skipped:
+        skip_reason_top1 = max(skipped.items(), key=lambda item: int(item[1] or 0))[0]
+    else:
+        skip_reason_top1 = recommendations.get("empty_reason") or None
     return {
         "sampled_at": timestamp,
         "scheduler": compact_scheduler(scheduler),
@@ -72,9 +96,103 @@ def collect_sample(base_url: str) -> dict[str, Any]:
             "count": recommendations.get("count"),
             "empty_reason": recommendations.get("empty_reason"),
             "scheduler_running": recommendations.get("scheduler_running"),
+            "skip_reason_top1": skip_reason_top1,
+            "skipped": skipped,
         },
+        "metar_age_median_seconds": freshness.get("metar_age_median_seconds"),
+        "metar_age_p95_seconds": freshness.get("metar_age_p95_seconds"),
+        "forecast_age_median_seconds": freshness.get("forecast_age_median_seconds"),
+        "forecast_age_p95_seconds": freshness.get("forecast_age_p95_seconds"),
+        "recommendation_count": recommendations.get("count") or 0,
+        "skip_reason_top1": skip_reason_top1,
+        "freshness_by_city": freshness.get("by_city"),
         "city_ages": city_age_snapshot(city_series),
     }
+
+
+def db_freshness_snapshot() -> dict[str, Any]:
+    cfg = load_config()
+    now = datetime.now(timezone.utc)
+    by_city: list[dict[str, Any]] = []
+    metar_ages: list[float] = []
+    forecast_ages: list[float] = []
+    try:
+        with sqlite3.connect(cfg.v3_db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            stations = conn.execute(
+                """
+                SELECT city_key, station_id
+                FROM stations
+                WHERE COALESCE(enabled, 0) = 1
+                ORDER BY city_key
+                """
+            ).fetchall()
+            for station in stations:
+                city = station["city_key"]
+                metar_at = conn.execute(
+                    "SELECT MAX(report_time) FROM metar_reports WHERE city = ?",
+                    (city,),
+                ).fetchone()[0]
+                forecast_at = conn.execute(
+                    "SELECT MAX(COALESCE(retrieved_at, run_at, created_at)) FROM forecast_runs WHERE city = ?",
+                    (city,),
+                ).fetchone()[0]
+                metar_age = age_seconds(now, metar_at)
+                forecast_age = age_seconds(now, forecast_at)
+                if metar_age is not None:
+                    metar_ages.append(metar_age)
+                if forecast_age is not None:
+                    forecast_ages.append(forecast_age)
+                by_city.append(
+                    {
+                        "city": city,
+                        "station_id": station["station_id"],
+                        "latest_metar_at": metar_at,
+                        "metar_age_seconds": metar_age,
+                        "latest_forecast_at": forecast_at,
+                        "forecast_age_seconds": forecast_age,
+                    }
+                )
+    except Exception as exc:
+        return {"error": str(exc), "by_city": []}
+    return {
+        "metar_age_median_seconds": percentile(metar_ages, 50),
+        "metar_age_p95_seconds": percentile(metar_ages, 95),
+        "forecast_age_median_seconds": percentile(forecast_ages, 50),
+        "forecast_age_p95_seconds": percentile(forecast_ages, 95),
+        "by_city": by_city,
+    }
+
+
+def age_seconds(now: datetime, value: Any) -> float | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            dt = datetime.fromisoformat(text.replace(" ", "T"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - dt.astimezone(timezone.utc)).total_seconds())
+
+
+def percentile(values: list[float], p: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return round(ordered[0], 3)
+    rank = (len(ordered) - 1) * (p / 100.0)
+    lower = int(rank)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = rank - lower
+    return round(ordered[lower] * (1 - weight) + ordered[upper] * weight, 3)
 
 
 def compact_scheduler(payload: dict[str, Any]) -> dict[str, Any]:
@@ -124,11 +242,43 @@ def build_report(
 ) -> dict[str, Any]:
     poller_failures: dict[str, int] = {}
     latest_pollers = (samples[-1].get("scheduler") or {}).get("pollers") if samples else {}
+    forecast_runs = [
+        sample.get("scheduler", {}).get("pollers", {}).get("forecast_poller", {}).get("last_run_at")
+        for sample in samples
+    ]
+    forecast_cycles = len({value for value in forecast_runs if value})
+    recommendation_curve = [
+        {
+            "sampled_at": sample.get("sampled_at"),
+            "recommendation_count": sample.get("recommendation_count"),
+        }
+        for sample in samples
+    ]
+    skip_counts = Counter(
+        sample.get("skip_reason_top1")
+        for sample in samples
+        if sample.get("skip_reason_top1")
+    )
     for sample in samples:
         for key, row in ((sample.get("scheduler") or {}).get("pollers") or {}).items():
             poller_failures[key] = max(poller_failures.get(key, 0), int(row.get("fails_last_hour") or 0))
+    metar_median_values = [
+        sample.get("metar_age_median_seconds")
+        for sample in samples
+        if sample.get("metar_age_median_seconds") is not None
+    ]
+    metar_p95_values = [
+        sample.get("metar_age_p95_seconds")
+        for sample in samples
+        if sample.get("metar_age_p95_seconds") is not None
+    ]
+    forecast_median_values = [
+        sample.get("forecast_age_median_seconds")
+        for sample in samples
+        if sample.get("forecast_age_median_seconds") is not None
+    ]
     return {
-        "probe_version": "scheduler-longrun-probe-v1",
+        "probe_version": "scheduler-longrun-probe-v2",
         "base_url": base_url,
         "started_at": started_at,
         "finished_at": finished_at,
@@ -136,13 +286,39 @@ def build_report(
         "start_payload": start_payload,
         "stop_payload": stop_payload,
         "latest_pollers": latest_pollers,
+        "forecast_poller_full_cycles_observed": forecast_cycles,
+        "metar_age_median_seconds": percentile(metar_median_values, 50),
+        "metar_age_p95_seconds": percentile(metar_p95_values, 95),
+        "forecast_age_median_seconds": percentile(forecast_median_values, 50),
         "max_fails_last_hour": poller_failures,
-        "recommendation_counts": [sample.get("recommendations", {}).get("count") for sample in samples],
+        "recommendation_counts": [sample.get("recommendation_count") for sample in samples],
+        "recommendation_curve": recommendation_curve,
+        "skip_reason_top1_counts": dict(skip_counts),
+        "metar_stale_or_missing_repeated": skip_counts.get("metar_stale_or_missing", 0) > 1,
+        "metar_stale_or_missing_root_cause": infer_metar_stale_root_cause(samples),
         "notes": [
             "This is an audit-only sampler. It does not import PolyWX or market data.",
             "Use --start-scheduler and --stop-scheduler when you want a self-contained run.",
+            "Age metrics are computed from the local v3 SQLite DB for enabled stations.",
         ],
     }
+
+
+def infer_metar_stale_root_cause(samples: list[dict[str, Any]]) -> str:
+    stale_samples = [sample for sample in samples if sample.get("skip_reason_top1") == "metar_stale_or_missing"]
+    if not stale_samples:
+        return "metar_stale_or_missing was not the top skip reason in sampled dashboard payloads."
+    latest = stale_samples[-1]
+    ages = [
+        row.get("metar_age_seconds")
+        for row in latest.get("freshness_by_city") or []
+        if row.get("metar_age_seconds") is not None
+    ]
+    if not ages:
+        return "No latest METAR timestamps were present for enabled stations."
+    if min(ages) > 30 * 60:
+        return "Latest METAR rows for enabled stations were older than the 30 minute recommendation gate."
+    return "At least one enabled station had fresh METAR; inspect target_date/lead-time gates for D+1/D+2 decisions."
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -166,12 +342,32 @@ def render_markdown(report: dict[str, Any]) -> str:
         )
     lines.extend(["", "## Notes", ""])
     lines.extend(f"- {note}" for note in report.get("notes") or [])
+    lines.extend(
+        [
+            "",
+            "## Required Answers",
+            "",
+            f"- Forecast poller full cycles observed: `{report.get('forecast_poller_full_cycles_observed')}`",
+            f"- METAR age median seconds: `{report.get('metar_age_median_seconds')}`",
+            f"- METAR age P95 seconds: `{report.get('metar_age_p95_seconds')}`",
+            f"- Forecast age median seconds: `{report.get('forecast_age_median_seconds')}`",
+            f"- Recommendation count curve: `{json.dumps(report.get('recommendation_curve'), ensure_ascii=False)}`",
+            f"- Top skip reason counts: `{json.dumps(report.get('skip_reason_top1_counts'), ensure_ascii=False)}`",
+            f"- metar_stale_or_missing repeated: `{report.get('metar_stale_or_missing_repeated')}`",
+            f"- metar_stale_or_missing root cause: {report.get('metar_stale_or_missing_root_cause')}",
+        ]
+    )
     lines.append("")
     return "\n".join(lines)
 
 
 def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def append_jsonl(path: Path, payload: Any) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def utc_now() -> str:

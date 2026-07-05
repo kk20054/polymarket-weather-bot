@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from .cli import run_china_weather_fetch, run_daily_max_build, run_hourly_consensus_build, run_market_buckets_sync, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build
+from .cli import run_china_weather_fetch, run_daily_max_build, run_gamma_structured_sync, run_hourly_consensus_build, run_market_buckets_sync, run_model_timing_reprice, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build
 from .db import log_data_fetch, utc_now
 from .metar import fetch_recent_hours
 from .stations import enabled_station_rows, sync_station_registry
@@ -19,6 +19,9 @@ METAR_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_METAR_SECONDS", "30
 FORECAST_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_SECONDS", "3600") or "3600")
 DERIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_DERIVE_SECONDS", "900") or "900")
 CHINA_LIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_CHINA_LIVE_SECONDS", "300") or "300")
+GAMMA_ORDERBOOK_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_GAMMA_ORDERBOOK_SECONDS", "300") or "300")
+MODEL_TIMING_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_MODEL_TIMING_SECONDS", "60") or "60")
+MODEL_TIMING_WINDOWS_UTC = ((7, 1), (19, 1), (5, 1), (17, 1))
 
 
 @dataclass
@@ -86,6 +89,8 @@ class WeatherBotScheduler:
             "forecast_poller": PollerState("forecast_poller", "Forecast", FORECAST_INTERVAL_SECONDS),
             "derive_poller": PollerState("derive_poller", "Historical", DERIVE_INTERVAL_SECONDS),
             "china_live_poller": PollerState("china_live_poller", "China Live", CHINA_LIVE_INTERVAL_SECONDS),
+            "gamma_orderbook_poller": PollerState("gamma_orderbook_poller", "Orderbook", GAMMA_ORDERBOOK_INTERVAL_SECONDS),
+            "model_timing_poller": PollerState("model_timing_poller", "Model Timing", MODEL_TIMING_INTERVAL_SECONDS),
         }
 
     async def start(self) -> dict[str, Any]:
@@ -136,6 +141,10 @@ class WeatherBotScheduler:
                     result = await self._run_derive_poller()
                 elif poller_key == "china_live_poller":
                     result = await self._run_china_live_poller()
+                elif poller_key == "gamma_orderbook_poller":
+                    result = await self._run_gamma_orderbook_poller()
+                elif poller_key == "model_timing_poller":
+                    result = await self._run_model_timing_poller()
                 else:
                     raise KeyError(poller_key)
             except Exception as exc:
@@ -293,6 +302,26 @@ class WeatherBotScheduler:
                 str(row.get("city_key") or row.get("city")),
             ),
         )
+
+    async def _run_gamma_orderbook_poller(self) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            run_gamma_structured_sync,
+            "",
+            days=3,
+            dry_run=False,
+            fetch_orderbooks=True,
+        )
+
+    async def _run_model_timing_poller(self) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        if (now.hour, now.minute) not in MODEL_TIMING_WINDOWS_UTC:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "outside_model_timing_window",
+                "windows_utc": [f"{hour:02d}:{minute:02d}" for hour, minute in MODEL_TIMING_WINDOWS_UTC],
+            }
+        return await asyncio.to_thread(run_model_timing_reprice, "", days_arg=2, dry_run=False)
 
 
 async def _run_city_batch(

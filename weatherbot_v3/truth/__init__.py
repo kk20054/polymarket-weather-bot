@@ -8,8 +8,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 
-from .config import load_config
-from .registry import REGISTRY_VERSION, get_city_profile
+from ..config import load_config
+from ..registry import REGISTRY_VERSION, get_city_profile
 
 
 @dataclass(frozen=True)

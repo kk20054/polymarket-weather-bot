@@ -17,6 +17,13 @@ DEFAULT_ENABLED_CITY_KEYS = {
     "dallas",
     "shanghai",
     "hong-kong",
+    "beijing",
+    "wuhan",
+    "qingdao",
+    "shenzhen",
+    "taipei",
+    "singapore",
+    "seoul",
 }
 
 
@@ -32,6 +39,14 @@ def station_row_from_profile(profile: CitySettlementProfile) -> dict[str, Any]:
     if station_id.startswith("K"):
         provider_ids["nws"] = station_id
         networks.append("NWS station observations")
+    settlement_station_id = station_id
+    settlement_station_name = profile.station_name
+    primary_settlement_source = profile.expected_resolution_provider
+    if profile.city == "hong-kong":
+        settlement_station_id = "HKO"
+        settlement_station_name = "Hong Kong Observatory"
+        primary_settlement_source = "hong_kong_observatory"
+        networks.append("HKO Daily Extract")
     confidence = 0.75 if profile.verification_status == "provisional" else 0.9
     settlement_rule_text = (
         f"WeatherBot registry maps {profile.city_name} to {profile.station_name} "
@@ -44,7 +59,7 @@ def station_row_from_profile(profile: CitySettlementProfile) -> dict[str, Any]:
         "provider_station_ids": provider_ids,
         "nearby_observation_networks": networks,
         "settlement_rule_text": settlement_rule_text,
-        "primary_settlement_source": profile.expected_resolution_provider,
+        "primary_settlement_source": primary_settlement_source,
         "confidence": confidence,
     }
     return {
@@ -62,13 +77,13 @@ def station_row_from_profile(profile: CitySettlementProfile) -> dict[str, Any]:
         "region": profile.region,
         "expected_metric": profile.expected_metric,
         "settlement_rule_text": settlement_rule_text,
-        "settlement_station_id": station_id,
-        "settlement_station_name": profile.station_name,
+        "settlement_station_id": settlement_station_id,
+        "settlement_station_name": settlement_station_name,
         "settlement_timezone": profile.timezone,
         "settlement_unit": profile.unit,
         "settlement_time_basis": "local_day",
         "settlement_rule_verified_at": "",
-        "primary_settlement_source": profile.expected_resolution_provider,
+        "primary_settlement_source": primary_settlement_source,
         "nearby_observation_networks_json": dump_json(networks),
         "confidence": confidence,
         "verification_status": profile.verification_status,

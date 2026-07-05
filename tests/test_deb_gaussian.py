@@ -108,6 +108,34 @@ class DebGaussianTests(unittest.TestCase):
             self.assertGreaterEqual(prediction["mu"], 28.0)
             self.assertGreaterEqual(prediction["sigma"], prediction["sigma_floor"])
 
+    def test_chicago_fahrenheit_forecast_is_not_double_converted(self):
+        path = test_db_path("deb_chicago_unit_regression")
+        with patch("weatherbot_v3.db.load_config", return_value=SimpleNamespace(v3_db_path=path)):
+            init_v3_db(path)
+            insert_forecast_run(
+                {
+                    "run_key": "openmeteo:chicago:2026-07-04:ecmwf",
+                    "city": "chicago",
+                    "target_date": "2026-07-04",
+                    "source": "openmeteo_ecmwf_ifs025",
+                    "unit": "F",
+                    "mean_high": 94.9,
+                    "std_high": 0.0,
+                    "member_count": 1,
+                    "retrieved_at": "2026-07-04T06:00:00Z",
+                    "parse_status": "parsed",
+                    "training_eligible": True,
+                },
+                [{"member_id": "m0", "high_temp": 94.9}],
+            )
+
+            prediction = build_and_store_daily_max_prediction("chicago", "2026-07-04", path=path)
+
+            self.assertTrue(prediction["ok"])
+            self.assertEqual(prediction["unit"], "F")
+            self.assertLess(prediction["mu"], 96.0)
+            self.assertGreater(prediction["mu"], 93.0)
+
     def test_signal_decision_probability_skeleton_fields_are_persisted(self):
         path = test_db_path("deb_signal_decision_fields")
         with patch("weatherbot_v3.db.load_config", return_value=SimpleNamespace(v3_db_path=path)):

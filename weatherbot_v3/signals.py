@@ -16,6 +16,7 @@ from .db import (
     upsert_signal_decision_record,
 )
 from .deb import bucket_probabilities
+from .forecasts.ensemble import distribution_for_prediction as ensemble_distribution_for_prediction
 from .stations import get_station
 from .strategies import LadderGridStrategy, SingleBucketEVStrategy, TailBuyingStrategy
 
@@ -59,14 +60,16 @@ def build_signal_decisions(
             "decisions": [],
         }
 
-    distribution = bucket_probabilities(
-        float(prediction["mu"]),
-        float(prediction["sigma"]),
-        buckets,
-        unit=str(prediction.get("unit") or "C"),
-        sigma_floor=_optional_float(prediction.get("sigma_floor")),
-        normalize=True,
-    )
+    distribution = ensemble_distribution_for_prediction(prediction, buckets)
+    if not distribution:
+        distribution = bucket_probabilities(
+            float(prediction["mu"]),
+            float(prediction["sigma"]),
+            buckets,
+            unit=str(prediction.get("unit") or "C"),
+            sigma_floor=_optional_float(prediction.get("sigma_floor")),
+            normalize=True,
+        )
     probabilities = {
         str(item.get("bucket_key") or ""): item
         for item in distribution.get("items") or []
@@ -81,6 +84,7 @@ def build_signal_decisions(
         "distribution": distribution,
         "evidence": evidence,
         "station_live_reasons": station_live_reasons,
+        "forecast_algo": prediction.get("forecast_algo") or prediction.get("method") or prediction.get("deb_version"),
         "max_spread_bps": MAX_SPREAD_BPS,
         "stale_book_seconds": STALE_BOOK_SECONDS,
         "min_bias_sample_days": MIN_BIAS_SAMPLE_DAYS,
@@ -115,6 +119,7 @@ def build_signal_decisions(
         "target_date": date,
         "prediction_id": prediction.get("id"),
         "deb_version": prediction.get("deb_version") or prediction.get("method"),
+        "forecast_algo": prediction.get("forecast_algo") or prediction.get("method") or prediction.get("deb_version"),
         "bucket_count": len(buckets),
         "decision_count": len(decisions),
         "stored": stored,

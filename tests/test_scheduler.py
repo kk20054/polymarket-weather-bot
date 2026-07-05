@@ -119,7 +119,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
         payload = await scheduler_status()
         self.assertIn("pollers", payload)
-        for key in ("forecast_poller", "metar_poller", "china_live_poller", "derive_poller"):
+        for key in ("forecast_poller", "metar_poller", "china_live_poller", "derive_poller", "gamma_orderbook_poller"):
             self.assertIn(key, payload["pollers"])
             for field in ("last_run_at", "age_seconds", "last_duration_ms", "fails_last_hour", "next_run_at"):
                 self.assertIn(field, payload["pollers"][key])

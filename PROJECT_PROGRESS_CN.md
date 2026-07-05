@@ -157,3 +157,43 @@
 - 下一步：
 - 相关提交：
 ```
+
+### 2026-07-05：README 运行手册与本地启动烟测
+
+- 目标：把根目录 README 从旧版 WeatherBet 单体说明更新为当前 WeatherBot v6 的 GitHub 风格运行手册，并实际启动本地项目供人工核验。
+- 改动：重写 `README.md`，说明当前实现路径、目录结构、后端/前端启动方法、端口占用处理、看板操作、常用 CLI、人工核验命令、测试命令、配置变量、当前限制与风险声明；明确 `weatherbet.py`/legacy 不是 v6 主运行入口。
+- 验证：已启动 FastAPI 后端 `http://127.0.0.1:8765` 与 Vite 前端 `http://127.0.0.1:5173/`；`/api/dashboard` 返回成功，当前运行态为 `scanner_status=stopped`、`is_running=false`、`stats.auto_simulation.enabled=false`、`production_refresh.running=false`、`scheduler_status.running=false`；前端 HTTP 200。
+- 结论：项目已在本机跑起，可打开 `http://127.0.0.1:5173/` 人工核验；本轮没有启动 scheduler、没有开启实盘、没有修改交易逻辑。
+- 下一步：人工检查 README 的启动/核验步骤是否符合你的操作习惯；如要继续验证数据刷新，再在看板点击“启动调度器”并观察顶部 poller 徽章。
+- 相关提交：未提交。
+### 2026-07-05: Asian Polymarket weather market source snapshot
+- Target: complete Asian weather-market research addendum A-F without changing trading code or unlocking live execution.
+- Changes: added `docs/polymarket_asia_markets_snapshot.md`, `docs/polymarket_asia_markets_snapshot.csv`, and `docs/open_meteo_asia_samples.json`. The snapshot covers active Gamma Asian highest-temperature events, per-bucket CSV rows, Wunderground/HKO source reachability, ZBAA Wunderground vs AWC/IEM feasibility, Open-Meteo CMA/JMA/GFS ensemble/historical/previous-runs availability, unit/timezone contract notes, Asian city strategy priority, and UMA MOOV2 settlement-delay constraints.
+- Verification: Gamma exact slug probes found 31 active Asian events and 341 bucket rows; Wunderground base URLs are reachable for 9 non-HK Asian airport markets; Hong Kong uses HKO Daily Extract rather than Wunderground. Open-Meteo forecast, ensemble, historical forecast, and previous-runs probes succeeded for Shanghai, Beijing, Hong Kong, Tokyo, Seoul, Taipei, and Chicago.
+- Conclusion: Asian markets are confirmed and worth integrating, but exact settlement replication still needs a dedicated Wunderground daily-history path; IEM/AWC METAR max should remain an approximation, not live-unlocking settlement truth.
+- Next: wire Asian station registry/model preferences in a separate implementation turn; prioritize Shanghai/Wuhan/Beijing, keep Hong Kong truth-gated until HKO collector is production-ready, and keep Seoul monitor-only unless paper evidence improves.
+- Commit: not committed in this research turn; workspace already had unrelated dirty files.
+## 2026-07-05：Round 3 Truth Layer 三源协议 + Gamma 结构化持久化
+
+- 改动：将旧 `weatherbot_v3/truth.py` 迁移为 `weatherbot_v3/truth/__init__.py`，新增 `truth/iem_asos.py`、`truth/hko.py`、`truth/wunderground.py`、`truth/delta.py`；新增 Gamma 结构化模块 `weatherbot_v3/polymarket_gamma.py`；SQLite 新增 `truth_iem_daily`、`truth_iem_hourly`、`truth_wunderground_daily`、`truth_hko_daily`、`truth_delta_audit`、`polymarket_events`、`polymarket_markets`、`polymarket_orderbook`。
+- 改动：补齐亚洲城市 registry/stations：Beijing ZBAA、Wuhan ZHHH、Qingdao ZSQD、Shenzhen ZGSZ、Taipei RCSS，并确保 Seoul/Singapore 本地旧库可选；Hong Kong 观测站保留 VHHH，但 settlement truth 指向 HKO Daily Extract；受控 scheduler 新增 `gamma_orderbook_poller`，默认停用，手动启动 scheduler 后每 300 秒刷新亚洲活跃事件与 orderbook。
+- 验证：`python -m unittest tests.test_v3_core` 167 tests OK；`python -m unittest tests.test_polywx_contract` 12 tests OK；`python -m unittest tests.test_scheduler` 6 tests OK；`git diff --check` OK（仅 CRLF warning）。新增测试覆盖 IEM F->C、HKO Daily Extract、Wunderground skip reason、Gamma 三表持久化、11/6 桶动态边界、`or higher/or lower` 尾桶和 scheduler status shape。
+- 真实冒烟：IEM ZBAA 2026-06-27 返回 high_c=35.0、obs_count=24；HKO 2026-07-04 官方 Daily Extract 当前只发布到 7/2，返回 `date_not_found_in_hko_daily_extract`，HKO 2026-07-02 成功 high_c=32.2；Wunderground ZBAA 2026-06-27 无 key/未授权返回 `http_401` skip；Shanghai 2026-07-06 Gamma 同步 1 event、11 markets、11 orderbooks，尾桶 `37°C or higher` 正确解析为 `[37,+inf)`。
+- 结论：Round 3 数据结构和 collector 路径可用；IEM 是可靠近似 truth，HKO 是 Hong Kong P0 truth，Wunderground 是可选 truth 且失败不阻塞。当前仍不能用这些数据直接解锁 live，需后续 Round 4/5 把 truth_delta、Gamma orderbook refresh 和策略/看板消费链路接入。
+
+### 2026-07-05: Round 4 Ensemble DEB + bucket calibration foundation
+- Target: replace single Gaussian-only DEB consumption with an ensemble-backed probability path, add initial market sanity calibration, wire model reprice events, and keep live trading locked.
+- Changes: added `weatherbot_v3/forecasts/ensemble.py`, `weatherbot_v3/bias.py`, and `scripts/train_bias.py`; extended `daily_max_predictions`, `signal_decisions.forecast_algo`, and `model_reprice_events`; `signals.py` now consumes ensemble sample distributions when available and falls back to Gaussian CDF otherwise. `openmeteo.py` now includes CMA GRAPES for China/HK deterministic fetches; `config.py` stores Asian city priority modes.
+- Verification: ran 195 tests OK with `python -m unittest tests.test_ensemble_vs_market tests.test_deb_gaussian tests.test_v3_core tests.test_scheduler tests.test_polywx_contract`; `git diff --check` passed with only Windows line-ending warnings. Real smoke generated `data/bias_table.json`, fetched Shanghai Open-Meteo ensemble data, built `ensemble_v1` daily max for Shanghai 2026-07-06, rebuilt Shanghai signal decisions, and stored `model_reprice_events`. The earlier SQLite ResourceWarning noise was resolved in the 2026-07-05 Previous Runs follow-up.
+- Conclusion: Round 4 foundation is usable for paper/research probability comparisons. Live remains locked. The 341-bucket calibration is currently a snapshot sanity baseline because the local DB does not yet contain full archived ensemble runs for every historical bucket; this must become a Previous Runs walk-forward before profitability claims.
+- Next: collect archived Open-Meteo previous-runs for the 341 bucket set, expand ensemble coverage beyond the smoke city/date, then rerun calibration with real historical lead-time alignment.
+- Commit: not committed in this turn.
+
+### 2026-07-05: Previous Runs walk-forward entry and SQLite warning cleanup
+
+- Target: close the main leftover from Round 4 by replacing fake market-normalized "calibration" with a real Open-Meteo Previous Runs ingestion path, then remove noisy SQLite ResourceWarnings from the test run.
+- Changes: extended `weatherbot_v3/openmeteo.py` with `fetch_openmeteo_previous_runs`, per-region model selection, local-day-to-UTC request windows, previous_dayN parsing, and explicit data-fetch logging; added `openmeteo-previous-runs` CLI; added `previous_run_samples` and `previous_run_distribution_for_buckets` to `weatherbot_v3/forecasts/ensemble.py`; updated `tests/test_ensemble_vs_market.py` so the 341-bucket snapshot is labeled as a market baseline rather than model probability. Fixed legacy `dashboard_db.py` by making `_connect()` return a closing sqlite connection.
+- Verification: real smoke fetched Beijing 2026-07-05 previous-day 1/2/3 archived runs for ECMWF/GFS/CMA and wrote 9 forecast runs plus 9 members; report written to `audits/previous-runs-beijing-2026-07-05.md`. `python -m unittest tests.test_ensemble_vs_market tests.test_deb_gaussian tests.test_v3_core tests.test_scheduler tests.test_polywx_contract` passed, 198 tests OK. `git diff --check` passed with only Windows line-ending warnings.
+- Conclusion: the walk-forward data path now exists and is auditable, but it exposed a real blocker: Beijing 2026-07-05 34C bucket had market mid 0.9965 while archived Previous Runs sample probability was 0.0. That means the old `model_prob >= 0.85` sanity cannot be honestly claimed yet; it is a calibration/model-source mismatch to solve before production paper scoring.
+- Next: run previous-runs ingestion across the full 341-bucket set, compare by city/model/lead-time, then decide whether CMA/JMA/GFS ensemble weighting, station truth, or bucket/date alignment is causing the large Beijing mismatch. Keep scheduler and live trading off unless explicitly requested.
+- Commit: not committed in this turn.

@@ -57,3 +57,39 @@
 - 若查策略输出，优先看 `signal_decisions.strategy_name`、`kelly_fraction`、`position_size_usd`、`ladder_group_id` 和 `audits/strategy-multiplex-report-2026-07-04.md`。
 - 不跑 Firecrawl，除非任务明确要求或现有 evidence 不足。
 - 收尾必须更新 `PROJECT_PROGRESS_CN.md` 和本文件。
+
+## 2026-07-05 Runtime Note
+
+- README has been rewritten as the current WeatherBot v6 operator guide.
+- Backend is running at `http://127.0.0.1:8765`; frontend is running at `http://127.0.0.1:5173/` for manual verification.
+- Smoke state: scanner stopped, production refresh stopped, scheduler stopped, live locked.
+- This was a docs/runtime smoke turn only; no trading logic changed and scheduler was not started.
+## 2026-07-05 Asia Market Snapshot
+
+- Added research-only snapshot files: `docs/polymarket_asia_markets_snapshot.md`, `docs/polymarket_asia_markets_snapshot.csv`, and `docs/open_meteo_asia_samples.json`.
+- Gamma probes confirmed 31 active Asian highest-temperature events across Shanghai, Beijing, Hong Kong, Tokyo, Seoul, Taipei, Wuhan, Qingdao, Shenzhen, and Singapore, with 341 bucket-level CSV rows.
+- Wunderground airport-history base URLs are reachable for the non-HK Asian markets; Hong Kong is HKO Daily Extract, not Wunderground.
+- ZBAA test shows exact Wunderground daily-history values are not available from static HTML/PWS probes; AWC date probe is not enough for daily max, while IEM ASOS is a useful approximation. Do not use IEM/AWC METAR max to unlock live settlement truth.
+- Open-Meteo CMA/JMA/GFS ensemble/historical/previous-runs probes succeeded for 6 Asian cities plus Chicago. Strategy priority note: Shanghai > Wuhan > Beijing >> Hong Kong > Tokyo > Seoul; keep Seoul monitor-only until paper evidence improves.
+
+## 2026-07-05 Round 3 Truth Layer
+
+- Implemented `weatherbot_v3/truth/` three-source protocol: IEM ASOS approximation, optional Wunderground daily truth, and HKO Daily Extract for Hong Kong.
+- Added `truth_delta_audit` plus structured `polymarket_events` / `polymarket_markets` / `polymarket_orderbook` persistence, dynamic Celsius bucket parser, and controlled `gamma_orderbook_poller` at 300s interval when scheduler is explicitly running.
+- Real smoke: ZBAA 2026-06-27 IEM high = 35.0C; HKO 2026-07-04 is not yet published by the official feed, while 2026-07-02 returned 32.2C; Wunderground returned explicit `http_401` skip without API key; Shanghai 2026-07-06 Gamma stored 1 event, 11 markets, 11 orderbooks.
+- Current next step: wire the truth/Gamma tables into Round 4 consumers; do not unlock live from IEM approximation alone.
+
+## 2026-07-05 Round 4 Ensemble Status
+
+- Ensemble DEB foundation is implemented: `ensemble_v1` can read persisted Open-Meteo members, compute daily max sample distributions, and feed bucket probabilities into `signal_decisions.forecast_algo`.
+- Initial bias pipeline exists via `scripts/train_bias.py`; generated `data/bias_table.json` is local data and must not be committed.
+- Model timing reprice storage exists in `model_reprice_events`; scheduler support is present but scheduler remains stopped by default.
+- Round 4 tests passed: 195 OK. The earlier SQLite ResourceWarning noise was resolved in the Previous Runs follow-up below.
+- Production blocker: 341-bucket calibration is still a snapshot sanity baseline until archived Previous Runs are collected for all relevant city/date/lead-time buckets.
+
+## 2026-07-05 Previous Runs Follow-up
+
+- Added a manual Open-Meteo Previous Runs collector path (`openmeteo-previous-runs`) that stores archived lead-time runs as auditable `forecast_runs` / `forecast_members`; it is not wired to scheduler or live trading.
+- Beijing 2026-07-05 smoke fetched ECMWF/GFS/CMA previous-day 1/2/3 runs successfully. The archived model samples gave 34C bucket probability 0.0 while the market mid was 0.9965, so the old Beijing ">=0.85" sanity check is now treated as a calibration blocker, not a pass.
+- ResourceWarning noise was traced to legacy `dashboard_db.py` using plain `sqlite3.connect()` with `with conn:`; fixed by returning a closing connection from `_connect()`.
+- Verification: `python -m unittest tests.test_ensemble_vs_market tests.test_deb_gaussian tests.test_v3_core tests.test_scheduler tests.test_polywx_contract` passed, 198 tests OK. `git diff --check` passed with only Windows line-ending warnings.

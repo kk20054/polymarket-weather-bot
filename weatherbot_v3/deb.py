@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import statistics
 from datetime import datetime, timezone
 from pathlib import Path
@@ -154,6 +155,37 @@ def build_daily_max_prediction(
     unit = _clean_unit(profile.unit if profile else "C")
     sigma_floor = sigma_floor_for_unit(unit) if sigma_floor_c == DEFAULT_SIGMA_FLOOR_C else convert_sigma(float(sigma_floor_c), "C", unit)
     issued = _floor_issued_at(issued_at)
+
+    if os.getenv("WEATHERBOT_ENSEMBLE_DEB_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}:
+        try:
+            from .forecasts.ensemble import build_ensemble_prediction
+
+            ensemble = build_ensemble_prediction(city_key, target_date, issued_at=issued, path=path)
+        except Exception as exc:
+            ensemble = {"ok": False, "reasons": [f"ensemble_error:{exc}"]}
+        if ensemble.get("ok"):
+            observed_floor = _observed_floor(city_key, target_date, unit, path)
+            floor_applied = False
+            if observed_floor is not None and observed_floor > float(ensemble.get("mu") or -999):
+                ensemble["mu"] = observed_floor
+                floor_applied = True
+            mixed_peak = _mixed_curve_peak(
+                city_key,
+                target_date,
+                unit,
+                profile.timezone if profile else "UTC",
+                issued,
+                path,
+            )
+            ensemble.update({
+                "observed_floor": observed_floor,
+                "mu_observed_floor_applied": floor_applied,
+                "peak_hour": mixed_peak.get("peak_hour") or ensemble.get("peak_hour") or "",
+                "peak_temp": mixed_peak.get("peak_temp") if mixed_peak.get("peak_temp") is not None else ensemble.get("peak_temp"),
+                "peak_source": mixed_peak.get("peak_source") or ensemble.get("peak_source") or "",
+                "mixed_peak": mixed_peak,
+            })
+            return ensemble
 
     forecast_components, component_meta = _forecast_components(city_key, target_date, unit, residual_days, path)
     if not forecast_components:

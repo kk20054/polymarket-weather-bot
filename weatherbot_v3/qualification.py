@@ -28,7 +28,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     station_sync = sync_station_registry(path)
     station_rows = list_stations(path)
-    with connect(path) as conn:
+    conn = connect(path)
+    try:
         rules = [dict(row) for row in conn.execute("SELECT * FROM market_rules").fetchall()]
         contracts = [dict(row) for row in conn.execute("SELECT * FROM settlement_contracts").fetchall()]
         truths = [dict(row) for row in conn.execute("SELECT * FROM truth_observations").fetchall()]
@@ -75,6 +76,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 "SELECT * FROM fills WHERE order_type = 'paper' AND source = 'paper-execution-v1'"
             ).fetchall()
         ]
+    finally:
+        conn.close()
 
     rules_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     contracts_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
