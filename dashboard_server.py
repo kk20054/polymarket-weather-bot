@@ -656,14 +656,26 @@ def _recommendation_class(target_date: str, station: dict, now: datetime) -> str
         local_today = now.astimezone(ZoneInfo(tz_name)).date().isoformat()
     except Exception:
         local_today = now.date().isoformat()
-    return "today_observation" if str(target_date or "") <= local_today else "forecast_lead"
+    return "today_observation" if str(target_date or "") == local_today else "forecast_lead"
+
+
+def _station_local_today(station: dict, now: datetime) -> str:
+    tz_name = str(station.get("settlement_timezone") or station.get("timezone") or "UTC")
+    try:
+        return now.astimezone(ZoneInfo(tz_name)).date().isoformat()
+    except Exception:
+        return now.date().isoformat()
+
+
+def _recommendation_query_cutoff(stations: dict[str, dict], now: datetime) -> str:
+    local_dates = [_station_local_today(station, now) for station in stations.values()]
+    return min(local_dates) if local_dates else _today_str()
 
 
 def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = None, path: Path | None = None) -> dict:
     """Return PolyWX-style watch cards from persisted Layer 6 decisions only."""
     init_v3_db(path)
     now = datetime.now(timezone.utc)
-    today = _today_str()
     items: list[dict] = []
     skipped = Counter()
     with connect(path) as conn:
@@ -671,6 +683,7 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             str(row["city_key"]): dict(row)
             for row in conn.execute("SELECT * FROM stations").fetchall()
         }
+        query_cutoff = _recommendation_query_cutoff(stations, now)
         metars = _latest_rows_by_city(
             [dict(row) for row in conn.execute(
                 """
@@ -712,7 +725,7 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
                 ORDER BY city, target_date, COALESCE(retrieved_at, run_at, created_at) DESC, id DESC
                 LIMIT 1500
                 """,
-                (today,),
+                (query_cutoff,),
             ).fetchall()
         ]
         predictions = [
@@ -724,7 +737,7 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
                 ORDER BY target_date ASC, issued_at DESC, id DESC
                 LIMIT 500
                 """,
-                (today,),
+                (query_cutoff,),
             ).fetchall()
         ]
         decisions = [
@@ -746,7 +759,7 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
                 ORDER BY sd.city_key, sd.target_date, sd.issued_at DESC, sd.edge DESC, sd.id DESC
                 LIMIT 1500
                 """,
-                (today,),
+                (query_cutoff,),
             ).fetchall()
         ]
 
@@ -780,6 +793,9 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             skipped["older_decision_round"] += 1
             continue
         station = stations.get(city) or {}
+        if target_date < _station_local_today(station, now):
+            skipped["past_target_date"] += 1
+            continue
         metar = metars.get(city) or {}
         forecast = latest_forecast_by_city_date.get((city, target_date)) or {}
         recommendation_class = _recommendation_class(target_date, station, now)

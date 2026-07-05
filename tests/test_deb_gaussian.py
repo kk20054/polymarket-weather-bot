@@ -29,7 +29,7 @@ def test_db_path(name: str) -> Path:
 
 
 class DebGaussianTests(unittest.TestCase):
-    def test_gaussian_bucket_integral_matches_one_sigma_interval(self):
+    def test_celsius_bucket_integral_uses_truncated_integer_interval(self):
         result = bucket_probabilities(
             25.0,
             1.0,
@@ -39,7 +39,9 @@ class DebGaussianTests(unittest.TestCase):
         )
 
         probability = result["items"][0]["probability"]
-        self.assertAlmostEqual(probability, 0.682689, places=5)
+        self.assertAlmostEqual(probability, 0.818595, places=5)
+        self.assertEqual(result["items"][0]["bucket_low"], 24.0)
+        self.assertEqual(result["items"][0]["bucket_high"], 27.0)
 
     def test_open_tail_buckets_normalize_to_one(self):
         result = bucket_probabilities(

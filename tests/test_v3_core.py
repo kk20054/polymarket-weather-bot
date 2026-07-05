@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.china_weather import hko_rhrread_observation, weathercn_sk2d_observation
@@ -2023,7 +2024,7 @@ class V3CoreTests(unittest.TestCase):
     def test_dashboard_recommendations_use_fresh_verified_signal_decisions(self):
         db_path = test_db_path("dashboard_recommendations")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
-        target = date.today().isoformat()
+        target = datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
             init_v3_db(db_path)
             sync_station_registry(path=db_path)
@@ -2064,7 +2065,7 @@ class V3CoreTests(unittest.TestCase):
     def test_dashboard_recommendations_keep_spread_only_watch_candidate(self):
         db_path = test_db_path("dashboard_recommendations_spread")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
-        target = date.today().isoformat()
+        target = datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
             init_v3_db(db_path)
             sync_station_registry(path=db_path)
