@@ -1,0 +1,23 @@
+{
+  "app.subtitle": "天气量化交易平台",
+  "language.label": "语言",
+  "language.zh": "中文",
+  "language.en": "English",
+  "city.selector": "城市",
+  "city.status.fully_active": "可模拟",
+  "city.status.paper_only": "仅模拟",
+  "city.status.monitor_only": "仅观察",
+  "city.status.observation_only": "仅观测",
+  "city.group.mainland": "中国大陆",
+  "city.group.asia": "亚洲其他",
+  "city.group.us": "欧美 / 美国",
+  "view.workbench": "天气工作台",
+  "view.deltaAudit": "Delta Audit",
+  "banner.hk": "此市场按 HKO 天文台每日摘要结算，与观测站 VHHH 不一致；系统仅提供 paper 模拟，不会实盘下单",
+  "banner.seoul": "该城市历史 bot 实盘 P&L 严重负向（外部案例 -$4,259），仅供研究观察，不提供 paper 或 live",
+  "banner.active": "活跃市场：{slug}；结算源：{source}",
+  "delta.title": "Truth Delta Audit",
+  "delta.subtitle": "IEM / Wunderground / HKO 日最高温差异，用来判断结算 truth 近似误差",
+  "delta.empty": "暂无 truth_delta_audit 数据；先运行 Round 3 truth collector。",
+  "alpha.tooltip": "ECMWF 06Z 更新后模型概率变化 {delta}，市场未 reprice"
+}

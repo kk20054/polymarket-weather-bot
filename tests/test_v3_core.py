@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.china_weather import hko_rhrread_observation, weathercn_sk2d_observation
-from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, paper_execution_summary, set_settlement_contract_verification, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_settlement_contracts, upsert_signal_decision_record, weather_evidence_summary
+from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, model_reprice_event_summary, paper_execution_summary, set_settlement_contract_verification, truth_delta_audit_summary, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_model_reprice_event, upsert_settlement_contracts, upsert_signal_decision_record, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.polymarket_probe import parse_settlement_rule_text, probe_polymarket_markets
@@ -226,6 +226,60 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(market_summary["top_blocked"][0]["bucket"], "82-83")
         self.assertTrue(_city_evidence_matches(payload[0], "chicago-kord"))
         self.assertTrue(_city_evidence_matches(payload[0], "chicago"))
+
+    def test_round5_truth_delta_and_alpha_summaries_support_dashboard(self):
+        path = test_db_path("round5-dashboard-readonly")
+        with patch.dict(os.environ, {"WEATHERBOT_DB_PATH": str(path)}):
+            init_v3_db(path)
+            with connect(path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO truth_delta_audit (
+                        audit_key, icao, city, date_local, wu_high_c, iem_high_c,
+                        hko_high_c, delta_wu_minus_iem, notes, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "chicago-2026-07-04",
+                        "KORD",
+                        "chicago",
+                        "2026-07-04",
+                        31.1,
+                        30.2,
+                        None,
+                        0.9,
+                        "unit test",
+                        "2026-07-05T00:00:00+00:00",
+                        "2026-07-05T00:00:00+00:00",
+                    ),
+                )
+            delta_summary = truth_delta_audit_summary("chicago", path=path)
+            self.assertEqual(delta_summary["count"], 1)
+            self.assertEqual(delta_summary["rows"][0]["icao"], "KORD")
+            self.assertEqual(delta_summary["histogram"][0]["count"], 1)
+
+            upsert_model_reprice_event(
+                {
+                    "event_key": "alpha-chicago",
+                    "city_key": "chicago",
+                    "target_date": "2026-07-04",
+                    "market_id": "market-92",
+                    "bucket_key": "bucket-92",
+                    "triggered_at": "2026-07-05T06:01:00+00:00",
+                    "model_source": "ecmwf_06z",
+                    "previous_model_prob": 0.21,
+                    "model_prob": 0.31,
+                    "delta_prob": 0.10,
+                    "market_mid": 0.22,
+                    "edge": 0.09,
+                    "alpha_candidate": True,
+                },
+                path=path,
+            )
+            alpha_summary = model_reprice_event_summary("chicago", "2026-07-04", alpha_only=True, path=path)
+            self.assertEqual(alpha_summary["count"], 1)
+            self.assertEqual(alpha_summary["alpha_count"], 1)
+            self.assertTrue(alpha_summary["rows"][0]["alpha_candidate"])
 
     def test_diff_stats_summary_reports_polywx_metrics(self):
         summary = _diff_stats_summary(

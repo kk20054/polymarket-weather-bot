@@ -17,11 +17,13 @@ import {
   fetchDailyMaxPredictions,
   fetchForecastArchiveManifest,
   fetchMarketBuckets,
+  fetchModelRepriceEvents,
   fetchProductionRefreshStatus,
   fetchProductionValidation,
   fetchSchedulerStatus,
   fetchSignalDecisions,
   fetchSettlementContracts,
+  fetchTruthDeltaAudit,
   placeLiveOrder,
   resetSimulation,
   runProductionAction,
@@ -42,11 +44,14 @@ import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
-import type { AutoSimulationStatus, BotStats, DashboardRecommendationItem, DataReadiness, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerPollerStatus, SchedulerStatus } from './types'
+import { DeltaAuditPanel } from './components/DeltaAuditPanel'
+import { useT, type I18nLanguage } from './i18n/useT'
+import type { AutoSimulationStatus, BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommendationItem, DataReadiness, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerPollerStatus, SchedulerStatus } from './types'
 
 type TradeMode = 'paper' | 'live'
 type UiLanguage = 'zh' | 'en'
 type ThemeMode = 'light' | 'dark'
+type MainView = 'workbench' | 'delta'
 type ProductionRefreshOptions = {
   cities?: string[]
   days?: number
@@ -103,6 +108,54 @@ const UI_COPY = {
     theme: 'Theme',
   },
 } satisfies Record<UiLanguage, Record<string, string>>
+
+const MAINLAND_CITY_KEYS = new Set(['shanghai', 'beijing', 'wuhan', 'qingdao', 'shenzhen'])
+const ASIA_OTHER_CITY_KEYS = new Set(['hong-kong', 'tokyo', 'seoul', 'taipei', 'singapore'])
+const ROUND5_STATUS_FALLBACK: Record<string, CityStatusConfig> = {
+  shanghai: { status: 'fully_active', rank: 1, settlement: 'verified WU' },
+  'hong-kong': { status: 'paper_only', rank: 2, settlement: 'HKO mismatch' },
+  seoul: { status: 'monitor_only', rank: 3, settlement: 'verified WU', reason: 'external_pnl_negative' },
+  tokyo: { status: 'fully_active', rank: 4, settlement: 'verified WU' },
+  beijing: { status: 'fully_active', rank: 5, settlement: 'verified WU' },
+  singapore: { status: 'fully_active', rank: 6, settlement: 'verified WU' },
+  taipei: { status: 'fully_active', rank: 7, settlement: 'verified WU' },
+  shenzhen: { status: 'fully_active', rank: 8, settlement: 'verified WU' },
+  wuhan: { status: 'fully_active', rank: 9, settlement: 'verified WU' },
+  qingdao: { status: 'fully_active', rank: 10, settlement: 'verified WU' },
+}
+
+const STATUS_ICON: Record<CityTradingStatus, string> = {
+  fully_active: '🟢',
+  paper_only: '🟡',
+  monitor_only: '🔴',
+  observation_only: '⚪',
+}
+
+function resolveCityTradingStatus(
+  cityKey?: string,
+  verificationStatus?: string,
+  statusMap?: Record<string, CityStatusConfig>,
+): CityTradingStatus {
+  const key = cityKey || ''
+  const configured = (statusMap?.[key]?.status || ROUND5_STATUS_FALLBACK[key]?.status || '') as CityTradingStatus | ''
+  if (configured === 'fully_active' || configured === 'paper_only' || configured === 'monitor_only' || configured === 'observation_only') return configured
+  if (verificationStatus === 'settlement_mismatch') return 'paper_only'
+  if (verificationStatus === 'no_active_market') return 'observation_only'
+  return 'observation_only'
+}
+
+function statusTone(status: CityTradingStatus) {
+  if (status === 'fully_active') return 'border-green-500/30 bg-green-500/10 text-green-200'
+  if (status === 'paper_only') return 'border-amber-500/35 bg-amber-500/10 text-amber-100'
+  if (status === 'monitor_only') return 'border-red-500/35 bg-red-500/10 text-red-100'
+  return 'border-neutral-700 bg-neutral-900/50 text-neutral-400'
+}
+
+function cityGroupKey(cityKey: string, continent?: string) {
+  if (MAINLAND_CITY_KEYS.has(cityKey)) return 'mainland'
+  if (ASIA_OTHER_CITY_KEYS.has(cityKey)) return 'asia'
+  return continent === 'Asia Pacific' || continent === 'Asia' ? 'asia' : 'us'
+}
 
 const EMPTY_STATS: BotStats = {
   is_running: false,
@@ -931,6 +984,7 @@ function App() {
   const [contractStatus, setContractStatus] = useState('mature-auto')
   const [citySearch, setCitySearch] = useState('')
   const [citySort, setCitySort] = useState<'signal' | 'alpha'>('signal')
+  const [activeMainView, setActiveMainView] = useState<MainView>('workbench')
   const [continentFilter, setContinentFilter] = useState<(typeof CONTINENT_FILTERS)[number]>('全部')
   const [uiLanguage, setUiLanguage] = useState<UiLanguage>(() => {
     if (typeof window === 'undefined') return 'zh'
@@ -946,6 +1000,8 @@ function App() {
   const productionRefreshRunningRef = useRef(false)
   const seenSchedulerRunsRef = useRef<Record<string, string>>({})
   const copy = UI_COPY[uiLanguage]
+  const i18nLanguage: I18nLanguage = uiLanguage === 'zh' ? 'zh-CN' : 'en'
+  const t = useT(i18nLanguage)
 
   const showRefreshNotice = (notice: RefreshNotice, ttlMs = 7000) => {
     setRefreshNotices(current => [notice, ...current.filter(item => item.id !== notice.id)].slice(0, 5))
@@ -1018,6 +1074,22 @@ function App() {
     queryFn: () => fetchDailyMaxPredictions(selectedCity, selectedDate),
     enabled: selectedEvidenceReadyForLayer7,
     refetchInterval: 60000,
+    retry: 1,
+  })
+
+  const truthDeltaAuditQuery = useQuery({
+    queryKey: ['truth-delta-audit', selectedCity],
+    queryFn: () => fetchTruthDeltaAudit(selectedCity || '', 500),
+    enabled: Boolean(selectedCity),
+    refetchInterval: 120000,
+    retry: 1,
+  })
+
+  const modelRepriceEventsQuery = useQuery({
+    queryKey: ['model-reprice-events', selectedCity, selectedDate],
+    queryFn: () => fetchModelRepriceEvents(selectedCity || '', selectedDate || '', true, 200),
+    enabled: selectedEvidenceReadyForLayer7,
+    refetchInterval: 30000,
     retry: 1,
   })
 
@@ -1249,6 +1321,7 @@ function App() {
   const signals = data?.weather_signals ?? []
   const forecasts = data?.weather_forecasts ?? []
   const citySeries = data?.weather_city_series ?? []
+  const cityStatusMap = data?.city_statuses ?? ROUND5_STATUS_FALLBACK
   const cityEvidence = data?.city_evidence ?? []
   const events = data?.events ?? []
   const fetchLog = data?.fetch_log ?? []
@@ -1445,6 +1518,20 @@ function App() {
   const selectedCityMeta = cityOptions.find(city => city.key === selectedCity)
   const selectedCityEvidence = cityEvidence.find(city => city.city_key === selectedCity)
   const selectedDateEvidence = selectedCityEvidence?.dates.find(item => item.target_date === selectedDate) ?? selectedCityEvidence?.dates[0]
+  const selectedTradingStatus = resolveCityTradingStatus(selectedCityMeta?.key, selectedCityMeta?.verificationStatus, cityStatusMap)
+  const selectedStatusConfig = selectedCityMeta?.key ? (cityStatusMap[selectedCityMeta.key] ?? ROUND5_STATUS_FALLBACK[selectedCityMeta.key]) : undefined
+  const selectedMarketBucket = marketBucketsQuery.data?.latest?.find(bucket => bucket.event_slug || bucket.event_url)
+  const cityGroups = useMemo(() => {
+    const groups: Record<'mainland' | 'asia' | 'us', typeof cityOptions> = {
+      mainland: [],
+      asia: [],
+      us: [],
+    }
+    for (const city of cityOptions) {
+      groups[cityGroupKey(city.key, city.continent)].push(city)
+    }
+    return groups
+  }, [cityOptions])
   const recommendations = data?.recommendations ?? null
   const recommendedItems = recommendations?.items ?? []
   const actionableCityCount = recommendations?.trade_candidate_count ?? cityOptions.filter(city => city.actionable > 0).length
@@ -1591,7 +1678,7 @@ function App() {
             <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot</h1>
             <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] tabular-nums text-neutral-500">{APP_VERSION}</span>
           </div>
-          <div className="text-[11px] text-neutral-600">{copy.subtitle}</div>
+          <div className="text-[11px] text-neutral-600">{t('app.subtitle')}</div>
         </div>
         <div className="order-last flex min-w-0 basis-full flex-nowrap items-center gap-1.5 overflow-x-auto text-[10px] xl:overflow-visible">
           <span className="shrink-0 border border-neutral-800 px-2 py-1 text-neutral-400">{copy.data} {dataAge(stats.data_age_minutes)}</span>
@@ -1627,22 +1714,45 @@ function App() {
             {liveAvailable ? copy.liveReady : copy.liveLocked}
           </span>
         </div>
-        <div className="inline-flex items-center border border-neutral-800 text-[11px]" aria-label={copy.language}>
-          <button
-            type="button"
-            onClick={() => setUiLanguage('zh')}
-            className={`px-2 py-1.5 ${uiLanguage === 'zh' ? 'bg-neutral-100 text-black' : 'text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200'}`}
+        <label className="inline-flex items-center gap-1 border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400">
+          <span>{t('city.selector')}</span>
+          <select
+            value={selectedCity}
+            onChange={event => setSelectedCity(event.target.value)}
+            className="min-w-[180px] bg-transparent text-neutral-100 outline-none"
+            aria-label={t('city.selector')}
           >
-            中文
-          </button>
-          <button
-            type="button"
-            onClick={() => setUiLanguage('en')}
-            className={`border-l border-neutral-800 px-2 py-1.5 ${uiLanguage === 'en' ? 'bg-neutral-100 text-black' : 'text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200'}`}
+            <optgroup label={t('city.group.mainland')}>
+              {cityGroups.mainland.map(city => {
+                const status = resolveCityTradingStatus(city.key, city.verificationStatus, cityStatusMap)
+                return <option key={city.key} value={city.key}>{STATUS_ICON[status]} {city.name} · {city.station || '--'}</option>
+              })}
+            </optgroup>
+            <optgroup label={t('city.group.asia')}>
+              {cityGroups.asia.map(city => {
+                const status = resolveCityTradingStatus(city.key, city.verificationStatus, cityStatusMap)
+                return <option key={city.key} value={city.key}>{STATUS_ICON[status]} {city.name} · {city.station || '--'}</option>
+              })}
+            </optgroup>
+            <optgroup label={t('city.group.us')}>
+              {cityGroups.us.map(city => {
+                const status = resolveCityTradingStatus(city.key, city.verificationStatus, cityStatusMap)
+                return <option key={city.key} value={city.key}>{STATUS_ICON[status]} {city.name} · {city.station || '--'}</option>
+              })}
+            </optgroup>
+          </select>
+        </label>
+        <label className="inline-flex items-center gap-1 border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400" aria-label={t('language.label')}>
+          <span>{t('language.label')}</span>
+          <select
+            value={uiLanguage}
+            onChange={event => setUiLanguage(event.target.value === 'en' ? 'en' : 'zh')}
+            className="bg-transparent text-neutral-100 outline-none"
           >
-            English
-          </button>
-        </div>
+            <option value="zh">{t('language.zh')}</option>
+            <option value="en">{t('language.en')}</option>
+          </select>
+        </label>
         <div className="inline-flex items-center border border-neutral-800 text-[11px]" aria-label={copy.theme}>
           <button
             type="button"
@@ -1947,7 +2057,54 @@ function App() {
             </div>
           </div>
 
+          {selectedCityMeta && (
+            <div className={`border-b px-3 py-2 text-[11px] ${statusTone(selectedTradingStatus)}`}>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold">
+                  {STATUS_ICON[selectedTradingStatus]} {t(`city.status.${selectedTradingStatus}`)}
+                </span>
+                {selectedTradingStatus === 'paper_only' && selectedCityMeta.key === 'hong-kong' ? (
+                  <span>{t('banner.hk')}</span>
+                ) : selectedTradingStatus === 'monitor_only' && selectedCityMeta.key === 'seoul' ? (
+                  <span>{t('banner.seoul')}</span>
+                ) : selectedTradingStatus === 'fully_active' ? (
+                  <span>
+                    {t('banner.active', {
+                      slug: selectedMarketBucket?.event_slug || selectedMarketBucket?.event_url || selectedCityMeta.key,
+                      source: selectedCityMeta.primarySettlementSource || selectedStatusConfig?.settlement || 'verified',
+                    })}
+                    {selectedMarketBucket?.event_url ? (
+                      <a href={selectedMarketBucket.event_url} target="_blank" rel="noreferrer" className="ml-2 underline decoration-dotted underline-offset-2">
+                        Polymarket
+                      </a>
+                    ) : null}
+                  </span>
+                ) : (
+                  <span>{selectedStatusConfig?.reason || selectedCityMeta.verificationStatus || 'no active market'}</span>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="min-h-[720px] overflow-y-auto xl:min-h-0 xl:flex-1">
+            <div className="flex gap-1 border-b border-neutral-800 p-2 text-[11px]">
+              <button
+                type="button"
+                onClick={() => setActiveMainView('workbench')}
+                className={`border px-3 py-1.5 ${activeMainView === 'workbench' ? 'border-blue-500/40 bg-blue-500/15 text-blue-100' : 'border-neutral-800 text-neutral-500 hover:text-neutral-200'}`}
+              >
+                {t('view.workbench')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveMainView('delta')}
+                className={`border px-3 py-1.5 ${activeMainView === 'delta' ? 'border-blue-500/40 bg-blue-500/15 text-blue-100' : 'border-neutral-800 text-neutral-500 hover:text-neutral-200'}`}
+              >
+                {t('view.deltaAudit')}
+              </button>
+            </div>
+            {activeMainView === 'workbench' ? (
+            <>
             <div className="border-b border-neutral-800 p-2">
               <div className="mb-1 flex items-center justify-between gap-2">
                 <div className="text-[10px] font-medium text-neutral-300">推荐关注</div>
@@ -2013,7 +2170,16 @@ function App() {
               onBackfillHistory={() => historyBackfillMutation.mutate()}
               backfilling={historyBackfillMutation.isPending}
               backfillResult={historyBackfillMutation.data}
+              alphaEvents={modelRepriceEventsQuery.data?.rows ?? []}
             />
+            </>
+            ) : (
+              <DeltaAuditPanel
+                summary={truthDeltaAuditQuery.data ?? null}
+                selectedCity={selectedCity}
+                language={i18nLanguage}
+              />
+            )}
           </div>
         </section>
 

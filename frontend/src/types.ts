@@ -1308,6 +1308,7 @@ export interface DashboardData {
   weather_signals: WeatherSignal[]
   weather_forecasts: WeatherForecast[]
   weather_city_series?: WeatherCitySeries[]
+  city_statuses?: Record<string, CityStatusConfig>
   city_evidence?: CityEvidence[]
   recommendations?: DashboardRecommendations
   scheduler_status?: SchedulerStatus
@@ -1318,6 +1319,73 @@ export interface DashboardData {
     reason?: string
     generated_at?: string
   }
+}
+
+export type CityTradingStatus = 'fully_active' | 'paper_only' | 'monitor_only' | 'observation_only'
+
+export interface CityStatusConfig {
+  status?: CityTradingStatus | string
+  rank?: number
+  volume?: number
+  settlement?: string
+  reason?: string
+  note?: string
+}
+
+export interface TruthDeltaAuditRow {
+  id?: number
+  audit_key?: string
+  icao?: string
+  city?: string
+  date_local?: string
+  wu_high_c?: number | null
+  iem_high_c?: number | null
+  hko_high_c?: number | null
+  polymarket_resolved_bucket?: string | null
+  delta_wu_minus_iem?: number | null
+  resolved_at?: string | null
+  notes?: string | null
+}
+
+export interface TruthDeltaAuditSummary {
+  ok: boolean
+  count: number
+  city_filter?: string
+  rows: TruthDeltaAuditRow[]
+  by_city?: Array<{
+    city?: string
+    icao?: string
+    count: number
+    latest_date?: string | null
+    delta_wu_minus_iem_values?: number[]
+  }>
+  histogram?: Array<{ bucket: string; count: number }>
+}
+
+export interface ModelRepriceEvent {
+  id?: number
+  event_key?: string
+  city_key?: string
+  target_date?: string
+  market_id?: string
+  bucket_key?: string
+  triggered_at?: string
+  model_source?: string
+  previous_model_prob?: number | null
+  model_prob?: number | null
+  delta_prob?: number | null
+  market_mid?: number | null
+  edge?: number | null
+  alpha_candidate?: boolean
+}
+
+export interface ModelRepriceEventSummary {
+  ok: boolean
+  count: number
+  alpha_count: number
+  city_filter?: string
+  target_date_filter?: string
+  rows: ModelRepriceEvent[]
 }
 
 export interface DashboardEvent {

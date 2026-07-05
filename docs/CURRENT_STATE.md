@@ -93,3 +93,11 @@
 - Beijing 2026-07-05 smoke fetched ECMWF/GFS/CMA previous-day 1/2/3 runs successfully. The archived model samples gave 34C bucket probability 0.0 while the market mid was 0.9965, so the old Beijing ">=0.85" sanity check is now treated as a calibration blocker, not a pass.
 - ResourceWarning noise was traced to legacy `dashboard_db.py` using plain `sqlite3.connect()` with `with conn:`; fixed by returning a closing connection from `_connect()`.
 - Verification: `python -m unittest tests.test_ensemble_vs_market tests.test_deb_gaussian tests.test_v3_core tests.test_scheduler tests.test_polywx_contract` passed, 198 tests OK. `git diff --check` passed with only Windows line-ending warnings.
+
+## 2026-07-06 Round 5 UI Status
+
+- Layer 7 Round 5 UI is implemented: top City dropdown grouped by Mainland China / Other Asia / US-Europe, language dropdown backed by `frontend/src/i18n/useT.ts`, HK paper-only banner, Seoul monitor-only banner, and fully-active market source banner.
+- Probability buckets now render as a dynamic 6-12 column grid with model probability, market mid, edge, bid/ask, >8pp highlight, and ⚡ alpha candidate tooltip from `model_reprice_events`.
+- Delta Audit page is available in the center panel and reads `/api/truth-delta-audit`; it is honest-empty until Round 3 truth collectors populate enough rows.
+- Backend additions are read-only: `/api/truth-delta-audit`, `/api/model-reprice-events`, and dashboard `city_statuses`. Live trading remains locked.
+- Verification: `npm run build` passed; `python -m unittest tests.test_polywx_contract tests.test_v3_core` passed, 181 tests OK; `git diff --check` passed with only CRLF warnings.

@@ -189,6 +189,16 @@
 - Next: collect archived Open-Meteo previous-runs for the 341 bucket set, expand ensemble coverage beyond the smoke city/date, then rerun calibration with real historical lead-time alignment.
 - Commit: not committed in this turn.
 
+### 2026-07-06：Round 5 Layer 7 UI 大清理 + i18n + 城市状态可视化
+
+- 目标：只做 Layer 7 UI 与只读展示支撑，不改交易算法、不解锁 live；把 10 个亚洲城市的 fully_active / paper_only / monitor_only / observation_only 状态显性化，并补齐 i18n、动态 bucket 表、Delta Audit 和 alpha candidate 标记。
+- 改动：新增 `frontend/src/i18n/zh-CN.json`、`frontend/src/i18n/en.json`、`frontend/src/i18n/useT.ts`；顶栏新增分组 City dropdown 与语言 dropdown；中间主板新增 HK paper-only 黄色横幅、Seoul monitor-only 红色横幅、fully_active 市场信息条；新增 `DeltaAuditPanel`，读取 `truth_delta_audit`；概率桶明细从表格改为 6-12 桶动态 grid，展示 model_prob / market_mid / edge / bid-ask，edge 绝对值 >8pp 高亮；alpha candidate 用 `model_reprice_events` 显示 ⚡ tooltip。
+- 后端支撑：`dashboard_server.py` 新增只读 `/api/truth-delta-audit`、`/api/model-reprice-events`，dashboard payload 暴露 `city_statuses`；`weatherbot_v3/db.py` 新增 truth delta 与 model reprice summary/list 函数。
+- 验证：`npm run build` 通过；`.venv\Scripts\python.exe -m unittest tests.test_polywx_contract tests.test_v3_core` 通过，181 tests OK；`git diff --check` 通过，仅 Windows LF/CRLF warning。
+- 结论：Round 5 UI 框架可用，城市状态与风险提示更清晰；Delta/Alpha 页面依赖 Round 3/4 表内真实数据，没数据时显示诚实空态。live 仍锁定。
+- 下一步：浏览器人工 QA 10 城城市切换、HK/Seoul 横幅、6/12 桶动态表；之后进入 Round 6 前应先补 Previous Runs/Truth Delta 数据密度与 paper validation。
+- 相关提交：待提交。
+
 ### 2026-07-05: Previous Runs walk-forward entry and SQLite warning cleanup
 
 - Target: close the main leftover from Round 4 by replacing fake market-normalized "calibration" with a real Open-Meteo Previous Runs ingestion path, then remove noisy SQLite ResourceWarnings from the test run.

@@ -13,7 +13,7 @@ import {
   YAxis,
 } from 'recharts'
 import { ExternalLink } from 'lucide-react'
-import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, CityEvidenceMarketBucketSummary, CityEvidenceProbabilitySummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, MarketBucketSummary, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, CityEvidenceMarketBucketSummary, CityEvidenceProbabilitySummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -25,6 +25,7 @@ interface Props {
   marketBuckets?: MarketBucketSummary | null
   signalDecisions?: SignalDecisionSummary | null
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
+  alphaEvents?: ModelRepriceEvent[]
   layer7Loading?: boolean
   selectedCity?: string
   onSelectedCity?: (cityKey: string) => void
@@ -89,6 +90,7 @@ type HourlyWeatherRow = {
 }
 
 type LayerDistributionItem = DistributionItem & {
+  bucket_key?: string | null
   bucket_label?: string | null
   bucket_direction?: string | null
   event_url?: string | null
@@ -115,6 +117,37 @@ type EvidenceCardItem = {
   tone?: EvidenceCardTone
   badges?: Array<{ label: string; tone?: EvidenceCardTone }>
   details?: Array<{ label: string; value: string; wide?: boolean }>
+}
+
+const gridColsMap: Record<number, string> = {
+  6: 'grid-cols-6',
+  7: 'grid-cols-7',
+  8: 'grid-cols-8',
+  9: 'grid-cols-9',
+  10: 'grid-cols-10',
+  11: 'grid-cols-11',
+  12: 'grid-cols-12',
+}
+
+function bucketGridClass(count: number) {
+  if (count <= 6) return gridColsMap[6]
+  if (count >= 12) return gridColsMap[12]
+  return gridColsMap[count] ?? gridColsMap[6]
+}
+
+function marketMid(item: LayerDistributionItem) {
+  const bid = item.bid === null || item.bid === undefined ? null : Number(item.bid)
+  const ask = item.ask === null || item.ask === undefined ? null : Number(item.ask)
+  if (bid !== null && ask !== null && Number.isFinite(bid) && Number.isFinite(ask)) return (bid + ask) / 2
+  if (ask !== null && Number.isFinite(ask)) return ask
+  if (bid !== null && Number.isFinite(bid)) return bid
+  return null
+}
+
+function alphaEventTitle(event?: ModelRepriceEvent) {
+  if (!event) return ''
+  const delta = event.delta_prob === null || event.delta_prob === undefined ? '--' : `${(Number(event.delta_prob) * 100).toFixed(1)}pp`
+  return `ECMWF 06Z 更新后模型概率变化 ${delta}，市场未 reprice`
 }
 
 type WeatherWorkbenchTab = 'forecast' | 'metar' | 'historical' | 'diff' | 'fetch'
@@ -801,6 +834,7 @@ function buildLayerDistributionItems(buckets?: MarketBucketSummary | null, decis
       const edge = asNumber(decision?.edge) ?? asNumber(modelBucket.edge) ?? (probability - ask)
       return {
         market_id: String(bucket.market_id),
+        bucket_key: bucket.bucket_key ?? modelBucket.bucket_key,
         question: bucket.question ?? '',
         bucket_low: asNumber(bucket.bucket_low) ?? asNumber(modelBucket.bucket_low) ?? -999,
         bucket_high: asNumber(bucket.bucket_high) ?? asNumber(modelBucket.bucket_high) ?? 999,
@@ -1002,6 +1036,7 @@ export function WeatherPanel({
   marketBuckets,
   signalDecisions,
   dailyMaxPrediction,
+  alphaEvents = [],
   layer7Loading = false,
   selectedCity,
   onSelectedCity,
@@ -1419,6 +1454,7 @@ export function WeatherPanel({
               dailyMaxPrediction={dailyMaxPrediction}
               signalDecisions={signalDecisions}
               marketBuckets={marketBuckets}
+              alphaEvents={alphaEvents}
               loading={layer7Loading}
               evidenceSummary={selectedDateEvidence?.modules?.probability_buckets?.probability_summary}
               marketSummary={layerMarketSummary ?? selectedDateEvidence?.modules?.market_buckets?.market_summary}
@@ -2563,6 +2599,7 @@ function TemperatureDistributionPanel({
   dailyMaxPrediction,
   signalDecisions,
   marketBuckets,
+  alphaEvents = [],
   loading = false,
   evidenceSummary,
   marketSummary,
@@ -2577,6 +2614,7 @@ function TemperatureDistributionPanel({
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
   signalDecisions?: SignalDecisionSummary | null
   marketBuckets?: MarketBucketSummary | null
+  alphaEvents?: ModelRepriceEvent[]
   loading?: boolean
   evidenceSummary?: CityEvidenceProbabilitySummary
   marketSummary?: CityEvidenceMarketBucketSummary
@@ -2616,6 +2654,18 @@ function TemperatureDistributionPanel({
       .slice(0, Math.min(2, chartRows.length))
       .map(row => row.index)
   )
+  const alphaByMarket = useMemo(() => {
+    const byMarket = new Map<string, ModelRepriceEvent>()
+    const byBucket = new Map<string, ModelRepriceEvent>()
+    for (const event of alphaEvents) {
+      if (!event.alpha_candidate) continue
+      if (event.market_id) byMarket.set(String(event.market_id), event)
+      if (event.bucket_key) byBucket.set(String(event.bucket_key), event)
+    }
+    return { byMarket, byBucket }
+  }, [alphaEvents])
+  const alphaForItem = (item: LayerDistributionItem) =>
+    alphaByMarket.byMarket.get(String(item.market_id || '')) ?? alphaByMarket.byBucket.get(String(item.bucket_key || ''))
   const normalized = decision?.model_distribution?.normalized ?? distribution?.normalized
   const distributionMethod = decision?.model_distribution?.method ?? deb?.method ?? distribution?.notes?.[0] ?? 'gaussian-cdf'
   const activeEventUrl = decisionMarketBucket?.event_url ?? signal?.event_url
@@ -2699,31 +2749,42 @@ function TemperatureDistributionPanel({
           </div>
 
           <aside className="border border-[#2C3445] bg-[#161A22]">
-            <div className="max-h-[260px] overflow-auto xl:max-h-[320px]">
-              <table className="w-full border-collapse text-left text-[10px]">
-                <thead className="sticky top-0 bg-[#1B212C] text-[#7D8694]">
-                  <tr className="border-b border-[#2C3445]">
-                    <th className="px-2 py-1 font-normal">桶</th>
-                    <th className="px-2 py-1 font-normal">概率</th>
-                    <th className="px-2 py-1 font-normal">卖一</th>
-                    <th className="px-2 py-1 font-normal">Edge</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayItems.map((item, index) => (
-                    <tr key={`${item.market_id || item.bucket_label || `${item.bucket_low}-${item.bucket_high}` || 'bucket'}-${index}`} className={`border-b border-[#2C3445]/80 ${item.is_signal ? 'bg-cyan-500/10 text-cyan-200' : 'hover:bg-[#222A37]'}`}>
-                      <td className="max-w-[132px] px-2 py-1" title={item.question}>
-                        <span className="block truncate">
-                          {fmtBucketAxisLabel(item, unit)}
-                        </span>
-                      </td>
-                      <td className="px-2 py-1 tabular-nums text-green-300">{fmtProb(item.probability)}</td>
-                      <td className="px-2 py-1 tabular-nums text-amber-300">{fallbackMode ? '--' : fmtPrice(item.ask)}</td>
-                      <td className="px-2 py-1 tabular-nums text-neutral-400">{fallbackMode ? '--' : fmtSignedPct(item.probability_edge ?? item.ev)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className={`grid gap-1 p-2 text-[10px] ${bucketGridClass(displayItems.length)}`}>
+              {displayItems.map((item, index) => {
+                const edge = Number(item.probability_edge ?? item.ev ?? 0)
+                const alpha = alphaForItem(item)
+                const mid = marketMid(item)
+                return (
+                  <div
+                    key={`${item.market_id || item.bucket_key || item.bucket_label || `${item.bucket_low}-${item.bucket_high}` || 'bucket'}-${index}`}
+                    className={`min-h-[112px] border p-2 ${item.is_signal ? 'border-cyan-500/40 bg-cyan-500/10' : 'border-[#2C3445] bg-[#1B212C]'} ${Math.abs(edge) > 0.08 ? 'animate-pulse shadow-[0_0_0_1px_rgba(34,197,94,0.25)]' : ''}`}
+                    title={item.question || fmtBucketAxisLabel(item, unit)}
+                  >
+                    <div className="flex items-start justify-between gap-1">
+                      <span className="min-w-0 truncate font-semibold text-[#F8FAFC]">{fmtBucketAxisLabel(item, unit)}</span>
+                      {alpha ? <span title={alphaEventTitle(alpha)} className="shrink-0 text-amber-300">⚡</span> : null}
+                    </div>
+                    <div className="mt-2 space-y-1 tabular-nums text-[#7D8694]">
+                      <div className="flex justify-between gap-1">
+                        <span>model</span>
+                        <span className="text-green-300">{fmtProb(item.probability)}</span>
+                      </div>
+                      <div className="flex justify-between gap-1">
+                        <span>mid</span>
+                        <span>{fallbackMode ? '--' : fmtPrice(mid)}</span>
+                      </div>
+                      <div className="flex justify-between gap-1">
+                        <span>edge</span>
+                        <span className={edge >= 0 ? 'text-green-300' : 'text-red-300'}>{fallbackMode ? '--' : fmtSignedPct(edge)}</span>
+                      </div>
+                      <div className="flex justify-between gap-1">
+                        <span>bid/ask</span>
+                        <span>{fallbackMode ? '--' : `${fmtPrice(item.bid)} / ${fmtPrice(item.ask)}`}</span>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
             <div className="grid grid-cols-2 gap-1 border-t border-[#2C3445] p-2 text-[10px] xl:grid-cols-4">
               <MetricCard label="最高概率" value={fmtProb(evidenceHighestProbability ?? Math.max(...displayItems.map(item => Number(item.probability ?? 0))))} sub={fallbackMode ? '暂无匹配市场桶' : evidenceHighestBucket || '柱色越深概率越高'} />

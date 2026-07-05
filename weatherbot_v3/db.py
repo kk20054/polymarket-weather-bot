@@ -3416,6 +3416,151 @@ def upsert_model_reprice_event(event: dict[str, Any], path: Path | None = None) 
         return int(found["id"]) if found else 0
 
 
+def list_truth_delta_audit(
+    city: str | None = None,
+    *,
+    limit: int = 500,
+    path: Path | None = None,
+) -> list[dict[str, Any]]:
+    init_v3_db(path)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if city:
+        clauses.append("(LOWER(city) = LOWER(?) OR LOWER(icao) = LOWER(?))")
+        params.extend([city, city])
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(max(1, min(int(limit or 500), 2000)))
+    with connect(path) as conn:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM truth_delta_audit
+                {where}
+                ORDER BY date_local DESC, id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        ]
+    for row in rows:
+        row["raw"] = _loads_obj(row.get("raw_json"))
+    return rows
+
+
+def truth_delta_audit_summary(
+    city: str | None = None,
+    *,
+    limit: int = 500,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    rows = list_truth_delta_audit(city, limit=limit, path=path)
+    by_city: dict[str, dict[str, Any]] = {}
+    deltas: list[float] = []
+    for row in rows:
+        city_key = str(row.get("city") or row.get("icao") or "unknown").lower()
+        entry = by_city.setdefault(
+            city_key,
+            {
+                "city": row.get("city"),
+                "icao": row.get("icao"),
+                "count": 0,
+                "latest_date": None,
+                "delta_wu_minus_iem_values": [],
+            },
+        )
+        entry["count"] += 1
+        if not entry["latest_date"] or str(row.get("date_local") or "") > str(entry["latest_date"] or ""):
+            entry["latest_date"] = row.get("date_local")
+        delta = _nullable_num(row.get("delta_wu_minus_iem"))
+        if delta is not None:
+            rounded = round(float(delta), 2)
+            entry["delta_wu_minus_iem_values"].append(rounded)
+            deltas.append(rounded)
+
+    histogram: dict[str, int] = {}
+    for delta in deltas:
+        bucket = round(delta * 2) / 2
+        label = f"{bucket:+.1f}C"
+        histogram[label] = histogram.get(label, 0) + 1
+
+    return {
+        "ok": True,
+        "count": len(rows),
+        "city_filter": city or "",
+        "rows": rows,
+        "by_city": list(by_city.values()),
+        "histogram": [{"bucket": key, "count": value} for key, value in sorted(histogram.items())],
+    }
+
+
+def list_model_reprice_events(
+    city: str | None = None,
+    target_date: str | None = None,
+    *,
+    alpha_only: bool = False,
+    limit: int = 200,
+    path: Path | None = None,
+) -> list[dict[str, Any]]:
+    init_v3_db(path)
+    clauses: list[str] = []
+    params: list[Any] = []
+    if city:
+        clauses.append("LOWER(city_key) = LOWER(?)")
+        params.append(city)
+    if target_date:
+        clauses.append("target_date = ?")
+        params.append(target_date)
+    if alpha_only:
+        clauses.append("alpha_candidate = 1")
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(max(1, min(int(limit or 200), 1000)))
+    with connect(path) as conn:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM model_reprice_events
+                {where}
+                ORDER BY triggered_at DESC, id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        ]
+    for row in rows:
+        row["alpha_candidate"] = bool(row.get("alpha_candidate"))
+        row["raw"] = _loads_obj(row.get("raw_json"))
+    return rows
+
+
+def model_reprice_event_summary(
+    city: str | None = None,
+    target_date: str | None = None,
+    *,
+    alpha_only: bool = False,
+    limit: int = 200,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    rows = list_model_reprice_events(
+        city,
+        target_date,
+        alpha_only=alpha_only,
+        limit=limit,
+        path=path,
+    )
+    return {
+        "ok": True,
+        "count": len(rows),
+        "alpha_count": sum(1 for row in rows if row.get("alpha_candidate")),
+        "city_filter": city or "",
+        "target_date_filter": target_date or "",
+        "rows": rows,
+    }
+
+
 def latest_event_distribution(market_id: str) -> dict[str, Any] | None:
     init_v3_db()
     with connect() as conn:

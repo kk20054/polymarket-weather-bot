@@ -1,0 +1,23 @@
+{
+  "app.subtitle": "Weather Quant Trading Platform",
+  "language.label": "Language",
+  "language.zh": "中文",
+  "language.en": "English",
+  "city.selector": "City",
+  "city.status.fully_active": "paper ready",
+  "city.status.paper_only": "paper only",
+  "city.status.monitor_only": "monitor only",
+  "city.status.observation_only": "observation only",
+  "city.group.mainland": "Mainland China",
+  "city.group.asia": "Other Asia",
+  "city.group.us": "US / Europe",
+  "view.workbench": "Weather Workbench",
+  "view.deltaAudit": "Delta Audit",
+  "banner.hk": "This market settles by HKO daily extract while the current observation station is VHHH; paper simulation only, no live trading.",
+  "banner.seoul": "External bot P&L evidence is strongly negative for Seoul (-$4,259); research monitoring only, no paper or live.",
+  "banner.active": "Active market: {slug}; settlement source: {source}",
+  "delta.title": "Truth Delta Audit",
+  "delta.subtitle": "Daily high differences across IEM / Wunderground / HKO, used to audit settlement-truth approximation error.",
+  "delta.empty": "No truth_delta_audit rows yet. Run the Round 3 truth collector first.",
+  "alpha.tooltip": "After the ECMWF 06Z update, model probability moved {delta} and the market has not repriced."
+}

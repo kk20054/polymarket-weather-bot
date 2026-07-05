@@ -41,6 +41,7 @@ from weatherbot_v3.db import init_v3_db
 from weatherbot_v3.db import insert_event_distribution, latest_event_distribution, latest_signal_decision
 from weatherbot_v3.db import list_signal_decisions
 from weatherbot_v3.db import market_bucket_summary
+from weatherbot_v3.db import model_reprice_event_summary, truth_delta_audit_summary
 from weatherbot_v3.db import daily_max_prediction_summary
 from weatherbot_v3.db import list_data_fetch_logs
 from weatherbot_v3.db import weather_evidence_summary
@@ -65,6 +66,7 @@ from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summa
 from weatherbot_v3.db import paper_execution_summary
 from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.cli import run_market_buckets_sync, run_production_refresh
+from weatherbot_v3.config import asian_city_priority_config
 from weatherbot_v3.validation import build_production_validation_report
 
 
@@ -4024,6 +4026,7 @@ def build_dashboard_payload():
         "weather_signals": weather_signals,
         "weather_forecasts": list(weather_forecasts_by_city.values()),
         "weather_city_series": weather_city_series,
+        "city_statuses": asian_city_priority_config(),
         "city_evidence": city_evidence,
         "recommendations": _recommendations_payload(),
         "events": events,
@@ -4086,6 +4089,7 @@ def _minimal_dashboard_payload(reason: str = "cache_warming"):
         "weather_signals": [],
         "weather_forecasts": [],
         "weather_city_series": city_series,
+        "city_statuses": asian_city_priority_config(),
         "city_evidence": _build_city_evidence_payload(city_series, [], fetch_log),
         "recommendations": _recommendations_payload(),
         "events": events,
@@ -4462,6 +4466,21 @@ async def bucket_probabilities_api(city: str = "", target_date: str = ""):
 @app.get("/api/signal-decisions")
 async def signal_decisions(city: str = "", target_date: str = "", limit: int = 100):
     return signal_decisions_summary(city or None, target_date or None, limit=limit)
+
+
+@app.get("/api/truth-delta-audit")
+async def truth_delta_audit(city: str = "", limit: int = 500):
+    return truth_delta_audit_summary(city or None, limit=limit)
+
+
+@app.get("/api/model-reprice-events")
+async def model_reprice_events(city: str = "", target_date: str = "", alpha_only: bool = False, limit: int = 200):
+    return model_reprice_event_summary(
+        city or None,
+        target_date or None,
+        alpha_only=alpha_only,
+        limit=limit,
+    )
 
 
 @app.get("/api/signal-decisions/{decision_id}")
