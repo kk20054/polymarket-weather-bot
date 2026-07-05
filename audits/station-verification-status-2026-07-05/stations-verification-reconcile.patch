@@ -1,0 +1,39 @@
+diff --git a/weatherbot_v3/stations.py b/weatherbot_v3/stations.py
+--- a/weatherbot_v3/stations.py
++++ b/weatherbot_v3/stations.py
+@@
+-                verification_status=CASE
+-                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market') THEN stations.verification_status
+-                    ELSE excluded.verification_status
+-                END,
++                verification_status=CASE
++                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market') THEN stations.verification_status
++                    WHEN COALESCE(NULLIF(stations.settlement_rule_verified_at, ''), '') != ''
++                         AND UPPER(COALESCE(NULLIF(stations.settlement_station_id, ''), stations.station_id, '')) = UPPER(COALESCE(stations.station_id, '')) THEN 'verified'
++                    WHEN COALESCE(NULLIF(stations.settlement_rule_verified_at, ''), '') != ''
++                         AND UPPER(COALESCE(NULLIF(stations.settlement_station_id, ''), stations.station_id, '')) != UPPER(COALESCE(stations.station_id, '')) THEN 'settlement_mismatch'
++                    ELSE excluded.verification_status
++                END,
+@@
+     return {
+         "ok": True,
+         "sync_version": STATION_SYNC_VERSION,
+         "registry_version": REGISTRY_VERSION,
+         "synced": len(rows),
+         "total": count,
+         "updated_at": now,
+     }
+
+Review note:
+- This prevents future registry syncs from preserving a probe timestamp while reverting status to `provisional`.
+- A one-time DB reconciliation should also run after review:
+
+```sql
+UPDATE stations
+SET verification_status = CASE
+    WHEN UPPER(COALESCE(NULLIF(settlement_station_id, ''), station_id, '')) = UPPER(COALESCE(station_id, '')) THEN 'verified'
+    ELSE 'settlement_mismatch'
+END
+WHERE COALESCE(NULLIF(settlement_rule_verified_at, ''), '') != ''
+  AND COALESCE(verification_status, '') NOT IN ('verified', 'settlement_mismatch', 'no_active_market');
+```
