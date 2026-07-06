@@ -105,8 +105,42 @@ class DebGaussianTests(unittest.TestCase):
 
             self.assertTrue(prediction["ok"])
             self.assertTrue(prediction["mu_observed_floor_applied"])
-            self.assertGreaterEqual(prediction["mu"], 28.0)
+            self.assertGreaterEqual(prediction["mu"], 27.5)
             self.assertGreaterEqual(prediction["sigma"], prediction["sigma_floor"])
+
+    def test_tokyo_observed_floor_keeps_deb_above_intraday_max_minus_half_c(self):
+        path = test_db_path("deb_tokyo_observed_floor")
+        with patch("weatherbot_v3.db.load_config", return_value=SimpleNamespace(v3_db_path=path)):
+            init_v3_db(path)
+            insert_forecast_run(
+                {
+                    "run_key": "jma:tokyo:2026-07-05",
+                    "city": "tokyo",
+                    "target_date": "2026-07-05",
+                    "source": "openmeteo_jma_seamless",
+                    "unit": "C",
+                    "mean_high": 24.0,
+                    "std_high": 0.0,
+                    "member_count": 1,
+                    "retrieved_at": "2026-07-05T00:00:00Z",
+                },
+                [{"member_id": "m0", "high_temp": 24.0}],
+            )
+            upsert_metar_report({
+                "report_key": "rjtt-20260705-0014",
+                "city": "tokyo",
+                "station_id": "RJTT",
+                "report_time": "2026-07-05T00:14:00Z",
+                "temperature": 26.0,
+                "parser_version": "iem-asos-csv-v1",
+                "raw_text": "RJTT 050014Z 18008KT 9999 FEW020 26/21 Q1009",
+            })
+
+            prediction = build_and_store_daily_max_prediction("tokyo", "2026-07-05", path=path)
+
+            self.assertTrue(prediction["ok"])
+            self.assertTrue(prediction["mu_observed_floor_applied"])
+            self.assertGreaterEqual(prediction["mu"], 25.5)
 
     def test_chicago_fahrenheit_forecast_is_not_double_converted(self):
         path = test_db_path("deb_chicago_unit_regression")

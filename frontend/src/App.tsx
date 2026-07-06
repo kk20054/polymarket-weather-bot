@@ -235,11 +235,6 @@ function tempLabel(value?: number | null, unit = '') {
   return `${Number(value).toFixed(1)}°${unit || ''}`
 }
 
-function probabilityLabel(value?: number | null) {
-  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--'
-  return `${(Number(value) * 100).toFixed(1)}%`
-}
-
 function edgeLabel(value?: number | null) {
   if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--'
   const sign = Number(value) >= 0 ? '+' : ''
@@ -255,11 +250,12 @@ function pollerTone(poller?: SchedulerPollerStatus | null) {
   return 'border-red-500/30 text-red-300'
 }
 
-function SchedulerBadge({ poller, label }: { poller?: SchedulerPollerStatus | null; label: string }) {
+function SchedulerBadge({ poller, label, extraTitle }: { poller?: SchedulerPollerStatus | null; label: string; extraTitle?: string }) {
   const fails = Number(poller?.fails_last_hour ?? 0)
   return (
     <span
       className={`shrink-0 border px-2 py-1 tabular-nums ${pollerTone(poller)}`}
+      data-extra-title={extraTitle || undefined}
       title={`${label} next: ${poller?.next_run_at ? timeText(poller.next_run_at) : '--'} · ${poller?.last_message || 'waiting'}`}
     >
       {label} {pollerAgeLabel(poller)} ({durationLabel(poller?.last_duration_ms)})
@@ -286,6 +282,8 @@ function RecommendationCard({
     : isObservationOnly
       ? 'border-red-400/30 bg-red-500/5 text-neutral-200 hover:border-red-300/50'
       : 'border-amber-500/30 bg-amber-500/5 text-neutral-200 hover:border-amber-400/60'
+  const sigma = item.deb_sigma === null || item.deb_sigma === undefined ? '--' : Number(item.deb_sigma).toFixed(2)
+  const title = `METAR age ${age} ? verified ${verified} ? ${item.blocked_reasons?.length ? item.blocked_reasons.map(reasonLabel).join(', ') : blocker}`
 
   return (
     <div
@@ -299,73 +297,40 @@ function RecommendationCard({
         }
       }}
       className={`min-w-0 cursor-pointer border p-2 text-left transition ${cardTone}`}
+      title={title}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="truncate text-[12px] font-semibold">{item.city_name}</div>
-          <div className="mt-0.5 truncate text-[9px] text-neutral-500">
-            {item.station_id || '--'} · METAR age {age} · verified {verified}
-          </div>
-        </div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 truncate text-[12px] font-semibold">{item.city_name} / {item.station_id || '--'}</div>
         <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${
           isObservationOnly ? 'border-red-400/30 text-red-200' : item.paper_allowed ? 'border-green-400/30 text-green-200' : 'border-amber-400/30 text-amber-200'
         }`}>
-          {isObservationOnly ? '仅观测分析（无市场）' : item.paper_allowed ? 'Paper ok' : 'Spread watch'}
+          {isObservationOnly ? 'Observation' : item.paper_allowed ? 'Paper ok' : 'Blocked'}
         </span>
       </div>
-
-      <div className="mt-2 grid grid-cols-2 gap-1 text-[10px]">
-        <div className="border border-neutral-800/80 px-2 py-1">
-          <div className="text-neutral-500">当前观测</div>
-          <div className="mt-0.5 tabular-nums text-neutral-100">{tempLabel(item.current_temp, item.current_temp_unit)}</div>
-        </div>
-        <div className="border border-neutral-800/80 px-2 py-1">
-          <div className="text-neutral-500">DEB μ±σ</div>
-          <div className="mt-0.5 tabular-nums text-neutral-100">
-            {tempLabel(item.deb_mu, item.deb_unit)} ± {item.deb_sigma === null || item.deb_sigma === undefined ? '--' : Number(item.deb_sigma).toFixed(2)}
-          </div>
-        </div>
+      <div className="mt-1 truncate text-[10px] tabular-nums text-neutral-300">
+        {tempLabel(item.current_temp, item.current_temp_unit)} to {tempLabel(item.deb_mu, item.deb_unit)} +/- {sigma}
       </div>
-
-      {isObservationOnly ? (
-        <div className="mt-2 border border-neutral-800/80 px-2 py-1.5 text-[10px] text-neutral-400">
-          China Weather Live {tempLabel(item.china_live_temp, item.current_temp_unit)}
-          {item.china_live_observed_at ? ` · ${relativeTime(item.china_live_observed_at)}` : ''} · 交易字段已隐藏
-        </div>
-      ) : (
-        <>
-          <div className="mt-2 grid grid-cols-[minmax(0,1fr)_82px] gap-1 text-[10px]">
-            <div className="min-w-0 border border-neutral-800/80 px-2 py-1">
-              <div className="text-neutral-500">最优桶</div>
-              <div className="mt-0.5 truncate text-neutral-100">{item.bucket_label || item.bucket_key || '--'}</div>
-            </div>
-            <div className="border border-neutral-800/80 px-2 py-1">
-              <div className="text-neutral-500">Edge</div>
-              <div className={`mt-0.5 tabular-nums ${Number(item.edge ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
-                {edgeLabel(item.edge)}
-              </div>
-            </div>
-          </div>
-          <div className="mt-1 flex flex-wrap gap-1 text-[9px]">
-            <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">model {probabilityLabel(item.model_probability)}</span>
-            <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">ask {probabilityLabel(item.market_ask)}</span>
-            {item.blocked_reasons?.length ? (
-              <span className="border border-amber-500/30 px-1.5 py-0.5 text-amber-200">{blocker}</span>
-            ) : null}
-            {item.polymarket_url ? (
+      <div className="mt-1 flex items-center justify-between gap-2 text-[10px]">
+        <span className="min-w-0 truncate text-neutral-400">{isObservationOnly ? 'No active market' : (item.bucket_label || item.bucket_key || '--')}</span>
+        <span className={`shrink-0 tabular-nums ${Number(item.edge ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>{isObservationOnly ? '--' : edgeLabel(item.edge)}</span>
+      </div>
+      <div className="mt-1 truncate text-[9px] text-neutral-500">
+        {isObservationOnly
+          ? `China Weather Live ${tempLabel(item.china_live_temp, item.current_temp_unit)}${item.china_live_observed_at ? ` ? ${relativeTime(item.china_live_observed_at)}` : ''}`
+          : item.polymarket_url
+            ? (
               <a
                 href={item.polymarket_url}
                 target="_blank"
                 rel="noreferrer"
                 onClick={event => event.stopPropagation()}
-                className="border border-cyan-500/30 px-1.5 py-0.5 text-cyan-200 hover:bg-cyan-500/10"
+                className="text-cyan-200 hover:text-cyan-100"
               >
                 Polymarket
               </a>
-            ) : null}
-          </div>
-        </>
-      )}
+            )
+            : 'No Polymarket link'}
+      </div>
     </div>
   )
 }
@@ -781,7 +746,6 @@ function SimulationCard({
   autoPending: boolean
 }) {
   const autoRunning = autoSimulation.enabled
-  const lastResult = autoSimulation.last_result
 
   return (
     <div className="border border-neutral-800 bg-black p-3">
@@ -873,23 +837,9 @@ function SimulationCard({
         </button>
       </div>
 
-      {(lastResult || autoSimulation.last_error) && (
-        <div className="mt-3 border border-neutral-800 p-2 text-[10px] leading-relaxed text-neutral-400">
-          <div className="mb-1 flex items-center justify-between gap-2">
-            <span className="text-neutral-200">最近检查</span>
-            <span className="tabular-nums text-neutral-500">{timeText(autoSimulation.last_run)}</span>
-          </div>
-          {lastResult && (
-            <div>
-              买入 {lastResult.count}，跳过 {lastResult.skipped}，花费 {money(lastResult.spent)}，剩余 {money(lastResult.remaining)}
-              {lastResult.orderbooks_refreshed !== undefined && (
-                <span title={`盘口刷新失败 ${lastResult.orderbook_refresh_failed ?? 0} 个`}>
-                  {' '}· 盘口 {lastResult.orderbooks_refreshed}
-                </span>
-              )}
-            </div>
-          )}
-          {autoSimulation.last_error && <div className="text-red-300">{autoSimulation.last_error}</div>}
+      {autoSimulation.last_error && (
+        <div className="mt-3 border border-red-500/30 bg-red-500/5 p-2 text-[10px] leading-relaxed text-red-300">
+          {autoSimulation.last_error}
         </div>
       )}
 
@@ -1332,7 +1282,6 @@ function App() {
   const productionRefreshRunning = Boolean(productionRefreshMutation.isPending || productionRefresh?.running)
   const productionRefreshStages = productionRefresh?.stages ?? []
   const productionRefreshDone = productionRefreshStages.filter(stage => stage.ok && !stage.running).length
-  const productionRefreshCurrent = productionRefreshStages.find(stage => stage.running) ?? productionRefreshStages[productionRefreshStages.length - 1]
   const schedulerStatus: SchedulerStatus | null = schedulerStatusQuery.data ?? data?.scheduler_status ?? null
   const schedulerRunning = Boolean(schedulerStatus?.running || schedulerStartMutation.isPending)
   const currentRefreshOptions = useMemo<ProductionRefreshOptions>(() => ({
@@ -1347,6 +1296,7 @@ function App() {
   const forecastArchiveManifest = forecastArchiveManifestQuery.data ?? null
   const actionable = signals.filter(signal => signal.actionable).length
   const liveAvailable = Boolean(stats.strategy_live_ready && data?.v3?.config?.live_trading)
+  const debugMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1'
   const needsManualRefresh = data?._meta?.reason === 'manual_refresh_required'
   const autoSimulation = stats.auto_simulation ?? {
     enabled: false,
@@ -1681,38 +1631,31 @@ function App() {
           <div className="text-[11px] text-neutral-600">{t('app.subtitle')}</div>
         </div>
         <div className="order-last flex min-w-0 basis-full flex-nowrap items-center gap-1.5 overflow-x-auto text-[10px] xl:overflow-visible">
-          <span className="shrink-0 border border-neutral-800 px-2 py-1 text-neutral-400">{copy.data} {dataAge(stats.data_age_minutes)}</span>
           <SchedulerBadge poller={schedulerStatus?.pollers?.forecast_poller} label="Forecast" />
-          <SchedulerBadge poller={schedulerStatus?.pollers?.metar_poller} label="METAR" />
-          <SchedulerBadge poller={schedulerStatus?.pollers?.china_live_poller} label="China Live" />
+          <SchedulerBadge
+            poller={schedulerStatus?.pollers?.metar_poller}
+            label="METAR"
+            extraTitle={`China Live ${pollerAgeLabel(schedulerStatus?.pollers?.china_live_poller)} (${durationLabel(schedulerStatus?.pollers?.china_live_poller?.last_duration_ms)})`}
+          />
           <SchedulerBadge poller={schedulerStatus?.pollers?.derive_poller} label="Historical" />
-          <span
-            className={`shrink-0 border px-2 py-1 ${
-              productionRefreshRunning
-                ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
-                : productionRefresh?.ok
-                  ? 'border-green-500/30 text-green-300'
-                  : productionRefresh
-                    ? 'border-amber-500/30 text-amber-300'
-                    : 'border-neutral-800 text-neutral-500'
-            }`}
-            title={(productionRefresh?.failed_stages ?? []).length > 0 ? `失败阶段：${productionRefresh?.failed_stages?.join(', ')}` : `刷新目标：${productionRefresh?.target_date || productionRefresh?.request?.start_date || '--'}`}
-          >
-            {productionRefreshRunning
-              ? `抓取中 ${productionRefreshDone}/${productionRefreshStages.length || 11}${productionRefreshCurrent?.name ? ` · ${productionRefreshCurrent.name}` : ''}`
-              : productionRefresh?.requested_at
-                ? `抓取 ${productionRefresh?.ok ? '完成' : '异常'} · ${productionRefresh?.target_date || productionRefresh?.request?.start_date || '--'}`
-                : '抓取未运行'}
+          <span className="shrink-0 border border-neutral-800 px-2 py-1 text-neutral-400">
+            Last refresh {dataAge(stats.data_age_minutes)}
           </span>
-          <span className={`shrink-0 border px-2 py-1 ${stats.is_running ? 'border-green-500/30 text-green-300' : 'border-neutral-800 text-neutral-500'}`}>
-            {stats.is_running ? copy.legacyRunning : copy.manual}
-          </span>
-          <span className={`shrink-0 border px-2 py-1 ${autoSimulation.enabled ? 'border-cyan-500/30 text-cyan-300' : 'border-neutral-800 text-neutral-500'}`}>
-            {autoSimulation.enabled ? copy.autoOn : copy.autoOff}
-          </span>
-          <span className={`shrink-0 border px-2 py-1 ${liveAvailable ? 'border-green-500/30 text-green-300' : 'border-amber-500/30 text-amber-300'}`}>
-            {liveAvailable ? copy.liveReady : copy.liveLocked}
-          </span>
+          {debugMode && (
+            <span
+              className={`shrink-0 border px-2 py-1 ${
+                productionRefreshRunning
+                  ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
+                  : productionRefresh?.ok
+                    ? 'border-green-500/30 text-green-300'
+                    : productionRefresh
+                      ? 'border-amber-500/30 text-amber-300'
+                      : 'border-neutral-800 text-neutral-500'
+              }`}
+            >
+              {productionRefreshRunning ? `refresh ${productionRefreshDone}/${productionRefreshStages.length || 11}` : productionRefresh?.requested_at ? 'refresh done' : 'refresh idle'}
+            </span>
+          )}
         </div>
         <label className="inline-flex items-center gap-1 border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400">
           <span>{t('city.selector')}</span>

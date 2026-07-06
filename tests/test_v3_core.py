@@ -4231,7 +4231,7 @@ class V3CoreTests(unittest.TestCase):
             second = build_daily_max_prediction("chicago", "2026-07-10", issued_at="2026-07-10T13:00:00Z", path=db_path)
 
         self.assertTrue(first["mu_observed_floor_applied"])
-        self.assertGreaterEqual(first["mu"], 91.9)
+        self.assertGreaterEqual(first["mu"], 91.0)
         self.assertEqual(first["bias_correction"], 0.0)
         self.assertIn("insufficient_settlement_days", first["build_warnings"])
         self.assertEqual(second["bias_sample_count"], 7)

@@ -36,9 +36,11 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         active = 0
         max_active = 0
+        seen_hours: list[float] = []
         lock = threading.Lock()
 
         def fake_recent(city: str, *, hours: float = 6.0):
+            seen_hours.append(hours)
             nonlocal active, max_active
             with lock:
                 active += 1
@@ -68,6 +70,8 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(result["cities"], 3)
             self.assertLessEqual(max_active, 2)
             self.assertEqual(pws_fetch.call_count, result["cities"])
+            self.assertTrue(seen_hours)
+            self.assertTrue(all(hours == 24.0 for hours in seen_hours))
             status = scheduler.status()["pollers"]["metar_poller"]
             self.assertEqual(status["last_result"]["result_count"], result["cities"])
             self.assertEqual(len(status["last_result"]["city_results"]), result["cities"])

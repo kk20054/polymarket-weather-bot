@@ -110,7 +110,7 @@ def refresh_metar_reports(
 def fetch_recent_hours(
     city: str | list[str] | None = None,
     *,
-    hours: float = 6.0,
+    hours: float = 24.0,
     session: requests.Session | None = None,
 ) -> dict[str, Any]:
     cities: list[str] | None
@@ -120,7 +120,7 @@ def fetch_recent_hours(
         cities = [str(item).strip() for item in city if str(item).strip()]
     else:
         cities = [str(city).strip()] if str(city).strip() else None
-    bounded_hours = max(1.0, min(float(hours or 6.0), 24.0))
+    bounded_hours = max(1.0, min(float(hours or 24.0), 24.0))
     payload = refresh_metar_reports(cities, hours=bounded_hours, session=session)
     payload["mode"] = "recent_hours"
     payload["recent_hours"] = bounded_hours

@@ -165,9 +165,10 @@ def build_daily_max_prediction(
             ensemble = {"ok": False, "reasons": [f"ensemble_error:{exc}"]}
         if ensemble.get("ok"):
             observed_floor = _observed_floor(city_key, target_date, unit, path)
+            mu_floor = _observed_mu_floor(observed_floor, unit)
             floor_applied = False
-            if observed_floor is not None and observed_floor > float(ensemble.get("mu") or -999):
-                ensemble["mu"] = observed_floor
+            if mu_floor is not None and mu_floor > float(ensemble.get("mu") or -999):
+                ensemble["mu"] = mu_floor
                 floor_applied = True
             mixed_peak = _mixed_curve_peak(
                 city_key,
@@ -224,6 +225,7 @@ def build_daily_max_prediction(
     sigma_from_history = bias_info["residual_std"] if bias_info["sample_count"] >= MIN_BIAS_SAMPLE_DAYS else DEFAULT_RMSE_BY_UNIT.get(unit, 2.0)
     sigma_raw = math.sqrt(sigma_from_spread**2 + sigma_from_history**2) / 2.0
     observed_floor = _observed_floor(city_key, target_date, unit, path)
+    mu_floor = _observed_mu_floor(observed_floor, unit)
     time_decay = _time_decay_factor(target_date, profile.timezone if profile else "UTC", observed_floor is not None)
     sigma = sigma_with_floor(sigma_raw * time_decay, sigma_floor)
     mixed_peak = _mixed_curve_peak(
@@ -237,8 +239,8 @@ def build_daily_max_prediction(
 
     mu = mu_bias_adjusted
     floor_applied = False
-    if observed_floor is not None and observed_floor > mu:
-        mu = observed_floor
+    if mu_floor is not None and mu_floor > mu:
+        mu = mu_floor
         floor_applied = True
 
     prediction = {
@@ -451,6 +453,12 @@ def convert_sigma(value: float, from_unit: str, to_unit: str) -> float:
     if source == "F" and target == "C":
         return abs(float(value)) * 5.0 / 9.0
     return abs(float(value))
+
+
+def _observed_mu_floor(observed_floor: float | None, unit: str) -> float | None:
+    if observed_floor is None:
+        return None
+    return float(observed_floor) - convert_sigma(0.5, "C", unit)
 
 
 def _forecast_components(

@@ -13,7 +13,7 @@ import {
   YAxis,
 } from 'recharts'
 import { ExternalLink } from 'lucide-react'
-import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, CityEvidenceMarketBucketSummary, CityEvidenceProbabilitySummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -745,70 +745,6 @@ function findBucketForDecision(decision: SignalDecisionRecord | undefined, bucke
   })
 }
 
-function reasonCountsFromDecisions(decisions: SignalDecisionRecord[]) {
-  const counts = new Map<string, number>()
-  for (const decision of decisions) {
-    for (const reason of decision.gate_reasons ?? decision.reasons ?? []) {
-      counts.set(reason, (counts.get(reason) ?? 0) + 1)
-    }
-  }
-  return [...counts.entries()]
-    .map(([reason, count]) => ({ reason, count }))
-    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
-}
-
-function decisionToMarketSignal(decision: SignalDecisionRecord, buckets?: MarketBucketSummary | null) {
-  const bucket = findBucketForDecision(decision, buckets)
-  const modelBucket = decisionBucket(decision)
-  return {
-    signal_id: decision.signal_id ?? undefined,
-    market_id: decision.market_id ?? modelBucket.market_id,
-    event_url: bucket?.event_url ?? null,
-    bucket: modelBucket.bucket_label ?? bucket?.bucket_label ?? '--',
-    price: decisionPrice(decision),
-    bid: decisionBid(decision),
-    spread: decisionSpread(decision),
-    edge: asNumber(decision.edge) ?? asNumber(modelBucket.edge),
-    paper_allowed: decision.paper_allowed,
-    live_allowed: decision.live_allowed,
-    reasons: decision.gate_reasons ?? decision.reasons ?? [],
-  }
-}
-
-function buildLayerMarketSummary(buckets?: MarketBucketSummary | null, decisions?: SignalDecisionSummary | null): CityEvidenceMarketBucketSummary | undefined {
-  const bucketRows = buckets?.latest ?? []
-  const decisionRows = decisions?.decisions ?? []
-  if (bucketRows.length === 0 && decisionRows.length === 0) return undefined
-  const reasonCounts = decisions?.reason_counts?.length ? decisions.reason_counts : reasonCountsFromDecisions(decisionRows)
-  const executable = decisionRows
-    .filter(decision => decision.paper_allowed)
-    .sort((a, b) => (asNumber(b.edge) ?? -999) - (asNumber(a.edge) ?? -999))
-    .map(decision => decisionToMarketSignal(decision, buckets))
-  const blocked = decisionRows
-    .filter(decision => !decision.paper_allowed)
-    .sort((a, b) => (asNumber(b.edge) ?? -999) - (asNumber(a.edge) ?? -999))
-    .map(decision => decisionToMarketSignal(decision, buckets))
-  return {
-    signal_count: decisionRows.length,
-    bucket_count: buckets?.bucket_count ?? bucketRows.length,
-    matched_bucket_count: buckets?.matched_bucket_count ?? bucketRows.filter(row => row.strict_match_status === 'matched').length,
-    actionable_signal_count: executable.length,
-    paper_allowed_count: executable.length,
-    live_allowed_count: decisionRows.filter(row => row.live_allowed).length,
-    blocked_signal_count: decisionRows.filter(row => !row.paper_allowed).length,
-    open_tail_count: bucketRows.filter(row => (row.bucket_low ?? 0) <= -900 || (row.bucket_high ?? 0) >= 900).length,
-    low_price_tail_count: decisionRows.filter(row => (row.gate_reasons ?? []).includes('low_price_tail_bucket')).length,
-    missing_price_count: bucketRows.filter(row => row.best_ask === null || row.best_ask === undefined).length,
-    high_spread_count: decisionRows.filter(row => (row.gate_reasons ?? []).includes('spread_too_wide')).length,
-    stale_book_count: decisionRows.filter(row => (row.gate_reasons ?? []).includes('stale_book')).length,
-    strict_matching_required: true,
-    ready: bucketRows.length > 0 && (buckets?.matched_bucket_count ?? 0) > 0,
-    reason_counts: reasonCounts,
-    top_executable: executable.slice(0, 4),
-    top_blocked: blocked.slice(0, 4),
-  }
-}
-
 function buildLayerDistributionItems(buckets?: MarketBucketSummary | null, decisions?: SignalDecisionSummary | null): LayerDistributionItem[] {
   const decisionByMarket = new Map<string, SignalDecisionRecord>()
   const decisionByBucket = new Map<string, SignalDecisionRecord>()
@@ -1120,7 +1056,6 @@ export function WeatherPanel({
   const layerDecisionBucket = decisionBucket(layerDecision)
   const layerDecisionMarketBucket = useMemo(() => findBucketForDecision(layerDecision, marketBuckets), [layerDecision, marketBuckets])
   const layerDistributionItems = useMemo(() => buildLayerDistributionItems(marketBuckets, signalDecisions), [marketBuckets, signalDecisions])
-  const layerMarketSummary = useMemo(() => buildLayerMarketSummary(marketBuckets, signalDecisions), [marketBuckets, signalDecisions])
   const probabilityItems = layerDistributionItems.length > 0 ? layerDistributionItems : distributionChartItems
   const latestHistory = latestBy<HistoricalWeatherPoint>(
     series?.history_points ?? [],
@@ -1174,7 +1109,7 @@ export function WeatherPanel({
   const layerEventUrl = layerDecisionMarketBucket?.event_url
   const decisionLabel = hasLayerDecision
     ? layerDecision?.paper_allowed
-      ? 'PAPER BUY'
+      ? 'Paper ok'
       : '观察 / 跳过'
     : bestSignal?.actionable
       ? 'BUY YES'
@@ -1208,32 +1143,6 @@ export function WeatherPanel({
       return !cityKey || text.includes(cityKey.toLowerCase()) || text.includes(String(series?.city_name ?? '').toLowerCase()) || /scan|forecast|orderbook|truth|refresh|scanner|weather/i.test(text)
     })
     .slice(0, 18)
-  const forecastCards: EvidenceCardItem[] = forecastRows.map((point, index) => ({
-    id: `forecast-${point.timestamp}-${point.target_date}-${index}`,
-    eyebrow: shortTime(point.timestamp),
-    title: longDate(point.target_date),
-    value: fmtTemp(point.best ?? point.ensemble_mean, unit),
-    meta: point.source || 'forecast',
-    tone: point.target_date === selectedDate ? 'green' : 'neutral',
-    badges: [
-      { label: `ECMWF ${fmtTemp(point.ecmwf, unit)}`, tone: 'cyan' },
-      { label: `HRRR ${fmtTemp(point.hrrr, unit)}`, tone: 'green' },
-      { label: `METAR ${fmtTemp(point.metar, unit)}`, tone: 'amber' },
-      { label: `湿度 ${fmtPct(point.humidity)}`, tone: 'neutral' },
-    ],
-    details: [
-      { label: '更新时间', value: shortTime(point.timestamp) },
-      { label: '目标日期', value: longDate(point.target_date) },
-      { label: 'best / ensemble', value: `${fmtTemp(point.best, unit)} / ${fmtTemp(point.ensemble_mean, unit)}` },
-      { label: 'ensemble std', value: point.ensemble_std === null || point.ensemble_std === undefined ? '--' : point.ensemble_std.toFixed(2) },
-      { label: 'ECMWF', value: fmtTemp(point.ecmwf, unit) },
-      { label: 'HRRR', value: fmtTemp(point.hrrr, unit) },
-      { label: 'METAR', value: fmtTemp(point.metar, unit) },
-      { label: '湿度', value: fmtPct(point.humidity) },
-      { label: 'horizon', value: point.horizon || '--' },
-      { label: '来源', value: point.source || '--', wide: true },
-    ],
-  }))
   const metarCards: EvidenceCardItem[] = metarRows.map((point, index) => {
     const forecastValue = point.best ?? point.ensemble_mean
     const gap = forecastValue !== null && forecastValue !== undefined && point.metar !== null && point.metar !== undefined
@@ -1439,8 +1348,6 @@ export function WeatherPanel({
               unit={unit}
               cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
               selectedDate={selectedDate}
-              actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
-              historyProvider={latestHistory?.provider || truthTier}
               dailyMaxPrediction={dailyMaxPrediction}
             />
             <TemperatureDistributionPanel
@@ -1452,22 +1359,10 @@ export function WeatherPanel({
               actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
               cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
               dailyMaxPrediction={dailyMaxPrediction}
-              signalDecisions={signalDecisions}
-              marketBuckets={marketBuckets}
               alphaEvents={alphaEvents}
               loading={layer7Loading}
-              evidenceSummary={selectedDateEvidence?.modules?.probability_buckets?.probability_summary}
-              marketSummary={layerMarketSummary ?? selectedDateEvidence?.modules?.market_buckets?.market_summary}
             />
             <ForecastDataTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
-            <details className="border border-[#2C3445] bg-[#161A22]">
-              <summary className="cursor-pointer select-none px-2 py-2 text-xs text-[#CBD2DC] hover:bg-[#222A37]">
-                Forecast snapshot cards · {forecastRows.length}
-              </summary>
-              <div className="border-t border-neutral-800">
-                <EvidenceCards empty="No forecast snapshots for this date" items={forecastCards} />
-              </div>
-            </details>
           </div>
         )}
 
@@ -1596,7 +1491,6 @@ function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRo
           <div className="text-[10px] text-neutral-500">Forecast Data</div>
           <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {rows.length} rows</div>
         </div>
-        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">PolyWX schema</span>
       </div>
       {rows.length === 0 ? (
         <div className="max-h-[360px] overflow-auto">
@@ -1649,12 +1543,6 @@ function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRo
           </table>
         </div>
       )}
-      <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
-        <summary className="cursor-pointer select-none hover:text-neutral-400">Schema notes</summary>
-        <div className="mt-1 leading-relaxed">
-          Cloud uses real cloud_cover when available and falls back to humidity for older rows. Precip shows amount / probability; wind shows direction degrees and speed.
-        </div>
-      </details>
     </section>
   )
 }
@@ -2005,16 +1893,12 @@ function HourlyEvidencePanel({
   unit,
   cityName,
   selectedDate,
-  actualHigh,
-  historyProvider,
   dailyMaxPrediction,
 }: {
   rows: HourlyWeatherRow[]
   unit: string
   cityName?: string
   selectedDate: string
-  actualHigh?: number | null
-  historyProvider?: string
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
 }) {
   const numericValues = (values: unknown[]) =>
@@ -2024,12 +1908,8 @@ function HourlyEvidencePanel({
   const historicalValues = numericValues(rows.map(row => row.historical))
   const chinaLiveValues = numericValues(rows.map(row => row.china_live))
   const pwsValues = numericValues(rows.map(row => row.pws))
-  const cloudValues = numericValues(rows.map(row => row.cloud_cover))
   const forecastMax = forecastValues.length > 0 ? Math.max(...forecastValues) : null
   const metarMax = metarValues.length > 0 ? Math.max(...metarValues) : null
-  const historicalMax = historicalValues.length > 0 ? Math.max(...historicalValues) : null
-  const chinaLiveMax = chinaLiveValues.length > 0 ? Math.max(...chinaLiveValues) : null
-  const avgCloud = mean(cloudValues)
   const chartRows = rows.map(row => ({
     ...row,
     forecast_value: asNumber(row.forecast),
@@ -2149,19 +2029,6 @@ function HourlyEvidencePanel({
       <StatBadgeRow label="ACCURACY (PEARSON R)" items={[statAccuracyPill('METAR', metarStats), statAccuracyPill('Historical', historicalStats)]} empty="No accuracy stats yet" tone="orange" />
       <StatBadgeRow label="HIST↔METAR OVERLAP" items={[overlapStats]} empty="No overlap data yet" tone="green" />
 
-      <details className="border-t border-neutral-900 px-2 py-1 text-[9px] text-neutral-600">
-        <summary className="cursor-pointer select-none hover:text-neutral-400">数据说明 / 额外指标</summary>
-        <div className="mt-1 grid gap-1 md:grid-cols-3">
-          <DetailLine label="Cloud/RH" value={fmtPct(avgCloud)} />
-          <DetailLine label="Actual high" value={fmtTemp(actualHigh, unit)} />
-          <DetailLine label="预报高点" value={fmtTemp(forecastMax, unit)} />
-          <DetailLine label="METAR高点" value={fmtTemp(metarMax, unit)} />
-          <DetailLine label="Historical高点" value={fmtTemp(historicalMax, unit)} />
-          <DetailLine label="China Live高点" value={fmtTemp(chinaLiveMax, unit)} />
-          <DetailLine label="History provider" value={historyProvider || '--'} />
-          <DetailLine label="说明" value="橙线为 METAR，绿线为 Historical，红色方块为 China Weather Live，紫色三角为 PWS，蓝色空心圆虚线为 Forecast，灰色面积为 Cloud Cover %；China Live 不作为 settlement truth，也不会解锁实盘。" wide />
-        </div>
-      </details>
     </section>
   )
 }
@@ -2597,12 +2464,8 @@ function TemperatureDistributionPanel({
   actualHigh,
   cityName,
   dailyMaxPrediction,
-  signalDecisions,
-  marketBuckets,
   alphaEvents = [],
   loading = false,
-  evidenceSummary,
-  marketSummary,
 }: {
   signal?: WeatherSignal
   decision?: SignalDecisionRecord
@@ -2612,17 +2475,11 @@ function TemperatureDistributionPanel({
   actualHigh?: number | null
   cityName?: string
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
-  signalDecisions?: SignalDecisionSummary | null
-  marketBuckets?: MarketBucketSummary | null
   alphaEvents?: ModelRepriceEvent[]
   loading?: boolean
-  evidenceSummary?: CityEvidenceProbabilitySummary
-  marketSummary?: CityEvidenceMarketBucketSummary
 }) {
   const distribution = signal?.distribution
   const deb = dailyMaxPrediction?.latest
-  const decisionBucketData = decisionBucket(decision)
-  const decisionMarketBucket = findBucketForDecision(decision, marketBuckets)
   const debUnit = deb?.unit || unit
   const forecastValue = deb?.mu !== null && deb?.mu !== undefined
     ? convertTempUnit(Number(deb.mu), debUnit, unit)
@@ -2666,15 +2523,7 @@ function TemperatureDistributionPanel({
   }, [alphaEvents])
   const alphaForItem = (item: LayerDistributionItem) =>
     alphaByMarket.byMarket.get(String(item.market_id || '')) ?? alphaByMarket.byBucket.get(String(item.bucket_key || ''))
-  const normalized = decision?.model_distribution?.normalized ?? distribution?.normalized
   const distributionMethod = decision?.model_distribution?.method ?? deb?.method ?? distribution?.notes?.[0] ?? 'gaussian-cdf'
-  const activeEventUrl = decisionMarketBucket?.event_url ?? signal?.event_url
-  const evidenceTopBuckets = evidenceSummary?.top_buckets ?? []
-  const evidenceHighestProbability = evidenceSummary?.highest_probability
-  const evidenceHighestBucket = evidenceSummary?.highest_bucket
-  const reasonCounts = marketSummary?.reason_counts ?? []
-  const blockedSignals = marketSummary?.top_blocked ?? []
-  const executableSignals = marketSummary?.top_executable ?? []
   const observedLabel = actualHigh === null || actualHigh === undefined
     ? '实测 --'
     : `实测 ${fmtDualTemp(actualHigh, unit)} (metar, ${deb?.member_count ?? '--'} 样本)`
@@ -2701,15 +2550,6 @@ function TemperatureDistributionPanel({
             <div className="text-[9px] text-[#7D8694]">更新 {debUpdatedLabel}</div>
           </div>
         </div>
-        <details className="mt-1 text-[9px] text-[#7D8694]">
-          <summary className="cursor-pointer select-none hover:text-[#CBD2DC]">DEB metadata</summary>
-          <div className="mt-1 flex flex-wrap gap-1">
-            <span className="border border-[#2C3445] px-1 py-0.5">observed {fmtTemp(actualHigh, unit)}</span>
-            <span className="border border-[#2C3445] px-1 py-0.5">{normalized ? 'normalized' : 'not normalized'}</span>
-            <span className="border border-[#2C3445] px-1 py-0.5">{distributionMethod}</span>
-            {loading && <span className="border border-[#2C3445] px-1 py-0.5 text-cyan-300">loading</span>}
-          </div>
-        </details>
       </div>
 
       <div className="border-b border-[#2C3445] px-2 py-1.5">
@@ -2758,99 +2598,23 @@ function TemperatureDistributionPanel({
                   <div
                     key={`${item.market_id || item.bucket_key || item.bucket_label || `${item.bucket_low}-${item.bucket_high}` || 'bucket'}-${index}`}
                     className={`min-h-[112px] border p-2 ${item.is_signal ? 'border-cyan-500/40 bg-cyan-500/10' : 'border-[#2C3445] bg-[#1B212C]'} ${Math.abs(edge) > 0.08 ? 'animate-pulse shadow-[0_0_0_1px_rgba(34,197,94,0.25)]' : ''}`}
-                    title={item.question || fmtBucketAxisLabel(item, unit)}
+                    title={`${item.question || fmtBucketAxisLabel(item, unit)} | bid/ask ${fallbackMode ? '--' : `${fmtPrice(item.bid)} / ${fmtPrice(item.ask)}`}`}
                   >
                     <div className="flex items-start justify-between gap-1">
                       <span className="min-w-0 truncate font-semibold text-[#F8FAFC]">{fmtBucketAxisLabel(item, unit)}</span>
                       {alpha ? <span title={alphaEventTitle(alpha)} className="shrink-0 text-amber-300">⚡</span> : null}
                     </div>
-                    <div className="mt-2 space-y-1 tabular-nums text-[#7D8694]">
-                      <div className="flex justify-between gap-1">
-                        <span>model</span>
-                        <span className="text-green-300">{fmtProb(item.probability)}</span>
-                      </div>
-                      <div className="flex justify-between gap-1">
-                        <span>mid</span>
-                        <span>{fallbackMode ? '--' : fmtPrice(mid)}</span>
-                      </div>
-                      <div className="flex justify-between gap-1">
-                        <span>edge</span>
-                        <span className={edge >= 0 ? 'text-green-300' : 'text-red-300'}>{fallbackMode ? '--' : fmtSignedPct(edge)}</span>
-                      </div>
-                      <div className="flex justify-between gap-1">
-                        <span>bid/ask</span>
-                        <span>{fallbackMode ? '--' : `${fmtPrice(item.bid)} / ${fmtPrice(item.ask)}`}</span>
-                      </div>
+                    <div className={`mt-2 text-lg font-semibold tabular-nums ${edge >= 0 ? 'text-green-300' : 'text-red-300'}`}>
+                      {fallbackMode ? '--' : fmtSignedPct(edge)}
+                    </div>
+                    <div className="mt-1 flex justify-between gap-2 text-[10px] tabular-nums text-[#7D8694]">
+                      <span>model {fmtProb(item.probability)}</span>
+                      <span>market {fallbackMode ? '--' : fmtPrice(mid)}</span>
                     </div>
                   </div>
                 )
               })}
             </div>
-            <div className="grid grid-cols-2 gap-1 border-t border-[#2C3445] p-2 text-[10px] xl:grid-cols-4">
-              <MetricCard label="最高概率" value={fmtProb(evidenceHighestProbability ?? Math.max(...displayItems.map(item => Number(item.probability ?? 0))))} sub={fallbackMode ? '暂无匹配市场桶' : evidenceHighestBucket || '柱色越深概率越高'} />
-              <MetricCard label="信号桶" value={decision ? fmtBucketLabel(decisionBucketData.bucket_label, decision.bucket_lower, unit) : signal ? signalBucketLabel(signal, unit) : '--'} sub={decision?.paper_allowed ? 'PAPER BUY' : signal?.actionable ? 'BUY YES' : '观察'} />
-              <MetricCard label="分布覆盖" value={`${evidenceSummary?.bucket_count ?? displayItems.length}`} sub={`归一 ${evidenceSummary?.normalized_count ?? (normalized || fallbackMode ? 1 : 0)} / 决策 ${signalDecisions?.count ?? (signal ? 1 : 0)}`} />
-              <MetricCard label="可操作" value={`${marketSummary?.paper_allowed_count ?? evidenceSummary?.actionable_signal_count ?? (signal?.actionable ? 1 : 0)}`} sub={marketSummary?.strict_matching_required ?? evidenceSummary?.strict_matching_required ? '严格匹配' : '观察'} />
-            </div>
-            {evidenceTopBuckets.length > 0 && (
-              <details className="border-t border-[#2C3445] px-2 py-1 text-[9px] text-[#7D8694]">
-                <summary className="cursor-pointer select-none hover:text-[#CBD2DC]">Evidence top buckets</summary>
-                <div className="mt-1 space-y-1">
-                  {evidenceTopBuckets.slice(0, 5).map((bucket, index) => (
-                    <div key={`${bucket.market_id || bucket.bucket}-${index}`} className="flex items-center justify-between gap-2 border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
-                      <span className="min-w-0 truncate" title={bucket.bucket}>{bucket.bucket || '--'}</span>
-                      <span className="shrink-0 tabular-nums text-green-300">{fmtProb(bucket.probability)}</span>
-                    </div>
-                  ))}
-                </div>
-              </details>
-            )}
-            {marketSummary && (
-              <details className="border-t border-[#2C3445] px-2 py-1 text-[9px] text-[#7D8694]">
-                <summary className="cursor-pointer select-none hover:text-[#CBD2DC]">WeatherBot 附加：盘口 / token / gate</summary>
-                {activeEventUrl && (
-                  <a href={activeEventUrl} target="_blank" rel="noreferrer" className="mt-1 block truncate text-cyan-300 hover:text-cyan-100">
-                    Polymarket ↗
-                  </a>
-                )}
-                <div className="mt-1 grid grid-cols-2 gap-1">
-                  <MetricCard label="匹配桶" value={`${marketSummary.matched_bucket_count ?? 0}/${marketSummary.bucket_count ?? 0}`} sub={marketSummary.strict_matching_required ? '严格匹配' : '观察'} />
-                  <MetricCard label="Paper OK" value={`${marketSummary.paper_allowed_count ?? 0}`} sub={`阻塞 ${marketSummary.blocked_signal_count ?? 0}`} />
-                  <MetricCard label="低价尾桶" value={`${marketSummary.low_price_tail_count ?? 0}`} sub={`开放 ${marketSummary.open_tail_count ?? 0}`} />
-                  <MetricCard label="盘口问题" value={`${marketSummary.high_spread_count ?? 0}`} sub={`缺价 ${marketSummary.missing_price_count ?? 0} / 过期 ${marketSummary.stale_book_count ?? 0}`} />
-                </div>
-                {reasonCounts.length > 0 && (
-                  <div className="mt-1 space-y-1">
-                    {reasonCounts.slice(0, 4).map((reason, index) => (
-                      <div key={`${reason.reason || 'reason'}-${index}`} className="flex items-center justify-between gap-2 border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
-                        <span className="min-w-0 truncate" title={reason.reason}>{reason.reason}</span>
-                        <span className="shrink-0 tabular-nums text-amber-300">{reason.count}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {executableSignals.length > 0 && (
-                  <div className="mt-1 space-y-1">
-                    {executableSignals.slice(0, 2).map((row, index) => (
-                      <a key={`executable-${row.signal_id || row.market_id || row.event_url || row.bucket || 'signal'}-${index}`} href={row.event_url || undefined} target="_blank" rel="noreferrer" className="block border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-1 text-emerald-200 hover:bg-emerald-500/15">
-                        <span className="block truncate" title={row.bucket}>{row.bucket || '--'}</span>
-                        <span className="tabular-nums text-emerald-300">{fmtPrice(row.price)} / edge {fmtSignedPct(row.edge)}</span>
-                      </a>
-                    ))}
-                  </div>
-                )}
-                {blockedSignals.length > 0 && executableSignals.length === 0 && (
-                  <div className="mt-1 space-y-1">
-                    {blockedSignals.slice(0, 2).map((row, index) => (
-                      <div key={`blocked-${row.signal_id || row.market_id || row.event_url || row.bucket || 'signal'}-${index}`} className="border border-[#2C3445] bg-[#1B212C] px-1.5 py-1">
-                        <div className="truncate text-[#CBD2DC]" title={row.bucket}>{row.bucket || '--'}</div>
-                        <div className="truncate text-[#7D8694]" title={(row.reasons || []).join(', ')}>{(row.reasons || []).slice(0, 2).join(', ') || 'blocked'}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </details>
-            )}
           </aside>
         </div>
       )}

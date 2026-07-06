@@ -1193,7 +1193,7 @@ def main() -> None:
     parser.add_argument("--cities", default="", help="Comma-separated city keys; empty means all cities")
     parser.add_argument("--city", action="append", default=[], help="Single city key; can be repeated and is merged with --cities")
     parser.add_argument("--days", type=int, default=None, help="Days for supported commands; forecast defaults to 4, METAR backfill defaults to 30")
-    parser.add_argument("--recent-hours", type=float, default=6.0, help="Recent METAR hours for metar-refresh")
+    parser.add_argument("--recent-hours", type=float, default=24.0, help="Recent METAR hours for metar-refresh")
     parser.add_argument("--station-limit", type=int, default=5, help="Maximum PWS stations per city")
     parser.add_argument("--limit", type=int, default=50, help="Maximum current/future signal markets to refresh")
     parser.add_argument("--start-date", default="", help="Inclusive local target date filter")

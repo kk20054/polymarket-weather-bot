@@ -214,7 +214,7 @@ class WeatherBotScheduler:
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
-            metar = await asyncio.to_thread(fetch_recent_hours, city, hours=6.0)
+            metar = await asyncio.to_thread(fetch_recent_hours, city, hours=24.0)
             pws = await asyncio.to_thread(
                 run_pws_fetch,
                 city,

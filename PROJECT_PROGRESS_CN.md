@@ -207,3 +207,15 @@
 - Conclusion: the walk-forward data path now exists and is auditable, but it exposed a real blocker: Beijing 2026-07-05 34C bucket had market mid 0.9965 while archived Previous Runs sample probability was 0.0. That means the old `model_prob >= 0.85` sanity cannot be honestly claimed yet; it is a calibration/model-source mismatch to solve before production paper scoring.
 - Next: run previous-runs ingestion across the full 341-bucket set, compare by city/model/lead-time, then decide whether CMA/JMA/GFS ensemble weighting, station truth, or bucket/date alignment is causing the large Beijing mismatch. Keep scheduler and live trading off unless explicitly requested.
 - Commit: not committed in this turn.
+
+### 2026-07-06：强制减法 + DEB/hourly 口径审计修正
+
+- 目标：停止加功能，只做减法、bug fix、审计和逻辑落纸；不新增 UI 组件、后端 endpoint 或 collector；继续以 PolyWX 为 benchmark，承认当前看板仍不能用于真实自动赚钱。
+- 改动：`frontend/src/App.tsx` 将顶部状态条收缩为 Forecast / METAR / Historical / Last refresh 四个 pill，并把 production refresh 进度隐藏到 `?debug=1`；推荐关注卡压缩为城市状态、当前温度到 DEB、bucket/edge、Polymarket 链接四行，gate 细节进 tooltip；移除顶部 auto paper/live locked 等噪声。`frontend/src/components/WeatherPanel.tsx` 删除 Forecast snapshot cards、Schema notes、DEB metadata、WeatherBot 盘口/token/gate 附加说明、额外指标说明和四个白色 metric boxes；Bucket grid 改为两行核心信息，bid/ask 进 tooltip。
+- 改动：`weatherbot_v3/metar.py`、`weatherbot_v3/scheduler.py`、`weatherbot_v3/cli.py` 把 recent METAR 默认窗口从 6 小时改成 24 小时，避免打开当天页面时只有少数白线点。`weatherbot_v3/hourly.py` 改为每小时按 `report_time` 选择最新观测，保留 METAR / China Live / PWS / Historical 独立来源，不再用小时内最大值冒充当前观测；无 METAR 但有 mesonet 时 primary source 标记为 `mesonet_other`，不插值、不伪造 METAR。
+- 改动：`weatherbot_v3/deb.py` 的 DEB μ 下限改为 `observed_max_so_far - 0.5°C`，同时覆盖 ensemble 和 fallback 路径；新增 Tokyo observed-floor 回归测试，并调整 Chicago 回归预期。新增 `docs/IMPLEMENTATION_LOGIC_CN.md` 落纸当前 L0-L9 实现路径、数据边界、算法口径、执行边界和未完成项。
+- 审计：本地新增 `audits/deb_audit_2026-07-05.md` 与 `audits/hourly_gaps_audit_2026-07-05.md`（不提交），记录 DEB 数据流、Tokyo 2026-07-05 Gamma/Polymarket resolved bucket 26C 对照、当前 DB 无足够本地 replay 样本、以及 hourly/METAR 缺口与修复方案。
+- 验证：`python -m unittest tests.test_polywx_contract` 通过 13 tests OK；`npm run build` 通过，仍有既有 Browserslist/chunk warning；`python -m unittest discover tests -v` 通过 212 tests OK；`git diff --check` 待提交前复跑。
+- 结论：本轮显著减少了看板肥胖和内部解释噪声，也修正了 METAR 窗口、小时观测聚合和 DEB observed floor 这三个会直接影响预测读数的问题。但当前模型仍未证明盈利，PolyWX 字段级对齐和 DEB 数值 benchmark 仍未完成，live 继续锁定。
+- 下一步：用 PolyWX Chicago/Tokyo/Shanghai 的真实截图/DOM/XHR 做字段级 benchmark，优先核对 Hourly 曲线、DEB μ/σ、peak hour、METAR 派生字段和 Probability buckets；不要再扩新功能，先把现有链路跑准。
+- 相关提交：待提交。
