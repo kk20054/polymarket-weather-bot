@@ -511,6 +511,13 @@ function localDateString(date = new Date()) {
   return `${year}-${month}-${day}`
 }
 
+function addDateDays(value: string, days: number) {
+  const parsed = new Date(`${value || localDateString()}T00:00:00`)
+  if (Number.isNaN(parsed.getTime())) return localDateString()
+  parsed.setDate(parsed.getDate() + days)
+  return localDateString(parsed)
+}
+
 function elapsedLabel(value?: number | null) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return ''
   if (value < 1000) return `${Math.round(Number(value))}ms`
@@ -538,11 +545,7 @@ function fetchPulseDetail(fetchLog: FetchLogRow[], patterns: string[], fallback:
   if (!latest) return fallback
   const age = latest.time ? freshnessLabel(latest.time) : fallback
   const duration = visibleElapsedLabel(latest.duration)
-  const failures = rows
-    .slice(0, 24)
-    .filter(row => /err|warn|fail|timeout/i.test(`${row.status ?? ''} ${row.message ?? ''} ${row.details ?? ''}`))
-    .length
-  return [age, duration ? `(${duration})` : '', failures > 0 ? `⚠ ${failures}次失败` : ''].filter(Boolean).join(' ')
+  return [age, duration ? `(${duration})` : ''].filter(Boolean).join(' ')
 }
 
 function evidenceStatus(value?: string | null, staleAfterMinutes = 180): EvidenceStatus {
@@ -938,7 +941,7 @@ function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): Hou
       ecmwf: point.ecmwf ?? null,
       hrrr: point.hrrr ?? null,
       humidity: point.humidity ?? null,
-      cloud_cover: point.cloud_cover ?? point.humidity ?? null,
+      cloud_cover: point.cloud_cover ?? null,
       precipitation: point.precipitation ?? null,
       precipitation_probability: point.precipitation_probability ?? null,
       wind_speed: point.wind_speed ?? null,
@@ -1097,7 +1100,6 @@ export function WeatherPanel({
     }
   }, [availableDates, forecastFallback?.target_date, latestForecast?.target_date, selectedDate])
 
-  const selectedDateIndex = availableDates.indexOf(selectedDate)
   const selectedDateRow = chartData.find(row => row.date === selectedDate)
     ?? (selectedDate ? { date: selectedDate, label: shortDate(selectedDate) } : chartData[chartData.length - 1])
   const hasLayerDecision = Boolean(layerDecision)
@@ -1246,8 +1248,7 @@ export function WeatherPanel({
         <div className="inline-flex shrink-0 items-center border border-neutral-800">
           <button
             type="button"
-            onClick={() => selectedDateIndex > 0 && setSelectedDate(availableDates[selectedDateIndex - 1])}
-            disabled={selectedDateIndex <= 0}
+            onClick={() => setSelectedDate(addDateDays(selectedDate || todayDate, -1))}
             className="px-2 py-1 text-[10px] text-neutral-400 hover:bg-neutral-900 disabled:opacity-30"
           >
             前一天
@@ -1261,8 +1262,7 @@ export function WeatherPanel({
           />
           <button
             type="button"
-            onClick={() => selectedDateIndex >= 0 && selectedDateIndex < availableDates.length - 1 && setSelectedDate(availableDates[selectedDateIndex + 1])}
-            disabled={selectedDateIndex < 0 || selectedDateIndex >= availableDates.length - 1}
+            onClick={() => setSelectedDate(addDateDays(selectedDate || todayDate, 1))}
             className="px-2 py-1 text-[10px] text-neutral-400 hover:bg-neutral-900 disabled:opacity-30"
           >
             后一天
@@ -1918,7 +1918,7 @@ function HourlyEvidencePanel({
     china_live_value: asNumber(row.china_live),
     pws_value: asNumber(row.pws),
     gap_value: asNumber(row.gap),
-    cloud_pct: asNumber(row.cloud_cover ?? row.humidity),
+    cloud_pct: asNumber(row.cloud_cover),
   }))
   const hasChartEvidence = chartRows.some(row =>
     row.forecast_value !== null
@@ -1976,15 +1976,15 @@ function HourlyEvidencePanel({
       <div
         className="p-2"
         role="img"
-        aria-label={`${cityName || '当前城市'} Hourly Temperature chart. METAR is an orange solid line, Historical is a green solid line, China Weather Live is a red square-marker line when present, PWS is a purple triangle-marker line when present, Forecast is a dashed blue hollow-dot line, Cloud Cover is a translucent area, and the forecast peak is marked with a pink vertical line.`}
+        aria-label={`${cityName || '当前城市'}逐小时温度图：METAR 为橙色实线，历史为绿色实线，中国实况为红色方块，PWS 为紫色三角，预报为蓝色虚线空心点，云量为灰色面积，峰值用粉色竖线标记。`}
       >
         <div className="mb-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[10px] text-[#7D8694]">
-          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full bg-[#F97316]" />METAR</span>
-          <span className={`inline-flex items-center gap-1 ${hasHistorical ? '' : 'opacity-45'}`}><span className="h-2.5 w-2.5 rounded-full bg-[#22C55E]" />Historical</span>
-          <span className={`inline-flex items-center gap-1 ${hasChinaLive ? '' : 'opacity-45'}`}><span className="h-2.5 w-2.5 bg-[#EF4444]" />China Weather Live</span>
-          <span className={`inline-flex items-center gap-1 ${hasPws ? '' : 'opacity-45'}`}><span className="h-0 w-0 border-x-[5px] border-b-[9px] border-x-transparent border-b-[#A855F7]" />PWS</span>
-          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full border border-[#3B82F6]" />Forecast</span>
-          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-3 bg-[#94A3B8]/30" />Cloud Cover %</span>
+          <span className={`inline-flex items-center gap-1 ${hasChinaLive ? '' : 'opacity-45'}`}><span className="h-2.5 w-2.5 bg-[#EF4444]" />中国实况</span>
+          <span className={`inline-flex items-center gap-1 ${hasPws ? '' : 'opacity-45'}`}><span className="h-0 w-0 border-x-[5px] border-b-[9px] border-x-transparent border-b-[#A855F7]" />PWS（实时）</span>
+          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full bg-[#F97316]" />METAR（本地时）</span>
+          <span className={`inline-flex items-center gap-1 ${hasHistorical ? '' : 'opacity-45'}`}><span className="h-2.5 w-2.5 rounded-full bg-[#22C55E]" />历史（本地时）</span>
+          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full border border-[#3B82F6]" />预报（本地时）</span>
+          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-3 bg-[#94A3B8]/30" />云量 %</span>
         </div>
         <div className="relative h-[320px]">
           <ResponsiveContainer width="100%" height="100%">
@@ -1996,21 +1996,21 @@ function HourlyEvidencePanel({
               <Tooltip
                 contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
                 formatter={(value: any, name: any) => {
-                  if (name === 'Cloud Cover %') return [`${Number(value).toFixed(0)}%`, name]
+                  if (name === '云量 %') return [`${Number(value).toFixed(0)}%`, name]
                   return [fmtTemp(Number(value), unit), name]
                 }}
                 labelFormatter={(_, payload) => payload?.[0]?.payload?.timestamp ? shortTime(payload[0].payload.timestamp) : ''}
               />
-              <Area yAxisId="percent" type="monotone" dataKey="cloud_pct" name="Cloud Cover %" stroke="#94A3B8" fill="#94A3B8" fillOpacity={0.25} strokeOpacity={0.65} connectNulls={false} />
+              <Area yAxisId="percent" type="monotone" dataKey="cloud_pct" name="云量 %" stroke="#94A3B8" fill="#94A3B8" fillOpacity={0.25} strokeOpacity={0.65} connectNulls={false} />
               <Line yAxisId="temp" type="monotone" dataKey="metar_value" name="METAR" stroke="#F97316" dot={{ r: 3, fill: '#F97316', stroke: '#F97316', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />
-              <Line yAxisId="temp" type="monotone" dataKey="historical_value" name="Historical" stroke="#22C55E" dot={{ r: 3, fill: '#22C55E', stroke: '#22C55E', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />
+              <Line yAxisId="temp" type="monotone" dataKey="historical_value" name="历史" stroke="#22C55E" dot={{ r: 3, fill: '#22C55E', stroke: '#22C55E', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />
               {hasChinaLive && (
-                <Line yAxisId="temp" type="monotone" dataKey="china_live_value" name="China Weather Live" stroke="#EF4444" dot={<SquareDot fill="#EF4444" />} activeDot={<SquareDot fill="#EF4444" active />} strokeWidth={2} connectNulls={false} />
+                <Line yAxisId="temp" type="monotone" dataKey="china_live_value" name="中国实况" stroke="#EF4444" dot={<SquareDot fill="#EF4444" />} activeDot={<SquareDot fill="#EF4444" active />} strokeWidth={2} connectNulls={false} />
               )}
               {hasPws && (
                 <Line yAxisId="temp" type="monotone" dataKey="pws_value" name="PWS" stroke="#A855F7" dot={<TriangleDot fill="#A855F7" />} activeDot={<TriangleDot fill="#A855F7" active />} strokeWidth={2} connectNulls={false} />
               )}
-              <Line yAxisId="temp" type="monotone" dataKey="forecast_value" name="Forecast" stroke="#3B82F6" strokeDasharray="4 4" dot={<HollowCircleDot stroke="#3B82F6" />} activeDot={<HollowCircleDot stroke="#3B82F6" active />} strokeWidth={2} connectNulls={false} />
+              <Line yAxisId="temp" type="monotone" dataKey="forecast_value" name="预报" stroke="#3B82F6" strokeDasharray="4 4" dot={<HollowCircleDot stroke="#3B82F6" />} activeDot={<HollowCircleDot stroke="#3B82F6" active />} strokeWidth={2} connectNulls={false} />
               {peakHour && (
                 <ReferenceLine
                   yAxisId="temp"

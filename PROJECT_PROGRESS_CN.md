@@ -219,3 +219,15 @@
 - 结论：本轮显著减少了看板肥胖和内部解释噪声，也修正了 METAR 窗口、小时观测聚合和 DEB observed floor 这三个会直接影响预测读数的问题。但当前模型仍未证明盈利，PolyWX 字段级对齐和 DEB 数值 benchmark 仍未完成，live 继续锁定。
 - 下一步：用 PolyWX Chicago/Tokyo/Shanghai 的真实截图/DOM/XHR 做字段级 benchmark，优先核对 Hourly 曲线、DEB μ/σ、peak hour、METAR 派生字段和 Probability buckets；不要再扩新功能，先把现有链路跑准。
 - 相关提交：待提交。
+
+### 2026-07-06：PolyWX 对齐减法 + METAR 派生字段修正
+
+- 目标：继续执行 PolyWX 对齐整改方案，优先删掉日常看板里的调试噪声，并修复 raw METAR 已正确但 UI `vis / wx / cloud` 显示错误的问题；不新增 endpoint、collector 或交易路径。
+- 改动：`frontend/src/App.tsx` 删除中间主板 `Delta Audit` 入口，删除顶部“刷新当前城市”，推荐关注移到城市标题上方并压缩为城市/现在温度/预计最高温；城市标题下删除 `METAR --`、`证据 F/H`、模块计数、信号计数；顶部 poller 状态改中文短标签，失败次数只保留在 tooltip。
+- 改动：`frontend/src/components/WeatherPanel.tsx` 修复前一天/后一天/今天按日历日切换，Hourly 图例改为中文 PolyWX 风格；云量只使用真实 `cloud_cover` 字段，不再用 humidity 兜底；无真实 China Live/PWS 数据时不画浮点；Forecast/METAR/Historical/China Live/PWS 继续独立成多条 series。
+- 改动：`weatherbot_v3/hourly.py` 将 METAR `visibility`、天气现象 token（如 `-RA`）、云层覆盖百分比从 `metar_reports.raw_text/cloud_layers_json` 映射进 observation payload 和 `hourly_consensus_points`，让 METAR 表和 Hourly 图读解析产物而不是空值/JSON 字符串。
+- 验证：`python -m unittest tests.test_polywx_contract -v` 13 tests OK；`python -m unittest tests.test_v3_core -v` 168 tests OK；`npm run build` 通过；`git diff --check` 通过，仅 Windows LF/CRLF warning。`/api/dashboard` 返回 `weather_city_series=26`、`recommendations=0`、`scheduler=true`。
+- Firecrawl 对照：`firecrawl_interact` 成功读取 PolyWX Shanghai 2026-07-06 动态页面，确认其主路径为推荐关注、Forecast/METAR/Historical/China Weather Live 状态徽章、日期控制、Forecast/METAR/Historical/Diff Stats/Fetch Log 五 tab、Hourly chart、DEB 和 Probability buckets。本轮只对齐主路径，不照搬会员/反馈等非交易模块。
+- 结论：本轮解决了“看板肥胖”和“raw METAR 对但派生字段错”的一部分核心问题；数据层仍需继续核对 Forecast/China Live/Cloud 与 PolyWX 的真实源差异，推荐为 0 仍可能由 gate 和市场匹配导致。live 仍锁定。
+- 下一步：重启后端和 Vite 后人工核验 `shanghai-zspd&date=2026-07-06` 与 `chicago-kord` 页面；下一轮只做 Forecast/China Live 数值对齐和推荐 gate 诊断，不再加新模块。
+- 相关提交：待提交。

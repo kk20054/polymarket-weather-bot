@@ -23,7 +23,6 @@ import {
   fetchSchedulerStatus,
   fetchSignalDecisions,
   fetchSettlementContracts,
-  fetchTruthDeltaAudit,
   placeLiveOrder,
   resetSimulation,
   runProductionAction,
@@ -44,14 +43,12 @@ import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
-import { DeltaAuditPanel } from './components/DeltaAuditPanel'
 import { useT, type I18nLanguage } from './i18n/useT'
 import type { AutoSimulationStatus, BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommendationItem, DataReadiness, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerPollerStatus, SchedulerStatus } from './types'
 
 type TradeMode = 'paper' | 'live'
 type UiLanguage = 'zh' | 'en'
 type ThemeMode = 'light' | 'dark'
-type MainView = 'workbench' | 'delta'
 type ProductionRefreshOptions = {
   cities?: string[]
   days?: number
@@ -80,7 +77,6 @@ const UI_COPY = {
     autoOff: '一键模拟关闭',
     liveReady: '实盘可用',
     liveLocked: '实盘锁定',
-    refreshCurrent: '刷新当前城市',
     schedulerStart: '启动调度器',
     schedulerStop: '停止调度器',
     fetching: '抓取中',
@@ -98,7 +94,6 @@ const UI_COPY = {
     autoOff: 'Auto paper off',
     liveReady: 'Live ready',
     liveLocked: 'Live locked',
-    refreshCurrent: 'Refresh city',
     schedulerStart: 'Start scheduler',
     schedulerStop: 'Stop scheduler',
     fetching: 'Fetching',
@@ -235,13 +230,9 @@ function tempLabel(value?: number | null, unit = '') {
   return `${Number(value).toFixed(1)}°${unit || ''}`
 }
 
-function edgeLabel(value?: number | null) {
-  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--'
-  const sign = Number(value) >= 0 ? '+' : ''
-  return `${sign}${(Number(value) * 100).toFixed(1)}pp`
-}
-
 function pollerTone(poller?: SchedulerPollerStatus | null) {
+  const fails = Number(poller?.fails_last_hour ?? 0)
+  if (fails > 0) return 'border-red-500/35 bg-red-500/5 text-red-300'
   if (poller?.running) return 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200'
   const age = poller?.age_seconds
   if (age === null || age === undefined || !Number.isFinite(Number(age))) return 'border-neutral-800 text-neutral-500'
@@ -252,14 +243,20 @@ function pollerTone(poller?: SchedulerPollerStatus | null) {
 
 function SchedulerBadge({ poller, label, extraTitle }: { poller?: SchedulerPollerStatus | null; label: string; extraTitle?: string }) {
   const fails = Number(poller?.fails_last_hour ?? 0)
+  const title = [
+    `${label} 下次：${poller?.next_run_at ? timeText(poller.next_run_at) : '--'}`,
+    `耗时：${durationLabel(poller?.last_duration_ms)}`,
+    fails > 0 ? `近 1 小时失败：${fails}` : '',
+    poller?.last_message ? `最近消息：${poller.last_message}` : '',
+    extraTitle || '',
+  ].filter(Boolean).join('\n')
   return (
     <span
       className={`shrink-0 border px-2 py-1 tabular-nums ${pollerTone(poller)}`}
       data-extra-title={extraTitle || undefined}
-      title={`${label} next: ${poller?.next_run_at ? timeText(poller.next_run_at) : '--'} · ${poller?.last_message || 'waiting'}`}
+      title={title}
     >
       {label} {pollerAgeLabel(poller)} ({durationLabel(poller?.last_duration_ms)})
-      {fails > 0 ? ` ⚠ ${fails} fail/hr` : ''}
     </span>
   )
 }
@@ -278,12 +275,16 @@ function RecommendationCard({
   const verified = item.verification_status || (item.settlement_rule_verified_at ? 'verified' : 'unverified')
   const blocker = item.blocked_reasons?.[0] ? reasonLabel(item.blocked_reasons[0]) : (item.paper_allowed ? 'paper allowed' : 'watch')
   const cardTone = selected
-    ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-50'
+    ? 'border-amber-400/60 bg-amber-400/15 text-amber-50'
     : isObservationOnly
-      ? 'border-red-400/30 bg-red-500/5 text-neutral-200 hover:border-red-300/50'
-      : 'border-amber-500/30 bg-amber-500/5 text-neutral-200 hover:border-amber-400/60'
-  const sigma = item.deb_sigma === null || item.deb_sigma === undefined ? '--' : Number(item.deb_sigma).toFixed(2)
-  const title = `METAR age ${age} ? verified ${verified} ? ${item.blocked_reasons?.length ? item.blocked_reasons.map(reasonLabel).join(', ') : blocker}`
+      ? 'border-neutral-700 bg-neutral-900/50 text-neutral-200 hover:border-neutral-500'
+      : 'border-amber-500/35 bg-amber-500/10 text-neutral-100 hover:border-amber-400/70'
+  const title = [
+    `METAR age ${age}`,
+    `verified ${verified}`,
+    item.blocked_reasons?.length ? item.blocked_reasons.map(reasonLabel).join(', ') : blocker,
+    item.polymarket_url || '',
+  ].filter(Boolean).join('\n')
 
   return (
     <div
@@ -299,37 +300,10 @@ function RecommendationCard({
       className={`min-w-0 cursor-pointer border p-2 text-left transition ${cardTone}`}
       title={title}
     >
-      <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0 truncate text-[12px] font-semibold">{item.city_name} / {item.station_id || '--'}</div>
-        <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${
-          isObservationOnly ? 'border-red-400/30 text-red-200' : item.paper_allowed ? 'border-green-400/30 text-green-200' : 'border-amber-400/30 text-amber-200'
-        }`}>
-          {isObservationOnly ? 'Observation' : item.paper_allowed ? 'Paper ok' : 'Blocked'}
-        </span>
-      </div>
-      <div className="mt-1 truncate text-[10px] tabular-nums text-neutral-300">
-        {tempLabel(item.current_temp, item.current_temp_unit)} to {tempLabel(item.deb_mu, item.deb_unit)} +/- {sigma}
-      </div>
-      <div className="mt-1 flex items-center justify-between gap-2 text-[10px]">
-        <span className="min-w-0 truncate text-neutral-400">{isObservationOnly ? 'No active market' : (item.bucket_label || item.bucket_key || '--')}</span>
-        <span className={`shrink-0 tabular-nums ${Number(item.edge ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>{isObservationOnly ? '--' : edgeLabel(item.edge)}</span>
-      </div>
-      <div className="mt-1 truncate text-[9px] text-neutral-500">
-        {isObservationOnly
-          ? `China Weather Live ${tempLabel(item.china_live_temp, item.current_temp_unit)}${item.china_live_observed_at ? ` ? ${relativeTime(item.china_live_observed_at)}` : ''}`
-          : item.polymarket_url
-            ? (
-              <a
-                href={item.polymarket_url}
-                target="_blank"
-                rel="noreferrer"
-                onClick={event => event.stopPropagation()}
-                className="text-cyan-200 hover:text-cyan-100"
-              >
-                Polymarket
-              </a>
-            )
-            : 'No Polymarket link'}
+      <div className="truncate text-[12px] font-semibold">{item.city_name}</div>
+      <div className="mt-1 flex items-center gap-3 text-[10px] tabular-nums">
+        <span className="text-amber-200">现在 {tempLabel(item.current_temp, item.current_temp_unit)}</span>
+        <span className="text-amber-200">预计最高 {tempLabel(item.deb_mu, item.deb_unit)}</span>
       </div>
     </div>
   )
@@ -934,7 +908,6 @@ function App() {
   const [contractStatus, setContractStatus] = useState('mature-auto')
   const [citySearch, setCitySearch] = useState('')
   const [citySort, setCitySort] = useState<'signal' | 'alpha'>('signal')
-  const [activeMainView, setActiveMainView] = useState<MainView>('workbench')
   const [continentFilter, setContinentFilter] = useState<(typeof CONTINENT_FILTERS)[number]>('全部')
   const [uiLanguage, setUiLanguage] = useState<UiLanguage>(() => {
     if (typeof window === 'undefined') return 'zh'
@@ -947,7 +920,6 @@ function App() {
   const [productionActionResult, setProductionActionResult] = useState<ProductionActionRunResult | null>(null)
   const [refreshNotices, setRefreshNotices] = useState<RefreshNotice[]>([])
   const balanceInitRef = useRef(false)
-  const productionRefreshRunningRef = useRef(false)
   const seenSchedulerRunsRef = useRef<Record<string, string>>({})
   const copy = UI_COPY[uiLanguage]
   const i18nLanguage: I18nLanguage = uiLanguage === 'zh' ? 'zh-CN' : 'en'
@@ -1027,14 +999,6 @@ function App() {
     retry: 1,
   })
 
-  const truthDeltaAuditQuery = useQuery({
-    queryKey: ['truth-delta-audit', selectedCity],
-    queryFn: () => fetchTruthDeltaAudit(selectedCity || '', 500),
-    enabled: Boolean(selectedCity),
-    refetchInterval: 120000,
-    retry: 1,
-  })
-
   const modelRepriceEventsQuery = useQuery({
     queryKey: ['model-reprice-events', selectedCity, selectedDate],
     queryFn: () => fetchModelRepriceEvents(selectedCity || '', selectedDate || '', true, 200),
@@ -1081,7 +1045,7 @@ function App() {
         tone: 'running',
         title: uiLanguage === 'zh' ? '调度器启动中' : 'Scheduler starting',
         message: uiLanguage === 'zh'
-          ? '后端将按源轮询 enabled 城市：METAR 5 分钟、China Live 5 分钟、Forecast 60 分钟、Historical 15 分钟。'
+          ? '后端将按源轮询启用城市：METAR 5 分钟、中国实况 5 分钟、预报 60 分钟、历史观测 15 分钟。'
           : 'Backend pollers will refresh enabled cities by source frequency.',
         details: ['scheduler'],
       }, 6000)
@@ -1094,7 +1058,7 @@ function App() {
         tone: 'success',
         title: uiLanguage === 'zh' ? '调度器已启动' : 'Scheduler started',
         message: result.message || (uiLanguage === 'zh' ? '常驻 poller 已在后端运行。' : 'Server-side pollers are running.'),
-        details: ['METAR', 'China Live', 'Forecast', 'Historical'],
+        details: ['METAR', '中国实况', '预报', '历史观测'],
       }, 8000)
     },
     onError: error => {
@@ -1284,13 +1248,6 @@ function App() {
   const productionRefreshDone = productionRefreshStages.filter(stage => stage.ok && !stage.running).length
   const schedulerStatus: SchedulerStatus | null = schedulerStatusQuery.data ?? data?.scheduler_status ?? null
   const schedulerRunning = Boolean(schedulerStatus?.running || schedulerStartMutation.isPending)
-  const currentRefreshOptions = useMemo<ProductionRefreshOptions>(() => ({
-    cities: selectedCity ? [selectedCity] : [],
-    days: refreshDaysForDate(selectedDate),
-    limit: 20,
-    startDate: selectedDate || '',
-    endDate: selectedDate || '',
-  }), [selectedCity, selectedDate])
   const productionValidation = productionValidationQuery.data ?? null
   const modelDatasetAudit = data?.model_dataset_audit ?? null
   const forecastArchiveManifest = forecastArchiveManifestQuery.data ?? null
@@ -1485,16 +1442,6 @@ function App() {
   const recommendations = data?.recommendations ?? null
   const recommendedItems = recommendations?.items ?? []
   const actionableCityCount = recommendations?.trade_candidate_count ?? cityOptions.filter(city => city.actionable > 0).length
-  const selectedEvidenceCount = (selectedCityMeta?.forecastCount ?? 0)
-    + (selectedCityMeta?.historyCount ?? 0)
-    + (selectedCityMeta?.latestMetar !== null && selectedCityMeta?.latestMetar !== undefined ? 1 : 0)
-    + (selectedCityMeta?.humidityStatus === 'available' ? 1 : 0)
-  const selectedEvidenceReady = selectedEvidenceCount > 0
-
-  useEffect(() => {
-    productionRefreshRunningRef.current = productionRefreshRunning
-  }, [productionRefreshRunning])
-
   useEffect(() => {
     const pollers = schedulerStatus?.pollers ?? {}
     for (const key of ['forecast_poller', 'metar_poller', 'china_live_poller', 'derive_poller']) {
@@ -1525,25 +1472,6 @@ function App() {
       }
     }
   }, [schedulerStatus, uiLanguage])
-
-  const runProductionRefreshFromDashboard = (source: 'manual' | 'auto' = 'manual') => {
-    if (productionRefreshRunningRef.current) {
-      showRefreshNotice({
-        id: Date.now(),
-        tone: 'warning',
-        title: uiLanguage === 'zh' ? '已有抓取正在运行' : 'Refresh already running',
-        message: uiLanguage === 'zh'
-          ? '请等待当前 production-refresh 完成；后端锁会阻止重复抓取。'
-          : 'Please wait for the current production-refresh to finish. The backend lock prevents duplicate fetches.',
-        details: ['production-refresh lock'],
-      }, 9000)
-      return
-    }
-    productionRefreshMutation.mutate({
-      ...currentRefreshOptions,
-      source,
-    })
-  }
 
   const filteredCityOptions = cityOptions.filter(city => {
     const query = citySearch.trim().toLowerCase()
@@ -1631,15 +1559,19 @@ function App() {
           <div className="text-[11px] text-neutral-600">{t('app.subtitle')}</div>
         </div>
         <div className="order-last flex min-w-0 basis-full flex-nowrap items-center gap-1.5 overflow-x-auto text-[10px] xl:overflow-visible">
-          <SchedulerBadge poller={schedulerStatus?.pollers?.forecast_poller} label="Forecast" />
+          <SchedulerBadge poller={schedulerStatus?.pollers?.forecast_poller} label="预报" />
           <SchedulerBadge
             poller={schedulerStatus?.pollers?.metar_poller}
             label="METAR"
-            extraTitle={`China Live ${pollerAgeLabel(schedulerStatus?.pollers?.china_live_poller)} (${durationLabel(schedulerStatus?.pollers?.china_live_poller?.last_duration_ms)})`}
           />
-          <SchedulerBadge poller={schedulerStatus?.pollers?.derive_poller} label="Historical" />
+          <SchedulerBadge poller={schedulerStatus?.pollers?.derive_poller} label="历史观测" />
+          <SchedulerBadge
+            poller={schedulerStatus?.pollers?.china_live_poller}
+            label="中国天气实况"
+            extraTitle="当前为本系统中国实况源，用于展示对照；未确认与 PolyWX 同源，不能解锁结算 truth 或实盘。"
+          />
           <span className="shrink-0 border border-neutral-800 px-2 py-1 text-neutral-400">
-            Last refresh {dataAge(stats.data_age_minutes)}
+            已刷新 {dataAge(stats.data_age_minutes)}
           </span>
           {debugMode && (
             <span
@@ -1712,15 +1644,6 @@ function App() {
             {uiLanguage === 'zh' ? '深色' : 'Dark'}
           </button>
         </div>
-        <button
-          onClick={() => runProductionRefreshFromDashboard('manual')}
-          disabled={productionRefreshRunning}
-          className="inline-flex items-center gap-1 whitespace-nowrap border border-green-500/30 px-2 py-1.5 text-[11px] text-green-300 hover:bg-green-500/10 disabled:opacity-40"
-          title="刷新当前城市/日期一次：production-refresh-v2。不会启动常驻调度器。"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${productionRefreshRunning ? 'animate-spin' : ''}`} />
-          {productionRefreshRunning ? copy.fetching : copy.refreshCurrent}
-        </button>
         <button
           onClick={() => {
             if (schedulerRunning) schedulerStopMutation.mutate()
@@ -1943,6 +1866,28 @@ function App() {
         </aside>
 
         <section className="order-1 min-h-[720px] overflow-hidden xl:order-2 xl:flex xl:min-h-0 xl:flex-col">
+          <div className="shrink-0 border-b border-amber-500/20 bg-amber-500/10 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="shrink-0 text-[11px] font-semibold text-amber-300">推荐关注</div>
+              {recommendedItems.length > 0 ? (
+                <div className="grid min-w-0 flex-1 gap-1 md:grid-cols-2 2xl:grid-cols-4">
+                  {recommendedItems.map(item => (
+                    <RecommendationCard
+                      key={`${item.type}-${item.city_key}-${item.target_date}-${item.bucket_key ?? item.metar_report_time ?? 'latest'}`}
+                      item={item}
+                      selected={selectedCity === item.city_key}
+                      onSelect={() => {
+                        setSelectedCity(item.city_key)
+                        if (item.target_date) setSelectedDate(item.target_date)
+                      }}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="text-[11px] text-amber-200/80">暂无推荐</div>
+              )}
+            </div>
+          </div>
           <div className="z-20 shrink-0 flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 bg-black/95 px-3 py-2">
             <div className="min-w-0">
               <div className="truncate text-sm font-medium text-neutral-100">
@@ -1952,18 +1897,6 @@ function App() {
                 <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">{selectedDate || '日期待定'}</span>
                 <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">
                   {selectedCityMeta?.latest === null || selectedCityMeta?.latest === undefined ? '预测 --' : `预测 ${Number(selectedCityMeta.latest).toFixed(1)}°${selectedCityMeta.unit}`}
-                </span>
-                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">
-                  {selectedCityMeta?.latestMetar === null || selectedCityMeta?.latestMetar === undefined ? 'METAR --' : `METAR ${Number(selectedCityMeta.latestMetar).toFixed(1)}°${selectedCityMeta.unit}`}
-                </span>
-                <span className={`border px-1.5 py-0.5 ${selectedEvidenceReady ? 'border-cyan-500/30 text-cyan-200' : 'border-neutral-800 text-neutral-500'}`}>
-                  证据 F{selectedCityMeta?.forecastCount ?? 0} / H{selectedCityMeta?.historyCount ?? 0}
-                </span>
-                <span className={`border px-1.5 py-0.5 ${(selectedDateEvidence?.ready_modules ?? 0) > 0 ? 'border-blue-500/30 text-blue-200' : 'border-neutral-800 text-neutral-500'}`}>
-                  模块 {selectedDateEvidence?.ready_modules ?? 0}/{selectedDateEvidence?.module_count ?? 8}
-                </span>
-                <span className={`border px-1.5 py-0.5 ${actionable > 0 ? 'border-green-500/30 text-green-300' : 'border-neutral-800 text-neutral-500'}`}>
-                  信号 {actionable}/{signals.length}
                 </span>
               </div>
               <div className="mt-1 flex flex-wrap gap-1.5 text-[9px]">
@@ -2030,62 +1963,6 @@ function App() {
           )}
 
           <div className="min-h-[720px] overflow-y-auto xl:min-h-0 xl:flex-1">
-            <div className="flex gap-1 border-b border-neutral-800 p-2 text-[11px]">
-              <button
-                type="button"
-                onClick={() => setActiveMainView('workbench')}
-                className={`border px-3 py-1.5 ${activeMainView === 'workbench' ? 'border-blue-500/40 bg-blue-500/15 text-blue-100' : 'border-neutral-800 text-neutral-500 hover:text-neutral-200'}`}
-              >
-                {t('view.workbench')}
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveMainView('delta')}
-                className={`border px-3 py-1.5 ${activeMainView === 'delta' ? 'border-blue-500/40 bg-blue-500/15 text-blue-100' : 'border-neutral-800 text-neutral-500 hover:text-neutral-200'}`}
-              >
-                {t('view.deltaAudit')}
-              </button>
-            </div>
-            {activeMainView === 'workbench' ? (
-            <>
-            <div className="border-b border-neutral-800 p-2">
-              <div className="mb-1 flex items-center justify-between gap-2">
-                <div className="text-[10px] font-medium text-neutral-300">推荐关注</div>
-                <div className="text-[9px] text-neutral-500">
-                  信号 {recommendations?.trade_candidate_count ?? 0} · 观察 {recommendations?.observation_only_count ?? 0}
-                </div>
-              </div>
-              {recommendedItems.length > 0 ? (
-                <div className="grid gap-1 md:grid-cols-2 2xl:grid-cols-4">
-                  {recommendedItems.map(item => (
-                    <RecommendationCard
-                      key={`${item.type}-${item.city_key}-${item.target_date}-${item.bucket_key ?? item.metar_report_time ?? 'latest'}`}
-                      item={item}
-                      selected={selectedCity === item.city_key}
-                      onSelect={() => {
-                        setSelectedCity(item.city_key)
-                        if (item.target_date) setSelectedDate(item.target_date)
-                      }}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <div className="border border-neutral-800 px-2 py-2 text-[10px] text-neutral-500">
-                  {recommendations?.empty_reason === 'scheduler_stopped'
-                    ? '启动调度器以获取实时推荐。'
-                    : '暂无通过 METAR age / verified / strict match / paper gate 的实时推荐。'}
-                  {recommendations?.skipped ? (
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {Object.entries(recommendations.skipped).slice(0, 5).map(([reason, count]) => (
-                        <span key={reason} className="border border-neutral-800 px-1.5 py-0.5">
-                          {reason} {count}
-                        </span>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              )}
-            </div>
             <WeatherPanel
               forecasts={forecasts}
               signals={signals}
@@ -2115,14 +1992,6 @@ function App() {
               backfillResult={historyBackfillMutation.data}
               alphaEvents={modelRepriceEventsQuery.data?.rows ?? []}
             />
-            </>
-            ) : (
-              <DeltaAuditPanel
-                summary={truthDeltaAuditQuery.data ?? null}
-                selectedCity={selectedCity}
-                language={i18nLanguage}
-              />
-            )}
           </div>
         </section>
 

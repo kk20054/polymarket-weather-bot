@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,24 @@ FIELD_KEYS = {
     "pressure": ("pressure_msl", "surface_pressure", "pressure"),
     "dew_point": ("dew_point_2m", "dewpoint_2m", "dew_point"),
     "shortwave_radiation": ("shortwave_radiation", "solar_radiation"),
+}
+
+METAR_WEATHER_RE = re.compile(
+    r"^(?:[-+])?(?:VC)?(?:(?:MI|PR|BC|DR|BL|SH|TS|FZ))*"
+    r"(?:DZ|RA|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PY|PO|SQ|FC|SS|DS|TS)+$"
+)
+
+METAR_CLOUD_COVER_PCT = {
+    "SKC": 0.0,
+    "CLR": 0.0,
+    "NSC": 0.0,
+    "NCD": 0.0,
+    "CAVOK": 0.0,
+    "FEW": 25.0,
+    "SCT": 50.0,
+    "BKN": 100.0,
+    "OVC": 100.0,
+    "VV": 100.0,
 }
 
 WEATHER_CODE_LABELS = {
@@ -393,11 +412,13 @@ def hourly_consensus_points(
             "pws": pws_temp,
             "humidity": _float(row.get("humidity")),
             "cloud_cover": _float(row.get("cloud_cover")),
+            "visibility": _float(observation_payload.get("visibility")) if isinstance(observation_payload, dict) else None,
             "precipitation": _float(row.get("precipitation")),
             "wind_speed": _float(row.get("wind_speed")),
             "wind_direction": _float(row.get("wind_direction")),
             "pressure": _float(row.get("pressure")),
             "dew_point": _float(row.get("dew_point")),
+            "condition": observation_payload.get("condition") if isinstance(observation_payload, dict) else None,
             "forecast_spread": _float(row.get("forecast_spread")),
             "consensus_method": row.get("consensus_method") or "",
             "diff": residual,
@@ -822,11 +843,13 @@ def _observation_hourly_points(
             source="metar",
             station_id=row.get("station_id"),
             humidity=None,
-            cloud_cover=None,
+            cloud_cover=_metar_cloud_cover_percent(row),
             wind_speed=row.get("wind_speed"),
             wind_direction=row.get("wind_direction"),
             pressure=row.get("pressure") or row.get("altimeter"),
             dew_point=row.get("dew_point"),
+            visibility=row.get("visibility"),
+            condition=_metar_weather_tokens(row),
             raw=row,
         )
         _append_observation_bucket(buckets, point, target_date, target_dates_by_city)
@@ -848,6 +871,8 @@ def _observation_hourly_points(
             wind_direction=row.get("wind_direction"),
             pressure=row.get("pressure"),
             dew_point=row.get("dew_point"),
+            visibility=None,
+            condition=_condition_label(row),
             raw=row,
         )
         _append_observation_bucket(buckets, point, target_date, target_dates_by_city)
@@ -876,6 +901,8 @@ def _observation_hourly_points(
             "wind_direction": _float(primary_point.get("wind_direction")),
             "pressure": _float(primary_point.get("pressure")),
             "dew_point": _float(primary_point.get("dew_point")),
+            "visibility": _float(primary_point.get("visibility")),
+            "condition": primary_point.get("condition"),
             "sources": sorted(bucket["sources"]),
             "source": primary_source,
             "source_temperatures": source_temperatures,
@@ -903,6 +930,8 @@ def _observation_point(
     wind_direction: Any,
     pressure: Any,
     dew_point: Any,
+    visibility: Any,
+    condition: Any,
     raw: dict[str, Any],
 ) -> dict[str, Any] | None:
     report_dt = _parse_report_time(report_time)
@@ -929,6 +958,8 @@ def _observation_point(
         "wind_direction": _float(wind_direction),
         "pressure": _float(pressure),
         "dew_point": dew_point_value,
+        "visibility": _float(visibility),
+        "condition": str(condition) if condition else None,
         "raw": raw,
     }
 
@@ -957,6 +988,8 @@ def _append_observation_bucket(
             "wind_direction_values": [],
             "pressure_values": [],
             "dew_point_values": [],
+            "visibility_values": [],
+            "condition_values": [],
             "sources": set(),
             "latest_by_source": {},
             "latest_point": None,
@@ -973,10 +1006,13 @@ def _append_observation_bucket(
         bucket["latest_by_source"][source] = point
     if bucket["latest_point"] is None or _observation_sort_key(point) >= _observation_sort_key(bucket["latest_point"]):
         bucket["latest_point"] = point
-    for field in ("humidity", "cloud_cover", "wind_speed", "wind_direction", "pressure", "dew_point"):
+    for field in ("humidity", "cloud_cover", "wind_speed", "wind_direction", "pressure", "dew_point", "visibility"):
         value = point.get(field)
         if value is not None:
             bucket[f"{field}_values"].append(float(value))
+    condition = point.get("condition")
+    if condition:
+        bucket["condition_values"].append(str(condition))
 
 
 def _observation_sort_key(point: dict[str, Any]) -> datetime:
@@ -1113,6 +1149,8 @@ def _combined_observation(points: list[dict[str, Any]]) -> dict[str, Any]:
         "wind_direction": _circular_mean_degrees([value for value in (_float(point.get("wind_direction")) for point in points) if value is not None]),
         "pressure": _mean([value for value in (_float(point.get("pressure")) for point in points) if value is not None]),
         "dew_point": _mean([value for value in (_float(point.get("dew_point")) for point in points) if value is not None]),
+        "visibility": _mean([value for value in (_float(point.get("visibility")) for point in points) if value is not None]),
+        "condition": _mode([str(point.get("condition")) for point in points if point.get("condition")]),
         "sources": sources,
         "primary_source": primary_source,
         "source_temperatures": source_temperatures,
@@ -1310,6 +1348,39 @@ def _mode(values: list[str]) -> str | None:
     if not counts:
         return None
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
+def _metar_weather_tokens(row: dict[str, Any]) -> str | None:
+    raw = str(row.get("raw_text") or "").strip()
+    if not raw:
+        return None
+    tokens = []
+    for token in raw.split():
+        cleaned = token.strip().upper()
+        if METAR_WEATHER_RE.match(cleaned):
+            tokens.append(cleaned)
+    return " ".join(tokens) if tokens else None
+
+
+def _metar_cloud_cover_percent(row: dict[str, Any]) -> float | None:
+    layers = _loads(row.get("cloud_layers_json"), [])
+    cover_codes: list[str] = []
+    if isinstance(layers, list):
+        for layer in layers:
+            if isinstance(layer, dict):
+                cover = layer.get("cover") or layer.get("coverage") or layer.get("skyc") or layer.get("sky_cover")
+                if cover:
+                    cover_codes.append(str(cover).upper())
+            elif layer:
+                cover_codes.append(str(layer).upper())
+    raw = str(row.get("raw_text") or "").upper()
+    for code in METAR_CLOUD_COVER_PCT:
+        if code in {"CAVOK", "SKC", "CLR", "NSC", "NCD"} and re.search(rf"\b{code}\b", raw):
+            cover_codes.append(code)
+        elif re.search(rf"\b{code}\d{{3}}\b", raw):
+            cover_codes.append(code)
+    values = [METAR_CLOUD_COVER_PCT[code] for code in cover_codes if code in METAR_CLOUD_COVER_PCT]
+    return max(values) if values else None
 
 
 def _circular_mean_degrees(values: list[float]) -> float | None:

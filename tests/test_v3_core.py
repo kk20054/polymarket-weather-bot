@@ -4055,11 +4055,13 @@ class V3CoreTests(unittest.TestCase):
                 "city_name": "Chicago",
                 "station_id": "KORD",
                 "report_time": "2026-07-01T21:51:00Z",
-                "raw_text": "METAR KORD 012151Z 21012KT 10SM 33/23 A2987",
+                "raw_text": "METAR KORD 012151Z 21012KT 10SM -RA FEW042 BKN090 33/23 A2987",
                 "temperature": 91.4,
                 "dew_point": 73.4,
                 "wind_direction": 210,
                 "wind_speed": 12,
+                "visibility": 10,
+                "cloud_layers": [{"cover": "FEW"}, {"cover": "BKN"}],
                 "pressure": 1011,
             })
             upsert_mesonet_observation({
@@ -4096,8 +4098,11 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("pws", row["observation_sources_json"])
         self.assertAlmostEqual(row["forecast_temp"], 87.8, places=1)
         self.assertAlmostEqual(row["observed_temp"], 91.4, places=1)
+        self.assertAlmostEqual(row["cloud_cover"], 100.0, places=1)
         self.assertAlmostEqual(row["residual"], 3.6, places=1)
         self.assertEqual(summary["points"][0]["build_status"], "fallback_only")
+        self.assertAlmostEqual(summary["points"][0]["visibility"], 10.0, places=1)
+        self.assertEqual(summary["points"][0]["condition"], "-RA")
 
     def test_layer4_openmeteo_primary_excludes_polywx_and_uses_median_spread(self):
         db_path = test_db_path("layer4_openmeteo_primary")
