@@ -377,7 +377,10 @@ def hourly_consensus_points(
         observed_temp = _float(row.get("observed_temp"))
         residual = _float(row.get("residual"))
         raw_payload = _loads(row.get("raw_json"), {})
+        forecast_payload = raw_payload.get("forecast") if isinstance(raw_payload, dict) else {}
         observation_payload = raw_payload.get("observation") if isinstance(raw_payload, dict) else {}
+        if not forecast_payload and isinstance(raw_payload, dict) and isinstance(raw_payload.get("raw_json"), dict):
+            forecast_payload = raw_payload["raw_json"].get("forecast")
         if not observation_payload and isinstance(raw_payload, dict) and isinstance(raw_payload.get("raw_json"), dict):
             observation_payload = raw_payload["raw_json"].get("observation")
         source_temperatures = (
@@ -412,6 +415,7 @@ def hourly_consensus_points(
             "pws": pws_temp,
             "humidity": _float(row.get("humidity")),
             "cloud_cover": _float(row.get("cloud_cover")),
+            "forecast_cloud_cover": _float(forecast_payload.get("cloud_cover")) if isinstance(forecast_payload, dict) else None,
             "visibility": _float(observation_payload.get("visibility")) if isinstance(observation_payload, dict) else None,
             "precipitation": _float(row.get("precipitation")),
             "wind_speed": _float(row.get("wind_speed")),

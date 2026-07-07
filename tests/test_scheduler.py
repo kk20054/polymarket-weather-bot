@@ -102,6 +102,42 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status["fails_last_hour"], 1)
             self.assertIsNotNone(status["next_run_at"])
 
+    async def test_metar_poller_does_not_backoff_for_optional_pws_failure(self):
+        db_path = test_db_path("scheduler_pws_optional")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+
+        def fake_recent(city: str, *, hours: float = 6.0):
+            return {
+                "ok": True,
+                "city": city,
+                "station_id": city.upper(),
+                "reports_fetched": 1,
+                "reports_upserted": 1,
+            }
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db()
+            configure_enabled_cities(["chicago"])
+            scheduler = WeatherBotScheduler(city_concurrency=1)
+            with patch("weatherbot_v3.scheduler.fetch_recent_hours", side_effect=fake_recent), patch(
+                "weatherbot_v3.scheduler.run_pws_fetch",
+                side_effect=RuntimeError("pws unavailable"),
+            ):
+                result = await scheduler.run_once("metar_poller")
+
+            self.assertTrue(result["ok"])
+            status = scheduler.status()["pollers"]["metar_poller"]
+            self.assertEqual(status["last_status"], "OK")
+            city_result = status["last_result"]["city_results"][0]
+            self.assertTrue(city_result["ok"])
+            logs = list_data_fetch_logs(limit=20)
+            self.assertTrue(any(
+                row.get("source") == "scheduler"
+                and row.get("stage") == "metar_poller"
+                and row.get("status") == "OK"
+                for row in logs
+            ))
+
     async def test_start_stop_are_idempotent_without_running_collectors(self):
         scheduler = WeatherBotScheduler(city_concurrency=2)
 

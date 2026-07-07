@@ -1444,11 +1444,15 @@ function App() {
   const actionableCityCount = recommendations?.trade_candidate_count ?? cityOptions.filter(city => city.actionable > 0).length
   useEffect(() => {
     const pollers = schedulerStatus?.pollers ?? {}
+    let shouldRefreshDashboard = false
+    let shouldRefreshLayer7 = false
     for (const key of ['forecast_poller', 'metar_poller', 'china_live_poller', 'derive_poller']) {
       const poller = pollers[key]
       const runKey = poller?.last_run_at
       if (!poller || !runKey || seenSchedulerRunsRef.current[key] === runKey) continue
       seenSchedulerRunsRef.current[key] = runKey
+      shouldRefreshDashboard = true
+      shouldRefreshLayer7 = true
       const cityResults = poller.last_result?.city_results ?? []
       for (const [index, result] of cityResults.entries()) {
         const city = result.city || result.station_id || 'unknown'
@@ -1471,7 +1475,16 @@ function App() {
         }, ok ? 5000 : 14000)
       }
     }
-  }, [schedulerStatus, uiLanguage])
+    if (shouldRefreshDashboard) {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    }
+    if (shouldRefreshLayer7) {
+      queryClient.invalidateQueries({ queryKey: ['market-buckets'] })
+      queryClient.invalidateQueries({ queryKey: ['signal-decisions'] })
+      queryClient.invalidateQueries({ queryKey: ['daily-max-predictions'] })
+      queryClient.invalidateQueries({ queryKey: ['model-reprice-events'] })
+    }
+  }, [schedulerStatus, uiLanguage, queryClient])
 
   const filteredCityOptions = cityOptions.filter(city => {
     const query = citySearch.trim().toLowerCase()

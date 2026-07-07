@@ -197,7 +197,7 @@
 - 验证：`npm run build` 通过；`.venv\Scripts\python.exe -m unittest tests.test_polywx_contract tests.test_v3_core` 通过，181 tests OK；`git diff --check` 通过，仅 Windows LF/CRLF warning。
 - 结论：Round 5 UI 框架可用，城市状态与风险提示更清晰；Delta/Alpha 页面依赖 Round 3/4 表内真实数据，没数据时显示诚实空态。live 仍锁定。
 - 下一步：浏览器人工 QA 10 城城市切换、HK/Seoul 横幅、6/12 桶动态表；之后进入 Round 6 前应先补 Previous Runs/Truth Delta 数据密度与 paper validation。
-- 相关提交：待提交。
+- 相关提交：本轮提交已完成，最终 hash 见本轮回复。
 
 ### 2026-07-05: Previous Runs walk-forward entry and SQLite warning cleanup
 
@@ -231,3 +231,13 @@
 - 结论：本轮解决了“看板肥胖”和“raw METAR 对但派生字段错”的一部分核心问题；数据层仍需继续核对 Forecast/China Live/Cloud 与 PolyWX 的真实源差异，推荐为 0 仍可能由 gate 和市场匹配导致。live 仍锁定。
 - 下一步：重启后端和 Vite 后人工核验 `shanghai-zspd&date=2026-07-06` 与 `chicago-kord` 页面；下一轮只做 Forecast/China Live 数值对齐和推荐 gate 诊断，不再加新模块。
 - 相关提交：待提交。
+
+### 2026-07-07：调度器刷新链路 + 云量口径修正
+
+- 目标：修复用户实测“启动调度器后数据停留在旧小时”和“云量与 PolyWX 不一致”的两个问题；不新增 collector、不解锁 live、不改交易执行路径。
+- 改动：`weatherbot_v3/scheduler.py` 将 METAR poller 的成功判定改为核心 METAR 增量抓取成功即可，PWS 失败只记录 `optional_warnings`，不再触发核心 poller 失败退避；`frontend/src/App.tsx` 在 scheduler poller 出现新的 `last_run_at` 后主动 invalidate dashboard、market buckets、signal decisions、daily max predictions 与 model reprice 查询，避免前端缓存停留在上一轮数据。
+- 改动：`weatherbot_v3/hourly.py` 在 `hourly_consensus_points` 中新增 `forecast_cloud_cover`，从 `raw_json.forecast.cloud_cover` 读取；`frontend/src/components/WeatherPanel.tsx` 的 Hourly 主图云量面积图改用 `forecast_cloud_cover`，而 METAR 表继续使用 METAR 云层解析后的 `cloud_cover`；历史 diff fallback 不再把 `humidity_mean` 塞进 cloud 字段。
+- 验证：`python -m unittest tests.test_polywx_contract tests.test_scheduler` 20 tests OK；`python -m unittest tests.test_v3_core` 168 tests OK；`npm run build` 通过；`git diff --check` 通过（仅 Windows LF/CRLF warning）。`/api/hourly-consensus?city=shanghai&target_date=2026-07-06` 已返回 `forecast_cloud_cover`；浏览器打开 `http://127.0.0.1:5173/?city=shanghai-zspd&date=2026-07-06` 无 console error，页面无 Delta Audit/刷新当前城市，调度器按钮可启动并已手动停止。
+- 结论：本轮解决的是“调度完成后前端不刷新”和“主图云量取错合成字段”的工程问题。昨天日志显示 scheduler 实际跑到北京时间约 17:20，因此旧页面停在旧数据更可能由前端缓存与部分小时共识未刷新造成；若后续仍停在某小时，需要继续按 city/date 查 collector 入库与 derive_poller 输出。
+- 下一步：人工启动调度器跑 10-30 分钟，观察顶部 poller age、`/api/scheduler/status`、`/api/hourly-consensus` 是否同步更新；随后继续对齐 Forecast/China Live 与 PolyWX 的数值来源差异。实盘继续锁定。
+- 相关提交：本轮提交已完成，最终 hash 见本轮回复。

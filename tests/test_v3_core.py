@@ -4102,6 +4102,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(row["residual"], 3.6, places=1)
         self.assertEqual(summary["points"][0]["build_status"], "fallback_only")
         self.assertAlmostEqual(summary["points"][0]["visibility"], 10.0, places=1)
+        self.assertAlmostEqual(summary["points"][0]["cloud_cover"], 100.0, places=1)
+        self.assertAlmostEqual(summary["points"][0]["forecast_cloud_cover"], 25.0, places=1)
         self.assertEqual(summary["points"][0]["condition"], "-RA")
 
     def test_layer4_openmeteo_primary_excludes_polywx_and_uses_median_spread(self):

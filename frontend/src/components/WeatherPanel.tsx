@@ -73,6 +73,7 @@ type HourlyWeatherRow = {
   hrrr?: number | null
   humidity?: number | null
   cloud_cover?: number | null
+  forecast_cloud_cover?: number | null
   precipitation?: number | null
   precipitation_probability?: number | null
   wind_speed?: number | null
@@ -463,6 +464,7 @@ function placeholderHourlyRow(targetDate: string, hour: number): HourlyWeatherRo
     hrrr: null,
     humidity: null,
     cloud_cover: null,
+    forecast_cloud_cover: null,
     precipitation: null,
     precipitation_probability: null,
     wind_speed: null,
@@ -942,6 +944,7 @@ function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): Hou
       hrrr: point.hrrr ?? null,
       humidity: point.humidity ?? null,
       cloud_cover: point.cloud_cover ?? null,
+      forecast_cloud_cover: point.forecast_cloud_cover ?? null,
       precipitation: point.precipitation ?? null,
       precipitation_probability: point.precipitation_probability ?? null,
       wind_speed: point.wind_speed ?? null,
@@ -1526,7 +1529,7 @@ function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRo
                 <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
                   <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
                   <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.cloud_cover)}</td>
+                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.forecast_cloud_cover)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPrecip(row.precipitation)} / {fmtPct(row.precipitation_probability)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
                   <td className="max-w-[140px] truncate px-2 py-1 text-neutral-400" title={`${row.source || '--'} · ${row.horizon || '--'}`}>
@@ -1774,7 +1777,7 @@ function DiffStatsPanel({
       observed: Number(row.actual_high),
       forecast: Number(row.forecast_high),
       delta: Number(row.actual_high) - Number(row.forecast_high),
-      cloud_cover: row.humidity_mean,
+      cloud_cover: null,
       condition: row.calibration_tier || row.historical_provider,
       wind_speed: null,
       wind_direction: null,
@@ -1918,7 +1921,7 @@ function HourlyEvidencePanel({
     china_live_value: asNumber(row.china_live),
     pws_value: asNumber(row.pws),
     gap_value: asNumber(row.gap),
-    cloud_pct: asNumber(row.cloud_cover),
+    cloud_pct: asNumber(row.forecast_cloud_cover),
   }))
   const hasChartEvidence = chartRows.some(row =>
     row.forecast_value !== null

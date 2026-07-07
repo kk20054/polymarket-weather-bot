@@ -215,20 +215,26 @@ class WeatherBotScheduler:
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
             metar = await asyncio.to_thread(fetch_recent_hours, city, hours=24.0)
-            pws = await asyncio.to_thread(
-                run_pws_fetch,
-                city,
-                dry_run=False,
-                all_cities=False,
-                limit_cities=1,
-                station_limit=5,
-            )
+            optional_warnings = []
+            try:
+                pws = await asyncio.to_thread(
+                    run_pws_fetch,
+                    city,
+                    dry_run=False,
+                    all_cities=False,
+                    limit_cities=1,
+                    station_limit=5,
+                )
+            except Exception as exc:
+                pws = {"ok": False, "optional": True, "error": str(exc)}
+                optional_warnings.append("pws_failed")
             return {
-                "ok": _payload_ok(metar) and _payload_ok(pws),
+                "ok": _payload_ok(metar),
                 "city": city,
                 "station_id": row.get("station_id"),
                 "metar": metar,
                 "pws": pws,
+                "optional_warnings": optional_warnings,
             }
 
         return await _run_city_batch(

@@ -892,6 +892,7 @@ export interface WeatherCityPoint {
   ensemble_std?: number | null
   humidity?: number | null
   cloud_cover?: number | null
+  forecast_cloud_cover?: number | null
   precipitation?: number | null
   precipitation_probability?: number | null
   wind_speed?: number | null
