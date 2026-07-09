@@ -267,4 +267,4 @@
 - 结论：WU hourly history 已能入库并驱动 Historical 线；Weather.com v3 forecast 已能由 scheduler/production-refresh 写入并参与 PolyWX-aligned DEB。实盘仍锁定。
 - 阻塞：WU/HKO truth 覆盖仍不足；Weather.com/WU key 权限与稳定性需要持续监控；尚未做 10 城批量 WU hourly/daily backfill 和 PolyWX 数值回归。
 - 下一步：批量回填 10 城 30-90 天 WU hourly/daily，重建 hourly consensus/DEB，并做 PolyWX benchmark diff。
-- 相关提交：507a9ff。
+- 相关提交：e400d25。
