@@ -92,6 +92,9 @@ class V3Config:
     forecast_max_age_minutes: float
     default_order_min_size: float
     default_tick_size: float
+    weather_com_forecast_enabled: bool
+    pws_peak_lock_enabled: bool
+    deb_weight_mode: str
     v3_db_path: Path
 
 
@@ -135,5 +138,8 @@ def load_config() -> V3Config:
         forecast_max_age_minutes=_float(get("FORECAST_MAX_AGE_MINUTES", 180.0), 180.0),
         default_order_min_size=_float(get("DEFAULT_ORDER_MIN_SIZE", 5.0), 5.0),
         default_tick_size=_float(get("DEFAULT_TICK_SIZE", 0.01), 0.01),
+        weather_com_forecast_enabled=_bool(get("WEATHER_COM_FORECAST_ENABLED", True), True),
+        pws_peak_lock_enabled=_bool(get("PWS_PEAK_LOCK_ENABLED", True), True),
+        deb_weight_mode=str(get("DEB_WEIGHT_MODE", "ensemble") or "ensemble"),
         v3_db_path=Path(str(get("V3_DB_PATH", DATA_DIR / "weatherbot_v3.db"))),
     )

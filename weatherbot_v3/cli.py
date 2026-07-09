@@ -288,6 +288,33 @@ def run_openmeteo_fetch(
     return payload
 
 
+def run_weathercom_fetch(
+    cities_arg: str = "",
+    *,
+    dry_run: bool = False,
+    all_cities: bool = False,
+    limit_cities: int = 5,
+    forecast_days: int = 3,
+) -> dict:
+    from .weathercom import fetch_weathercom_forecasts
+
+    cities = _cities_from_arg(cities_arg)
+    if all_cities:
+        cities = []
+        limit_cities = 10_000
+    payload = fetch_weathercom_forecasts(
+        cities or None,
+        dry_run=dry_run,
+        limit_cities=limit_cities,
+        forecast_days=forecast_days,
+    )
+    if not dry_run and payload.get("runs_upserted", 0) > 0:
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        payload["forecast_stage"] = readiness_stage(readiness, "forecast_runs")
+    return payload
+
+
 def run_openmeteo_previous_runs(
     cities_arg: str = "",
     *,
@@ -945,6 +972,55 @@ def run_wunderground_truth_fetch(
     }
 
 
+def run_wunderground_hourly_fetch(
+    cities_arg: str = "",
+    *,
+    target_date: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    days: int = 1,
+    all_cities: bool = False,
+    limit_cities: int = 10,
+    dry_run: bool = False,
+) -> dict:
+    from .truth.wunderground import fetch_wunderground_hourly_result, persist_wunderground_hourly
+
+    sync_station_registry()
+    requested = _cities_from_arg(cities_arg)
+    rows = list_stations()
+    if requested:
+        wanted = {item.lower() for item in requested}
+        rows = [row for row in rows if str(row.get("city_key") or "").lower() in wanted or str(row.get("station_id") or "").lower() in wanted]
+    elif not all_cities:
+        rows = [row for row in rows if row.get("enabled")][: max(1, int(limit_cities or 10))]
+    targets = _cli_date_window(target_date=target_date, start_date=start_date, end_date=end_date, days=days)
+    results = []
+    rows_upserted = 0
+    for row in rows:
+        station = str(row.get("settlement_station_id") or row.get("station_id") or "").upper()
+        if station == "HKO":
+            continue
+        timezone_name = str(row.get("settlement_timezone") or row.get("timezone") or "UTC")
+        for target in targets:
+            result = fetch_wunderground_hourly_result(station, target, timezone_name=timezone_name)
+            if result.get("ok") and not dry_run:
+                persisted = persist_wunderground_hourly(result)
+                rows_upserted += int(persisted.get("rows_upserted") or 0)
+                result["rows_upserted"] = persisted.get("rows_upserted")
+            results.append(result)
+    return {
+        "ok": all(item.get("ok") for item in results) if results else False,
+        "source": "wunderground",
+        "stage": "truth_wunderground_hourly",
+        "dry_run": dry_run,
+        "target_dates": targets,
+        "stored": 0 if dry_run else sum(1 for item in results if item.get("ok")),
+        "rows_upserted": rows_upserted,
+        "skipped": sum(1 for item in results if not item.get("ok")),
+        "results": results,
+    }
+
+
 def run_truth_delta_build(limit: int = 500) -> dict:
     from .truth.delta import rebuild_truth_delta_from_tables
 
@@ -1083,6 +1159,10 @@ def run_production_refresh(
         "openmeteo_fetch",
         lambda: run_openmeteo_fetch(cities, forecast_days=min(bounded_days + 2, 7), limit_cities=5),
     )
+    run_stage(
+        "weathercom_fetch",
+        lambda: run_weathercom_fetch(cities, forecast_days=min(bounded_days + 2, 7), limit_cities=5),
+    )
     run_stage("metar_refresh", lambda: _run_recent_metar_refresh(cities, recent_metar_hours))
     run_stage(
         "hourly_consensus",
@@ -1161,6 +1241,7 @@ def main() -> None:
             "model-dataset-audit",
             "forecast-backfill",
             "openmeteo-fetch",
+            "weathercom-fetch",
             "openmeteo-previous-runs",
             "china-weather-fetch",
             "pws-fetch",
@@ -1186,6 +1267,7 @@ def main() -> None:
             "iem-asos-fetch",
             "hko-truth-fetch",
             "wunderground-truth-fetch",
+            "wunderground-hourly-fetch",
             "truth-delta-build",
             "gamma-structured-sync",
         ],
@@ -1301,6 +1383,18 @@ def main() -> None:
             run_openmeteo_fetch(
                 cities_arg,
                 ensemble=args.ensemble,
+                dry_run=args.dry_run,
+                all_cities=args.all_cities,
+                limit_cities=args.limit_cities,
+                forecast_days=args.forecast_days,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "weathercom-fetch":
+        print(json.dumps(
+            run_weathercom_fetch(
+                cities_arg,
                 dry_run=args.dry_run,
                 all_cities=args.all_cities,
                 limit_cities=args.limit_cities,
@@ -1591,6 +1685,21 @@ def main() -> None:
     elif args.command == "wunderground-truth-fetch":
         print(json.dumps(
             run_wunderground_truth_fetch(
+                cities_arg,
+                target_date=args.target_date or "",
+                start_date=args.start_date,
+                end_date=args.end_date,
+                days=args.days or 1,
+                all_cities=args.all_cities,
+                limit_cities=args.limit_cities,
+                dry_run=args.dry_run,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "wunderground-hourly-fetch":
+        print(json.dumps(
+            run_wunderground_hourly_fetch(
                 cities_arg,
                 target_date=args.target_date or "",
                 start_date=args.start_date,

@@ -389,7 +389,11 @@ def hourly_consensus_points(
             else {}
         )
         china_live_temp = _float(source_temperatures.get("china_live")) if source_temperatures else None
-        historical_temp = _float(source_temperatures.get("open_meteo_historical")) if source_temperatures else None
+        historical_temp = None
+        if source_temperatures:
+            historical_temp = _float(source_temperatures.get("wunderground_history"))
+            if historical_temp is None:
+                historical_temp = _float(source_temperatures.get("open_meteo_historical"))
         pws_temp = None
         if source_temperatures:
             pws_temp = _float(
@@ -781,8 +785,13 @@ def _target_map(
             UNION
             SELECT city, date(observed_at) AS target_date FROM mesonet_observations
             WHERE city IN ({placeholders}) AND observed_at IS NOT NULL AND observed_at != ''
+            UNION
+            SELECT LOWER(s.city_key) AS city, w.date_local AS target_date
+            FROM truth_wunderground_hourly w
+            JOIN stations s ON UPPER(s.station_id) = UPPER(w.icao)
+            WHERE LOWER(s.city_key) IN ({placeholders}) AND w.date_local IS NOT NULL AND w.date_local != ''
             """,
-            tuple(profile_cities + profile_cities + profile_cities),
+            tuple(profile_cities + profile_cities + profile_cities + profile_cities),
         ).fetchall():
             city = str(row["city"] or "").strip().lower()
             date_value = str(row["target_date"] or "").strip()
@@ -833,6 +842,19 @@ def _observation_hourly_points(
                 tuple(cities),
             ).fetchall()
         ]
+        station_placeholders = ",".join("?" for _ in station_to_profile)
+        wunderground_rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM truth_wunderground_hourly
+                WHERE icao IN ({station_placeholders})
+                ORDER BY icao, observed_at_utc
+                """,
+                tuple(station_to_profile),
+            ).fetchall()
+        ] if station_to_profile else []
 
     buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in metar_rows:
@@ -877,6 +899,29 @@ def _observation_hourly_points(
             dew_point=row.get("dew_point"),
             visibility=None,
             condition=_condition_label(row),
+            raw=row,
+        )
+        _append_observation_bucket(buckets, point, target_date, target_dates_by_city)
+
+    for row in wunderground_rows:
+        profile = station_to_profile.get(str(row.get("icao") or "").upper())
+        if not profile:
+            continue
+        point = _observation_point(
+            profile,
+            report_time=row.get("observed_at_utc"),
+            temperature=row.get("temp_c"),
+            source_unit="C",
+            source="wunderground_history",
+            station_id=row.get("icao"),
+            humidity=row.get("humidity"),
+            cloud_cover=row.get("cloud_cover_pct"),
+            wind_speed=row.get("wind_speed_kph"),
+            wind_direction=row.get("wind_direction"),
+            pressure=row.get("pressure_hpa"),
+            dew_point=row.get("dew_point_c"),
+            visibility=row.get("visibility_km"),
+            condition=row.get("condition"),
             raw=row,
         )
         _append_observation_bucket(buckets, point, target_date, target_dates_by_city)

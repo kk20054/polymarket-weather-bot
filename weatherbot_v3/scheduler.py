@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from .cli import run_china_weather_fetch, run_daily_max_build, run_gamma_structured_sync, run_hourly_consensus_build, run_market_buckets_sync, run_model_timing_reprice, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build
+from .cli import run_china_weather_fetch, run_daily_max_build, run_gamma_structured_sync, run_hourly_consensus_build, run_market_buckets_sync, run_model_timing_reprice, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build, run_weathercom_fetch
 from .db import log_data_fetch, utc_now
 from .metar import fetch_recent_hours
 from .stations import enabled_station_rows, sync_station_registry
@@ -245,17 +245,33 @@ class WeatherBotScheduler:
 
     async def _run_forecast_poller(self) -> dict[str, Any]:
         rows = _enabled_rows()
-        return await _run_city_batch(
-            rows,
-            self.city_concurrency,
-            lambda row: asyncio.to_thread(
+
+        async def run_city(row: dict[str, Any]) -> dict[str, Any]:
+            city = str(row.get("city_key") or row.get("city"))
+            openmeteo = await asyncio.to_thread(
                 run_openmeteo_fetch,
-                str(row.get("city_key") or row.get("city")),
+                city,
                 ensemble=False,
                 limit_cities=1,
                 forecast_days=7,
-            ),
-        )
+            )
+            weathercom = await asyncio.to_thread(
+                run_weathercom_fetch,
+                city,
+                dry_run=False,
+                limit_cities=1,
+                forecast_days=3,
+            )
+            return {
+                "ok": _payload_ok(openmeteo),
+                "city": city,
+                "station_id": row.get("station_id"),
+                "openmeteo": openmeteo,
+                "weathercom": weathercom,
+                "optional_warnings": [] if _payload_ok(weathercom) else ["weathercom_v3_unavailable"],
+            }
+
+        return await _run_city_batch(rows, self.city_concurrency, run_city)
 
     async def _run_derive_poller(self) -> dict[str, Any]:
         rows = _enabled_rows()

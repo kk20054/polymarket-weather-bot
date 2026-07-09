@@ -99,7 +99,7 @@ class StrategyBase:
         elif book_age_seconds > float(context.get("stale_book_seconds") or 300.0):
             cautions.append("stale_book")
         forecast_algo = str(prediction.get("forecast_algo") or prediction.get("method") or prediction.get("deb_version") or "")
-        if forecast_algo not in {"weatherbot-deb-v2", "ensemble_v1"}:
+        if forecast_algo not in {"weatherbot-deb-v2", "ensemble_v1", "polywx_aligned_deb_v1"}:
             hard_blocks.append("forecast_algo_not_supported")
         if int(prediction.get("bias_sample_count") or 0) < int(context.get("min_bias_sample_days") or 7):
             gate_reasons.append("insufficient_bias_samples")

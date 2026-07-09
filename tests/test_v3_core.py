@@ -33,7 +33,9 @@ from weatherbot_v3.stations import apply_market_probe_result, list_stations, sta
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.metar import backfill_iem_asos_metars, ingest_iem_asos_csv, parse_iem_asos_csv, probe_iem_stations, fetch_awc_metars, refresh_metar_reports
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
+from weatherbot_v3.truth.wunderground import fetch_wunderground_daily_result, fetch_wunderground_hourly_result, persist_wunderground_hourly
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
+from weatherbot_v3.weathercom import weathercom_runs_from_response
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import _stage_result, default_orderbook_start_date, run_china_weather_fetch, run_daily_max_build, run_hourly_consensus_build, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_polymarket_market_probe, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _recommendations_payload, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
@@ -62,6 +64,7 @@ class FakeHTTPResponse:
         self._payload = payload
         self.url = url
         self.status_code = status_code
+        self.text = payload if isinstance(payload, str) else json.dumps(payload)
 
     def json(self):
         return self._payload
@@ -837,6 +840,7 @@ class V3CoreTests(unittest.TestCase):
             patch("weatherbot_v3.cli.sync_settlement_contracts", return_value={"settlement_contracts": 2}),
             patch("weatherbot_v3.cli.run_forecast_backfill", return_value={"ok": 1, "failed": 0}) as forecast,
             patch("weatherbot_v3.cli.run_openmeteo_fetch", return_value={"runs_upserted": 6, "members_upserted": 24}) as openmeteo,
+            patch("weatherbot_v3.cli.run_weathercom_fetch", return_value={"ok": True, "runs_upserted": 2, "members_upserted": 2}) as weathercom,
             patch("weatherbot_v3.cli._run_recent_metar_refresh", return_value={"reports_upserted": 8}) as metar,
             patch("weatherbot_v3.cli.run_hourly_consensus_build", return_value={"rows_upserted": 24}) as hourly,
             patch("weatherbot_v3.cli.run_daily_max_build", return_value={"stored": 1}) as daily_max,
@@ -864,6 +868,7 @@ class V3CoreTests(unittest.TestCase):
             "contracts_sync",
             "forecast_backfill",
             "openmeteo_fetch",
+            "weathercom_fetch",
             "metar_refresh",
             "hourly_consensus",
             "daily_max_build",
@@ -873,9 +878,10 @@ class V3CoreTests(unittest.TestCase):
             "signal_migration",
             "orderbook_backfill",
         ])
-        self.assertTrue(payload["stages"][8]["skipped"])
+        self.assertTrue(payload["stages"][9]["skipped"])
         forecast.assert_called_once_with("nyc", 2)
         openmeteo.assert_called_once_with("nyc", forecast_days=4, limit_cities=5)
+        weathercom.assert_called_once_with("nyc", forecast_days=4, limit_cities=5)
         metar.assert_called_once_with("nyc", 48.0)
         hourly.assert_called_once_with("nyc", target_date="2026-06-27", days_arg=None)
         daily_max.assert_called_once_with("nyc", target_date="2026-06-27", days_arg=None)
@@ -4302,6 +4308,228 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(prediction["peak_hour"], "16:00")
         self.assertEqual(prediction["peak_source"], "metar")
         self.assertAlmostEqual(prediction["peak_temp"], 93.92, places=2)
+
+    def test_weathercom_v3_forecast_can_feed_polywx_aligned_deb(self):
+        db_path = test_db_path("weathercom_v3_polywx_deb")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        profile = SETTLEMENT_REGISTRY["shanghai"]
+        payload = {
+            "validTimeUtc": [
+                1783296000,  # 2026-07-06T00:00:00Z
+                1783306800,
+                1783317600,
+            ],
+            "temperature": [27.0, 33.0, 35.0],
+            "cloudCover": [40, 55, 70],
+            "relativeHumidity": [80, 68, 60],
+            "temperatureDewPoint": [24, 25, 25],
+            "precipChance": [10, 20, 30],
+            "windSpeed": [8, 10, 12],
+            "windDirection": [180, 200, 220],
+            "pressureMeanSeaLevel": [1006, 1007, 1007],
+            "wxPhraseLong": ["Cloudy", "Partly Cloudy", "Thunderstorms"],
+        }
+        weather_runs, weather_members = weathercom_runs_from_response(
+            profile,
+            payload,
+            source_url="https://api.weather.com/v3/wx/forecast/hourly/15day?apiKey=***",
+            retrieved_at="2026-07-05T12:00:00+00:00",
+            forecast_days=2,
+        )
+        gfs_run, gfs_members = openmeteo_hourly_run(
+            "shanghai",
+            "2026-07-06",
+            "openmeteo_gfs_seamless",
+            [28.0, 34.0],
+            valid_times=["2026-07-06T00:00:00+00:00", "2026-07-06T06:00:00+00:00"],
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
+            for run, members in zip(weather_runs, weather_members):
+                insert_forecast_run(run, members)
+            insert_forecast_run(gfs_run, gfs_members)
+            prediction = build_daily_max_prediction("shanghai", "2026-07-06", issued_at="2026-07-05T13:00:00Z", path=db_path)
+
+        self.assertTrue(prediction["ok"])
+        self.assertEqual(prediction["deb_version"], "polywx_aligned_deb_v1")
+        families = {component["family"] for component in prediction["components"]}
+        self.assertIn("weathercom_v3", families)
+        self.assertIn("gfs", families)
+        self.assertAlmostEqual(sum(prediction["model_weights"].values()), 1.0, places=6)
+        v3_component = next(component for component in prediction["components"] if component["family"] == "weathercom_v3")
+        self.assertEqual(v3_component["role"], "weather.com/WU-style v3 forecast")
+        self.assertIn("truth_basis", v3_component)
+        self.assertNotIn("missing_weathercom_v3", prediction["build_warnings"])
+
+    def test_deb_records_missing_weathercom_warning_in_polywx_mode(self):
+        db_path = test_db_path("polywx_missing_weathercom")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        gfs_run, gfs_members = openmeteo_hourly_run(
+            "shanghai",
+            "2026-07-06",
+            "openmeteo_gfs_seamless",
+            [34.0, 35.0, 35.5],
+            valid_times=[
+                "2026-07-06T00:00:00+00:00",
+                "2026-07-06T06:00:00+00:00",
+                "2026-07-06T08:00:00+00:00",
+            ],
+        )
+        ecmwf_run, ecmwf_members = openmeteo_hourly_run(
+            "shanghai",
+            "2026-07-06",
+            "openmeteo_ecmwf_ifs025",
+            [33.0, 34.5],
+            valid_times=["2026-07-06T00:00:00+00:00", "2026-07-06T06:00:00+00:00"],
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
+            insert_forecast_run(gfs_run, gfs_members)
+            insert_forecast_run(ecmwf_run, ecmwf_members)
+            prediction = build_daily_max_prediction("shanghai", "2026-07-06", issued_at="2026-07-05T13:00:00Z", path=db_path)
+
+        self.assertTrue(prediction["ok"])
+        self.assertEqual(prediction["deb_version"], "polywx_aligned_deb_v1")
+        self.assertIn("missing_weathercom_v3", prediction["build_warnings"])
+
+    def test_pws_peak_lock_is_recorded_as_evidence_only(self):
+        db_path = test_db_path("pws_peak_lock_deb")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        run, members = openmeteo_hourly_run(
+            "chicago",
+            "2026-07-10",
+            "openmeteo_ncep_hrrr_conus",
+            [89.8, 90.0, 89.5],
+            valid_times=[
+                "2026-07-10T18:00:00+00:00",
+                "2026-07-10T19:00:00+00:00",
+                "2026-07-10T20:00:00+00:00",
+            ],
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "WEATHERBOT_ENSEMBLE_DEB_ENABLED": "false"}, clear=False):
+            insert_forecast_run(run, members)
+            for minute, temp in [(0, 91.0), (5, 90.4), (10, 89.8)]:
+                upsert_mesonet_observation({
+                    "observation_key": f"pws:test:{minute}",
+                    "city": "chicago",
+                    "city_name": "Chicago",
+                    "station_id": "WU_PWS_KORD",
+                    "station_name": "PWS test",
+                    "network": "wunderground_pws",
+                    "observed_at": f"2026-07-10T19:{minute:02d}:00+00:00",
+                    "temperature": temp,
+                    "parser_version": "test",
+                    "parse_status": "parsed",
+                    "quality_flags": ["display_only", "not_settlement_truth"],
+                })
+            for hour, forecast, observed in [("14:00", 90.0, 90.0), ("15:00", 89.5, 90.0), ("16:00", 89.0, 89.7)]:
+                upsert_hourly_consensus({
+                    "city": "chicago",
+                    "city_name": "Chicago",
+                    "target_date": "2026-07-10",
+                    "local_hour": hour,
+                    "valid_time": f"2026-07-10T{hour}:00-05:00",
+                    "station_id": "KORD",
+                    "forecast_temp": forecast,
+                    "observed_temp": observed,
+                    "observation_source": "metar",
+                    "forecast_source": "openmeteo_multi_model",
+                    "source_count": 2,
+                })
+            prediction = build_daily_max_prediction("chicago", "2026-07-10", issued_at="2026-07-10T19:30:00Z", path=db_path)
+
+        self.assertTrue(prediction["ok"])
+        self.assertTrue(prediction["peak_lock_candidate"]["candidate"])
+        self.assertEqual(prediction["peak_lock_candidate"]["role"], "trend_confirmation_only_not_settlement_truth")
+        self.assertIn("pws_peak_lock_candidate", prediction["build_warnings"])
+
+    def test_wunderground_daily_truth_success_and_failure_are_explicit(self):
+        db_path = test_db_path("wunderground_daily_truth")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+
+        class FakeSession:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def get(self, url, params=None, headers=None, timeout=None):
+                return FakeHTTPResponse(self.payload, url=f"{url}?ok=1")
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "WEATHER_COM_API_KEY": "test-key"}, clear=False):
+            success = fetch_wunderground_daily_result(
+                "ZBAA",
+                "2026-07-06",
+                session=FakeSession({"observations": [{"metric": {"tempHigh": 35.2, "tempLow": 24.1}}]}),
+            )
+            list_success = fetch_wunderground_daily_result(
+                "ZSPD",
+                "2026-07-06",
+                session=FakeSession({"observations": [{"temp": 26}, {"temp": 36}, {"temp": 31}]}),
+            )
+            failure = fetch_wunderground_daily_result(
+                "ZBAA",
+                "2026-07-06",
+                session=FakeSession({"observations": [{}]}),
+            )
+
+        self.assertTrue(success["ok"])
+        self.assertEqual(success["settlement_truth_type"], "wunderground_daily")
+        self.assertAlmostEqual(success["high_c"], 35.2)
+        self.assertTrue(list_success["ok"])
+        self.assertEqual(list_success["method"], "weather_com_v3_historical_daily")
+        self.assertAlmostEqual(list_success["high_c"], 36.0)
+        self.assertAlmostEqual(list_success["low_c"], 26.0)
+        self.assertFalse(failure["ok"])
+        self.assertIn("no_daily_high_in_payload", failure["skip_reasons"])
+
+    def test_wunderground_hourly_history_persists_and_feeds_historical_line(self):
+        db_path = test_db_path("wunderground_hourly_history")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+
+        class FakeSession:
+            def get(self, url, params=None, headers=None, timeout=None):
+                return FakeHTTPResponse(
+                    {
+                        "observations": [
+                            {
+                                "validTimeUtc": "2026-07-06T04:00:00Z",
+                                "metric": {
+                                    "temp": 35.4,
+                                    "dewpt": 25.1,
+                                    "pressure": 1007.1,
+                                    "vis": 10.0,
+                                    "wspd": 18.0,
+                                    "gust": 24.0,
+                                },
+                                "rh": 62,
+                                "wdir": 224,
+                                "wx_phrase": "Partly Cloudy",
+                                "clds": "SCT",
+                            }
+                        ]
+                    },
+                    url=f"{url}?apiKey=redacted",
+                )
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "WEATHER_COM_API_KEY": "test-key"}, clear=False):
+            result = fetch_wunderground_hourly_result(
+                "ZSPD",
+                "2026-07-06",
+                timezone_name="Asia/Shanghai",
+                session=FakeSession(),
+            )
+            persisted = persist_wunderground_hourly(result, path=db_path)
+            build_hourly_consensus(["shanghai"], target_date="2026-07-06", db_path=db_path)
+            points = hourly_consensus_points({"shanghai": {"2026-07-06"}}, db_path=db_path)
+            with connect(db_path) as conn:
+                row = conn.execute("SELECT * FROM truth_wunderground_hourly").fetchone()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["row_count"], 1)
+        self.assertEqual(persisted["rows_upserted"], 1)
+        self.assertAlmostEqual(float(row["temp_c"]), 35.4)
+        self.assertAlmostEqual(float(row["cloud_cover_pct"]), 50.0)
+        self.assertTrue(str(row["observed_at_local"]).startswith("2026-07-06T12:00:00"))
+        self.assertIn("shanghai", points)
+        self.assertAlmostEqual(points["shanghai"][0]["historical"], 35.4)
+        self.assertIsNone(points["shanghai"][0]["metar"])
 
     def test_celsius_bucket_probability_uses_truncation_not_rounding_window(self):
         result = bucket_probabilities(

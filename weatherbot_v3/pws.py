@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 import requests
 
 from .db import log_data_fetch, upsert_mesonet_observation, utc_now
+from .env_utils import env_value
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 
 
@@ -327,10 +328,10 @@ def _select_us_profiles(cities: list[str] | None, *, limit_cities: int) -> list[
 
 def _configured_station_ids(profile: CitySettlementProfile) -> list[str]:
     env_key = f"WUNDERGROUND_PWS_STATIONS_{profile.city.upper().replace('-', '_')}"
-    direct = os.getenv(env_key) or ""
+    direct = env_value(env_key)
     if direct:
         return _split_station_ids(direct)
-    raw_json = os.getenv("WUNDERGROUND_PWS_STATIONS_JSON") or ""
+    raw_json = env_value("WUNDERGROUND_PWS_STATIONS_JSON")
     if raw_json:
         try:
             data = json.loads(raw_json)
@@ -345,7 +346,7 @@ def _configured_station_ids(profile: CitySettlementProfile) -> list[str]:
 
 
 def _api_key() -> str:
-    return str(os.getenv("WUNDERGROUND_API_KEY") or os.getenv("WEATHER_COM_API_KEY") or "").strip()
+    return str(env_value("WUNDERGROUND_API_KEY") or env_value("WEATHER_COM_API_KEY") or "").strip()
 
 
 def _split_station_ids(value: str) -> list[str]:

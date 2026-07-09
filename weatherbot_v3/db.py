@@ -658,6 +658,34 @@ def init_v3_db(path: Path | None = None) -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS truth_wunderground_hourly (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_key TEXT UNIQUE,
+                icao TEXT,
+                date_local TEXT,
+                timezone TEXT,
+                observed_at_local TEXT,
+                observed_at_utc TEXT,
+                temp_c REAL,
+                dew_point_c REAL,
+                heat_index_c REAL,
+                humidity REAL,
+                pressure_hpa REAL,
+                visibility_km REAL,
+                wind_direction REAL,
+                wind_speed_kph REAL,
+                wind_gust_kph REAL,
+                cloud_cover_pct REAL,
+                condition TEXT,
+                source_url TEXT,
+                method TEXT,
+                settlement_truth_type TEXT,
+                parser_version TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS truth_hko_daily (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 truth_key TEXT UNIQUE,
@@ -1199,6 +1227,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_truth_iem_daily_station_date ON truth_iem_daily(icao, date_local)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_truth_iem_hourly_station_date ON truth_iem_hourly(icao, date_local)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_truth_wu_daily_station_date ON truth_wunderground_daily(icao, date_local)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_truth_wu_hourly_key ON truth_wunderground_hourly(observation_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_truth_wu_hourly_station_date ON truth_wunderground_hourly(icao, date_local)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_truth_wu_hourly_observed ON truth_wunderground_hourly(observed_at_utc)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_truth_hko_daily_date ON truth_hko_daily(date_local)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_truth_delta_audit_station_date ON truth_delta_audit(icao, date_local)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_polymarket_events_city_date ON polymarket_events(city, target_date)")

@@ -499,6 +499,10 @@ export interface DailyMaxPrediction {
   bias_correction?: number | null
   bias_sample_count?: number
   deb_version?: string
+  peak_hour?: string | null
+  peak_temp?: number | null
+  build_warnings?: string[]
+  peak_lock_candidate?: Record<string, unknown>
   updated_at?: string | null
 }
 

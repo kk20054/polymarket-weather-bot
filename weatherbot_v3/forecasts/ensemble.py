@@ -10,10 +10,12 @@ from zoneinfo import ZoneInfo
 from ..config import DATA_DIR
 from ..db import connect, init_v3_db, upsert_model_reprice_event, utc_now
 from ..deb import sigma_with_floor
+from ..env_utils import env_value
 from ..registry import CitySettlementProfile, get_city_profile
 
 
 ALGO = "ensemble_v1"
+POLYWX_ALIGNED_ALGO = "polywx_aligned_deb_v1"
 BIAS_TABLE_PATH = DATA_DIR / "bias_table.json"
 MIN_FAMILIES_FOR_ENSEMBLE = 2
 MIN_MEMBER_COUNT_FOR_SINGLE_FAMILY = 5
@@ -26,6 +28,17 @@ REGION_MODEL_WEIGHTS = {
     "japan_korea_taipei": {"gfs": 0.20, "ecmwf": 0.40, "jma": 0.40},
     "singapore": {"gfs": 0.40, "ecmwf": 0.60},
     "global": {"gfs": 0.30, "ecmwf": 0.45, "icon": 0.25},
+}
+POLYWX_ALIGNED_MODEL_WEIGHTS = {
+    "weathercom_v3": 0.484,
+    "gfs": 0.152,
+    "ecmwf": 0.104,
+    "icon": 0.095,
+    "gem": 0.093,
+    "jma": 0.073,
+    "cma": 0.073,
+    "hrrr": 0.073,
+    "nbm": 0.073,
 }
 
 
@@ -177,8 +190,9 @@ def build_ensemble_prediction(
     if not profile:
         return {"ok": False, "city_key": city_key, "target_date": target_date, "reasons": ["unknown_city"]}
     init_v3_db(path)
+    algo = _deb_algo()
     rows = _latest_forecast_members(profile, target_date, path)
-    components = _components_from_rows(profile, rows, bias_table if bias_table is not None else load_bias_table(), path)
+    components = _components_from_rows(profile, rows, bias_table if bias_table is not None else load_bias_table(), path, target_date=target_date)
     usable = [component for component in components if component["member_count"] > 0 and component["family"] in region_model_weights(profile)]
     usable_families = {component["family"] for component in usable}
     total_members = sum(int(component["member_count"]) for component in usable)
@@ -219,10 +233,10 @@ def build_ensemble_prediction(
         "mu": round(convert_temperature(mu, "C", profile.unit), 4),
         "sigma": round(sigma, 4),
         "unit": profile.unit,
-        "method": ALGO,
-        "deb_version": ALGO,
-        "forecast_algo": ALGO,
-        "algo": ALGO,
+        "method": algo,
+        "deb_version": algo,
+        "forecast_algo": algo,
+        "algo": algo,
         "model_weights": {component["source"]: component["weight"] for component in usable},
         "member_count": len(samples_unit),
         "components": usable,
@@ -247,7 +261,7 @@ def build_ensemble_prediction(
         "peak_source": "ensemble_weighted",
         "ensemble_samples": samples_unit,
         "ensemble_sample_weights": [row["weight"] for row in samples_unit],
-        "build_warnings": [],
+        "build_warnings": _source_warnings(usable, algo),
     }
 
 
@@ -497,6 +511,8 @@ def load_bias_table(path: Path | None = None) -> list[dict[str, Any]]:
 
 
 def region_model_weights(profile: CitySettlementProfile) -> dict[str, float]:
+    if _deb_algo() == POLYWX_ALIGNED_ALGO:
+        return POLYWX_ALIGNED_MODEL_WEIGHTS
     if profile.region == "us":
         return REGION_MODEL_WEIGHTS["us"]
     if profile.city in {"shanghai", "beijing", "wuhan", "qingdao", "shenzhen", "hong-kong"}:
@@ -510,8 +526,12 @@ def region_model_weights(profile: CitySettlementProfile) -> dict[str, float]:
 
 def model_family(name: str) -> str:
     raw = str(name or "").lower()
+    if "weathercom" in raw or "weather.com" in raw:
+        return "weathercom_v3"
     if "hrrr" in raw:
         return "hrrr"
+    if "nbm" in raw:
+        return "nbm"
     if "ecmwf" in raw or "ifs" in raw or "aifs" in raw:
         return "ecmwf"
     if "gfs" in raw:
@@ -568,7 +588,7 @@ def _latest_forecast_members(profile: CitySettlementProfile, target_date: str, p
                   AND fr.target_date = ?
                   AND COALESCE(fr.training_eligible, 0) = 1
                   AND COALESCE(fr.parse_status, 'parsed') = 'parsed'
-                  AND fr.source LIKE 'openmeteo_%'
+                  AND (fr.source LIKE 'openmeteo_%' OR fr.source = 'weathercom_v3_forecast')
                 ORDER BY fr.retrieved_at DESC, fr.id DESC, fm.member_id
                 """,
                 (profile.city, target_date),
@@ -586,6 +606,8 @@ def _components_from_rows(
     rows: list[dict[str, Any]],
     bias_table: list[dict[str, Any]],
     path: Path | None,
+    *,
+    target_date: str,
 ) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -620,23 +642,32 @@ def _components_from_rows(
         components.append({
             "source": str(first.get("source") or ""),
             "family": family,
+            "role": _component_role(family),
             "run_id": int(first.get("run_id") or 0),
             "model": str(first.get("model") or ""),
             "weight_raw": float(weights.get(family) or 0.0),
             "weight": 0.0,
+            "weight_prior": float(weights.get(family) or 0.0),
+            "weight_after_mae": 0.0,
             "member_count": len(adjusted_c),
             "raw_daily_highs_c": [round(value, 4) for value in highs_c],
             "adjusted_daily_highs_c": [round(value, 4) for value in adjusted_c],
             "model_daily_high_c": round(sum(adjusted_c) / len(adjusted_c), 4),
             "bias_correction_c": round(bias_c, 4),
             "bias_sample_count": int(sample_count),
+            "mae_7d": _mae_for(bias_table, profile.station_id, family),
+            "truth_basis": _truth_basis(profile, target_date, path),
             "retrieved_at": str(first.get("retrieved_at") or ""),
             "peak_hour": peak_hour.get("peak_hour") or "",
             "peak_temp_c": peak_hour.get("peak_temp_c"),
         })
+    if _deb_algo() == POLYWX_ALIGNED_ALGO:
+        _apply_mae_adjusted_weights(components)
+        return components
     raw_sum = sum(component["weight_raw"] for component in components) or 1.0
     for component in components:
         component["weight"] = component["weight_raw"] / raw_sum
+        component["weight_after_mae"] = component["weight"]
     return components
 
 
@@ -708,6 +739,85 @@ def _bias_for(bias_table: list[dict[str, Any]], station_id: str, family: str) ->
                 return 0.0, sample_count
             return float(row.get("additive_bias_c") or 0.0), sample_count
     return 0.0, 0
+
+
+def _deb_algo() -> str:
+    mode = env_value("DEB_WEIGHT_MODE", "ensemble").strip().lower()
+    return POLYWX_ALIGNED_ALGO if mode in {"polywx", "polywx_aligned", "polywx_aligned_deb_v1"} else ALGO
+
+
+def _component_role(family: str) -> str:
+    if family == "weathercom_v3":
+        return "weather.com/WU-style v3 forecast"
+    if family in {"gfs", "ecmwf", "icon", "gem", "jma", "cma", "hrrr", "nbm"}:
+        return "NWP forecast"
+    return "forecast"
+
+
+def _mae_for(bias_table: list[dict[str, Any]], station_id: str, family: str) -> float | None:
+    station = str(station_id or "").upper()
+    fam = str(family or "").lower()
+    for row in bias_table:
+        if str(row.get("icao") or row.get("station_id") or "").upper() != station:
+            continue
+        if str(row.get("model") or "").lower() != fam:
+            continue
+        for key in ("mae_c", "mae", "rmse_c", "rmse"):
+            value = _first_number(row.get(key))
+            if value is not None:
+                return round(float(value), 4)
+        bias = _first_number(row.get("additive_bias_c"))
+        if bias is not None:
+            return round(abs(float(bias)), 4)
+    return None
+
+
+def _truth_basis(profile: CitySettlementProfile, target_date: str, path: Path | None) -> str:
+    with connect(path) as conn:
+        wu = conn.execute(
+            "SELECT COUNT(*) FROM truth_wunderground_daily WHERE UPPER(icao) = ? AND date_local <= ? AND high_c IS NOT NULL",
+            (str(profile.station_id or "").upper(), target_date),
+        ).fetchone()[0]
+        if int(wu or 0) > 0:
+            return "wunderground_daily"
+        if profile.city == "hong-kong":
+            hko = conn.execute(
+                "SELECT COUNT(*) FROM truth_hko_daily WHERE date_local <= ? AND high_c IS NOT NULL",
+                (target_date,),
+            ).fetchone()[0]
+            if int(hko or 0) > 0:
+                return "hong_kong_observatory_daily_extract"
+        iem = conn.execute(
+            "SELECT COUNT(*) FROM truth_iem_daily WHERE UPPER(icao) = ? AND date_local <= ? AND high_c IS NOT NULL",
+            (str(profile.station_id or "").upper(), target_date),
+        ).fetchone()[0]
+        if int(iem or 0) > 0:
+            return "iem_asos_approximation"
+    return "none"
+
+
+def _apply_mae_adjusted_weights(components: list[dict[str, Any]]) -> None:
+    scored: list[tuple[dict[str, Any], float]] = []
+    for component in components:
+        prior = max(0.0, float(component.get("weight_prior") or component.get("weight_raw") or 0.0))
+        mae = _first_number(component.get("mae_7d"))
+        quality = 1.0 if mae is None else 1.0 / max(float(mae), 0.05)
+        scored.append((component, prior * quality))
+    total = sum(score for _component, score in scored) or 1.0
+    for component, score in scored:
+        weight = score / total
+        component["weight_raw"] = score
+        component["weight"] = weight
+        component["weight_after_mae"] = weight
+
+
+def _source_warnings(components: list[dict[str, Any]], algo: str) -> list[str]:
+    warnings: list[str] = []
+    if algo == POLYWX_ALIGNED_ALGO and not any(component.get("family") == "weathercom_v3" for component in components):
+        warnings.append("missing_weathercom_v3")
+    if not any(component.get("truth_basis") in {"wunderground_daily", "hong_kong_observatory_daily_extract"} for component in components):
+        warnings.append("truth_basis_uses_approximation_or_none")
+    return warnings
 
 
 def _weighted_samples(samples: list[Any]) -> list[tuple[float, float]]:

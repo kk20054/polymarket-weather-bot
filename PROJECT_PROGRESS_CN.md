@@ -1,6 +1,6 @@
 # WeatherBot 项目进度台账
 
-最后更新：2026-07-04
+最后更新：2026-07-07
 
 > 更早记录见 `docs/PROGRESS_ARCHIVE_CN.md`。日常 Turn Start 只读 `docs/CURRENT_STATE.md`，不要通读本文件或归档，除非任务明确涉及历史决策。
 
@@ -31,6 +31,14 @@
 9. `dashboard_server.py` 仍有测试期 SQLite connection ResourceWarning，后续非文档轮次应修。
 
 ## 最近 5 条完整 ledger
+
+### 2026-07-07：Layer 0/2/4 PolyWX Forecast/China Live/Cloud benchmark 与历史补数
+
+- 目标：用 Firecrawl 抓取 PolyWX 作为 benchmark，横向核对 WeatherBot 的 Forecast、China Live 与 Cloud 百分比口径；只把可由自有 collector 补齐的历史缺口写入数据库，不把 PolyWX 展示值导入 truth/交易表。
+- 改动/数据：Firecrawl 抽取 `https://www.polywx.xyz/?city=shanghai-zspd&date=2026-07-06` 与 `https://www.polywx.xyz/?city=chicago-kord&date=2026-07-04`，得到 24 小时 Forecast 与 Cloud benchmark。生成审计目录 `audits/polywx-source-alignment-2026-07-07/`，包含 `polywx-firecrawl-compact.json`、`local-after-backfill.json` 与 `README.md`。先备份 `data/weatherbot_v3.db` 到 `data/weatherbot_v3.db.bak-source-align-20260707-103827`，随后运行 `history-backfill --city shanghai --start-date 2026-07-06 --end-date 2026-07-06`，写入 24 行 `mesonet_observations.network=open_meteo_historical`，再运行 `hourly-consensus-build --city shanghai --target-date 2026-07-06`。
+- 验证/结果：Shanghai historical coverage 从 0/24 补到 24/24；Shanghai Forecast MAE vs PolyWX 为 2.11C，Cloud MAE 为 46.36 个百分点；Chicago Forecast MAE 为 1.61F，Cloud MAE 为 20.67 个百分点。Cloud 双方均为 0-100 百分比，不是 0-1 刻度错误；主要差异是 `data_source`，WeatherBot 走 Open-Meteo 多模型/forecast archive，PolyWX 走其自有 forecast feed/处理。Firecrawl 没稳定抽出 China Live 完整 5 分钟序列，用户截图显示 PolyWX 有更密集中国实况；本地 weather.com.cn 当前源只能提供当前快照，不能回填历史 5 分钟序列。
+- 结论：本轮安全补齐了 Shanghai 历史线，但没有、也不应把 PolyWX 值写入生产表。Forecast/Cloud 若要“完全像 PolyWX”，下一步需要明确选择：把 `polywx_forecast` 作为 display-only/fallback 用于 UI parity，或继续保留 WeatherBot 自有预报并在看板上诚实标注来源差异。China Live 要达到 PolyWX 5 分钟历史密度，需要另找可回放的中国站点历史 feed。
+- 下一步：优先做 Forecast/Cloud 路线决策和实现；若选择 UI parity，扩展现有 `polywx_forecast` display-only ingestion，并禁止参与 training/live gate；若选择独立模型路线，改 UI 标签与说明，避免暗示与 PolyWX 同源。
 
 ### 2026-07-04：Layer 2/7 Historical display-only 回填入口与 PolyWX benchmark 工具
 
@@ -241,3 +249,22 @@
 - 结论：本轮解决的是“调度完成后前端不刷新”和“主图云量取错合成字段”的工程问题。昨天日志显示 scheduler 实际跑到北京时间约 17:20，因此旧页面停在旧数据更可能由前端缓存与部分小时共识未刷新造成；若后续仍停在某小时，需要继续按 city/date 查 collector 入库与 derive_poller 输出。
 - 下一步：人工启动调度器跑 10-30 分钟，观察顶部 poller age、`/api/scheduler/status`、`/api/hourly-consensus` 是否同步更新；随后继续对齐 Forecast/China Live 与 PolyWX 的数值来源差异。实盘继续锁定。
 - 相关提交：本轮提交已完成，最终 hash 见本轮回复。
+
+### 2026-07-07: PolyWX-aligned source role contract + weather.com/WU probe
+
+- Target: align WeatherBot data-source roles with the PolyWX/weather.com/WU/METAR/PWS interpretation, without importing PolyWX display values as trading truth or unlocking live execution.
+- Changes: added `.env` fallback reader `weatherbot_v3/env_utils.py`; added `weatherbot_v3/weathercom.py` and `weathercom-fetch` CLI for `forecast_runs.source=weathercom_v3_forecast`; wired optional weather.com v3 forecast into scheduler forecast poller; added `WEATHER_COM_FORECAST_ENABLED`, `PWS_PEAK_LOCK_ENABLED`, and `DEB_WEIGHT_MODE`; extended ensemble DEB with `polywx_aligned_deb_v1`, source `role`, `weight_prior`, `weight_after_mae`, `mae_7d`, `truth_basis`, and `missing_weathercom_v3` warnings; added PWS peak-lock evidence to DEB as display/trend evidence only; added PolyWX-style DEB per-source weight table to the dashboard.
+- Probe results: current `.env` key can fetch Wunderground PWS current observations, but weather.com v3 forecast returns HTTP 401 and WU/weather.com daily history for airport ICAO still fails (`no_daily_high_in_payload` / HTTP 401). WU truth dry-run attempts are now redacted (`apiKey=***`).
+- Verification: `python -m unittest tests.test_v3_core tests.test_polywx_contract tests.test_ensemble_vs_market` passed 192 tests; `npm run build` passed; `git diff --check` passed with only Windows line-ending warnings. Audit updated at `audits/polywx-source-alignment-2026-07-07/README.md`.
+- Conclusion: source-role plumbing is in place, PWS current is usable for peak-lock evidence, but weather.com v3 forecast and WU daily truth still require proper API permission. Live remains locked.
+- Next: either obtain weather.com forecast / WU daily-history permission, or keep Open-Meteo as the honest WeatherBot forecast source and label the UI accordingly.
+
+### 2026-07-09: WU hourly history 入库 + Weather.com v3 forecast 接入 scheduler/DEB
+
+- 目标：先落地两个 PolyWX 数据源对齐任务：WU/weather.com hourly history 进入本地库并驱动 Historical 线；Weather.com v3 forecast 进入 scheduler/production-refresh 与 DEB 权重组件。
+- 改动：新增 `truth_wunderground_hourly` 表与索引；新增 `wunderground-hourly-fetch` CLI；`truth/wunderground.py` 增加 hourly history fetch/parse/persist；`hourly.py` 优先使用 `wunderground_history` 作为 Historical；`production-refresh-v2` 增加 `weathercom_fetch` 阶段，scheduler forecast poller 继续写入 `weathercom_v3_forecast`；测试覆盖 WU hourly -> Historical 线与 production refresh 阶段。
+- 验证：Weather.com v3 Shanghai dry-run `planned_runs=2`；WU ZSPD 2026-07-06 hourly `row_count=48/high_c=36.0/low_c=26.0`；本地入库后 `historical_points=24`；`DEB_WEIGHT_MODE=polywx_aligned` 下 DEB `has_weathercom_v3=True`；`python -m unittest tests.test_v3_core` 173/173 OK；`git diff --check` OK（仅 CRLF warning）。
+- 结论：WU hourly history 已能入库并驱动 Historical 线；Weather.com v3 forecast 已能由 scheduler/production-refresh 写入并参与 PolyWX-aligned DEB。实盘仍锁定。
+- 阻塞：WU/HKO truth 覆盖仍不足；Weather.com/WU key 权限与稳定性需要持续监控；尚未做 10 城批量 WU hourly/daily backfill 和 PolyWX 数值回归。
+- 下一步：批量回填 10 城 30-90 天 WU hourly/daily，重建 hourly consensus/DEB，并做 PolyWX benchmark diff。
+- 相关提交：507a9ff。

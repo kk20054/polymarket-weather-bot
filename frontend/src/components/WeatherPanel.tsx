@@ -574,6 +574,56 @@ function asNumber(value: unknown) {
   return Number.isFinite(numeric) ? numeric : null
 }
 
+type DebSourceRow = {
+  key: string
+  label: string
+  role: string
+  weight: number | null
+  mu: number | null
+  mae: number | null
+  truthBasis: string
+  warning?: string
+}
+
+function sourceShortLabel(source: unknown, family?: unknown) {
+  const raw = String(family || source || '').toLowerCase()
+  if (raw.includes('weathercom') || raw.includes('weather.com')) return 'v3'
+  if (raw.includes('ecmwf')) return 'ecmwf'
+  if (raw.includes('gfs')) return 'gfs'
+  if (raw.includes('icon')) return 'icon'
+  if (raw.includes('gem')) return 'gem'
+  if (raw.includes('jma')) return 'jma'
+  if (raw.includes('cma') || raw.includes('grapes')) return 'cma'
+  if (raw.includes('hrrr')) return 'hrrr'
+  if (raw.includes('nbm')) return 'nbm'
+  return String(source || family || 'source').replace(/^openmeteo_/, '').replace(/_forecast$/, '')
+}
+
+function buildDebSourceRows(deb: DailyMaxPredictionSummary['latest'], unit: string): DebSourceRow[] {
+  const components = (deb?.components ?? []) as Array<Record<string, unknown>>
+  const weights = deb?.model_weights ?? {}
+  return components
+    .map((component, index) => {
+      const source = String(component.source ?? component.family ?? `source-${index}`)
+      const family = String(component.family ?? sourceShortLabel(source))
+      const sourceUnit = component.model_daily_high_c !== undefined || component.peak_temp_c !== undefined ? 'C' : (deb?.unit || unit)
+      const rawMu = asNumber(component.model_daily_high_c) ?? asNumber(component.model_daily_high) ?? asNumber(component.peak_temp_c)
+      const weight = asNumber(component.weight_after_mae) ?? asNumber(component.weight) ?? asNumber(weights[source])
+      const mae = asNumber(component.mae_7d) ?? asNumber(component.rmse_7d)
+      return {
+        key: `${source}-${index}`,
+        label: sourceShortLabel(source, family),
+        role: String(component.role ?? family),
+        weight,
+        mu: rawMu === null ? null : convertTempUnit(rawMu, sourceUnit, unit),
+        mae,
+        truthBasis: String(component.truth_basis ?? 'unknown'),
+        warning: String(component.warning ?? ''),
+      }
+    })
+    .sort((a, b) => Number(b.weight ?? 0) - Number(a.weight ?? 0))
+}
+
 type DotShapeProps = {
   cx?: number
   cy?: number
@@ -2532,6 +2582,10 @@ function TemperatureDistributionPanel({
     : `实测 ${fmtDualTemp(actualHigh, unit)} (metar, ${deb?.member_count ?? '--'} 样本)`
   const debVersionLabel = deb?.deb_version || distributionMethod || 'DEB-v1'
   const debUpdatedLabel = freshnessLabel(deb?.updated_at ?? deb?.issued_at)
+  const sourceRows = buildDebSourceRows(deb, unit)
+  const buildWarnings = deb?.build_warnings ?? []
+  const peakLock = deb?.peak_lock_candidate as Record<string, unknown> | undefined
+  const peakLockCandidate = Boolean(peakLock?.candidate)
 
   return (
     <section className="border border-[#2C3445] bg-[#161A22]" aria-label="当日最高温概率分布">
@@ -2553,6 +2607,14 @@ function TemperatureDistributionPanel({
             <div className="text-[9px] text-[#7D8694]">更新 {debUpdatedLabel}</div>
           </div>
         </div>
+        {(peakLockCandidate || buildWarnings.length > 0) && (
+          <div className="mt-1 flex flex-wrap gap-1 text-[9px]">
+            {peakLockCandidate && <span className="border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-amber-200">PWS peak-lock</span>}
+            {buildWarnings.slice(0, 3).map(warning => (
+              <span key={warning} className="border border-[#2C3445] bg-[#1B212C] px-1.5 py-0.5 text-[#9AA4B2]">{warning}</span>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="border-b border-[#2C3445] px-2 py-1.5">
@@ -2568,7 +2630,38 @@ function TemperatureDistributionPanel({
         </div>
       ) : (
         <div className="grid gap-2 p-2">
-          <div className="h-[260px] max-h-[300px]">
+          <div className="grid gap-2 xl:grid-cols-[360px_minmax(0,1fr)]">
+            <aside className="border border-[#2C3445] bg-[#161A22]">
+              <div className="border-b border-[#2C3445] px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-[#7D8694]">
+                Per-source weights (DEB)
+              </div>
+              {sourceRows.length === 0 ? (
+                <div className="px-2 py-6 text-center text-[10px] text-[#7D8694]">No source weights yet</div>
+              ) : (
+                <div className="divide-y divide-[#222A38] text-[10px]">
+                  <div className="grid grid-cols-[1fr_86px_96px_64px] gap-2 px-2 py-1 text-[#7D8694]">
+                    <span>Source</span>
+                    <span>Weight</span>
+                    <span className="text-right">μ</span>
+                    <span className="text-right">MAE 7d</span>
+                  </div>
+                  {sourceRows.map(row => (
+                    <div key={row.key} className="grid grid-cols-[1fr_86px_96px_64px] items-center gap-2 px-2 py-1.5 text-[#CBD2DC]" title={`${row.role} | truth ${row.truthBasis}`}>
+                      <span className="truncate font-semibold text-[#F8FAFC]">{row.label}</span>
+                      <span className="flex items-center gap-2 tabular-nums">
+                        <span className="h-1.5 flex-1 bg-[#263044]">
+                          <span className="block h-full bg-[#5CB6F2]" style={{ width: `${Math.max(2, Math.min(100, Number(row.weight ?? 0) * 100))}%` }} />
+                        </span>
+                        <span className="w-9 text-right">{row.weight === null ? '--' : `${(row.weight * 100).toFixed(1)}%`}</span>
+                      </span>
+                      <span className="text-right tabular-nums">{fmtDualTemp(row.mu, unit)}</span>
+                      <span className="text-right tabular-nums">{row.mae === null ? '--' : `${row.mae.toFixed(2)}°C`}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </aside>
+            <div className="h-[260px] max-h-[300px] border border-[#2C3445] p-2">
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={chartRows} margin={{ top: 8, right: 14, bottom: 12, left: -8 }}>
                 <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" />
@@ -2589,6 +2682,7 @@ function TemperatureDistributionPanel({
                 </Bar>
               </ComposedChart>
             </ResponsiveContainer>
+            </div>
           </div>
 
           <aside className="border border-[#2C3445] bg-[#161A22]">

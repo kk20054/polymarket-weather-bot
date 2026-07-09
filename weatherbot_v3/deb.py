@@ -14,6 +14,7 @@ except Exception:  # pragma: no cover - Python always provides zoneinfo in suppo
     ZoneInfo = None  # type: ignore
 
 from .db import connect, init_v3_db, list_daily_max_predictions, list_market_buckets, upsert_daily_max_prediction
+from .env_utils import env_value
 from .registry import get_city_profile
 
 
@@ -178,6 +179,16 @@ def build_daily_max_prediction(
                 issued,
                 path,
             )
+            peak_lock = _peak_lock_candidate(
+                city_key,
+                target_date,
+                unit,
+                profile.timezone if profile else "UTC",
+                path,
+            )
+            build_warnings = list(ensemble.get("build_warnings") or [])
+            if peak_lock.get("candidate"):
+                build_warnings.append("pws_peak_lock_candidate")
             ensemble.update({
                 "observed_floor": observed_floor,
                 "mu_observed_floor_applied": floor_applied,
@@ -185,6 +196,8 @@ def build_daily_max_prediction(
                 "peak_temp": mixed_peak.get("peak_temp") if mixed_peak.get("peak_temp") is not None else ensemble.get("peak_temp"),
                 "peak_source": mixed_peak.get("peak_source") or ensemble.get("peak_source") or "",
                 "mixed_peak": mixed_peak,
+                "peak_lock_candidate": peak_lock,
+                "build_warnings": build_warnings,
             })
             return ensemble
 
@@ -243,6 +256,16 @@ def build_daily_max_prediction(
         mu = mu_floor
         floor_applied = True
 
+    peak_lock_candidate = _peak_lock_candidate(
+        city_key,
+        target_date,
+        unit,
+        profile.timezone if profile else "UTC",
+        path,
+    )
+    if peak_lock_candidate.get("candidate"):
+        warnings.append("pws_peak_lock_candidate")
+
     prediction = {
         "ok": True,
         "city_key": city_key,
@@ -274,6 +297,7 @@ def build_daily_max_prediction(
         "peak_temp": mixed_peak.get("peak_temp"),
         "peak_source": mixed_peak.get("peak_source") or "",
         "mixed_peak": mixed_peak,
+        "peak_lock_candidate": peak_lock_candidate,
     }
     return prediction
 
@@ -723,6 +747,110 @@ def _mixed_curve_peak(
         "curve_points": len(curve),
         "curve": curve,
     }
+
+
+def _peak_lock_candidate(
+    city_key: str,
+    target_date: str,
+    unit: str,
+    timezone_name: str,
+    path: Path | None,
+) -> dict[str, Any]:
+    if env_value("PWS_PEAK_LOCK_ENABLED", "true").strip().lower() in {"0", "false", "no", "off"}:
+        return {"enabled": False, "candidate": False, "reason": "pws_peak_lock_disabled"}
+    zone = _zone(timezone_name)
+    with connect(path) as conn:
+        pws_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT observed_at, temperature, station_id, source_url
+                FROM mesonet_observations
+                WHERE city = ?
+                  AND network = 'wunderground_pws'
+                  AND parse_status = 'parsed'
+                  AND temperature IS NOT NULL
+                ORDER BY observed_at DESC
+                LIMIT 24
+                """,
+                (city_key,),
+            ).fetchall()
+        ]
+        hourly_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT local_hour, forecast_temp, observed_temp
+                FROM hourly_consensus
+                WHERE city = ? AND target_date = ?
+                ORDER BY local_hour
+                """,
+                (city_key, target_date),
+            ).fetchall()
+        ]
+    same_day_rows: list[dict[str, Any]] = []
+    for row in pws_rows:
+        parsed = _parse_datetime(row.get("observed_at"))
+        if parsed and parsed.astimezone(zone).date().isoformat() == target_date:
+            value = _optional_float(row.get("temperature"))
+            if value is not None and _plausible_temp(value):
+                same_day_rows.append({
+                    "observed_at": parsed.isoformat(),
+                    "local_hour": parsed.astimezone(zone).strftime("%H:%M"),
+                    "temperature": convert_temp(value, _clean_unit(getattr(get_city_profile(city_key), "unit", unit)), unit),
+                    "station_id": row.get("station_id") or "",
+                    "source_url": row.get("source_url") or "",
+                })
+    same_day_rows = sorted(same_day_rows, key=lambda item: item["observed_at"])
+    if len(same_day_rows) < 3:
+        return {
+            "enabled": True,
+            "candidate": False,
+            "reason": "insufficient_pws_points",
+            "pws_points": len(same_day_rows),
+        }
+    latest = same_day_rows[-4:]
+    temps = [float(row["temperature"]) for row in latest]
+    decreasing_pairs = sum(1 for prev, cur in zip(temps, temps[1:]) if cur <= prev - convert_sigma(0.1, "C", unit))
+    recent_drop = temps[0] - temps[-1]
+    observed_max = max(
+        [float(row.get("observed_temp")) for row in hourly_rows if _optional_float(row.get("observed_temp")) is not None],
+        default=None,
+    )
+    latest_hour = latest[-1]["local_hour"][:2] + ":00"
+    future_forecasts = [
+        float(row.get("forecast_temp"))
+        for row in hourly_rows
+        if str(row.get("local_hour") or "") >= latest_hour and _optional_float(row.get("forecast_temp")) is not None
+    ]
+    future_forecast_max = max(future_forecasts, default=None)
+    remaining_upside = None
+    if observed_max is not None and future_forecast_max is not None:
+        remaining_upside = future_forecast_max - observed_max
+    candidate = decreasing_pairs >= 2 and recent_drop >= convert_sigma(0.3, "C", unit) and (
+        remaining_upside is None or remaining_upside <= convert_sigma(0.5, "C", unit)
+    )
+    return {
+        "enabled": True,
+        "candidate": bool(candidate),
+        "method": "pws_metar_peak_lock_v1",
+        "role": "trend_confirmation_only_not_settlement_truth",
+        "pws_points": len(same_day_rows),
+        "latest_points": latest,
+        "decreasing_pairs": decreasing_pairs,
+        "recent_drop": round(recent_drop, 3),
+        "observed_max": observed_max,
+        "future_forecast_max": future_forecast_max,
+        "remaining_upside": remaining_upside,
+        "reason": "pws_cooling_and_forecast_flat" if candidate else "peak_lock_conditions_not_met",
+    }
+
+
+def _zone(timezone_name: str):
+    try:
+        return ZoneInfo(timezone_name) if ZoneInfo else timezone.utc
+    except Exception:
+        return timezone.utc
 
 
 def _metar_temperature_unit(row: dict[str, Any], default_unit: str) -> str:

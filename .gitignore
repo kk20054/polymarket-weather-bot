@@ -147,6 +147,7 @@ venv.bak/
 # WeatherBot local state and secrets
 config.json
 data/
+keys/
 audits/
 .tmp/
 .tmp-tests/
