@@ -4,11 +4,13 @@
 - Phase: Phase 2 data-source alignment. Usable for observation, source benchmarking, and controlled paper research; live trading remains locked.
 - This turn landed WU/weather.com hourly history as `truth_wunderground_hourly`, exposed it through `wunderground-hourly-fetch`, and feeds it into `hourly_consensus_points` as the Historical line.
 - Weather.com v3 forecast is wired into `weathercom-fetch`, production refresh, scheduler forecast poller, and `DEB_WEIGHT_MODE=polywx_aligned` DEB components as `weathercom_v3`.
+- WU daily settlement truth now derives from WU/weather.com hourly history using each city local day, then stores `truth_wunderground_daily`; existing rows are skipped unless `--force-rebuild` is used.
+- Real batch backfill succeeded for 10 cities x 7 days (2026-07-01..07): 70 daily truth rows and 1609 hourly rows; no skipped city-date.
 - Real smoke succeeded: ZSPD WU hourly 2026-07-06 returned 48 rows, high 36.0C, low 26.0C; hourly consensus rebuilt 24 Historical points.
 - Real smoke succeeded: Shanghai Weather.com v3 forecast persisted 2 runs / 2 members, then DEB built `polywx_aligned_deb_v1` with `has_weathercom_v3=True`.
 - Checks passed: `python -m unittest tests.test_v3_core`, targeted WU/weathercom tests, and `git diff --check` (only Windows line-ending warnings).
-- Remaining blockers: no 10-city WU hourly/daily backfill yet; WU/HKO truth coverage still insufficient for live; PolyWX numeric benchmark still needs batch comparison.
-- Next: batch backfill 10 Asian/US cities for 30-90 days, rebuild hourly consensus + DEB, and compare against PolyWX saved benchmarks.
+- Remaining blockers: only 7 days are backfilled so far; HKO truth still separate; PolyWX numeric benchmark still needs batch comparison.
+- Next: extend WU daily/hourly backfill to 30-90 days, rebuild hourly consensus + DEB, and compare against PolyWX saved benchmarks.
 
 ## Latest Clean Snapshot 2026-07-07
 - Phase: Phase 1.5 -> Phase 2. Usable for observation, controlled simulation, and paper research; live trading remains locked.

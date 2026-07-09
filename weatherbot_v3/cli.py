@@ -938,8 +938,9 @@ def run_wunderground_truth_fetch(
     all_cities: bool = False,
     limit_cities: int = 10,
     dry_run: bool = False,
+    force_rebuild: bool = False,
 ) -> dict:
-    from .truth.wunderground import fetch_wunderground_daily_result, persist_wunderground_daily
+    from .truth.wunderground import fetch_wunderground_daily_result, persist_wunderground_daily, persist_wunderground_hourly
 
     sync_station_registry()
     requested = _cities_from_arg(cities_arg)
@@ -951,22 +952,35 @@ def run_wunderground_truth_fetch(
         rows = [row for row in rows if row.get("enabled")][: max(1, int(limit_cities or 10))]
     targets = _cli_date_window(target_date=target_date, start_date=start_date, end_date=end_date, days=days)
     results = []
+    hourly_rows_upserted = 0
     for row in rows:
         station = str(row.get("settlement_station_id") or row.get("station_id") or "").upper()
         if station == "HKO":
             continue
+        timezone_name = str(row.get("settlement_timezone") or row.get("timezone") or "UTC")
         for target in targets:
-            result = fetch_wunderground_daily_result(station, target)
+            if not force_rebuild:
+                cached = _existing_wunderground_daily(station, target)
+                if cached:
+                    results.append(cached)
+                    continue
+            result = fetch_wunderground_daily_result(station, target, timezone_name=timezone_name)
             if result.get("ok") and not dry_run:
                 persist_wunderground_daily(result)
-            results.append(result)
+                hourly_result = result.get("hourly_result")
+                if isinstance(hourly_result, dict) and hourly_result.get("ok"):
+                    persisted_hourly = persist_wunderground_hourly(hourly_result)
+                    hourly_rows_upserted += int(persisted_hourly.get("rows_upserted") or 0)
+            results.append(_compact_wunderground_result(result))
     return {
         "ok": all(item.get("ok") for item in results) if results else False,
         "source": "wunderground",
         "stage": "truth_wunderground_daily",
         "dry_run": dry_run,
+        "force_rebuild": force_rebuild,
         "target_dates": targets,
         "stored": 0 if dry_run else sum(1 for item in results if item.get("ok")),
+        "hourly_rows_upserted": hourly_rows_upserted,
         "skipped": sum(1 for item in results if not item.get("ok")),
         "results": results,
     }
@@ -1007,7 +1021,7 @@ def run_wunderground_hourly_fetch(
                 persisted = persist_wunderground_hourly(result)
                 rows_upserted += int(persisted.get("rows_upserted") or 0)
                 result["rows_upserted"] = persisted.get("rows_upserted")
-            results.append(result)
+            results.append(_compact_wunderground_result(result))
     return {
         "ok": all(item.get("ok") for item in results) if results else False,
         "source": "wunderground",
@@ -1018,6 +1032,61 @@ def run_wunderground_hourly_fetch(
         "rows_upserted": rows_upserted,
         "skipped": sum(1 for item in results if not item.get("ok")),
         "results": results,
+    }
+
+
+def _compact_wunderground_result(result: dict) -> dict:
+    rows = result.get("rows") if isinstance(result.get("rows"), list) else []
+    hourly_result = result.get("hourly_result") if isinstance(result.get("hourly_result"), dict) else None
+    return {
+        "ok": bool(result.get("ok")),
+        "icao": result.get("icao"),
+        "date_local": result.get("date_local"),
+        "timezone": result.get("timezone"),
+        "high_c": result.get("high_c"),
+        "low_c": result.get("low_c"),
+        "row_count": result.get("row_count") if result.get("row_count") is not None else (len(rows) if rows else None),
+        "hourly_row_count": result.get("hourly_row_count") or (hourly_result.get("row_count") if hourly_result else None),
+        "method": result.get("method"),
+        "settlement_truth_type": result.get("settlement_truth_type"),
+        "source_url": result.get("source_url"),
+        "skip_reasons": result.get("skip_reasons") or [],
+        "duration_ms": result.get("duration_ms"),
+        "rows_upserted": result.get("rows_upserted"),
+    }
+
+
+def _existing_wunderground_daily(station: str, target_date: str) -> dict | None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT icao, date_local, timezone, high_c, low_c, method,
+                   settlement_truth_type, source_url, parser_version, updated_at
+            FROM truth_wunderground_daily
+            WHERE UPPER(icao) = UPPER(?) AND date_local = ?
+              AND high_c IS NOT NULL
+            """,
+            (station, target_date),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "ok": True,
+        "cached": True,
+        "icao": row["icao"],
+        "date_local": row["date_local"],
+        "timezone": row["timezone"],
+        "high_c": row["high_c"],
+        "low_c": row["low_c"],
+        "row_count": None,
+        "hourly_row_count": None,
+        "method": row["method"],
+        "settlement_truth_type": row["settlement_truth_type"],
+        "source_url": row["source_url"],
+        "skip_reasons": [],
+        "duration_ms": 0,
+        "rows_upserted": 0,
+        "updated_at": row["updated_at"],
     }
 
 
@@ -1666,6 +1735,7 @@ def main() -> None:
                 all_cities=args.all_cities,
                 limit_cities=args.limit_cities,
                 dry_run=args.dry_run,
+                force_rebuild=args.force_rebuild,
             ),
             ensure_ascii=False,
             indent=2,

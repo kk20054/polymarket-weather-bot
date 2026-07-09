@@ -268,3 +268,14 @@
 - 阻塞：WU/HKO truth 覆盖仍不足；Weather.com/WU key 权限与稳定性需要持续监控；尚未做 10 城批量 WU hourly/daily backfill 和 PolyWX 数值回归。
 - 下一步：批量回填 10 城 30-90 天 WU hourly/daily，重建 hourly consensus/DEB，并做 PolyWX benchmark diff。
 - 相关提交：e400d25。
+
+### 2026-07-09: WU daily settlement truth 本地日聚合 + 10 城 7 天批量回填
+
+- 目标：继续补齐 WU daily settlement truth，不再依赖单独 daily endpoint；优先复用已跑通的 WU/weather.com hourly history，按每个城市本地日历日聚合 daily high/low，并保留小时明细供审计。
+- 改动：`fetch_wunderground_daily_result()` 新增 `timezone_name` 与 hourly fallback；`weather_com_location_historical_json` 成功时优先按 local-day hourly rows 计算 `truth_wunderground_daily`，并附带 `hourly_result` 供 CLI 同步写入 `truth_wunderground_hourly`；`wunderground-truth-fetch` 默认跳过已有 daily truth，除非显式 `--force-rebuild`，避免批量回填重复请求；CLI 输出改为摘要，不再打印 raw observations 巨型 JSON。
+- 跑数：先备份 DB 到 `data/weatherbot_v3.db.bak-wu-daily-20260709-174049`；单日 Shanghai/ZSPD 2026-07-06 dry-run 返回 `high_c=36.0/low_c=26.0/hourly_row_count=48`，接口耗时约 1.66s、整条 CLI 约 3.63s；10 城 x 3 天首次入库 `stored=30/hourly_rows_upserted=1186/skipped=0`，重复同窗口全 cached 约 2.01s。
+- 跑数：扩展 10 城 x 7 天（2026-07-01..07），结果 `stored=70/hourly_rows_upserted=1609/skipped=0`，总耗时 113.12s；DB 汇总确认 KORD/RCSS/RJTT/RKSI/WSSS/ZBAA/ZGSZ/ZHHH/ZSPD/ZSQD 均有 7 天 daily truth，hourly rows 按站点 168-351 行不等。
+- 验证：新增本地日过滤回归测试，确认 UTC 上一日本地非目标日的极端温度不会污染 target_date；`python -m unittest tests.test_v3_core` 174/174 OK；`git diff --check` OK（仅 Windows CRLF warning）。
+- 结论：WU daily truth 已从“接口探测可用”进入“可批量入库、可断点续跑、可本地日聚合”的状态；当前仅完成 7 天样本，仍不足以解锁 live，只能支撑后续 bias/DEB/PolyWX benchmark。
+- 下一步：扩展到 30-90 天；重建 hourly consensus 和 daily_max_predictions；对 PolyWX 保存基准做字段级 diff；Hong Kong 仍走 HKO truth，不应纳入 WU 批量。
+- 相关提交：pending。

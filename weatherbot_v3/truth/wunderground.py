@@ -25,6 +25,7 @@ def fetch_wunderground_daily(
     date_local: str | date,
     *,
     country_code: str = "",
+    timezone_name: str = "UTC",
     session: requests.Session | None = None,
     persist: bool = True,
     path: Path | None = None,
@@ -33,10 +34,14 @@ def fetch_wunderground_daily(
         icao,
         date_local,
         country_code=country_code,
+        timezone_name=timezone_name,
         session=session,
     )
     if result.get("ok") and persist:
         persist_wunderground_daily(result, path=path)
+        hourly_result = result.get("hourly_result")
+        if isinstance(hourly_result, dict) and hourly_result.get("ok"):
+            persist_wunderground_hourly(hourly_result, path=path)
     return result if result.get("ok") else None
 
 
@@ -45,6 +50,8 @@ def fetch_wunderground_daily_result(
     date_local: str | date,
     *,
     country_code: str = "",
+    timezone_name: str = "UTC",
+    hourly_fallback: bool = True,
     session: requests.Session | None = None,
     timeout: float = 20.0,
 ) -> dict[str, Any]:
@@ -69,6 +76,15 @@ def fetch_wunderground_daily_result(
                 attempts.append(_safe_attempt(attempt, f"http_{status_code}", source_url=source_url))
                 continue
             parsed = _parse_weather_daily_payload(text, station, target, source_url, attempt["method"])
+            hourly_parsed = None
+            if attempt["method"] == "weather_com_location_historical_json":
+                hourly_parsed = _parse_weather_hourly_payload(text, station, target, timezone_name, source_url, attempt["method"])
+                if hourly_parsed and hourly_parsed.get("rows"):
+                    parsed = _daily_from_hourly_result(
+                        hourly_parsed,
+                        attempts=attempts,
+                        skip_reasons=["derived_from_wunderground_hourly_history"],
+                    )
             if parsed:
                 parsed["duration_ms"] = round((time.perf_counter() - started_perf) * 1000, 2)
                 log_data_fetch(
@@ -88,6 +104,41 @@ def fetch_wunderground_daily_result(
             attempts.append(_safe_attempt(attempt, "no_daily_high_in_payload", source_url=source_url))
         except Exception as exc:
             attempts.append(_safe_attempt(attempt, "exception", error=str(exc)))
+    if hourly_fallback:
+        hourly = fetch_wunderground_hourly_result(
+            station,
+            target,
+            country_code=country_code,
+            timezone_name=timezone_name,
+            session=client,
+            timeout=timeout,
+        )
+        if hourly.get("ok") and hourly.get("rows"):
+            parsed = _daily_from_hourly_result(
+                hourly,
+                attempts=attempts,
+                skip_reasons=["daily_endpoint_failed", "derived_from_wunderground_hourly_history"],
+            )
+            parsed["duration_ms"] = round((time.perf_counter() - started_perf) * 1000, 2)
+            log_data_fetch(
+                source="wunderground",
+                stage="truth_wunderground_daily",
+                status="OK",
+                city=station,
+                target_date=target.isoformat(),
+                duration_ms=parsed["duration_ms"],
+                message="Wunderground daily truth derived from hourly history",
+                details={k: v for k, v in parsed.items() if k not in {"raw", "hourly_result"}},
+                started_at=started_at,
+                finished_at=utc_now(),
+                log_key=f"{PARSER_VERSION}:{station}:{target.isoformat()}:hourly-derived",
+            )
+            return parsed
+        attempts.append({
+            "method": "weather_com_location_historical_json_daily_from_hourly",
+            "status": "hourly_fallback_failed",
+            "skip_reasons": hourly.get("skip_reasons") or [],
+        })
     result = {
         "ok": False,
         "icao": station,
@@ -263,6 +314,42 @@ def persist_wunderground_daily(result: dict[str, Any], *, path: Path | None = No
             ),
         )
     return {"ok": True, "truth_key": truth_key}
+
+
+def _daily_from_hourly_result(
+    hourly: dict[str, Any],
+    *,
+    attempts: list[dict[str, Any]],
+    skip_reasons: list[str] | None = None,
+) -> dict[str, Any]:
+    rows = [row for row in hourly.get("rows") or [] if isinstance(row, dict)]
+    temps = [float(row["temp_c"]) for row in rows if row.get("temp_c") is not None]
+    if not temps:
+        raise ValueError("hourly_result_without_temperatures")
+    return {
+        "ok": True,
+        "icao": str(hourly.get("icao") or "").upper(),
+        "date_local": str(hourly.get("date_local") or ""),
+        "timezone": str(hourly.get("timezone") or ""),
+        "high_c": round(max(temps), 1),
+        "low_c": round(min(temps), 1),
+        "source_url": str(hourly.get("source_url") or ""),
+        "method": f"{hourly.get('method') or 'wunderground_hourly'}_daily_from_hourly",
+        "settlement_truth_type": SETTLEMENT_TRUTH_TYPE,
+        "skip_reasons": skip_reasons or ["derived_from_wunderground_hourly_history"],
+        "daily_attempts": attempts,
+        "hourly_row_count": len(rows),
+        "parser_version": PARSER_VERSION,
+        "raw": {
+            "daily_attempts": attempts,
+            "hourly_source_url": hourly.get("source_url"),
+            "hourly_method": hourly.get("method"),
+            "hourly_row_count": len(rows),
+            "hourly_high_c": hourly.get("high_c"),
+            "hourly_low_c": hourly.get("low_c"),
+        },
+        "hourly_result": hourly,
+    }
 
 
 def persist_wunderground_hourly(result: dict[str, Any], *, path: Path | None = None) -> dict[str, Any]:

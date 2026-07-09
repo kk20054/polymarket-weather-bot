@@ -4479,6 +4479,41 @@ class V3CoreTests(unittest.TestCase):
         self.assertFalse(failure["ok"])
         self.assertIn("no_daily_high_in_payload", failure["skip_reasons"])
 
+    def test_wunderground_daily_truth_derives_from_hourly_using_local_day(self):
+        class FakeSession:
+            def get(self, url, params=None, headers=None, timeout=None):
+                return FakeHTTPResponse(
+                    {
+                        "observations": [
+                            {
+                                "validTimeUtc": "2026-07-05T15:00:00Z",
+                                "temp": 99,
+                                "wx_phrase": "Fair",
+                            },
+                            {
+                                "validTimeUtc": "2026-07-06T04:00:00Z",
+                                "temp": 35,
+                                "wx_phrase": "Fair",
+                            },
+                        ]
+                    },
+                    url=f"{url}?apiKey=redacted",
+                )
+
+        with patch("weatherbot_v3.truth.wunderground.env_value", return_value=""):
+            result = fetch_wunderground_daily_result(
+                "ZSPD",
+                "2026-07-06",
+                timezone_name="Asia/Shanghai",
+                session=FakeSession(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["method"], "weather_com_location_historical_json_daily_from_hourly")
+        self.assertEqual(result["high_c"], 35.0)
+        self.assertEqual(result["hourly_row_count"], 1)
+        self.assertIn("derived_from_wunderground_hourly_history", result["skip_reasons"])
+
     def test_wunderground_hourly_history_persists_and_feeds_historical_line(self):
         db_path = test_db_path("wunderground_hourly_history")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
