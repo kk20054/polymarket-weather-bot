@@ -278,4 +278,4 @@
 - 验证：新增本地日过滤回归测试，确认 UTC 上一日本地非目标日的极端温度不会污染 target_date；`python -m unittest tests.test_v3_core` 174/174 OK；`git diff --check` OK（仅 Windows CRLF warning）。
 - 结论：WU daily truth 已从“接口探测可用”进入“可批量入库、可断点续跑、可本地日聚合”的状态；当前仅完成 7 天样本，仍不足以解锁 live，只能支撑后续 bias/DEB/PolyWX benchmark。
 - 下一步：扩展到 30-90 天；重建 hourly consensus 和 daily_max_predictions；对 PolyWX 保存基准做字段级 diff；Hong Kong 仍走 HKO truth，不应纳入 WU 批量。
-- 相关提交：pending。
+- 相关提交：790714f。
