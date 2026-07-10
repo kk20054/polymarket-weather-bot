@@ -327,3 +327,12 @@
 - 结论：HKO-VHHH delta 已具备正确持久化与可复算能力，但当前生产 DB 的 delta 尚未重建，且 WU/HKO 仍未达到 30 天；没有运行外网回填、没有重启 scheduler、`LIVE_TRADING=false` 未变。
 - 下一步：scheduler 连续运行至六小时后先读取 source health；通过后以限速、可断点批次补齐 WU/HKO/IEM 真值，再运行 `truth-delta-build`。
 - 相关提交：`cc90a90`。
+
+### 2026-07-11: IEM observation-station selection for Hong Kong truth delta
+
+- 目标：为后续 HKO−VHHH 30 天 delta 回填修正 IEM truth collector 的站点口径，不触碰正在运行的 scheduler。
+- 改动：`iem-asos-fetch` 现在始终用 `stations.station_id` 和 observation timezone；香港因此请求机场观测站 `VHHH`，而不会误取结算机构 `HKO` 后静默跳过。其他城市的 station/settlement station 一致，行为不变。
+- 验证：新增香港 CLI 回归，确认请求参数为 `VHHH / Asia/Hong_Kong`；`python -m unittest tests.test_v3_core` 184/184 OK；`git diff --check` 通过。
+- 结论：回填前置条件已齐备。仍需等 scheduler 六小时预验收结束后，再显式运行 WU/HKO/IEM 日期范围回填和 `truth-delta-build`。
+- 下一步：六小时审计结果通过后，先做 3 天 Chicago/Hong Kong 冒烟，再做 30 天可缓存批次。
+- 相关提交：`649e2d8`。
