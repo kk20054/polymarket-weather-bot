@@ -194,7 +194,32 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             for field in ("last_run_at", "age_seconds", "last_duration_ms", "fails_last_hour", "next_run_at", "initial_delay_seconds"):
                 self.assertIn(field, payload["pollers"][key])
 
-    async def test_derive_poller_batches_market_refresh_by_target_date(self):
+    async def test_derive_poller_consumes_pre_refreshed_market_buckets(self):
+        rows = [
+            {"city_key": "chicago", "station_id": "KORD"},
+            {"city_key": "atlanta", "station_id": "KATL"},
+        ]
+        dates = ["2026-07-10", "2026-07-11"]
+
+        with patch("weatherbot_v3.scheduler._enabled_rows", return_value=rows), patch(
+            "weatherbot_v3.scheduler._target_dates_for_station", return_value=dates
+        ), patch(
+            "weatherbot_v3.scheduler.run_market_buckets_sync"
+        ) as market_sync, patch(
+            "weatherbot_v3.scheduler.run_hourly_consensus_build", return_value={"ok": True, "rows_upserted": 24}
+        ), patch(
+            "weatherbot_v3.scheduler.run_daily_max_build", return_value={"ok": True, "stored": 1}
+        ), patch(
+            "weatherbot_v3.scheduler.run_signal_decisions_build",
+            return_value={"ok": True, "stored": 11, "results": [{"bucket_count": 11}]},
+        ):
+            result = await WeatherBotScheduler(city_concurrency=2)._run_derive_poller()
+
+        self.assertTrue(result["ok"])
+        market_sync.assert_not_called()
+        self.assertEqual(result["ok_cities"], 2)
+
+    async def test_gamma_poller_refreshes_active_buckets_by_target_date(self):
         rows = [
             {"city_key": "chicago", "station_id": "KORD"},
             {"city_key": "atlanta", "station_id": "KATL"},
@@ -202,33 +227,33 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         dates = ["2026-07-10", "2026-07-11"]
 
         def fake_market_sync(limit, **kwargs):
-            cities = kwargs["cities_arg"].split(",")
-            target_date = kwargs["target_date"]
             return {
                 "ok": True,
-                "results": [
-                    {"ok": True, "city": city, "target_date": target_date, "stored": 11}
-                    for city in cities
-                ],
+                "stored": 22,
+                "orderbook_ok": 22,
+                "events_failed": 0,
             }
 
         with patch("weatherbot_v3.scheduler._enabled_rows", return_value=rows), patch(
             "weatherbot_v3.scheduler._target_dates_for_station", return_value=dates
         ), patch(
+            "weatherbot_v3.scheduler.run_gamma_structured_sync",
+            return_value={
+                "ok": True,
+                "events_stored": 30,
+                "markets_stored": 330,
+                "orderbooks_stored": 330,
+                "failures": [],
+            },
+        ), patch(
             "weatherbot_v3.scheduler.run_market_buckets_sync", side_effect=fake_market_sync
-        ) as market_sync, patch(
-            "weatherbot_v3.scheduler.run_hourly_consensus_build", return_value={"ok": True, "rows_upserted": 24}
-        ), patch(
-            "weatherbot_v3.scheduler.run_daily_max_build", return_value={"ok": True, "stored": 1}
-        ), patch(
-            "weatherbot_v3.scheduler.run_signal_decisions_build", return_value={"ok": True, "stored": 11}
-        ):
-            result = await WeatherBotScheduler(city_concurrency=2)._run_derive_poller()
+        ) as market_sync:
+            result = await WeatherBotScheduler(city_concurrency=2)._run_gamma_orderbook_poller()
 
         self.assertTrue(result["ok"])
         self.assertEqual(market_sync.call_count, 2)
-        self.assertTrue(all(call.kwargs["cities_arg"] == "chicago,atlanta" for call in market_sync.call_args_list))
-        self.assertEqual(result["ok_cities"], 2)
+        self.assertEqual(result["market_buckets_stored"], 44)
+        self.assertEqual(result["active_orderbooks"], 44)
 
     async def test_china_live_poller_only_runs_supported_enabled_cities(self):
         db_path = test_db_path("scheduler_china_live")

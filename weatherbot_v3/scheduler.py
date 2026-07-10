@@ -345,24 +345,6 @@ class WeatherBotScheduler:
             str(row.get("city_key") or row.get("city") or ""): _target_dates_for_station(row)
             for row in rows
         }
-        market_results: dict[tuple[str, str], dict[str, Any]] = {}
-        target_dates = sorted({target for targets in targets_by_city.values() for target in targets})
-        for target_date in target_dates:
-            target_cities = [city for city, targets in targets_by_city.items() if target_date in targets]
-            market_batch = await asyncio.to_thread(
-                run_market_buckets_sync,
-                1000,
-                cities_arg=",".join(target_cities),
-                target_date=target_date,
-                active_weather=True,
-                limit_cities=len(target_cities),
-                fetch_orderbooks=True,
-            )
-            for item in market_batch.get("results") or []:
-                if not isinstance(item, dict):
-                    continue
-                key = (str(item.get("city") or ""), str(item.get("target_date") or target_date))
-                market_results[key] = item
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city") or "")
@@ -371,15 +353,16 @@ class WeatherBotScheduler:
             for target_date in city_target_dates:
                 hourly = await asyncio.to_thread(run_hourly_consensus_build, city, target_date, limit_cities=1)
                 daily = await asyncio.to_thread(run_daily_max_build, city, target_date, limit_cities=1)
-                buckets = market_results.get((city, target_date), {"ok": False, "stored": 0, "status": "missing"})
                 decisions = await asyncio.to_thread(run_signal_decisions_build, city, target_date, limit_cities=1, limit=120)
+                decision_results = decisions.get("results") if isinstance(decisions.get("results"), list) else []
+                bucket_count = int(decision_results[0].get("bucket_count") or 0) if decision_results else 0
                 date_results.append({
                     "target_date": target_date,
                     "hourly_rows": hourly.get("rows_upserted") or hourly.get("rows_built") or 0,
                     "daily_stored": daily.get("stored") or daily.get("stored_count") or 0,
-                    "market_buckets": buckets.get("stored") or buckets.get("buckets") or 0,
+                    "market_buckets": bucket_count,
                     "signal_decisions": decisions.get("stored") or decisions.get("decisions") or 0,
-                    "ok": all(_payload_ok(item) for item in (hourly, daily, buckets, decisions)),
+                    "ok": bucket_count > 0 and all(_payload_ok(item) for item in (hourly, daily, decisions)),
                 })
             return {
                 "ok": all(item.get("ok") for item in date_results),
@@ -414,13 +397,58 @@ class WeatherBotScheduler:
         )
 
     async def _run_gamma_orderbook_poller(self) -> dict[str, Any]:
-        return await asyncio.to_thread(
+        structured = await asyncio.to_thread(
             run_gamma_structured_sync,
             "",
             days=3,
             dry_run=False,
             fetch_orderbooks=True,
         )
+        rows = _enabled_rows()
+        targets_by_city = {
+            str(row.get("city_key") or row.get("city") or ""): _target_dates_for_station(row)
+            for row in rows
+        }
+        active_batches: list[dict[str, Any]] = []
+        for target_date in sorted({target for targets in targets_by_city.values() for target in targets}):
+            target_cities = [city for city, targets in targets_by_city.items() if target_date in targets]
+            payload = await asyncio.to_thread(
+                run_market_buckets_sync,
+                1000,
+                cities_arg=",".join(target_cities),
+                target_date=target_date,
+                active_weather=True,
+                limit_cities=len(target_cities),
+                fetch_orderbooks=True,
+            )
+            active_batches.append({
+                "ok": _payload_ok(payload),
+                "target_date": target_date,
+                "cities": target_cities,
+                "stored": int(payload.get("stored") or 0),
+                "orderbook_ok": int(payload.get("orderbook_ok") or 0),
+                "failed": int(payload.get("failed") or payload.get("events_failed") or 0),
+            })
+        failures = list(structured.get("failures") or [])
+        failures.extend(
+            {
+                "stage": "active_market_buckets",
+                "target_date": batch["target_date"],
+                "failed": batch["failed"],
+            }
+            for batch in active_batches
+            if not batch["ok"]
+        )
+        return {
+            "ok": _payload_ok(structured) and all(batch["ok"] for batch in active_batches),
+            "events_stored": int(structured.get("events_stored") or 0),
+            "markets_stored": int(structured.get("markets_stored") or 0),
+            "orderbooks_stored": int(structured.get("orderbooks_stored") or 0),
+            "market_buckets_stored": sum(batch["stored"] for batch in active_batches),
+            "active_orderbooks": sum(batch["orderbook_ok"] for batch in active_batches),
+            "active_batches": active_batches,
+            "failures": failures,
+        }
 
     async def _run_model_timing_poller(self) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
@@ -580,7 +608,8 @@ def _poller_message(poller_key: str, result: dict[str, Any]) -> str:
     if poller_key == "gamma_orderbook_poller":
         return (
             f"{poller_key} completed: {int(result.get('events_stored') or 0)} events, "
-            f"{int(result.get('orderbooks_stored') or 0)} orderbooks"
+            f"{int(result.get('orderbooks_stored') or 0)} structured books, "
+            f"{int(result.get('active_orderbooks') or 0)} active books"
             if _payload_ok(result)
             else f"{poller_key} completed with {len(result.get('failures') or [])} failures"
         )
