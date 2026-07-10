@@ -300,3 +300,12 @@
 - Conclusion: the previous indefinite-running symptom is fixed at the known request/write bottlenecks, and each core poller now has bounded behavior and measured capacity. A real 24-hour uninterrupted soak is still required; this turn does not claim production readiness.
 - Next: run the committed scheduler for 24 hours, then extend WU/HKO truth to 30 days and compute source deltas. Do not start UI work or live canary work first.
 - Commit: `9f1a04f`.
+
+### 2026-07-10: Keep signal-decision orderbooks fresh during long Derive runs
+
+- Finding: the first complete Derive cycle finished 14/14 cities in 741.6s, but source health still marked `polymarket_orderbook` stale. This was real, not a cache error: Derive fetched quotes at its start, then spent over 12 minutes computing, while the five-minute Gamma poller updated only `polymarket_orderbook` and not the `market_buckets/orderbooks` tables read by signal decisions.
+- Fix: `gamma_orderbook_poller` now refreshes both structured Gamma audit tables and all enabled-city D+0/D+1 active market buckets/orderbooks every five minutes. Derive no longer fetches markets; it consumes the pre-refreshed rows and validates that each decision target has buckets.
+- Runtime evidence: a real combined Gamma run completed in 41.4s and persisted 30 events, 330 structured books, 308 active market buckets, and 308 active orderbooks with zero failures. Source health immediately changed orderbook coverage to 100% healthy with roughly 26-36s quote age.
+- Verification: 206 backend/scheduler/watchlist/dashboard-contract tests passed; `npm run build` passed; `git diff --check` passed. Live and auto simulation remained disabled.
+- Conclusion: the previous soak is not accepted because decisions could see stale quotes. The 24-hour clock must restart from this commit; remaining blockers are settlement verification, WU/HKO history depth, transient METAR errors, and optional PWS coverage.
+- Commit: `d4c90f7`.
