@@ -309,3 +309,12 @@
 - Verification: 206 backend/scheduler/watchlist/dashboard-contract tests passed; `npm run build` passed; `git diff --check` passed. Live and auto simulation remained disabled.
 - Conclusion: the previous soak is not accepted because decisions could see stale quotes. The 24-hour clock must restart from this commit; remaining blockers are settlement verification, WU/HKO history depth, transient METAR errors, and optional PWS coverage.
 - Commit: `d4c90f7`.
+
+### 2026-07-10: Scheduler resilience after first one-hour soak sample
+
+- Observation: the one-hour run completed eight METAR cycles, twelve China Live cycles, one Forecast cycle, eight Gamma cycles, and two Derive cycles. Forecast completed 14/14 in 317.4s. Derive completed 14/14 twice in 837.0s and 905.2s; the latter narrowly exceeded the 900s target under concurrent load.
+- Findings: one Singapore AWC request timed out at 20s and recovered on later cycles. One Gamma structured sync reported ten Seoul `clob_batch_book_missing` rows even though active decision orderbooks were refreshed. PWS returned repeated HTTP 401 responses for the configured Weather.com key, which is a permission gap rather than a network outage.
+- Changes: AWC current-METAR reads now retry once with bounded backoff. Gamma classifies missing individual structured books as `book_gaps`, preserves them for audit, and keeps the poller successful when active bucket refresh succeeds. Scheduler applies an in-memory one-hour PWS auth cooldown after a 401/unauthorized response so optional PWS no longer floods fetch logs.
+- Verification: 209 backend/scheduler/watchlist/dashboard-contract tests passed; `git diff --check` passed. No execution behavior changed and live remains locked.
+- Conclusion: restart the 24-hour soak from this commit. PWS still requires a dedicated Wunderground PWS entitlement before it can become a usable source; Seoul book gaps remain correctly non-tradable.
+- Commit: `dc1cd8b`.
