@@ -143,18 +143,33 @@ def fetch_awc_metars(
     hours: float = 24.0,
     session: requests.Session | None = None,
     timeout: float = 20.0,
+    retries: int = 2,
+    retry_backoff_seconds: float = 0.5,
 ) -> list[dict[str, Any]]:
     ids = sorted({str(item or "").strip().upper() for item in station_ids if str(item or "").strip()})
     if not ids:
         return []
     bounded_hours = max(1.0, min(float(hours or 24.0), 96.0))
     client = session or requests.Session()
-    response = client.get(
-        AWC_METAR_URL,
-        params={"ids": ",".join(ids), "format": "json", "hours": bounded_hours},
-        headers={"User-Agent": USER_AGENT},
-        timeout=timeout,
-    )
+    attempts = max(1, int(retries or 1))
+    response = None
+    last_error: requests.RequestException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = client.get(
+                AWC_METAR_URL,
+                params={"ids": ",".join(ids), "format": "json", "hours": bounded_hours},
+                headers={"User-Agent": USER_AGENT},
+                timeout=timeout,
+            )
+            break
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt < attempts and retry_backoff_seconds > 0:
+                time.sleep(float(retry_backoff_seconds) * attempt)
+    if response is None:
+        assert last_error is not None
+        raise last_error
     if response.status_code == 204:
         return []
     response.raise_for_status()

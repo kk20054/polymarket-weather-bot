@@ -138,6 +138,32 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
                 for row in logs
             ))
 
+    async def test_metar_poller_cools_down_rejected_pws_credentials(self):
+        db_path = test_db_path("scheduler_pws_auth_cooldown")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+
+        def fake_recent(city: str, *, hours: float = 6.0):
+            return {"ok": True, "city": city, "reports_upserted": 1}
+
+        rejected = {
+            "ok": False,
+            "failed": 1,
+            "results": [{"city": "chicago", "error": "401 Unauthorized"}],
+        }
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db()
+            configure_enabled_cities(["chicago", "atlanta"])
+            scheduler = WeatherBotScheduler(city_concurrency=1)
+            with patch("weatherbot_v3.scheduler.fetch_recent_hours", side_effect=fake_recent), patch(
+                "weatherbot_v3.scheduler.run_pws_fetch", return_value=rejected
+            ) as pws_fetch:
+                result = await scheduler.run_once("metar_poller")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(pws_fetch.call_count, 1)
+        city_results = [row["payload"] for row in result["results"]]
+        self.assertTrue(any("pws_auth_cooldown" in row.get("optional_warnings", []) for row in city_results))
+
     async def test_metar_city_timeout_is_reported_without_blocking_batch_forever(self):
         db_path = test_db_path("scheduler_city_timeout")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -254,6 +280,23 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(market_sync.call_count, 2)
         self.assertEqual(result["market_buckets_stored"], 44)
         self.assertEqual(result["active_orderbooks"], 44)
+
+    async def test_gamma_poller_treats_missing_structured_books_as_gaps_not_poller_failure(self):
+        with patch("weatherbot_v3.scheduler._enabled_rows", return_value=[]), patch(
+            "weatherbot_v3.scheduler.run_gamma_structured_sync",
+            return_value={
+                "ok": False,
+                "events_stored": 1,
+                "markets_stored": 2,
+                "orderbooks_stored": 1,
+                "failures": [{"market_id": "missing", "error": "clob_batch_book_missing"}],
+            },
+        ):
+            result = await WeatherBotScheduler()._run_gamma_orderbook_poller()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["failures"], [])
+        self.assertEqual(len(result["book_gaps"]), 1)
 
     async def test_china_live_poller_only_runs_supported_enabled_cities(self):
         db_path = test_db_path("scheduler_china_live")

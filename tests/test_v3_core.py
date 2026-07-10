@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import requests
+
 from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.china_weather import hko_rhrread_observation, weathercn_sk2d_observation
 from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_forecast_runs, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, model_reprice_event_summary, paper_execution_summary, set_settlement_contract_verification, truth_delta_audit_summary, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_metar_reports, upsert_model_reprice_event, upsert_settlement_contracts, upsert_signal_decision_record, weather_evidence_summary
@@ -2827,6 +2829,58 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(params["hours"], 48.0)
         self.assertIn("WeatherBot", headers["User-Agent"])
         self.assertEqual(timeout, 20.0)
+
+    def test_awc_metar_fetch_retries_transient_request_error(self):
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return [{"stationId": "WSSS"}]
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise requests.Timeout("temporary timeout")
+                return FakeResponse()
+
+        session = FakeSession()
+        rows = fetch_awc_metars(["WSSS"], session=session, retries=2, retry_backoff_seconds=0)
+
+        self.assertEqual(session.calls, 2)
+        self.assertEqual(rows, [{"stationId": "WSSS"}])
+
+    def test_awc_metar_fetch_retries_transient_request_error(self):
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return [{"stationId": "WSSS"}]
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise requests.Timeout("temporary timeout")
+                return FakeResponse()
+
+        session = FakeSession()
+        rows = fetch_awc_metars(["WSSS"], session=session, retries=2, retry_backoff_seconds=0)
+
+        self.assertEqual(session.calls, 2)
+        self.assertEqual(rows, [{"stationId": "WSSS"}])
 
     def test_metar_refresh_persists_registry_station_reports(self):
         db_path = test_db_path("metar_refresh")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ FORECAST_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_CIT
 DERIVE_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_DERIVE_CITY_TIMEOUT", "300") or "300")
 CHINA_LIVE_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_CHINA_LIVE_CITY_TIMEOUT", "60") or "60")
 PWS_OPTIONAL_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PWS_TIMEOUT", "30") or "30")
+PWS_AUTH_COOLDOWN_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PWS_AUTH_COOLDOWN", "3600") or "3600")
 MODEL_TIMING_WINDOWS_UTC = ((7, 1), (19, 1), (5, 1), (17, 1))
 
 
@@ -92,6 +94,7 @@ class WeatherBotScheduler:
         self.city_concurrency = max(1, int(city_concurrency or 2))
         self.started_at: str | None = None
         self.stop_event = asyncio.Event()
+        self._pws_auth_disabled_until = 0.0
         self._source_health_cache: dict[str, Any] | None = None
         self._source_health_cache_at = 0.0
         self.pollers: dict[str, PollerState] = {
@@ -262,24 +265,39 @@ class WeatherBotScheduler:
                     "error": f"metar_timeout_{METAR_CITY_TIMEOUT_SECONDS}s",
                 }
             optional_warnings = []
-            try:
-                pws = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        run_pws_fetch,
-                        city,
-                        dry_run=False,
-                        all_cities=False,
-                        limit_cities=1,
-                        station_limit=5,
-                    ),
-                    timeout=PWS_OPTIONAL_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                pws = {"ok": False, "optional": True, "error": "pws_timeout"}
-                optional_warnings.append("pws_timeout")
-            except Exception as exc:
-                pws = {"ok": False, "optional": True, "error": str(exc)}
-                optional_warnings.append("pws_failed")
+            cooldown_remaining = max(0, round(self._pws_auth_disabled_until - time.monotonic()))
+            if cooldown_remaining:
+                pws = {
+                    "ok": True,
+                    "optional": True,
+                    "skipped": True,
+                    "reason": "pws_auth_cooldown",
+                    "retry_after_seconds": cooldown_remaining,
+                }
+                optional_warnings.append("pws_auth_cooldown")
+            else:
+                try:
+                    pws = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            run_pws_fetch,
+                            city,
+                            dry_run=False,
+                            all_cities=False,
+                            limit_cities=1,
+                            station_limit=5,
+                        ),
+                        timeout=PWS_OPTIONAL_TIMEOUT_SECONDS,
+                    )
+                    if _pws_auth_failure(pws):
+                        self._pws_auth_disabled_until = time.monotonic() + PWS_AUTH_COOLDOWN_SECONDS
+                        pws["auth_cooldown_seconds"] = PWS_AUTH_COOLDOWN_SECONDS
+                        optional_warnings.append("pws_auth_cooldown")
+                except asyncio.TimeoutError:
+                    pws = {"ok": False, "optional": True, "error": "pws_timeout"}
+                    optional_warnings.append("pws_timeout")
+                except Exception as exc:
+                    pws = {"ok": False, "optional": True, "error": str(exc)}
+                    optional_warnings.append("pws_failed")
             return {
                 "ok": _payload_ok(metar),
                 "city": city,
@@ -429,7 +447,13 @@ class WeatherBotScheduler:
                 "orderbook_ok": int(payload.get("orderbook_ok") or 0),
                 "failed": int(payload.get("failed") or payload.get("events_failed") or 0),
             })
-        failures = list(structured.get("failures") or [])
+        structured_failures = list(structured.get("failures") or [])
+        book_gaps = [
+            failure
+            for failure in structured_failures
+            if str(failure.get("error") or "") == "clob_batch_book_missing"
+        ]
+        failures = [failure for failure in structured_failures if failure not in book_gaps]
         failures.extend(
             {
                 "stage": "active_market_buckets",
@@ -440,13 +464,14 @@ class WeatherBotScheduler:
             if not batch["ok"]
         )
         return {
-            "ok": _payload_ok(structured) and all(batch["ok"] for batch in active_batches),
+            "ok": not failures and all(batch["ok"] for batch in active_batches),
             "events_stored": int(structured.get("events_stored") or 0),
             "markets_stored": int(structured.get("markets_stored") or 0),
             "orderbooks_stored": int(structured.get("orderbooks_stored") or 0),
             "market_buckets_stored": sum(batch["stored"] for batch in active_batches),
             "active_orderbooks": sum(batch["orderbook_ok"] for batch in active_batches),
             "active_batches": active_batches,
+            "book_gaps": book_gaps,
             "failures": failures,
         }
 
@@ -572,6 +597,16 @@ def _payload_ok(payload: Any) -> bool:
     return not failures
 
 
+def _pws_auth_failure(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    try:
+        text = json.dumps(payload, ensure_ascii=False).lower()
+    except Exception:
+        text = str(payload).lower()
+    return "401" in text or "unauthorized" in text or "forbidden" in text
+
+
 def _compact_result(payload: dict[str, Any]) -> dict[str, Any]:
     results = payload.get("results") if isinstance(payload.get("results"), list) else []
     city_results = []
@@ -609,7 +644,8 @@ def _poller_message(poller_key: str, result: dict[str, Any]) -> str:
         return (
             f"{poller_key} completed: {int(result.get('events_stored') or 0)} events, "
             f"{int(result.get('orderbooks_stored') or 0)} structured books, "
-            f"{int(result.get('active_orderbooks') or 0)} active books"
+            f"{int(result.get('active_orderbooks') or 0)} active books, "
+            f"{len(result.get('book_gaps') or [])} book gaps"
             if _payload_ok(result)
             else f"{poller_key} completed with {len(result.get('failures') or [])} failures"
         )
