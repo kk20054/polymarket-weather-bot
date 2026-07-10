@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .db import init_v3_db, insert_forecast_run
+from .db import init_v3_db, insert_forecast_runs
 from .registry import get_city_profile
 
 
@@ -92,6 +92,7 @@ def import_forecast_archive(path: str | Path, apply: bool = False, strict: bool 
     }
     city_counts: Counter[str] = Counter()
     source_counts: Counter[str] = Counter()
+    pending_runs: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
 
     if apply:
         init_v3_db()
@@ -114,9 +115,11 @@ def import_forecast_archive(path: str | Path, apply: bool = False, strict: bool 
         city_counts[str(run["city"])] += 1
         source_counts[str(run["source"])] += 1
         if apply:
-            run_id = insert_forecast_run(run, members)
-            summary["run_ids"].append(run_id)
-            summary["imported"] += 1
+            pending_runs.append((run, members))
+
+    if apply:
+        summary["run_ids"] = insert_forecast_runs(pending_runs)
+        summary["imported"] = len(summary["run_ids"])
 
     summary["by_city"] = dict(sorted(city_counts.items()))
     summary["by_source"] = dict(sorted(source_counts.items()))

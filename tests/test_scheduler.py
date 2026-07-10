@@ -138,6 +138,33 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
                 for row in logs
             ))
 
+    async def test_metar_city_timeout_is_reported_without_blocking_batch_forever(self):
+        db_path = test_db_path("scheduler_city_timeout")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+
+        def slow_recent(_city: str, *, hours: float = 6.0):
+            time.sleep(0.2)
+            return {"ok": True, "reports_upserted": 1, "hours": hours}
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db()
+            configure_enabled_cities(["chicago"])
+            scheduler = WeatherBotScheduler(city_concurrency=1)
+            with patch("weatherbot_v3.scheduler.METAR_CITY_TIMEOUT_SECONDS", 0.01), patch(
+                "weatherbot_v3.scheduler.fetch_recent_hours",
+                side_effect=slow_recent,
+            ):
+                started = time.perf_counter()
+                result = await scheduler.run_once("metar_poller")
+                elapsed = time.perf_counter() - started
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["cities"], 1)
+            self.assertEqual(result["failed_cities"], 1)
+            self.assertLess(elapsed, 1.0)
+            status = scheduler.status()["pollers"]["metar_poller"]
+            self.assertIn("metar_timeout", status["last_result"]["city_results"][0]["error"])
+
     async def test_start_stop_are_idempotent_without_running_collectors(self):
         scheduler = WeatherBotScheduler(city_concurrency=2)
 
@@ -164,8 +191,44 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("required_blockers", payload["source_health"])
         for key in ("forecast_poller", "metar_poller", "china_live_poller", "derive_poller", "gamma_orderbook_poller"):
             self.assertIn(key, payload["pollers"])
-            for field in ("last_run_at", "age_seconds", "last_duration_ms", "fails_last_hour", "next_run_at"):
+            for field in ("last_run_at", "age_seconds", "last_duration_ms", "fails_last_hour", "next_run_at", "initial_delay_seconds"):
                 self.assertIn(field, payload["pollers"][key])
+
+    async def test_derive_poller_batches_market_refresh_by_target_date(self):
+        rows = [
+            {"city_key": "chicago", "station_id": "KORD"},
+            {"city_key": "atlanta", "station_id": "KATL"},
+        ]
+        dates = ["2026-07-10", "2026-07-11"]
+
+        def fake_market_sync(limit, **kwargs):
+            cities = kwargs["cities_arg"].split(",")
+            target_date = kwargs["target_date"]
+            return {
+                "ok": True,
+                "results": [
+                    {"ok": True, "city": city, "target_date": target_date, "stored": 11}
+                    for city in cities
+                ],
+            }
+
+        with patch("weatherbot_v3.scheduler._enabled_rows", return_value=rows), patch(
+            "weatherbot_v3.scheduler._target_dates_for_station", return_value=dates
+        ), patch(
+            "weatherbot_v3.scheduler.run_market_buckets_sync", side_effect=fake_market_sync
+        ) as market_sync, patch(
+            "weatherbot_v3.scheduler.run_hourly_consensus_build", return_value={"ok": True, "rows_upserted": 24}
+        ), patch(
+            "weatherbot_v3.scheduler.run_daily_max_build", return_value={"ok": True, "stored": 1}
+        ), patch(
+            "weatherbot_v3.scheduler.run_signal_decisions_build", return_value={"ok": True, "stored": 11}
+        ):
+            result = await WeatherBotScheduler(city_concurrency=2)._run_derive_poller()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(market_sync.call_count, 2)
+        self.assertTrue(all(call.kwargs["cities_arg"] == "chicago,atlanta" for call in market_sync.call_args_list))
+        self.assertEqual(result["ok_cities"], 2)
 
     async def test_china_live_poller_only_runs_supported_enabled_cities(self):
         db_path = test_db_path("scheduler_china_live")

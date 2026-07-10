@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 import hashlib
 import math
 import sqlite3
@@ -1350,8 +1351,15 @@ def upsert_signal(signal: dict[str, Any], legacy_signal_id: int | None = None) -
         return int(conn.execute("SELECT id FROM signals WHERE signal_key = ?", (signal_key,)).fetchone()["id"])
 
 
-def insert_orderbook(market_id: str, payload: dict[str, Any]) -> int:
-    init_v3_db()
+def insert_orderbook(
+    market_id: str,
+    payload: dict[str, Any],
+    *,
+    path: Path | None = None,
+    _connection=None,
+) -> int:
+    if _connection is None:
+        init_v3_db(path)
     bids = _levels(payload.get("bids"))
     asks = _levels(payload.get("asks"))
     best_bid = max((level["price"] for level in bids), default=_num(payload.get("bestBid"), _num(payload.get("best_bid"), 0.0)))
@@ -1362,7 +1370,8 @@ def insert_orderbook(market_id: str, payload: dict[str, Any]) -> int:
         payload.get("snapshot_key")
         or f"{payload.get('yes_token_id') or payload.get('asset_id') or market_id}:{payload.get('hash') or raw_response_hash}"
     )
-    with connect() as conn:
+    connection_context = connect(path) if _connection is None else nullcontext(_connection)
+    with connection_context as conn:
         conn.execute(
             """
             INSERT INTO orderbooks (
@@ -1410,8 +1419,28 @@ def insert_orderbook(market_id: str, payload: dict[str, Any]) -> int:
         return int(conn.execute("SELECT id FROM orderbooks WHERE snapshot_key = ?", (snapshot_key,)).fetchone()["id"])
 
 
-def upsert_market_bucket(bucket: dict[str, Any], path: Path | None = None) -> int:
+def insert_orderbooks(
+    items: list[tuple[str, dict[str, Any]]],
+    path: Path | None = None,
+) -> list[int]:
+    if not items:
+        return []
     init_v3_db(path)
+    with connect(path) as conn:
+        return [
+            insert_orderbook(market_id, payload, path=path, _connection=conn)
+            for market_id, payload in items
+        ]
+
+
+def upsert_market_bucket(
+    bucket: dict[str, Any],
+    path: Path | None = None,
+    *,
+    _connection=None,
+) -> int:
+    if _connection is None:
+        init_v3_db(path)
     now = utc_now()
     market_id = str(bucket.get("market_id") or "")
     yes_token_id = str(bucket.get("yes_token_id") or "")
@@ -1471,7 +1500,8 @@ def upsert_market_bucket(bucket: dict[str, Any], path: Path | None = None) -> in
         "created_at": now,
         "updated_at": now,
     }
-    with connect(path) as conn:
+    connection_context = connect(path) if _connection is None else nullcontext(_connection)
+    with connection_context as conn:
         conn.execute(
             """
             INSERT INTO market_buckets (
@@ -1542,6 +1572,14 @@ def upsert_market_bucket(bucket: dict[str, Any], path: Path | None = None) -> in
         )
         found = conn.execute("SELECT id FROM market_buckets WHERE bucket_key = ?", (bucket_key,)).fetchone()
         return int(found["id"]) if found else 0
+
+
+def upsert_market_buckets(buckets: list[dict[str, Any]], path: Path | None = None) -> list[int]:
+    if not buckets:
+        return []
+    init_v3_db(path)
+    with connect(path) as conn:
+        return [upsert_market_bucket(bucket, path, _connection=conn) for bucket in buckets]
 
 
 def list_market_buckets(
@@ -2552,8 +2590,14 @@ def _decode_contract_row(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def upsert_metar_report(report: dict[str, Any]) -> int:
-    init_v3_db()
+def upsert_metar_report(
+    report: dict[str, Any],
+    *,
+    path: Path | None = None,
+    _connection=None,
+) -> int:
+    if _connection is None:
+        init_v3_db(path)
     now = utc_now()
     station_id = str(report.get("station_id") or report.get("station") or "").upper()
     report_time = str(report.get("report_time") or report.get("observed_at") or report.get("time") or "")
@@ -2562,7 +2606,8 @@ def upsert_metar_report(report: dict[str, Any]) -> int:
         report.get("report_key")
         or _stable_key("metar", station_id, report_time)
     )
-    with connect() as conn:
+    connection_context = connect(path) if _connection is None else nullcontext(_connection)
+    with connection_context as conn:
         conn.execute(
             """
             INSERT INTO metar_reports (
@@ -2632,6 +2677,16 @@ def upsert_metar_report(report: dict[str, Any]) -> int:
         )
         row = conn.execute("SELECT id FROM metar_reports WHERE report_key = ?", (report_key,)).fetchone()
         return int(row["id"]) if row else 0
+
+
+def upsert_metar_reports(reports: list[dict[str, Any]], path: Path | None = None) -> int:
+    if not reports:
+        return 0
+    init_v3_db(path)
+    with connect(path) as conn:
+        for report in reports:
+            upsert_metar_report(report, path=path, _connection=conn)
+    return len(reports)
 
 
 def upsert_mesonet_observation(observation: dict[str, Any]) -> int:
@@ -2989,8 +3044,15 @@ def forecast_summary(city: str | None = None, target_date: str | None = None) ->
     }
 
 
-def insert_forecast_run(run: dict[str, Any], members: list[dict[str, Any]] | None = None) -> int:
-    init_v3_db()
+def insert_forecast_run(
+    run: dict[str, Any],
+    members: list[dict[str, Any]] | None = None,
+    *,
+    path: Path | None = None,
+    _connection=None,
+) -> int:
+    if _connection is None:
+        init_v3_db(path)
     now = utc_now()
     run_key = str(
         run.get("run_key")
@@ -3004,7 +3066,8 @@ def insert_forecast_run(run: dict[str, Any], members: list[dict[str, Any]] | Non
             ]
         )
     )
-    with connect() as conn:
+    connection_context = connect(path) if _connection is None else nullcontext(_connection)
+    with connection_context as conn:
         conn.execute(
             """
             INSERT INTO forecast_runs (
@@ -3106,6 +3169,20 @@ def insert_forecast_run(run: dict[str, Any], members: list[dict[str, Any]] | Non
                 ),
             )
         return run_id
+
+
+def insert_forecast_runs(
+    items: list[tuple[dict[str, Any], list[dict[str, Any]]]],
+    path: Path | None = None,
+) -> list[int]:
+    if not items:
+        return []
+    init_v3_db(path)
+    with connect(path) as conn:
+        return [
+            insert_forecast_run(run, members, path=path, _connection=conn)
+            for run, members in items
+        ]
 
 
 def insert_event_distribution(market_id: str, event_slug: str, distribution: dict[str, Any], signal_id: int | None = None) -> None:

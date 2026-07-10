@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import time
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,29 @@ class GammaClient:
             return payload
         return {}
 
+    def orderbooks(self, token_ids: list[str]) -> dict[str, dict[str, Any]]:
+        unique = list(dict.fromkeys(str(token_id) for token_id in token_ids if str(token_id)))
+        books: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(unique), 500):
+            chunk = unique[start:start + 500]
+            response = self.session.post(
+                f"{CLOB_BASE_URL}/books",
+                json=[{"token_id": token_id} for token_id in chunk],
+                timeout=(5, 30),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise ValueError("clob_books_response_not_list")
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                token_id = str(item.get("asset_id") or item.get("token_id") or "")
+                if token_id:
+                    item["source_url"] = f"{CLOB_BASE_URL}/books"
+                    books[token_id] = item
+        return books
+
 
 def sync_asian_weather_markets(
     *,
@@ -86,6 +110,9 @@ def sync_asian_weather_markets(
     orderbooks_stored = 0
     failures: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
+    pending_events: list[dict[str, Any]] = []
+    pending_markets: list[dict[str, Any]] = []
+    pending_orderbooks: list[tuple[dict[str, Any], str]] = []
     started_at = utc_now()
     started_perf = time.perf_counter()
     for station in selected:
@@ -109,19 +136,12 @@ def sync_asian_weather_markets(
             events_seen += 1
             event_row, market_rows = event_to_rows(event, station, target)
             if not dry_run:
-                upsert_polymarket_event(event_row, path=path)
-                events_stored += 1
+                pending_events.append(event_row)
                 for row in market_rows:
-                    upsert_polymarket_market(row, path=path)
-                    markets_stored += 1
+                    pending_markets.append(row)
                     token_id = str(row.get("outcome_yes_token_id") or "")
                     if fetch_orderbooks and token_id:
-                        try:
-                            book = client.orderbook(token_id)
-                            upsert_polymarket_orderbook(row, book, path=path)
-                            orderbooks_stored += 1
-                        except Exception as exc:
-                            failures.append({"city": city_key, "market_id": row.get("market_id"), "token_id": token_id, "error": str(exc)})
+                        pending_orderbooks.append((row, token_id))
             results.append({
                 "city": city_key,
                 "target_date": target,
@@ -132,6 +152,42 @@ def sync_asian_weather_markets(
             })
             if sleep_seconds:
                 time.sleep(max(0.0, float(sleep_seconds)))
+    if not dry_run and (pending_events or pending_markets):
+        init_v3_db(path)
+        with connect(path) as conn:
+            for event_row in pending_events:
+                upsert_polymarket_event(event_row, path=path, _connection=conn)
+            for market_row in pending_markets:
+                upsert_polymarket_market(market_row, path=path, _connection=conn)
+        events_stored = len(pending_events)
+        markets_stored = len(pending_markets)
+    if fetch_orderbooks and pending_orderbooks and not dry_run:
+        try:
+            books = client.orderbooks([token_id for _, token_id in pending_orderbooks])
+            orderbook_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            for market_row, token_id in pending_orderbooks:
+                book = books.get(token_id)
+                if not book:
+                    failures.append({
+                        "city": market_row.get("city"),
+                        "market_id": market_row.get("market_id"),
+                        "token_id": token_id,
+                        "error": "clob_batch_book_missing",
+                    })
+                    continue
+                orderbook_rows.append((market_row, book))
+            if orderbook_rows:
+                init_v3_db(path)
+                with connect(path) as conn:
+                    for market_row, book in orderbook_rows:
+                        upsert_polymarket_orderbook(market_row, book, path=path, _connection=conn)
+                orderbooks_stored = len(orderbook_rows)
+        except Exception as exc:
+            failures.append({
+                "stage": "clob_batch_books",
+                "token_count": len(pending_orderbooks),
+                "error": str(exc),
+            })
     duration_ms = round((time.perf_counter() - started_perf) * 1000, 2)
     log_data_fetch(
         source="polymarket_gamma",
@@ -258,10 +314,17 @@ def parse_celsius_bucket_boundary(market: dict[str, Any] | str) -> dict[str, Any
     return {"label": "", "lower_c": None, "upper_c": None, "is_tail": False, "unit": unit}
 
 
-def upsert_polymarket_event(row: dict[str, Any], *, path: Path | None = None) -> dict[str, Any]:
-    init_v3_db(path)
+def upsert_polymarket_event(
+    row: dict[str, Any],
+    *,
+    path: Path | None = None,
+    _connection=None,
+) -> dict[str, Any]:
+    if _connection is None:
+        init_v3_db(path)
     now = utc_now()
-    with connect(path) as conn:
+    connection_context = connect(path) if _connection is None else nullcontext(_connection)
+    with connection_context as conn:
         conn.execute(
             """
             INSERT INTO polymarket_events (
@@ -303,10 +366,17 @@ def upsert_polymarket_event(row: dict[str, Any], *, path: Path | None = None) ->
     return {"ok": True, "event_id": row.get("event_id")}
 
 
-def upsert_polymarket_market(row: dict[str, Any], *, path: Path | None = None) -> dict[str, Any]:
-    init_v3_db(path)
+def upsert_polymarket_market(
+    row: dict[str, Any],
+    *,
+    path: Path | None = None,
+    _connection=None,
+) -> dict[str, Any]:
+    if _connection is None:
+        init_v3_db(path)
     now = utc_now()
-    with connect(path) as conn:
+    connection_context = connect(path) if _connection is None else nullcontext(_connection)
+    with connection_context as conn:
         conn.execute(
             """
             INSERT INTO polymarket_markets (
@@ -357,8 +427,15 @@ def upsert_polymarket_market(row: dict[str, Any], *, path: Path | None = None) -
     return {"ok": True, "market_id": row.get("market_id")}
 
 
-def upsert_polymarket_orderbook(market_row: dict[str, Any], book: dict[str, Any], *, path: Path | None = None) -> dict[str, Any]:
-    init_v3_db(path)
+def upsert_polymarket_orderbook(
+    market_row: dict[str, Any],
+    book: dict[str, Any],
+    *,
+    path: Path | None = None,
+    _connection=None,
+) -> dict[str, Any]:
+    if _connection is None:
+        init_v3_db(path)
     bids = _levels(book.get("bids"))
     asks = _levels(book.get("asks"))
     best_bid = max((level["price"] for level in bids), default=None)
@@ -366,7 +443,8 @@ def upsert_polymarket_orderbook(market_row: dict[str, Any], book: dict[str, Any]
     ts = datetime.now(timezone.utc).isoformat()
     raw_hash = _hash_json(book)
     snapshot_key = f"pm_orderbook:{market_row.get('market_id')}:{market_row.get('outcome_yes_token_id')}:{raw_hash}"
-    with connect(path) as conn:
+    connection_context = connect(path) if _connection is None else nullcontext(_connection)
+    with connection_context as conn:
         conn.execute(
             """
             INSERT INTO polymarket_orderbook (

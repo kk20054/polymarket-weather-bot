@@ -9,7 +9,7 @@ from typing import Any
 
 import requests
 
-from .db import insert_orderbook, log_data_fetch, upsert_market_bucket
+from .db import insert_orderbooks, log_data_fetch, upsert_market_buckets
 from .polymarket import quote_from_market_payload
 from .stations import list_stations
 
@@ -83,6 +83,30 @@ class PolymarketWeatherMarketClient:
         data["source_url"] = response.url
         return data
 
+    def get_orderbooks(self, token_ids: list[str]) -> dict[str, dict[str, Any]]:
+        unique = list(dict.fromkeys(str(token_id) for token_id in token_ids if str(token_id)))
+        books: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(unique), 500):
+            chunk = unique[start:start + 500]
+            response = self.session.post(
+                f"{CLOB_BASE_URL}/books",
+                json=[{"token_id": token_id} for token_id in chunk],
+                timeout=(5, 30),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise ValueError("clob_books_response_not_list")
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                token_id = str(item.get("asset_id") or item.get("token_id") or "")
+                if token_id:
+                    item["snapshot_type"] = "clob"
+                    item["source_url"] = f"{CLOB_BASE_URL}/books"
+                    books[token_id] = item
+        return books
+
 
 def sync_active_weather_market_buckets(
     *,
@@ -109,6 +133,7 @@ def sync_active_weather_market_buckets(
     markets_seen = 0
     missing_events = 0
     failed_events = 0
+    pending_orderbooks: list[tuple[str, dict[str, Any]]] = []
 
     for station in station_rows:
         if markets_seen >= bounded_limit:
@@ -162,6 +187,7 @@ def sync_active_weather_market_buckets(
             event_markets = _active_weather_markets_from_event(event)
             event_rows = []
             event_orderbook_errors = []
+            event_payloads: list[dict[str, Any]] = []
             for market in event_markets:
                 if markets_seen >= bounded_limit:
                     break
@@ -175,21 +201,36 @@ def sync_active_weather_market_buckets(
                     target_date=target_date,
                     gamma_url=gamma_url,
                 )
-                if fetch_orderbooks and payload.get("yes_token_id"):
-                    try:
-                        book_payload = client.get_orderbook(str(payload["yes_token_id"]))
+                event_payloads.append(payload)
+
+            book_map: dict[str, dict[str, Any]] = {}
+            batch_error = ""
+            token_ids = [str(payload.get("yes_token_id") or "") for payload in event_payloads if payload.get("yes_token_id")]
+            if fetch_orderbooks and token_ids:
+                try:
+                    book_map = client.get_orderbooks(token_ids)
+                except Exception as exc:
+                    batch_error = str(exc)
+
+            for payload in event_payloads:
+                token_id = str(payload.get("yes_token_id") or "")
+                if fetch_orderbooks and token_id:
+                    book_payload = book_map.get(token_id)
+                    if book_payload:
                         payload = _merge_orderbook_payload(payload, book_payload)
                         if not dry_run:
-                            insert_orderbook(str(payload.get("id") or ""), _orderbook_payload_for_db(payload, book_payload))
+                            pending_orderbooks.append(
+                                (str(payload.get("id") or ""), _orderbook_payload_for_db(payload, book_payload))
+                            )
                         orderbook_ok += 1
-                    except Exception as exc:
+                    else:
                         orderbook_failed += 1
                         event_orderbook_errors.append({
                             "market_id": str(payload.get("id") or ""),
-                            "token_id": str(payload.get("yes_token_id") or ""),
-                            "error": str(exc),
+                            "token_id": token_id,
+                            "error": batch_error or "clob_batch_book_missing",
                         })
-                        payload["orderbook_error"] = str(exc)
+                        payload["orderbook_error"] = batch_error or "clob_batch_book_missing"
                 row = market_bucket_from_payload(
                     payload,
                     city=city_key,
@@ -199,9 +240,6 @@ def sync_active_weather_market_buckets(
                 )
                 event_rows.append(row)
                 buckets.append(row)
-                if not dry_run:
-                    upsert_market_bucket(row)
-                    stored += 1
             result = {
                 "city": city_key,
                 "city_name": city_name,
@@ -226,6 +264,10 @@ def sync_active_weather_market_buckets(
             )
             if sleep_seconds:
                 time.sleep(max(0.0, float(sleep_seconds)))
+
+    if not dry_run:
+        stored = len(upsert_market_buckets(buckets))
+        insert_orderbooks(pending_orderbooks)
 
     return {
         "ok": failed_events == 0 and bool(buckets),
@@ -268,8 +310,8 @@ def ingest_market_buckets(
             target_date=target_date,
             station_id=station_id,
         )
-        upsert_market_bucket(row)
         bucket_rows.append(row)
+    upsert_market_buckets(bucket_rows)
     return {
         "ok": True,
         "parser_version": PARSER_VERSION,

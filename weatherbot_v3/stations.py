@@ -105,6 +105,7 @@ def sync_station_registry(
     rows = [station_row_from_profile(profile) for profile in (profiles or SETTLEMENT_REGISTRY.values())]
     now = utc_now()
     with connect(path) as conn:
+        had_station_rows = bool(conn.execute("SELECT 1 FROM stations LIMIT 1").fetchone())
         conn.executemany(
             """
             INSERT INTO stations (
@@ -191,7 +192,7 @@ def sync_station_registry(
             [{**row, "updated_at": now} for row in rows],
         )
         enabled_count = int(conn.execute("SELECT COUNT(*) FROM stations WHERE COALESCE(enabled, 0) = 1").fetchone()[0])
-        if enabled_count == 0:
+        if not had_station_rows and enabled_count == 0:
             placeholders = ",".join("?" for _ in DEFAULT_ENABLED_CITY_KEYS)
             conn.execute(
                 f"""

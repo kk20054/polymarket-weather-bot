@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from .db import insert_forecast_run, log_data_fetch, utc_now
+from .db import insert_forecast_runs, log_data_fetch, utc_now
 from .env_utils import env_value, redact_secret_text, redact_secrets
 from .forecasts.ensemble import convert_temperature
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
@@ -126,8 +126,7 @@ def fetch_weathercom_forecast_city(
         )
         run_ids: list[int] = []
         if not dry_run:
-            for run, run_members in zip(runs, members):
-                run_ids.append(insert_forecast_run(run, run_members))
+            run_ids = insert_forecast_runs(list(zip(runs, members)))
         payload = {
             "ok": bool(runs),
             "city": profile.city,

@@ -12,7 +12,7 @@ from typing import Any
 
 import requests
 
-from .db import connect, log_data_fetch, upsert_metar_report, utc_now
+from .db import connect, log_data_fetch, upsert_metar_reports, utc_now
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 from .stations import list_stations, sync_station_registry
 
@@ -74,7 +74,7 @@ def refresh_metar_reports(
 
     station_to_profile = {profile.station_id.upper(): profile for profile in selected}
     raw_reports = fetch_awc_metars(sorted(station_to_profile), hours=hours, session=session)
-    upserted = 0
+    parsed_reports: list[dict[str, Any]] = []
     skipped = 0
     failures: list[dict[str, Any]] = []
     for item in raw_reports:
@@ -84,13 +84,22 @@ def refresh_metar_reports(
             skipped += 1
             continue
         try:
-            upsert_metar_report(metar_report_from_awc(item, profile))
-            upserted += 1
+            parsed_reports.append(metar_report_from_awc(item, profile))
         except Exception as exc:
             failures.append({
                 "station_id": station_id,
                 "error": str(exc),
                 "raw_text": item.get("rawOb") or item.get("raw_text") or "",
+            })
+    upserted = 0
+    if parsed_reports:
+        try:
+            upserted = upsert_metar_reports(parsed_reports)
+        except Exception as exc:
+            failures.append({
+                "stage": "metar_batch_upsert",
+                "reports": len(parsed_reports),
+                "error": str(exc),
             })
 
     return {
@@ -597,11 +606,7 @@ def ingest_iem_asos_csv(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     parsed = parse_iem_asos_csv(text, station_row, source_url=source_url)
-    upserted = 0
-    if not dry_run:
-        for report in parsed["reports"]:
-            upsert_metar_report(report)
-            upserted += 1
+    upserted = 0 if dry_run else upsert_metar_reports(parsed["reports"])
     return {
         "ok": True,
         "dry_run": dry_run,

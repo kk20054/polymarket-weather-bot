@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 
-from .db import insert_forecast_run, log_data_fetch, utc_now
+from .db import insert_forecast_runs, log_data_fetch, utc_now
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 
 
@@ -183,11 +183,10 @@ def fetch_openmeteo_forecasts(
                 retrieved_at=retrieved.isoformat() if retrieved else None,
                 endpoint_kind=endpoint_kind,
             )
-            run_ids: list[int] = []
-            for run, run_members in zip(runs, members):
-                run_ids.append(insert_forecast_run(run, run_members))
-                city_result["runs_upserted"] += 1
-                city_result["members_upserted"] += len(run_members)
+            run_items = list(zip(runs, members))
+            run_ids = insert_forecast_runs(run_items)
+            city_result["runs_upserted"] += len(run_ids)
+            city_result["members_upserted"] += sum(len(run_members) for _, run_members in run_items)
             total_runs += len(run_ids)
             total_members += sum(len(item) for item in members)
             model_status = "OK" if all(run.get("parse_status") == "parsed" for run in runs) else "WARN"
@@ -329,11 +328,10 @@ def fetch_openmeteo_previous_runs(
                     source_url=response.get("url") or preview_url,
                     retrieved_at=retrieved.isoformat() if retrieved else None,
                 )
-                run_ids: list[int] = []
-                for run, run_members in zip(runs, members):
-                    run_ids.append(insert_forecast_run(run, run_members))
-                    city_result["runs_upserted"] += 1
-                    city_result["members_upserted"] += len(run_members)
+                run_items = list(zip(runs, members))
+                run_ids = insert_forecast_runs(run_items)
+                city_result["runs_upserted"] += len(run_ids)
+                city_result["members_upserted"] += sum(len(run_members) for _, run_members in run_items)
                 total_runs += len(run_ids)
                 total_members += sum(len(item) for item in members)
                 parse_statuses = sorted({str(run.get("parse_status") or "") for run in runs})

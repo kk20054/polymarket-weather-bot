@@ -7,7 +7,7 @@ from datetime import datetime, time, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .db import insert_forecast_run, utc_now
+from .db import insert_forecast_runs, utc_now
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 
 
@@ -19,7 +19,7 @@ def ingest_polywx_forecasts(
     *,
     source_url: str = "",
 ) -> dict[str, Any]:
-    run_ids: list[int] = []
+    pending_runs: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
     failures: list[dict[str, Any]] = []
     rows_seen = 0
     for city, by_date in rows_by_city_date.items():
@@ -36,9 +36,10 @@ def ingest_polywx_forecasts(
                     rows or [],
                     source_url=source_url,
                 )
-                run_ids.append(insert_forecast_run(run, members))
+                pending_runs.append((run, members))
             except Exception as exc:
                 failures.append({"city": profile.city, "target_date": target_date, "error": str(exc)})
+    run_ids = insert_forecast_runs(pending_runs)
     return {
         "ok": not failures,
         "source": "polywx_forecast",

@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.china_weather import hko_rhrread_observation, weathercn_sk2d_observation
-from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, model_reprice_event_summary, paper_execution_summary, set_settlement_contract_verification, truth_delta_audit_summary, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_model_reprice_event, upsert_settlement_contracts, upsert_signal_decision_record, weather_evidence_summary
+from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_forecast_runs, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, model_reprice_event_summary, paper_execution_summary, set_settlement_contract_verification, truth_delta_audit_summary, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_metar_reports, upsert_model_reprice_event, upsert_settlement_contracts, upsert_signal_decision_record, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.env_utils import redact_secret_text, redact_secrets
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
@@ -92,6 +92,17 @@ class FakePolymarketSession:
         token_id = (params or {}).get("token_id")
         payload = self.book_payloads.get(str(token_id), {})
         return FakeHTTPResponse(payload, url=f"{url}?token_id={token_id}")
+
+    def post(self, url, json=None, timeout=None):
+        self.calls.append({"url": url, "json": json, "timeout": timeout})
+        payload = []
+        for item in json or []:
+            token_id = str(item.get("token_id") or "")
+            book = dict(self.book_payloads.get(token_id, {}))
+            if book:
+                book.setdefault("asset_id", token_id)
+                payload.append(book)
+        return FakeHTTPResponse(payload, url=url)
 
 
 def openmeteo_hourly_run(
@@ -559,6 +570,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(payload["stored"], 1)
         self.assertEqual(payload["matched"], 1)
         self.assertEqual(payload["orderbook_ok"], 1)
+        self.assertEqual(sum(1 for call in session.calls if str(call["url"]).endswith("/books")), 1)
+        self.assertEqual(sum(1 for call in session.calls if str(call["url"]).endswith("/book")), 0)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["market_id"], "market-active-1")
         self.assertEqual(rows[0]["bucket_low"], 88.0)
@@ -1156,6 +1169,63 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(evidence["latest_mesonet_observations"][0]["parser_version"], "pws-observation-row-v1")
         self.assertEqual(evidence["latest_mesonet_observations"][0]["parse_status"], "parsed")
         self.assertEqual(evidence["latest_mesonet_observations"][0]["raw_unit"], "F")
+
+    def test_metar_bulk_upsert_is_idempotent_in_one_transaction(self):
+        db_path = test_db_path("metar_bulk_upsert")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        reports = [
+            {
+                "city": "chicago",
+                "station_id": "KORD",
+                "report_time": f"2026-07-10T{hour:02d}:00:00+00:00",
+                "raw_text": f"METAR KORD {hour:02d}00Z",
+                "temperature": 20.0 + hour,
+                "parse_status": "parsed",
+            }
+            for hour in range(3)
+        ]
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            first = upsert_metar_reports(reports, db_path)
+            corrected = [dict(report, raw_text=f"{report['raw_text']} COR") for report in reports]
+            second = upsert_metar_reports(corrected, db_path)
+            with connect(db_path) as conn:
+                rows = conn.execute("SELECT raw_text FROM metar_reports ORDER BY report_time").fetchall()
+
+        self.assertEqual(first, 3)
+        self.assertEqual(second, 3)
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(str(row["raw_text"]).endswith(" COR") for row in rows))
+
+    def test_forecast_bulk_insert_is_idempotent_in_one_transaction(self):
+        db_path = test_db_path("forecast_bulk_insert")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        first_run = openmeteo_hourly_run(
+            "chicago", "2026-07-10", "openmeteo_gfs", [20.0, 21.0]
+        )
+        second_run = openmeteo_hourly_run(
+            "chicago", "2026-07-11", "openmeteo_ecmwf", [22.0, 23.0]
+        )
+        items = [first_run, second_run]
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            first_ids = insert_forecast_runs(items, db_path)
+            corrected_items = []
+            for run, members in items:
+                corrected_members = [dict(member, high_temp=99.0) for member in members]
+                corrected_items.append((run, corrected_members))
+            second_ids = insert_forecast_runs(corrected_items, db_path)
+            with connect(db_path) as conn:
+                run_count = conn.execute("SELECT COUNT(*) FROM forecast_runs").fetchone()[0]
+                member_count = conn.execute("SELECT COUNT(*) FROM forecast_members").fetchone()[0]
+                highs = [
+                    row["high_temp"]
+                    for row in conn.execute("SELECT high_temp FROM forecast_members ORDER BY id").fetchall()
+                ]
+
+        self.assertEqual(first_ids, second_ids)
+        self.assertEqual(run_count, 2)
+        self.assertEqual(member_count, 2)
+        self.assertEqual(highs, [99.0, 99.0])
 
     def test_pws_mesonet_rows_parse_and_persist_polywx_xhr_shape(self):
         db_path = test_db_path("mesonet_pws")
@@ -5962,6 +6032,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(result["events_stored"], 1)
         self.assertEqual(result["markets_stored"], 2)
         self.assertEqual(result["orderbooks_stored"], 2)
+        self.assertEqual(sum(1 for call in session.calls if str(call["url"]).endswith("/books")), 1)
         with connect(path) as conn:
             event_count = conn.execute("SELECT COUNT(*) FROM polymarket_events").fetchone()[0]
             market = conn.execute("SELECT bucket_lower_c, bucket_upper_c FROM polymarket_markets WHERE market_id='market-shanghai-28'").fetchone()
