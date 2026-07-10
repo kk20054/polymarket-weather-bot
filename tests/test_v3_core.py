@@ -5965,6 +5965,71 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(float(row["high_c"]), 33.5)
         self.assertEqual(row["parser_version"], "truth-hko-daily-extract-v1")
 
+    def test_truth_delta_rebuild_tracks_hko_against_vhhh_observation_station(self):
+        from weatherbot_v3.truth.delta import rebuild_truth_delta_from_tables
+
+        path = test_db_path("truth_delta_hko_vhhh")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        init_v3_db(path)
+        now = "2026-07-10T00:00:00+00:00"
+        with connect(path) as conn:
+            conn.execute(
+                """
+                INSERT INTO stations (
+                    city_key, city_name, station_id, station_name, timezone, unit,
+                    settlement_station_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("hong-kong", "Hong Kong", "VHHH", "Hong Kong International", "Asia/Hong_Kong", "C", "HKO", now),
+            )
+            conn.execute(
+                """
+                INSERT INTO truth_iem_daily (
+                    truth_key, icao, date_local, timezone, high_c, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("iem_asos:VHHH:2026-07-04", "VHHH", "2026-07-04", "Asia/Hong_Kong", 31.0, now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO truth_hko_daily (
+                    truth_key, date_local, high_c, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                ("hko:2026-07-04", "2026-07-04", 32.2, now, now),
+            )
+
+        result = rebuild_truth_delta_from_tables(path=path)
+        self.assertTrue(result["ok"])
+        with connect(path) as conn:
+            row = conn.execute(
+                """
+                SELECT city, iem_high_c, hko_high_c, delta_hko_minus_iem, delta_wu_minus_iem
+                FROM truth_delta_audit
+                WHERE icao = 'VHHH' AND date_local = '2026-07-04'
+                """
+            ).fetchone()
+        self.assertEqual(row["city"], "hong-kong")
+        self.assertAlmostEqual(float(row["iem_high_c"]), 31.0)
+        self.assertAlmostEqual(float(row["hko_high_c"]), 32.2)
+        self.assertAlmostEqual(float(row["delta_hko_minus_iem"]), 1.2)
+        self.assertIsNone(row["delta_wu_minus_iem"])
+
+    def test_wunderground_truth_cli_passes_force_rebuild(self):
+        from io import StringIO
+        from weatherbot_v3 import cli
+
+        output = StringIO()
+        with patch("weatherbot_v3.cli.run_wunderground_truth_fetch", return_value={"ok": True}) as fetch:
+            with patch.object(
+                cli.sys,
+                "argv",
+                ["weatherbot_v3.cli", "wunderground-truth-fetch", "--city", "chicago", "--force-rebuild"],
+            ), patch.object(cli.sys, "stdout", output):
+                cli.main()
+
+        self.assertTrue(fetch.call_args.kwargs["force_rebuild"])
+
     def test_truth_wunderground_returns_structured_skip_when_no_endpoint_has_daily_high(self):
         from weatherbot_v3.truth.wunderground import fetch_wunderground_daily_result
 

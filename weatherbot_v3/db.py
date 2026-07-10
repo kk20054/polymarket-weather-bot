@@ -713,6 +713,7 @@ def init_v3_db(path: Path | None = None) -> None:
                 hko_high_c REAL,
                 polymarket_resolved_bucket TEXT,
                 delta_wu_minus_iem REAL,
+                delta_hko_minus_iem REAL,
                 resolved_at TEXT,
                 notes TEXT,
                 raw_json TEXT,
@@ -1186,6 +1187,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "enabled": "INTEGER DEFAULT 0",
             "tier": "INTEGER DEFAULT 9",
             "registry_version": "TEXT",
+        },
+        "truth_delta_audit": {
+            "delta_hko_minus_iem": "REAL",
         },
     }
     for table, columns in ensure.items():
@@ -3566,6 +3570,7 @@ def truth_delta_audit_summary(
     rows = list_truth_delta_audit(city, limit=limit, path=path)
     by_city: dict[str, dict[str, Any]] = {}
     deltas: list[float] = []
+    hko_deltas: list[float] = []
     for row in rows:
         city_key = str(row.get("city") or row.get("icao") or "unknown").lower()
         entry = by_city.setdefault(
@@ -3576,6 +3581,7 @@ def truth_delta_audit_summary(
                 "count": 0,
                 "latest_date": None,
                 "delta_wu_minus_iem_values": [],
+                "delta_hko_minus_iem_values": [],
             },
         )
         entry["count"] += 1
@@ -3586,12 +3592,23 @@ def truth_delta_audit_summary(
             rounded = round(float(delta), 2)
             entry["delta_wu_minus_iem_values"].append(rounded)
             deltas.append(rounded)
+        hko_delta = _nullable_num(row.get("delta_hko_minus_iem"))
+        if hko_delta is not None:
+            rounded_hko = round(float(hko_delta), 2)
+            entry["delta_hko_minus_iem_values"].append(rounded_hko)
+            hko_deltas.append(rounded_hko)
 
     histogram: dict[str, int] = {}
     for delta in deltas:
         bucket = round(delta * 2) / 2
         label = f"{bucket:+.1f}C"
         histogram[label] = histogram.get(label, 0) + 1
+
+    hko_histogram: dict[str, int] = {}
+    for delta in hko_deltas:
+        bucket = round(delta * 2) / 2
+        label = f"{bucket:+.1f}C"
+        hko_histogram[label] = hko_histogram.get(label, 0) + 1
 
     return {
         "ok": True,
@@ -3600,6 +3617,7 @@ def truth_delta_audit_summary(
         "rows": rows,
         "by_city": list(by_city.values()),
         "histogram": [{"bucket": key, "count": value} for key, value in sorted(histogram.items())],
+        "hko_vs_iem_histogram": [{"bucket": key, "count": value} for key, value in sorted(hko_histogram.items())],
     }
 
 

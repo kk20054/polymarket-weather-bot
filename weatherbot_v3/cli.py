@@ -1767,6 +1767,7 @@ def main() -> None:
                 all_cities=args.all_cities,
                 limit_cities=args.limit_cities,
                 dry_run=args.dry_run,
+                force_rebuild=args.force_rebuild,
             ),
             ensure_ascii=False,
             indent=2,
