@@ -12,6 +12,7 @@
 - 2026-07-10 / Layer 1: restored seven overwritten settlement-rule records from `data_fetch_logs`, repaired six verified statuses and one Hong Kong mismatch, and protected verified timestamps during future registry sync.
 - 2026-07-10 / Layer 2-6 observability: added a 13-row source health matrix covering contracts, METAR, Open-Meteo, Weather.com, China Live, PWS, WU hourly/daily, IEM, HKO, orderbook, consensus, and decisions.
 - Code commit: `d58ae12`.
+- Fetch-log secret redaction commit: `8eda988`; 24 local log rows containing a plaintext weather key were scrubbed, with zero matches remaining.
 - 2026-07-10 / Scheduler soak: first cycle restored Open-Meteo, orderbook, and hourly consensus; China Live reported one failed city; Weather.com and PWS coverage remain incomplete.
 - 2026-07-09 / WU truth: 10 cities x 7 days of WU daily truth and 1,609 hourly rows were persisted; 30-day coverage remains pending.
 - 2026-07-09 / Forecast alignment: Weather.com v3 is wired into scheduler/DEB but has only Shanghai smoke coverage before this soak.
@@ -19,7 +20,7 @@
 ## Production Blockers
 - Settlement contracts cover 7/14 enabled cities; Hong Kong remains paper-only because settlement station and observation station differ.
 - WU daily/hourly history is 7 days for 10 cities, not the required 30 days; HKO daily truth has only one day.
-- Weather.com v3 and Asian PWS coverage are incomplete; China Live has a current collector failure to diagnose from scheduler logs.
+- Weather.com v3 coverage is incomplete; the current key returns PWS v2 HTTP 401 and a dedicated WU PWS API key is required. Shanghai China Live returned HTTP 502 while Hong Kong HKO succeeded.
 - Saved PolyWX benchmarks still show material Forecast/Cloud/DEB differences that require offline reconstruction after source coverage is stable.
 - Paper orders have no complete settlement lifecycle, realized PnL, win rate, or Brier-score validation.
 - The current database is large and scheduler first-cycle pollers can run for a long time; the 24-hour soak must establish duration, failures, and freshness before widening scope.

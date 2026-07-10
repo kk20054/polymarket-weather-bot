@@ -257,8 +257,9 @@
 - 真实修复：Atlanta/Chicago/Dallas/NYC/Shanghai/Tokyo 从 provisional 恢复为 verified；Hong Kong 恢复为 settlement_mismatch（VHHH observation vs HKO settlement）；7 条规则原文和来源均从 probe 日志恢复，无不一致残留。
 - 验证：`tests.test_v3_core` 177/177 通过；`tests.test_scheduler tests.test_polywx_contract` 20/20 通过；定向 scheduler health 契约通过；`git diff --check` 仅有 Windows 换行提示。
 - 运行态：后端 `127.0.0.1:8765` 已显式启动 scheduler 做 24 小时 soak。首轮已恢复 Open-Meteo、orderbook、hourly consensus；China Live 有 1 城失败；Weather.com/PWS/truth coverage 仍不完整。`LIVE_TRADING=false` 未变。
+- Soak 发现：Hong Kong HKO 成功，Shanghai China Live 返回 HTTP 502；当前 Weather.com key 调 PWS v2 返回 HTTP 401，说明后续解除 US-only 前需要有效 WU PWS API 权限。异常 URL 曾把 apiKey 带入本地 fetch logs，已新增递归脱敏并清理 24 条历史记录，复查明文命中为 0。
 - 下一步：持续采样健康矩阵并诊断 China Live/长 poller；随后扩 WU/HKO 至 30 天并计算 WU-IEM、HKO-VHHH delta。
-- 相关提交：`d58ae12`。
+- 相关提交：`d58ae12`、`8eda988`。
 
 ### 2026-07-07: PolyWX-aligned source role contract + weather.com/WU probe
 
