@@ -1,30 +1,31 @@
 # WeatherBot Current State
 
 ## Current Phase And Usability
-- Date: 2026-07-10. Phase 2 data-source health stabilization; Layer 1 consistency fix and Layer 2/3/5/6 health observability are implemented.
-- Usable for source observation, controlled paper research, and scheduler soak testing. It is not production-ready for unattended paper settlement or live trading.
-- `LIVE_TRADING=false`; no canary is permitted before 14-30 days of validated paper results.
-- Station verification inversion is repaired from persisted Gamma probe evidence: Atlanta/Chicago/Dallas/NYC/Shanghai/Tokyo are `verified`; Hong Kong is `settlement_mismatch` (VHHH observation vs HKO settlement).
-- Source health is available through `python -m weatherbot_v3.cli source-health`, `GET /api/source-health`, and the compact `GET /api/scheduler/status.source_health` summary.
-- The scheduler was explicitly started at `2026-07-10T09:31:32Z` on backend `127.0.0.1:8765` for a 24-hour soak; startup remains opt-in.
+- Date: 2026-07-10. Phase 2 data-source stabilization; Layer 1 verification consistency and Layer 2/3/5/6 scheduler observability are implemented.
+- The system is usable for monitored data collection and controlled paper research. It is not ready for unattended paper settlement or live trading.
+- `LIVE_TRADING=false`; no canary is permitted before a complete paper settlement lifecycle and 14-30 validated days.
+- Settlement evidence is consistent for the current seven audited cities: six verified contracts and one Hong Kong settlement mismatch.
+- Scheduler startup remains explicit. The committed scheduler now uses bounded city tasks, staggered pollers, batch CLOB requests, and batch SQLite transactions.
 
 ## Latest Ledger Summaries
-- 2026-07-10 / Layer 1: restored seven overwritten settlement-rule records from `data_fetch_logs`, repaired six verified statuses and one Hong Kong mismatch, and protected verified timestamps during future registry sync.
-- 2026-07-10 / Layer 2-6 observability: added a 13-row source health matrix covering contracts, METAR, Open-Meteo, Weather.com, China Live, PWS, WU hourly/daily, IEM, HKO, orderbook, consensus, and decisions.
-- Code commit: `d58ae12`.
-- Fetch-log secret redaction commit: `8eda988`; 24 local log rows containing a plaintext weather key were scrubbed, with zero matches remaining.
-- 2026-07-10 / Scheduler soak: first cycle restored Open-Meteo, orderbook, and hourly consensus; China Live reported one failed city; Weather.com and PWS coverage remain incomplete.
-- 2026-07-09 / WU truth: 10 cities x 7 days of WU daily truth and 1,609 hourly rows were persisted; 30-day coverage remains pending.
-- 2026-07-09 / Forecast alignment: Weather.com v3 is wired into scheduler/DEB but has only Shanghai smoke coverage before this soak.
+- 2026-07-10 / Layer 1: restored overwritten Gamma settlement evidence and reconciled six verified cities plus the Hong Kong mismatch. Commit `d58ae12`.
+- 2026-07-10 / Source health: added a 13-row source health matrix through CLI and API; fetch-log secret redaction removed 24 leaked local URL values. Commits `d58ae12`, `8eda988`.
+- 2026-07-10 / Scheduler capacity: fixed repeated 3 GB schema initialization, CLOB `/book` fan-out, unbounded city work, and duplicated derive market refreshes. Commit `9f1a04f`.
+- Runtime benchmarks: METAR 14/14 in 89.8s; Forecast 14/14 in 362.9s; Gamma 30 events and 330 books in 9.6-14.1s; isolated Derive 14/14 in 572.1s.
+- Verification: 205 backend/contract tests passed; frontend production build passed; `git diff --check` passed.
 
 ## Production Blockers
-- Settlement contracts cover 7/14 enabled cities; Hong Kong remains paper-only because settlement station and observation station differ.
+- The new scheduler implementation still needs an uninterrupted 24-hour soak; one Seoul AWC request timed out during the short smoke and recovered at poller scope.
+- Settlement contracts cover only 7/14 enabled cities; Hong Kong remains paper-only because VHHH observations do not equal HKO settlement truth.
 - WU daily/hourly history is 7 days for 10 cities, not the required 30 days; HKO daily truth has only one day.
-- Weather.com v3 coverage is incomplete; the current key returns PWS v2 HTTP 401 and a dedicated WU PWS API key is required. Shanghai China Live returned HTTP 502 while Hong Kong HKO succeeded.
-- Saved PolyWX benchmarks still show material Forecast/Cloud/DEB differences that require offline reconstruction after source coverage is stable.
-- Paper orders have no complete settlement lifecycle, realized PnL, win rate, or Brier-score validation.
-- The current database is large and scheduler first-cycle pollers can run for a long time; the 24-hour soak must establish duration, failures, and freshness before widening scope.
-- UI subtraction and component splitting are deliberately deferred until data and paper lifecycle evidence are trustworthy.
+- Weather.com v3 coverage is incomplete; the current key returns PWS v2 HTTP 401, so a dedicated WU PWS API permission/key is still required.
+- Saved PolyWX benchmarks still show material Forecast/Cloud/DEB differences.
+- Paper orders do not yet have a complete settlement lifecycle, realized PnL, win rate, or Brier-score validation.
+- Live dry-run, balance, duplicate-order, and canary gates are not accepted for production use.
 
 ## Next Step
-- Let the scheduler soak continue; sample `/api/scheduler/status` and `/api/source-health`, diagnose the China Live failure and long-running pollers, then extend WU/HKO truth to 30 days.
+- Run the committed scheduler for 24 hours and sample source health, poller durations, failures, and freshness.
+- Extend WU truth to 30 days and HKO truth to 30 days, then compute WU-IEM and HKO-VHHH deltas.
+- Expand Weather.com coverage and resolve the WU PWS permission gap.
+- Rebuild saved PolyWX Forecast/Cloud/DEB benchmarks only after source coverage is stable.
+- Implement the paper settlement and scoring lifecycle before any live canary discussion.

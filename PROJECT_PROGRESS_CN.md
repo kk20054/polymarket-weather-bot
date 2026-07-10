@@ -290,3 +290,13 @@
 - 结论：WU daily truth 已从“接口探测可用”进入“可批量入库、可断点续跑、可本地日聚合”的状态；当前仅完成 7 天样本，仍不足以解锁 live，只能支撑后续 bias/DEB/PolyWX benchmark。
 - 下一步：扩展到 30-90 天；重建 hourly consensus 和 daily_max_predictions；对 PolyWX 保存基准做字段级 diff；Hong Kong 仍走 HKO truth，不应纳入 WU 批量。
 - 相关提交：790714f。
+
+### 2026-07-10: Scheduler bounded execution and batch persistence
+
+- Goal: finish the interrupted scheduler stabilization work before extending truth coverage. The short soak had shown multi-hour pollers caused by repeated schema initialization on a roughly 3 GB SQLite database and hundreds of sequential CLOB orderbook calls.
+- Changes: added shared-transaction batch writes for METAR, forecast runs/members, market buckets, generic orderbooks, Gamma events/markets/orderbooks; switched CLOB orderbooks to official `POST /books` batches of at most 500 tokens; added city timeouts and explicit poller-specific logs; staggered first runs; preserved an explicitly empty watchlist; changed Derive to refresh all cities once per target date before per-city hourly/DEB/decision work.
+- Runtime evidence: Chicago METAR fell from about 59s to 2.2s in isolation. Full METAR completed 14/14 in 89.8s. Full Forecast completed 14/14 in 362.9s. Gamma persisted 30 events, 330 markets, and 330 books in 9.6s (scheduler 11.8-14.1s). Isolated Derive completed 14/14 in 572.1s, below its 900s interval. One Seoul AWC read timed out during the second METAR cycle and was recorded without blocking other cities.
+- Verification: `python -m unittest tests.test_v3_core tests.test_scheduler tests.test_watchlist_enabled tests.test_polywx_contract` passed 205 tests; `npm run build` passed; `git diff --check` passed. Live and auto simulation remained disabled.
+- Conclusion: the previous indefinite-running symptom is fixed at the known request/write bottlenecks, and each core poller now has bounded behavior and measured capacity. A real 24-hour uninterrupted soak is still required; this turn does not claim production readiness.
+- Next: run the committed scheduler for 24 hours, then extend WU/HKO truth to 30 days and compute source deltas. Do not start UI work or live canary work first.
+- Commit: `9f1a04f`.
