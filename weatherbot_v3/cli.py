@@ -888,8 +888,11 @@ def run_iem_asos_truth_fetch(
     targets = _cli_date_window(target_date=target_date, start_date=start_date, end_date=end_date, days=days)
     results = []
     for row in rows:
-        station = str(row.get("settlement_station_id") or row.get("station_id") or "").upper()
-        tz = str(row.get("settlement_timezone") or row.get("timezone") or "UTC")
+        # IEM is an observation-side approximation used for deltas. It must
+        # follow the physical reporting station, not a non-airport settlement
+        # authority such as Hong Kong Observatory.
+        station = str(row.get("station_id") or "").upper()
+        tz = str(row.get("timezone") or row.get("settlement_timezone") or "UTC")
         for target in targets:
             if station == "HKO":
                 continue

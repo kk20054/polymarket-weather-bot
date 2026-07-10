@@ -41,7 +41,7 @@ from weatherbot_v3.truth.wunderground import fetch_wunderground_daily_result, fe
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.weathercom import weathercom_runs_from_response
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from weatherbot_v3.cli import _stage_result, default_orderbook_start_date, run_china_weather_fetch, run_daily_max_build, run_hourly_consensus_build, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_polymarket_market_probe, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
+from weatherbot_v3.cli import _stage_result, default_orderbook_start_date, run_china_weather_fetch, run_daily_max_build, run_hourly_consensus_build, run_iem_asos_truth_fetch, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_polymarket_market_probe, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _recommendations_payload, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
 from dashboard_server import signal_decision_detail as signal_decision_detail_api
 from dashboard_server import signal_decisions as signal_decisions_api
@@ -6014,6 +6014,28 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(float(row["hko_high_c"]), 32.2)
         self.assertAlmostEqual(float(row["delta_hko_minus_iem"]), 1.2)
         self.assertIsNone(row["delta_wu_minus_iem"])
+
+    def test_iem_truth_fetch_uses_hong_kong_observation_station_not_hko_settlement_authority(self):
+        station_row = {
+            "city_key": "hong-kong",
+            "station_id": "VHHH",
+            "settlement_station_id": "HKO",
+            "timezone": "Asia/Hong_Kong",
+            "settlement_timezone": "Asia/Hong_Kong",
+        }
+        captured: list[tuple[str, str, str]] = []
+
+        def fake_fetch(station, target, timezone_name, *, persist):
+            captured.append((station, target, timezone_name))
+            return {"ok": True, "icao": station, "date_local": target}
+
+        with patch("weatherbot_v3.cli.sync_station_registry"), patch(
+            "weatherbot_v3.cli.list_stations", return_value=[station_row]
+        ), patch("weatherbot_v3.truth.iem_asos.fetch_iem_asos_daily", side_effect=fake_fetch):
+            result = run_iem_asos_truth_fetch("hong-kong", target_date="2026-07-04", dry_run=True)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(captured, [("VHHH", "2026-07-04", "Asia/Hong_Kong")])
 
     def test_wunderground_truth_cli_passes_force_rebuild(self):
         from io import StringIO
