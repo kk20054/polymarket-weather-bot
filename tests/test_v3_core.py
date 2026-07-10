@@ -11,6 +11,7 @@ from weatherbot_v3.ai_review import AIReviewer
 from weatherbot_v3.china_weather import hko_rhrread_observation, weathercn_sk2d_observation
 from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, model_reprice_event_summary, paper_execution_summary, set_settlement_contract_verification, truth_delta_audit_summary, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_model_reprice_event, upsert_settlement_contracts, upsert_signal_decision_record, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
+from weatherbot_v3.env_utils import redact_secret_text, redact_secrets
 from weatherbot_v3.polymarket import estimate_buy_fill, quote_from_market_payload, validate_order_constraints
 from weatherbot_v3.polymarket_probe import parse_settlement_rule_text, probe_polymarket_markets
 from weatherbot_v3.paper import execute_paper_decision
@@ -141,6 +142,19 @@ def openmeteo_hourly_run(
 
 
 class V3CoreTests(unittest.TestCase):
+    def test_secret_redaction_cleans_api_keys_in_nested_errors(self):
+        secret = "0123456789abcdef0123456789abcdef"
+        with patch.dict(os.environ, {"WEATHER_COM_API_KEY": secret}, clear=False):
+            payload = redact_secrets({
+                "error": f"401 for https://api.weather.com/path?apiKey={secret}&units=m",
+                "nested": [f"Authorization: Bearer {secret}"],
+            })
+            text = json.dumps(payload)
+
+        self.assertNotIn(secret, text)
+        self.assertIn("apiKey=***", payload["error"])
+        self.assertEqual(redact_secret_text(f"apiKey={secret}"), "apiKey=***")
+
     def test_city_evidence_payload_counts_polywx_modules(self):
         city_series = [{
             "city_key": "chicago-kord",

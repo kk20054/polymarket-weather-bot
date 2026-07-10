@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 import requests
 
 from .db import log_data_fetch, upsert_mesonet_observation, utc_now
-from .env_utils import env_value
+from .env_utils import env_value, redact_secret_text, redact_secrets
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 
 
@@ -286,6 +286,7 @@ def aggregate_pws_observations(
 
 
 def _logged_result(started: str, started_perf: float, city: str, payload: dict[str, Any]) -> dict[str, Any]:
+    payload = redact_secrets(payload)
     finished = utc_now()
     status = "OK" if payload.get("ok") else "WARN"
     log_data_fetch(
@@ -374,7 +375,7 @@ def _parse_observed_at(value: Any) -> str:
 
 
 def _strip_api_key(url: str) -> str:
-    return str(url or "").replace(_api_key(), "<redacted>")
+    return redact_secret_text(url)
 
 
 def _median(values: list[Any]) -> float | None:

@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from .db import insert_forecast_run, log_data_fetch, utc_now
-from .env_utils import env_value
+from .env_utils import env_value, redact_secret_text, redact_secrets
 from .forecasts.ensemble import convert_temperature
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 
@@ -325,6 +325,7 @@ def _failed_run(
 
 
 def _logged_result(started: str, started_perf: float, city: str, payload: dict[str, Any]) -> dict[str, Any]:
+    payload = redact_secrets(payload)
     finished = utc_now()
     status = "OK" if payload.get("ok") else "WARN"
     log_data_fetch(
@@ -428,8 +429,4 @@ def _convert_optional(value: Any, source_unit: str, target_unit: str) -> float |
 
 
 def _strip_api_key(url: str) -> str:
-    text = str(url or "")
-    for key in (env_value("WEATHER_COM_API_KEY"), env_value("WUNDERGROUND_API_KEY")):
-        if key:
-            text = text.replace(key, "***")
-    return text
+    return redact_secret_text(url)

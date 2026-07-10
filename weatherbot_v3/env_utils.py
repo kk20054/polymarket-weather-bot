@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+from typing import Any
 
 
 _DOTENV_CACHE: dict[str, str] | None = None
+_SECRET_ENV_NAMES = (
+    "WEATHER_COM_API_KEY",
+    "WUNDERGROUND_API_KEY",
+    "MINIMAX_API_KEY",
+    "VISUAL_CROSSING_KEY",
+)
 
 
 def env_value(name: str, default: str = "") -> str:
@@ -31,3 +39,26 @@ def _dotenv_values() -> dict[str, str]:
         pass
     _DOTENV_CACHE = values
     return values
+
+
+def redact_secret_text(value: Any) -> str:
+    text = str(value or "")
+    for name in _SECRET_ENV_NAMES:
+        secret = env_value(name)
+        if secret:
+            text = text.replace(secret, "***")
+    text = re.sub(r"(?i)(apiKey=)[^&\s\"']+", r"\1***", text)
+    text = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s\"']+", r"\1***", text)
+    return text
+
+
+def redact_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: redact_secrets(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_secrets(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_secrets(item) for item in value)
+    if isinstance(value, str):
+        return redact_secret_text(value)
+    return value
