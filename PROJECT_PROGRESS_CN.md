@@ -318,3 +318,12 @@
 - Verification: 209 backend/scheduler/watchlist/dashboard-contract tests passed; `git diff --check` passed. No execution behavior changed and live remains locked.
 - Conclusion: restart the 24-hour soak from this commit. PWS still requires a dedicated Wunderground PWS entitlement before it can become a usable source; Seoul book gaps remain correctly non-tradable.
 - Commit: `dc1cd8b`.
+
+### 2026-07-11: Truth delta audit repair and six-hour scheduler gate
+
+- 目标：不打断正在运行的 scheduler，先修正 HKO settlement truth 与 VHHH observation station 无法对账的 audit 缺口，并把 scheduler 验收拆为六小时预验收与二十四小时稳定性证据。
+- 改动：`truth_delta_audit` 新增 `delta_hko_minus_iem`；delta rebuild 通过 `stations.station_id -> city_key -> settlement_station_id` 识别香港，而不再错误要求 IEM ICAO 为 `HKO`。审计行现写入 city key，summary 提供 HKO-vs-IEM histogram。`wunderground-truth-fetch --force-rebuild` 现正确透传。
+- 验证：新增 VHHH=31.0°C / HKO=32.2°C 的回归，得出 `delta_hko_minus_iem=+1.2°C`；CLI force rebuild 回归通过；`python -m unittest tests.test_v3_core` 183/183 OK；新旧 DB schema 均可迁移。
+- 结论：HKO-VHHH delta 已具备正确持久化与可复算能力，但当前生产 DB 的 delta 尚未重建，且 WU/HKO 仍未达到 30 天；没有运行外网回填、没有重启 scheduler、`LIVE_TRADING=false` 未变。
+- 下一步：scheduler 连续运行至六小时后先读取 source health；通过后以限速、可断点批次补齐 WU/HKO/IEM 真值，再运行 `truth-delta-build`。
+- 相关提交：`cc90a90`。
