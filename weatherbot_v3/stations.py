@@ -99,6 +99,9 @@ def sync_station_registry(
     profiles: Iterable[CitySettlementProfile] | None = None,
 ) -> dict[str, Any]:
     init_v3_db(path)
+    # Repair legacy probe rows before registry defaults can touch them. The
+    # upsert below also treats a verified timestamp as protected evidence.
+    pre_reconciliation = reconcile_station_verification_status(path)
     rows = [station_row_from_profile(profile) for profile in (profiles or SETTLEMENT_REGISTRY.values())]
     now = utc_now()
     with connect(path) as conn:
@@ -137,38 +140,46 @@ def sync_station_registry(
                 region=excluded.region,
                 expected_metric=excluded.expected_metric,
                 settlement_rule_text=CASE
-                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market') THEN stations.settlement_rule_text
+                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market')
+                      OR COALESCE(stations.settlement_rule_verified_at, '') != '' THEN stations.settlement_rule_text
                     ELSE excluded.settlement_rule_text
                 END,
                 settlement_station_id=CASE
-                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market') THEN stations.settlement_station_id
+                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market')
+                      OR COALESCE(stations.settlement_rule_verified_at, '') != '' THEN stations.settlement_station_id
                     ELSE excluded.settlement_station_id
                 END,
                 settlement_station_name=CASE
-                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market') THEN stations.settlement_station_name
+                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market')
+                      OR COALESCE(stations.settlement_rule_verified_at, '') != '' THEN stations.settlement_station_name
                     ELSE excluded.settlement_station_name
                 END,
                 settlement_timezone=CASE
-                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market') THEN stations.settlement_timezone
+                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market')
+                      OR COALESCE(stations.settlement_rule_verified_at, '') != '' THEN stations.settlement_timezone
                     ELSE excluded.settlement_timezone
                 END,
                 settlement_unit=CASE
-                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market') THEN stations.settlement_unit
+                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market')
+                      OR COALESCE(stations.settlement_rule_verified_at, '') != '' THEN stations.settlement_unit
                     ELSE excluded.settlement_unit
                 END,
                 settlement_time_basis=CASE
-                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market') THEN stations.settlement_time_basis
+                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market')
+                      OR COALESCE(stations.settlement_rule_verified_at, '') != '' THEN stations.settlement_time_basis
                     ELSE excluded.settlement_time_basis
                 END,
                 settlement_rule_verified_at=COALESCE(NULLIF(stations.settlement_rule_verified_at, ''), excluded.settlement_rule_verified_at),
                 primary_settlement_source=CASE
-                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market') THEN stations.primary_settlement_source
+                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market')
+                      OR COALESCE(stations.settlement_rule_verified_at, '') != '' THEN stations.primary_settlement_source
                     ELSE excluded.primary_settlement_source
                 END,
                 nearby_observation_networks_json=excluded.nearby_observation_networks_json,
                 confidence=excluded.confidence,
                 verification_status=CASE
-                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market') THEN stations.verification_status
+                    WHEN COALESCE(stations.verification_status, '') IN ('verified', 'settlement_mismatch', 'no_active_market')
+                      OR COALESCE(stations.settlement_rule_verified_at, '') != '' THEN stations.verification_status
                     ELSE excluded.verification_status
                 END,
                 enabled=COALESCE(stations.enabled, excluded.enabled),
@@ -193,6 +204,8 @@ def sync_station_registry(
                 [now, *sorted(DEFAULT_ENABLED_CITY_KEYS)],
             )
         count = int(conn.execute("SELECT COUNT(*) FROM stations").fetchone()[0])
+    post_reconciliation = reconcile_station_verification_status(path)
+    reconciliation = _merge_reconciliation_results(pre_reconciliation, post_reconciliation)
     return {
         "ok": True,
         "sync_version": STATION_SYNC_VERSION,
@@ -200,6 +213,189 @@ def sync_station_registry(
         "synced": len(rows),
         "total": count,
         "updated_at": now,
+        "verification_reconciliation": reconciliation,
+    }
+
+
+def reconcile_station_verification_status(path: Path | None = None) -> dict[str, Any]:
+    """Repair legacy station rows whose verified timestamp and status disagree.
+
+    A non-empty ``settlement_rule_verified_at`` is only promoted when the
+    settlement contract fields are complete. A station mismatch remains an
+    explicit terminal state so observation collection can continue while live
+    trading stays blocked.
+    """
+    init_v3_db(path)
+    now = utc_now()
+    repaired: list[dict[str, str]] = []
+    inconsistent: list[dict[str, str]] = []
+    with connect(path) as conn:
+        probe_evidence = _latest_settlement_probe_evidence(conn)
+        rows = conn.execute(
+            """
+            SELECT city_key, station_id, settlement_station_id,
+                   settlement_rule_text, settlement_timezone, settlement_unit,
+                   settlement_rule_verified_at, verification_status, raw_json
+            FROM stations
+            ORDER BY city_key
+            """
+        ).fetchall()
+        for raw_row in rows:
+            row = dict(raw_row)
+            city_key = str(row.get("city_key") or "")
+            status = str(row.get("verification_status") or "provisional")
+            verified_at = str(row.get("settlement_rule_verified_at") or "").strip()
+            observation_station = str(row.get("station_id") or "").upper()
+            settlement_station = str(row.get("settlement_station_id") or observation_station).upper()
+            contract_complete = all(
+                str(row.get(field) or "").strip()
+                for field in ("settlement_rule_text", "settlement_timezone", "settlement_unit")
+            ) and bool(settlement_station)
+            evidence = probe_evidence.get(city_key)
+            generic_rule = _is_registry_placeholder_rule(str(row.get("settlement_rule_text") or ""))
+
+            expected = status
+            if verified_at and evidence:
+                settlement_station = str(
+                    evidence.get("settlement_station_id") or settlement_station
+                ).upper()
+                expected = (
+                    "settlement_mismatch"
+                    if observation_station and settlement_station != observation_station
+                    else "verified"
+                )
+                raw = _json_or_dict(row.get("raw_json"))
+                raw["latest_market_probe"] = evidence
+                raw["settlement_mismatch"] = expected == "settlement_mismatch"
+                conn.execute(
+                    """
+                    UPDATE stations
+                    SET settlement_rule_text = ?,
+                        settlement_station_id = ?,
+                        settlement_station_name = ?,
+                        settlement_timezone = ?,
+                        settlement_unit = ?,
+                        settlement_time_basis = ?,
+                        primary_settlement_source = ?,
+                        raw_json = ?,
+                        updated_at = ?
+                    WHERE city_key = ?
+                    """,
+                    (
+                        evidence.get("settlement_rule_text") or row.get("settlement_rule_text"),
+                        settlement_station,
+                        evidence.get("settlement_station_name") or "",
+                        evidence.get("settlement_timezone") or row.get("settlement_timezone"),
+                        evidence.get("settlement_unit") or row.get("settlement_unit"),
+                        evidence.get("settlement_time_basis") or "local_day",
+                        evidence.get("primary_settlement_source") or "polymarket_rule",
+                        dump_json(raw),
+                        now,
+                        city_key,
+                    ),
+                )
+            elif verified_at and contract_complete and not generic_rule:
+                expected = (
+                    "settlement_mismatch"
+                    if observation_station and settlement_station != observation_station
+                    else "verified"
+                )
+            elif verified_at:
+                inconsistent.append({
+                    "city_key": city_key,
+                    "status": status,
+                    "reason": "verified_timestamp_without_probe_evidence",
+                })
+                continue
+            elif status in {"verified", "settlement_mismatch"}:
+                inconsistent.append({
+                    "city_key": city_key,
+                    "status": status,
+                    "reason": "terminal_status_without_verified_at",
+                })
+                continue
+
+            if expected != status:
+                conn.execute(
+                    """
+                    UPDATE stations
+                    SET verification_status = ?,
+                        confidence = ?,
+                        updated_at = ?
+                    WHERE city_key = ?
+                    """,
+                    (
+                        expected,
+                        0.95 if expected == "verified" else 0.55,
+                        now,
+                        city_key,
+                    ),
+                )
+                repaired.append({
+                    "city_key": city_key,
+                    "from": status,
+                    "to": expected,
+                    "reason": "verified_timestamp_status_reconciliation",
+                })
+    return {
+        "ok": not inconsistent,
+        "checked": len(rows),
+        "repaired": repaired,
+        "repaired_count": len(repaired),
+        "inconsistent": inconsistent,
+        "inconsistent_count": len(inconsistent),
+        "updated_at": now,
+    }
+
+
+def _latest_settlement_probe_evidence(conn) -> dict[str, dict[str, Any]]:
+    evidence: dict[str, dict[str, Any]] = {}
+    rows = conn.execute(
+        """
+        SELECT details_json
+        FROM data_fetch_logs
+        WHERE stage = 'settlement_rule_probe'
+        ORDER BY id DESC
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            details = json.loads(row["details_json"] or "{}")
+        except Exception:
+            continue
+        city_key = str(details.get("city_key") or "")
+        if not city_key or city_key in evidence or not details.get("active_market"):
+            continue
+        if str(details.get("verification_status") or "") not in {"verified", "settlement_mismatch"}:
+            continue
+        evidence[city_key] = details
+    return evidence
+
+
+def _is_registry_placeholder_rule(rule_text: str) -> bool:
+    return rule_text.startswith("WeatherBot registry maps ") or "still requires rule/source verification" in rule_text
+
+
+def _merge_reconciliation_results(*results: dict[str, Any]) -> dict[str, Any]:
+    repaired: list[dict[str, str]] = []
+    inconsistent: list[dict[str, str]] = []
+    checked = 0
+    updated_at = utc_now()
+    for result in results:
+        checked = max(checked, int(result.get("checked") or 0))
+        repaired.extend(result.get("repaired") or [])
+        inconsistent.extend(result.get("inconsistent") or [])
+        updated_at = str(result.get("updated_at") or updated_at)
+    unique_repaired = list({(row["city_key"], row["from"], row["to"]): row for row in repaired}.values())
+    unique_inconsistent = list({(row["city_key"], row["reason"]): row for row in inconsistent}.values())
+    return {
+        "ok": not unique_inconsistent,
+        "checked": checked,
+        "repaired": unique_repaired,
+        "repaired_count": len(unique_repaired),
+        "inconsistent": unique_inconsistent,
+        "inconsistent_count": len(unique_inconsistent),
+        "updated_at": updated_at,
     }
 
 

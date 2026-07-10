@@ -14,6 +14,7 @@ from .migration import audit_market_files, migrate_legacy_signals, repair_truth_
 from .model_dataset import build_model_dataset_audit, is_settlement_pending
 from .notifier import FeishuNotifier
 from .qualification import build_data_readiness, persist_data_readiness
+from .source_health import build_source_health_matrix
 from .stations import list_stations, set_station_enabled, sync_station_registry
 from .validation import build_production_validation_report
 
@@ -1298,6 +1299,7 @@ def main() -> None:
             "init-db",
             "migrate",
             "summary",
+            "source-health",
             "state-print",
             "notify-daily",
             "production-refresh",
@@ -1391,6 +1393,8 @@ def main() -> None:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif args.command == "summary":
         print(json.dumps(dashboard_summary(), ensure_ascii=False, indent=2))
+    elif args.command == "source-health":
+        print(json.dumps(build_source_health_matrix(), ensure_ascii=False, indent=2))
     elif args.command == "state-print":
         print_current_state()
     elif args.command == "notify-daily":

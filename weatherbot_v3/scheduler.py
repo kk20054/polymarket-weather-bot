@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from .cli import run_china_weather_fetch, run_daily_max_build, run_gamma_structured_sync, run_hourly_consensus_build, run_market_buckets_sync, run_model_timing_reprice, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build, run_weathercom_fetch
 from .db import log_data_fetch, utc_now
 from .metar import fetch_recent_hours
+from .source_health import build_source_health_matrix, compact_source_health
 from .stations import enabled_station_rows, sync_station_registry
 
 
@@ -84,6 +85,8 @@ class WeatherBotScheduler:
         self.city_concurrency = max(1, int(city_concurrency or 2))
         self.started_at: str | None = None
         self.stop_event = asyncio.Event()
+        self._source_health_cache: dict[str, Any] | None = None
+        self._source_health_cache_at = 0.0
         self.pollers: dict[str, PollerState] = {
             "metar_poller": PollerState("metar_poller", "METAR", METAR_INTERVAL_SECONDS),
             "forecast_poller": PollerState("forecast_poller", "Forecast", FORECAST_INTERVAL_SECONDS),
@@ -189,7 +192,7 @@ class WeatherBotScheduler:
             }
 
     def status(self, *, message: str = "") -> dict[str, Any]:
-        return {
+        payload = {
             "ok": True,
             "scheduler_version": "weatherbot-scheduler-v1",
             "running": self.running,
@@ -198,6 +201,19 @@ class WeatherBotScheduler:
             "city_concurrency": self.city_concurrency,
             "pollers": {key: state.status() for key, state in self.pollers.items()},
         }
+        try:
+            now = time.monotonic()
+            if self._source_health_cache is None or now - self._source_health_cache_at >= 30.0:
+                self._source_health_cache = compact_source_health(build_source_health_matrix())
+                self._source_health_cache_at = now
+            payload["source_health"] = self._source_health_cache
+        except Exception as exc:
+            payload["source_health"] = {
+                "overall_status": "unknown",
+                "required_blockers": ["source_health_unavailable"],
+                "error": str(exc),
+            }
+        return payload
 
     async def _poll_loop(self, poller_key: str) -> None:
         while not self.stop_event.is_set():

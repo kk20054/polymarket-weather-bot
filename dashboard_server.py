@@ -61,6 +61,7 @@ from weatherbot_v3.production_actions import list_production_actions, run_produc
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.scheduler import get_scheduler
+from weatherbot_v3.source_health import build_source_health_matrix
 from weatherbot_v3.stations import list_stations, set_station_enabled, sync_station_registry
 from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summary
 from weatherbot_v3.db import paper_execution_summary
@@ -4340,6 +4341,11 @@ async def production_refresh_status():
 @app.get("/api/scheduler/status")
 async def scheduler_status():
     return get_scheduler().status()
+
+
+@app.get("/api/source-health")
+async def source_health():
+    return build_source_health_matrix()
 
 
 @app.post("/api/scheduler/start")

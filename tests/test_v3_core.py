@@ -29,7 +29,8 @@ from weatherbot_v3.pws import aggregate_pws_observations, parse_pws_current_payl
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summary
-from weatherbot_v3.stations import apply_market_probe_result, list_stations, station_row_from_profile, sync_station_registry
+from weatherbot_v3.source_health import build_source_health_matrix
+from weatherbot_v3.stations import apply_market_probe_result, list_stations, reconcile_station_verification_status, station_row_from_profile, sync_station_registry
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.metar import backfill_iem_asos_metars, ingest_iem_asos_csv, parse_iem_asos_csv, probe_iem_stations, fetch_awc_metars, refresh_metar_reports
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
@@ -1598,6 +1599,118 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(chicago["provider_station_ids"]["aviationweather"], "KORD")
         self.assertIn("METAR", chicago["nearby_observation_networks"])
         self.assertIn("requires rule/source verification", chicago["settlement_rule_text"])
+
+    def test_station_sync_reconciles_verified_timestamp_before_registry_upsert(self):
+        db_path = test_db_path("stations_verification_reconcile")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        rule = "Polymarket resolves Chicago from Wunderground KORD local-day history."
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            sync_station_registry(db_path)
+            with connect(db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE stations
+                    SET settlement_rule_text = ?, settlement_rule_verified_at = ?,
+                        primary_settlement_source = 'wunderground',
+                        verification_status = 'provisional'
+                    WHERE city_key = 'chicago'
+                    """,
+                    (rule, "2026-07-04T00:00:00+00:00"),
+                )
+            result = sync_station_registry(db_path)
+            chicago = list_stations(db_path, city="chicago")[0]
+
+        self.assertEqual(chicago["verification_status"], "verified")
+        self.assertEqual(chicago["settlement_rule_text"], rule)
+        self.assertEqual(chicago["primary_settlement_source"], "wunderground")
+        self.assertEqual(result["verification_reconciliation"]["repaired_count"], 1)
+
+    def test_station_reconcile_recovers_probe_evidence_overwritten_by_legacy_sync(self):
+        db_path = test_db_path("stations_probe_evidence_recovery")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        rule = "This market resolves from Wunderground KORD highest temperature."
+        details = {
+            "active_market": True,
+            "city_key": "chicago",
+            "verification_status": "verified",
+            "settlement_rule_text": rule,
+            "settlement_station_id": "KORD",
+            "settlement_station_name": "Chicago O'Hare International Airport",
+            "settlement_timezone": "America/Chicago",
+            "settlement_unit": "F",
+            "settlement_time_basis": "local_day",
+            "primary_settlement_source": "wunderground",
+            "source_url": "https://www.wunderground.com/history/daily/us/il/chicago/KORD",
+        }
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            sync_station_registry(db_path)
+            with connect(db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE stations
+                    SET settlement_rule_verified_at = ?, verification_status = 'provisional'
+                    WHERE city_key = 'chicago'
+                    """,
+                    ("2026-07-04T00:00:00+00:00",),
+                )
+            log_data_fetch(
+                source="polymarket_gamma",
+                stage="settlement_rule_probe",
+                status="OK",
+                message="active_market",
+                details=details,
+            )
+            result = reconcile_station_verification_status(db_path)
+            chicago = list_stations(db_path, city="chicago")[0]
+
+        self.assertEqual(result["repaired_count"], 1)
+        self.assertEqual(chicago["verification_status"], "verified")
+        self.assertEqual(chicago["settlement_rule_text"], rule)
+        self.assertEqual(chicago["primary_settlement_source"], "wunderground")
+        self.assertEqual(json.loads(chicago["raw_json"])["latest_market_probe"]["source_url"], details["source_url"])
+
+    def test_source_health_matrix_reports_fresh_core_sources_and_truth_blockers(self):
+        db_path = test_db_path("source_health_matrix")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        now = datetime.now(timezone.utc)
+        with patch.dict(
+            os.environ,
+            {"V3_DB_PATH": str(db_path), "WEATHER_COM_FORECAST_ENABLED": "false"},
+            clear=False,
+        ):
+            sync_station_registry(db_path)
+            with connect(db_path) as conn:
+                conn.execute("UPDATE stations SET enabled = 0")
+                conn.execute("UPDATE stations SET enabled = 1 WHERE city_key = 'chicago'")
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": now.isoformat(),
+                "raw_text": "KORD TEST",
+                "temperature": 25.0,
+                "parse_status": "parsed",
+            })
+            insert_forecast_run({
+                "run_key": "health-openmeteo-chicago",
+                "city": "chicago",
+                "target_date": now.date().isoformat(),
+                "source": "openmeteo_gfs_seamless",
+                "provider": "open_meteo",
+                "model": "gfs_seamless",
+                "retrieved_at": now.isoformat(),
+                "parse_status": "parsed",
+                "training_eligible": True,
+            })
+            matrix = build_source_health_matrix(db_path, now_utc=now)
+
+        sources = {row["key"]: row for row in matrix["sources"]}
+        self.assertEqual(sources["metar"]["status"], "healthy")
+        self.assertEqual(sources["forecast_openmeteo"]["status"], "healthy")
+        self.assertFalse(sources["forecast_weathercom_v3"]["required"])
+        self.assertEqual(sources["truth_wunderground_daily"]["status"], "missing")
+        self.assertIn("truth_wunderground_daily", matrix["required_blockers"])
+        self.assertEqual(matrix["overall_status"], "blocked")
 
     def test_station_row_parser_keeps_wmo_field_without_fabricating_ids(self):
         row = station_row_from_profile(SETTLEMENT_REGISTRY["tokyo"])
