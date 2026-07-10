@@ -250,6 +250,16 @@
 - 下一步：人工启动调度器跑 10-30 分钟，观察顶部 poller age、`/api/scheduler/status`、`/api/hourly-consensus` 是否同步更新；随后继续对齐 Forecast/China Live 与 PolyWX 的数值来源差异。实盘继续锁定。
 - 相关提交：本轮提交已完成，最终 hash 见本轮回复。
 
+### 2026-07-10: Layer 1 verification reconciliation + source health matrix
+
+- 目标：先修复 `verification_status` 与 `settlement_rule_verified_at` 倒挂，再建立全数据源实时健康矩阵；不改 UI、不解锁 live。
+- 改动：`stations.py` 在 registry upsert 前后执行证据一致性修复，`verified_at` 会保护已核验规则；若旧 sync 覆盖了规则，则从 `data_fetch_logs.stage=settlement_rule_probe` 恢复规则原文、结算站、来源和 probe 快照。新增 `source_health.py`，覆盖 settlement contracts、METAR、Open-Meteo、Weather.com v3、China Live、PWS、WU hourly/daily、IEM、HKO、orderbook、hourly consensus、signal decisions；接入 CLI `source-health`、`GET /api/source-health` 和 scheduler compact status。
+- 真实修复：Atlanta/Chicago/Dallas/NYC/Shanghai/Tokyo 从 provisional 恢复为 verified；Hong Kong 恢复为 settlement_mismatch（VHHH observation vs HKO settlement）；7 条规则原文和来源均从 probe 日志恢复，无不一致残留。
+- 验证：`tests.test_v3_core` 177/177 通过；`tests.test_scheduler tests.test_polywx_contract` 20/20 通过；定向 scheduler health 契约通过；`git diff --check` 仅有 Windows 换行提示。
+- 运行态：后端 `127.0.0.1:8765` 已显式启动 scheduler 做 24 小时 soak。首轮已恢复 Open-Meteo、orderbook、hourly consensus；China Live 有 1 城失败；Weather.com/PWS/truth coverage 仍不完整。`LIVE_TRADING=false` 未变。
+- 下一步：持续采样健康矩阵并诊断 China Live/长 poller；随后扩 WU/HKO 至 30 天并计算 WU-IEM、HKO-VHHH delta。
+- 相关提交：`d58ae12`。
+
 ### 2026-07-07: PolyWX-aligned source role contract + weather.com/WU probe
 
 - Target: align WeatherBot data-source roles with the PolyWX/weather.com/WU/METAR/PWS interpretation, without importing PolyWX display values as trading truth or unlocking live execution.
