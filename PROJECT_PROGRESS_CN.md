@@ -429,3 +429,12 @@
 - 结论：状态倒挂不再只被报告而会被确定性修复；每个城市缺哪个源、是 missing/stale/degraded/healthy 现可直接读取。PWS 仍是可选 entitlement 缺口，Hong Kong 仍正确 paper-only，live 与 paper cohort 均未开启。
 - 下一步：连续观察 24 小时并按 v2 矩阵验收各 poller；通过后进入保存 PolyWX 日期的 Forecast/Cloud/DEB 重建与字段级差异分析。
 - 相关提交：`25d2396`。
+
+### 2026-07-11：Layer 2 PWS 亚洲范围解锁与真实权限探测
+
+- 目标：核对“亚洲 PWS 缺失”究竟是代码范围限制还是 API 权限问题，同时不重启正在进行的 24 小时 scheduler soak。
+- 改动：移除 `pws.py` 的 `profile.region != us` 跳过和 US-only selector；所有 registry 城市均可用坐标执行 PWS discovery。Discovery 404 现在诚实记录为可选源无覆盖，不再制造 hard failure；401 仍保留为 entitlement 错误。
+- 验证：fixture 覆盖上海 station discovery、current observation 解析和 404 no-coverage；3 项定向测试通过。真实 dry-run 显示 Tokyo/Seoul/Taipei/Hong Kong/Singapore 均发现具体 PWS ID，但 current endpoint 返回 401；Shanghai/Beijing discovery 返回 404。
+- 结论：US-only 技术阻塞已解除。亚洲 PWS 的剩余阻塞是外部 API entitlement；中国大陆坐标还存在公开 PWS discovery 无覆盖。此源继续保持 display/peak-lock only，不影响 METAR、truth 或 live gate。
+- 下一步：24 小时 soak 结束并重启后端后启用新代码；若取得支持 PWS current 的 Weather.com/WU key，可直接复跑亚洲 dry-run，无需再改 collector。
+- 相关提交：`eb1f21f`。

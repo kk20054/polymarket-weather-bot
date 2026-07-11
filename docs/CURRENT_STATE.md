@@ -8,15 +8,15 @@
 - `LIVE_TRADING=false`; no live or canary execution is permitted.
 
 ## Latest Ledger Summaries
+- 2026-07-11 / Asian PWS audit: removed the US-only collector gate. Tokyo/Seoul/Taipei/Hong Kong/Singapore discover real station IDs but current observations return 401; Shanghai/Beijing discovery returns honest no-coverage. Commit `eb1f21f`, pending backend restart after soak.
 - 2026-07-11 / Source health v2: station verification invariants are enforced in both directions; `/api/source-health` now exposes 14 city rows across 13 sources. Scheduler soak started at `08:17:11Z`. Commit `25d2396`.
 - 2026-07-11 / Layer 6 probability repair: exact integer-C market buckets now use the same canonical truncation boundaries as Gaussian CDF buckets. Shanghai distribution sums to 1.0 instead of 0.0. Commit `e978b73`.
 - 2026-07-11 / Layer 7 reduction: removed duplicate city filters, inactive cities, internal rule badges, repeated forecast controls, and legacy one-click simulation. The right rail now reads the inactive paper cohort status. Commit `110bfc2`.
 - 2026-07-11 / Paper cohort: inactive-by-default 14-30 day validation enforces $40 bankroll, $2/trade, $10/day, five open positions/orders, and fresh post-start decisions. Commit `d1876b5`.
-- 2026-07-11 / Paper settlement: new v1 orders only realize PnL after authoritative closed Gamma outcomes and record win rate and Brier scores. Commit `4245bf4`.
 
 ## Production Blockers
 - Layer 7 is materially cleaner; the Hourly chart is now isolated and has passed desktop/768px QA, but `WeatherPanel.tsx` still needs DEB/table extraction and operator review.
-- PWS v2 returns HTTP 401 with the current entitlement, so PWS peak-lock is unavailable.
+- PWS no longer has a US-only code restriction, but the current API entitlement returns HTTP 401 for discovered Asian station IDs; PWS peak-lock remains unavailable.
 - Saved PolyWX replay still shows material Cloud, Forecast, and Chicago 07-04 DEB differences.
 - Scheduler status is in-memory; source-health v2 now provides a persistent-data-derived 14-city/source matrix even after process restart.
 - Derive can exceed its 15-minute interval under load.
