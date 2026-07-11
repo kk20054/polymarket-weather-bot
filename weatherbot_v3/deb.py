@@ -150,6 +150,7 @@ def build_daily_max_prediction(
     sigma_floor_c: float = DEFAULT_SIGMA_FLOOR_C,
     residual_days: int = 14,
     path: Path | None = None,
+    bias_table: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     init_v3_db(path)
     profile = get_city_profile(city_key)
@@ -161,11 +162,17 @@ def build_daily_max_prediction(
         try:
             from .forecasts.ensemble import build_ensemble_prediction
 
-            ensemble = build_ensemble_prediction(city_key, target_date, issued_at=issued, path=path)
+            ensemble = build_ensemble_prediction(
+                city_key,
+                target_date,
+                issued_at=issued,
+                path=path,
+                bias_table=bias_table,
+            )
         except Exception as exc:
             ensemble = {"ok": False, "reasons": [f"ensemble_error:{exc}"]}
         if ensemble.get("ok"):
-            observed_floor = _observed_floor(city_key, target_date, unit, path)
+            observed_floor = _observed_floor(city_key, target_date, unit, path, issued_at=issued)
             mu_floor = _observed_mu_floor(observed_floor, unit)
             floor_applied = False
             if mu_floor is not None and mu_floor > float(ensemble.get("mu") or -999):
@@ -237,7 +244,7 @@ def build_daily_max_prediction(
     sigma_from_spread = (max(model_highs) - min(model_highs)) if len(model_highs) > 1 else 0.0
     sigma_from_history = bias_info["residual_std"] if bias_info["sample_count"] >= MIN_BIAS_SAMPLE_DAYS else DEFAULT_RMSE_BY_UNIT.get(unit, 2.0)
     sigma_raw = math.sqrt(sigma_from_spread**2 + sigma_from_history**2) / 2.0
-    observed_floor = _observed_floor(city_key, target_date, unit, path)
+    observed_floor = _observed_floor(city_key, target_date, unit, path, issued_at=issued)
     mu_floor = _observed_mu_floor(observed_floor, unit)
     time_decay = _time_decay_factor(target_date, profile.timezone if profile else "UTC", observed_floor is not None)
     sigma = sigma_with_floor(sigma_raw * time_decay, sigma_floor)
@@ -928,10 +935,18 @@ def _loads(raw: Any, default: Any) -> Any:
         return default
 
 
-def _observed_floor(city_key: str, target_date: str, unit: str, path: Path | None) -> float | None:
+def _observed_floor(
+    city_key: str,
+    target_date: str,
+    unit: str,
+    path: Path | None,
+    *,
+    issued_at: str | None = None,
+) -> float | None:
     profile = get_city_profile(city_key)
     default_unit = _clean_unit(profile.unit if profile else unit)
     timezone_name = profile.timezone if profile else "UTC"
+    cutoff = _parse_datetime(issued_at)
     observed_values: list[float] = []
     with connect(path) as conn:
         for row in conn.execute(
@@ -944,12 +959,15 @@ def _observed_floor(city_key: str, target_date: str, unit: str, path: Path | Non
         ).fetchall():
             if _local_date(row["report_time"], timezone_name) != str(target_date):
                 continue
+            report_time = _parse_datetime(row["report_time"])
+            if cutoff is not None and (report_time is None or report_time > cutoff):
+                continue
             value = _optional_float(row["temperature"])
             if value is not None and _plausible_temp(value):
                 observed_values.append(convert_temp(value, _metar_temperature_unit(row, default_unit), unit))
         for row in conn.execute(
             """
-            SELECT temperature, raw_unit, observed_at
+            SELECT station_id, network, temperature, raw_unit, observed_at
             FROM mesonet_observations
             WHERE city = ?
             """,
@@ -957,21 +975,17 @@ def _observed_floor(city_key: str, target_date: str, unit: str, path: Path | Non
         ).fetchall():
             if _local_date(row["observed_at"], timezone_name) != str(target_date):
                 continue
+            observed_at = _parse_datetime(row["observed_at"])
+            if cutoff is not None and (observed_at is None or observed_at > cutoff):
+                continue
+            network = str(row["network"] or "").strip().lower()
+            station_id = str(row["station_id"] or "").strip().upper()
+            if not (city_key == "hong-kong" and network == "china_live" and station_id == "HKO"):
+                continue
             value = _optional_float(row["temperature"])
             raw_unit = _clean_unit(row["raw_unit"] or default_unit)
             if value is not None and _plausible_temp(value):
                 observed_values.append(convert_temp(value, raw_unit, unit))
-        for row in conn.execute(
-            """
-            SELECT observed_temp
-            FROM hourly_consensus
-            WHERE city = ? AND target_date = ? AND observed_temp IS NOT NULL
-            """,
-            (city_key, target_date),
-        ).fetchall():
-            value = _optional_float(row["observed_temp"])
-            if value is not None and _plausible_temp(value):
-                observed_values.append(convert_temp(value, default_unit, unit))
     if not observed_values:
         return None
     return max(observed_values)

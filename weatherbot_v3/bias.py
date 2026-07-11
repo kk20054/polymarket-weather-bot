@@ -41,6 +41,8 @@ def train_bias_table(
     days: int = 90,
     path: Path | None = None,
     output_path: Path | None = None,
+    as_of_date_exclusive: str | None = None,
+    persist: bool = True,
 ) -> dict[str, Any]:
     """Train auditable additive model corrections without target-day leakage.
 
@@ -59,7 +61,12 @@ def train_bias_table(
         profile = SETTLEMENT_REGISTRY.get(city)
         if not profile:
             continue
-        truth_by_date = _truth_by_date(profile.station_id, city, path)
+        truth_by_date = _truth_by_date(
+            profile.station_id,
+            city,
+            path,
+            before_date=as_of_date_exclusive,
+        )
         for family in DEFAULT_CITY_MODELS.get(city, COMMON_MODELS):
             records, audit = _residual_records_for_family(
                 city,
@@ -111,13 +118,15 @@ def train_bias_table(
             "forecast_cutoff": "prefer fixed T+24 previous_day1; otherwise latest forecast as_of strictly before target local-day start",
             "independent_sample": "one forecast snapshot per city/model/target_date",
             "minimum_runtime_samples": BIAS_MIN_SAMPLE_COUNT,
+            "as_of_date_exclusive": as_of_date_exclusive or "",
         },
     }
-    destination = output_path or DEFAULT_BIAS_TABLE
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_suffix(f"{destination.suffix}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(destination)
+    if persist:
+        destination = output_path or DEFAULT_BIAS_TABLE
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_suffix(f"{destination.suffix}.tmp")
+        temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(destination)
     return payload
 
 
@@ -134,7 +143,13 @@ def _selected_cities(cities: list[str] | None, path: Path | None) -> list[str]:
     return enabled or list(DEFAULT_CITY_MODELS)
 
 
-def _truth_by_date(station_id: str, city: str, path: Path | None) -> dict[str, dict[str, Any]]:
+def _truth_by_date(
+    station_id: str,
+    city: str,
+    path: Path | None,
+    *,
+    before_date: str | None = None,
+) -> dict[str, dict[str, Any]]:
     station = str(station_id or "").upper()
     truth: dict[str, dict[str, Any]] = {}
     with connect(path) as conn:
@@ -147,7 +162,10 @@ def _truth_by_date(station_id: str, city: str, path: Path | None) -> dict[str, d
             """,
             (station,),
         ).fetchall():
-            truth[str(row["date_local"])] = {
+            date_local = str(row["date_local"])
+            if before_date and date_local >= before_date:
+                continue
+            truth[date_local] = {
                 "high_c": float(row["high_c"]),
                 "basis": "iem_asos_approximation",
                 "exact": False,
@@ -161,7 +179,10 @@ def _truth_by_date(station_id: str, city: str, path: Path | None) -> dict[str, d
             """,
             (station,),
         ).fetchall():
-            truth[str(row["date_local"])] = {
+            date_local = str(row["date_local"])
+            if before_date and date_local >= before_date:
+                continue
+            truth[date_local] = {
                 "high_c": float(row["high_c"]),
                 "basis": "wunderground_daily",
                 "exact": True,
@@ -175,7 +196,10 @@ def _truth_by_date(station_id: str, city: str, path: Path | None) -> dict[str, d
                 ORDER BY date_local
                 """
             ).fetchall():
-                truth[str(row["date_local"])] = {
+                date_local = str(row["date_local"])
+                if before_date and date_local >= before_date:
+                    continue
+                truth[date_local] = {
                     "high_c": float(row["high_c"]),
                     "basis": "hong_kong_observatory_daily_extract",
                     "exact": True,

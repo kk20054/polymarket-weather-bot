@@ -119,6 +119,37 @@ class EnsembleProbabilityTests(unittest.TestCase):
         self.assertTrue(prediction["ok"], prediction)
         self.assertAlmostEqual(prediction["bias_correction"], 1.8, places=4)
 
+    def test_ensemble_replay_ignores_forecast_run_after_issued_at(self):
+        db_path = test_db_path("ensemble_as_of")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db(db_path)
+            for label, run_at, high in (
+                ("before", "2026-07-04T00:00:00+00:00", 30.0),
+                ("after", "2026-07-06T00:00:00+00:00", 45.0),
+            ):
+                run = _run("beijing", "2026-07-05", "openmeteo_gfs_seamless", high)
+                run.update({
+                    "run_key": f"gfs:{label}",
+                    "run_at": run_at,
+                    "retrieved_at": run_at,
+                    "member_count": 30,
+                })
+                insert_forecast_run(
+                    run,
+                    [_member(f"{label}-{index:02d}", [high]) for index in range(30)],
+                )
+
+            prediction = build_ensemble_prediction(
+                "beijing",
+                "2026-07-05",
+                issued_at="2026-07-05T12:00:00+00:00",
+                path=db_path,
+                bias_table=[],
+            )
+
+        self.assertTrue(prediction["ok"], prediction)
+        self.assertAlmostEqual(float(prediction["mu"]), 30.0, places=4)
+
     def test_signal_distribution_can_use_ensemble_samples(self):
         prediction = {
             "forecast_algo": ALGO,

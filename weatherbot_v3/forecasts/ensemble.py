@@ -191,7 +191,7 @@ def build_ensemble_prediction(
         return {"ok": False, "city_key": city_key, "target_date": target_date, "reasons": ["unknown_city"]}
     init_v3_db(path)
     algo = _deb_algo()
-    rows = _latest_forecast_members(profile, target_date, path)
+    rows = _latest_forecast_members(profile, target_date, path, as_of=issued_at)
     components = _components_from_rows(profile, rows, bias_table if bias_table is not None else load_bias_table(), path, target_date=target_date)
     usable = [component for component in components if component["member_count"] > 0 and component["family"] in region_model_weights(profile)]
     usable_families = {component["family"] for component in usable}
@@ -576,14 +576,20 @@ def convert_temperature(value: float, source_unit: str, target_unit: str) -> flo
     return numeric
 
 
-def _latest_forecast_members(profile: CitySettlementProfile, target_date: str, path: Path | None) -> list[dict[str, Any]]:
+def _latest_forecast_members(
+    profile: CitySettlementProfile,
+    target_date: str,
+    path: Path | None,
+    *,
+    as_of: str | None = None,
+) -> list[dict[str, Any]]:
     with connect(path) as conn:
         rows = [
             dict(row)
             for row in conn.execute(
                 """
                 SELECT fr.id AS run_id, fr.city, fr.target_date, fr.source, fr.provider,
-                       fr.model, fr.retrieved_at, fr.valid_at, fr.unit, fr.mean_high,
+                       fr.model, fr.run_at, fr.retrieved_at, fr.valid_at, fr.unit, fr.mean_high,
                        fr.std_high, fr.member_count, fm.member_id, fm.high_temp,
                        fm.hourly_json
                 FROM forecast_runs fr
@@ -598,6 +604,14 @@ def _latest_forecast_members(profile: CitySettlementProfile, target_date: str, p
                 (profile.city, target_date),
             ).fetchall()
         ]
+    cutoff = _parse_time(str(as_of or ""))
+    if cutoff is not None:
+        eligible_rows = []
+        for row in rows:
+            snapshot_at = _parse_time(str(row.get("run_at") or "")) or _parse_time(str(row.get("retrieved_at") or ""))
+            if snapshot_at is not None and snapshot_at <= cutoff:
+                eligible_rows.append(row)
+        rows = eligible_rows
     latest_by_source: dict[str, int] = {}
     for row in rows:
         source = str(row.get("source") or "")

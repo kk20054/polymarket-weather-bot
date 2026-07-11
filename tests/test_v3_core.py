@@ -4579,7 +4579,7 @@ class V3CoreTests(unittest.TestCase):
             upsert_metar_report({
                 "city": "chicago",
                 "station_id": "KORD",
-                "report_time": "2026-07-10T21:51:00Z",
+                "report_time": "2026-07-10T11:51:00Z",
                 "temperature": 33.33,
                 "parser_version": "iem-asos-csv-v1",
                 "raw_json": {"normalized_temperature_unit": "C"},
@@ -4609,6 +4609,50 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(second["bias_sample_count"], 7)
         self.assertAlmostEqual(second["bias_correction"], 2.0, places=2)
         self.assertGreaterEqual(first["sigma"], first["sigma_floor"])
+
+    def test_observed_floor_rejects_display_only_historical_and_future_metar(self):
+        db_path = test_db_path("daily_max_floor_source_contract")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        run, members = openmeteo_hourly_run(
+            "chicago",
+            "2026-07-10",
+            "openmeteo_ncep_hrrr_conus",
+            [80.0],
+            valid_times=["2026-07-10T21:00:00+00:00"],
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            insert_forecast_run(run, members)
+            upsert_mesonet_observation({
+                "observation_key": "history:future-hot",
+                "city": "chicago",
+                "network": "open_meteo_historical",
+                "station_id": "KORD",
+                "observed_at": "2026-07-10T10:00:00+00:00",
+                "temperature": 110.0,
+                "raw_unit": "F",
+                "parse_status": "parsed",
+                "quality_flags": ["display_only", "not_settlement_truth"],
+            })
+            upsert_metar_report({
+                "city": "chicago",
+                "station_id": "KORD",
+                "report_time": "2026-07-10T14:00:00+00:00",
+                "temperature": 100.0,
+                "parser_version": "test-fahrenheit-v1",
+                "raw_json": {"normalized_temperature_unit": "F"},
+                "raw_text": "KORD future",
+            })
+            prediction = build_daily_max_prediction(
+                "chicago",
+                "2026-07-10",
+                issued_at="2026-07-10T12:00:00+00:00",
+                path=db_path,
+            )
+
+        self.assertTrue(prediction["ok"])
+        self.assertIsNone(prediction["observed_floor"])
+        self.assertFalse(prediction["mu_observed_floor_applied"])
+        self.assertLess(float(prediction["mu"]), 100.0)
 
     def test_daily_max_v2_same_issued_hour_is_idempotent(self):
         db_path = test_db_path("daily_max_v2_idempotent")
@@ -6167,6 +6211,50 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(row["sample_count"], 1)
         self.assertEqual(row["archived_previous_day1_samples"], 1)
         self.assertAlmostEqual(row["additive_bias_c"], 1.0)
+
+    def test_bias_training_replay_excludes_truth_on_or_after_target_date(self):
+        from weatherbot_v3.bias import train_bias_table
+
+        path = test_db_path("bias_replay_cutoff")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        init_v3_db(path)
+        now = "2026-07-11T00:00:00+00:00"
+        with connect(path) as conn:
+            for target_date, truth, forecast in (
+                ("2026-06-30", 30.0, 31.0),
+                ("2026-07-01", 30.0, 40.0),
+            ):
+                conn.execute(
+                    "INSERT INTO truth_wunderground_daily (truth_key, icao, date_local, high_c, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (f"wu:KORD:{target_date}", "KORD", target_date, truth, now, now),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO forecast_runs (
+                        run_key, city, target_date, source, model, run_at, retrieved_at,
+                        horizon, unit, mean_high, training_eligible, parse_status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"run:{target_date}", "chicago", target_date,
+                        "openmeteo_previous_ecmwf_ifs025_day1", "ecmwf_ifs025",
+                        f"{target_date}T00:00:00+00:00", now, "D+1", "C", forecast,
+                        1, "parsed", now,
+                    ),
+                )
+
+        payload = train_bias_table(
+            cities=["chicago"],
+            days=30,
+            path=path,
+            as_of_date_exclusive="2026-07-01",
+            persist=False,
+        )
+        row = next(item for item in payload["rows"] if item["model"] == "ecmwf")
+
+        self.assertEqual(row["sample_dates"], ["2026-06-30"])
+        self.assertAlmostEqual(row["additive_bias_c"], 1.0)
+        self.assertEqual(payload["training_policy"]["as_of_date_exclusive"], "2026-07-01")
 
     def test_low_sample_bias_mae_cannot_change_runtime_weights(self):
         from weatherbot_v3.forecasts.ensemble import _mae_for
