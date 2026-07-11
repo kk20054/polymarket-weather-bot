@@ -8,7 +8,7 @@ from .config import load_config
 from .db import connect, utc_now
 
 
-SOURCE_HEALTH_VERSION = "source-health-v1"
+SOURCE_HEALTH_VERSION = "source-health-v2"
 
 
 def build_source_health_matrix(
@@ -211,6 +211,7 @@ def build_source_health_matrix(
             ),
         ])
 
+    city_matrix = _build_city_matrix(enabled_rows, matrix)
     required_bad = [row for row in matrix if row["required"] and row["status"] != "healthy"]
     optional_bad = [row for row in matrix if not row["required"] and row["status"] != "healthy"]
     overall = "healthy" if not required_bad else "blocked"
@@ -226,6 +227,8 @@ def build_source_health_matrix(
             "live_trading": cfg.live_trading,
         },
         "enabled_cities": enabled,
+        "source_keys": [row["key"] for row in matrix],
+        "city_matrix": city_matrix,
         "summary": {
             "sources": len(matrix),
             "healthy": sum(1 for row in matrix if row["status"] == "healthy"),
@@ -353,6 +356,10 @@ def _freshness_source(
         "data_age_seconds": data_age_seconds,
         "age_seconds_by_city": age_by_city,
         "data_age_seconds_by_city": data_age_by_city,
+        "sample_count_by_city": {
+            city: int(by_city[city]["sample_count"] or 0)
+            for city in covered
+        },
         "stale_cities": sorted(
             city for city, age in age_by_city.items()
             if age is None or age > stale_after_seconds
@@ -575,3 +582,65 @@ def _latest_time_value(values: Iterable[Any]) -> str:
         if timestamp is not None:
             parsed.append((timestamp, str(value)))
     return max(parsed, default=(datetime.min.replace(tzinfo=timezone.utc), ""))[1]
+
+
+def _build_city_matrix(station_rows, sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expand source summaries into an operator-friendly city/source matrix."""
+    result: list[dict[str, Any]] = []
+    for station in station_rows:
+        city = str(station["city_key"])
+        verification_status = str(station["verification_status"] or "provisional")
+        cells: dict[str, dict[str, Any]] = {}
+        for source in sources:
+            key = str(source["key"])
+            expected = set(str(value) for value in source.get("expected_cities") or [])
+            if city not in expected:
+                cells[key] = {"status": "not_applicable", "reason": "city_not_in_source_scope"}
+                continue
+            if key == "settlement_contracts":
+                status = "healthy" if verification_status == "verified" else (
+                    "degraded" if verification_status == "settlement_mismatch" else "missing"
+                )
+                cells[key] = {
+                    "status": status,
+                    "verification_status": verification_status,
+                    "verified_at": str(station["settlement_rule_verified_at"] or ""),
+                }
+                continue
+            if "history_days_by_city" in source:
+                days = int((source.get("history_days_by_city") or {}).get(city) or 0)
+                target = int(source.get("target_history_days") or 0)
+                cells[key] = {
+                    "status": "healthy" if days >= target else ("degraded" if days else "missing"),
+                    "history_days": days,
+                    "target_history_days": target,
+                }
+                continue
+            age = (source.get("age_seconds_by_city") or {}).get(city)
+            data_age = (source.get("data_age_seconds_by_city") or {}).get(city)
+            samples = int((source.get("sample_count_by_city") or {}).get(city) or 0)
+            stale_after = int(source.get("stale_after_seconds") or 0)
+            if samples <= 0:
+                status = "missing"
+            elif age is None or (stale_after and float(age) > stale_after):
+                status = "stale"
+            else:
+                status = "healthy"
+            cells[key] = {
+                "status": status,
+                "age_seconds": age,
+                "data_age_seconds": data_age,
+                "sample_count": samples,
+                "stale_after_seconds": stale_after,
+            }
+        result.append({
+            "city_key": city,
+            "station_id": str(station["station_id"] or ""),
+            "settlement_station_id": str(station["settlement_station_id"] or ""),
+            "verification_status": verification_status,
+            "settlement_rule_verified_at": str(station["settlement_rule_verified_at"] or ""),
+            "live_gate_eligible": verification_status == "verified",
+            "paper_only": verification_status == "settlement_mismatch",
+            "sources": cells,
+        })
+    return result

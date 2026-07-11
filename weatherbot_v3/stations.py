@@ -256,6 +256,7 @@ def reconcile_station_verification_status(path: Path | None = None) -> dict[str,
             generic_rule = _is_registry_placeholder_rule(str(row.get("settlement_rule_text") or ""))
 
             expected = status
+            verified_at_from_evidence = str((evidence or {}).get("verified_at") or "").strip()
             if verified_at and evidence:
                 settlement_station = str(
                     evidence.get("settlement_station_id") or settlement_station
@@ -302,18 +303,66 @@ def reconcile_station_verification_status(path: Path | None = None) -> dict[str,
                     else "verified"
                 )
             elif verified_at:
-                inconsistent.append({
+                expected = "unverified" if status in {"verified", "settlement_mismatch"} else status
+                conn.execute(
+                    """
+                    UPDATE stations
+                    SET settlement_rule_verified_at = '',
+                        verification_status = ?,
+                        confidence = ?,
+                        updated_at = ?
+                    WHERE city_key = ?
+                    """,
+                    (expected, 0.2, now, city_key),
+                )
+                repaired.append({
                     "city_key": city_key,
-                    "status": status,
-                    "reason": "verified_timestamp_without_probe_evidence",
+                    "from": status,
+                    "to": expected,
+                    "reason": "invalid_verified_timestamp_cleared",
                 })
                 continue
             elif status in {"verified", "settlement_mismatch"}:
-                inconsistent.append({
-                    "city_key": city_key,
-                    "status": status,
-                    "reason": "terminal_status_without_verified_at",
-                })
+                if evidence and verified_at_from_evidence:
+                    expected = (
+                        "settlement_mismatch"
+                        if observation_station and str(evidence.get("settlement_station_id") or settlement_station).upper() != observation_station
+                        else "verified"
+                    )
+                    conn.execute(
+                        """
+                        UPDATE stations
+                        SET settlement_rule_verified_at = ?,
+                            verification_status = ?,
+                            confidence = ?,
+                            updated_at = ?
+                        WHERE city_key = ?
+                        """,
+                        (verified_at_from_evidence, expected, 0.95 if expected == "verified" else 0.55, now, city_key),
+                    )
+                    repaired.append({
+                        "city_key": city_key,
+                        "from": status,
+                        "to": expected,
+                        "reason": "verified_timestamp_restored_from_probe",
+                    })
+                else:
+                    conn.execute(
+                        """
+                        UPDATE stations
+                        SET verification_status = 'unverified',
+                            confidence = 0.2,
+                            updated_at = ?
+                        WHERE city_key = ?
+                        """,
+                        (now, city_key),
+                    )
+                    repaired.append({
+                        "city_key": city_key,
+                        "from": status,
+                        "to": "unverified",
+                        "reason": "terminal_status_without_verified_at_downgraded",
+                    })
                 continue
 
             if expected != status:
@@ -353,7 +402,7 @@ def _latest_settlement_probe_evidence(conn) -> dict[str, dict[str, Any]]:
     evidence: dict[str, dict[str, Any]] = {}
     rows = conn.execute(
         """
-        SELECT details_json
+        SELECT details_json, created_at
         FROM data_fetch_logs
         WHERE stage = 'settlement_rule_probe'
         ORDER BY id DESC
@@ -369,6 +418,7 @@ def _latest_settlement_probe_evidence(conn) -> dict[str, dict[str, Any]]:
             continue
         if str(details.get("verification_status") or "") not in {"verified", "settlement_mismatch"}:
             continue
+        details["verified_at"] = str(details.get("verified_at") or row["created_at"] or "")
         evidence[city_key] = details
     return evidence
 

@@ -1755,6 +1755,50 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(chicago["primary_settlement_source"], "wunderground")
         self.assertEqual(json.loads(chicago["raw_json"])["latest_market_probe"]["source_url"], details["source_url"])
 
+    def test_station_reconcile_downgrades_terminal_status_without_timestamp(self):
+        db_path = test_db_path("stations_terminal_without_timestamp")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            sync_station_registry(db_path)
+            with connect(db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE stations
+                    SET verification_status = 'verified',
+                        settlement_rule_verified_at = ''
+                    WHERE city_key = 'chicago'
+                    """
+                )
+            result = reconcile_station_verification_status(db_path)
+            chicago = list_stations(db_path, city="chicago")[0]
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["repaired_count"], 1)
+        self.assertEqual(chicago["verification_status"], "unverified")
+        self.assertEqual(chicago["settlement_rule_verified_at"], "")
+
+    def test_station_reconcile_clears_invalid_verified_timestamp(self):
+        db_path = test_db_path("stations_invalid_verified_timestamp")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            sync_station_registry(db_path)
+            with connect(db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE stations
+                    SET verification_status = 'provisional',
+                        settlement_rule_verified_at = '2026-07-04T00:00:00+00:00'
+                    WHERE city_key = 'chicago'
+                    """
+                )
+            result = reconcile_station_verification_status(db_path)
+            chicago = list_stations(db_path, city="chicago")[0]
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["repaired_count"], 1)
+        self.assertEqual(chicago["verification_status"], "provisional")
+        self.assertEqual(chicago["settlement_rule_verified_at"], "")
+
     def test_source_health_matrix_reports_fresh_core_sources_and_truth_blockers(self):
         db_path = test_db_path("source_health_matrix")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -1797,6 +1841,11 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(sources["truth_wunderground_daily"]["status"], "missing")
         self.assertIn("truth_wunderground_daily", matrix["required_blockers"])
         self.assertEqual(matrix["overall_status"], "blocked")
+        self.assertEqual(matrix["version"], "source-health-v2")
+        chicago = next(row for row in matrix["city_matrix"] if row["city_key"] == "chicago")
+        self.assertEqual(chicago["sources"]["metar"]["status"], "healthy")
+        self.assertEqual(chicago["sources"]["forecast_openmeteo"]["status"], "healthy")
+        self.assertEqual(chicago["sources"]["truth_wunderground_daily"]["status"], "missing")
 
     def test_station_row_parser_keeps_wmo_field_without_fabricating_ids(self):
         row = station_row_from_profile(SETTLEMENT_REGISTRY["tokyo"])
