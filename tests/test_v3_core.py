@@ -28,7 +28,7 @@ from weatherbot_v3.market_buckets import ingest_market_buckets, market_bucket_fr
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
 from weatherbot_v3.openmeteo import fetch_openmeteo_forecasts, model_allowlist_for_city, openmeteo_runs_from_response
 from weatherbot_v3.mesonet import ingest_mesonet_observations, mesonet_observation_from_pws_row
-from weatherbot_v3.pws import aggregate_pws_observations, parse_pws_current_payload
+from weatherbot_v3.pws import aggregate_pws_observations, fetch_wunderground_pws_city, parse_pws_current_payload
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY
 from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summary
@@ -1395,6 +1395,71 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(aggregate["raw_unit"], "F")
         self.assertIn("display_only", aggregate["quality_flags"])
         self.assertIn("not_settlement_truth", aggregate["quality_flags"])
+
+    def test_wunderground_pws_discovers_and_fetches_asian_city(self):
+        db_path = test_db_path("pws_asian_city")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+
+        class FakePwsSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, *, params, timeout, headers):
+                self.calls.append((url, dict(params)))
+                if url.endswith("/v3/location/near"):
+                    return FakeHTTPResponse({"location": {"stationId": ["ISHANG123"]}}, url)
+                return FakeHTTPResponse({
+                    "observations": [{
+                        "stationID": "ISHANG123",
+                        "neighborhood": "Near ZSPD",
+                        "obsTimeUtc": "2026-07-11T08:10:00Z",
+                        "humidity": 70,
+                        "metric": {"temp": 31.5, "dewpt": 25.0},
+                    }],
+                }, url)
+
+        session = FakePwsSession()
+        with patch.dict(
+            os.environ,
+            {"V3_DB_PATH": str(db_path), "WUNDERGROUND_API_KEY": "fixture-key"},
+            clear=False,
+        ):
+            init_v3_db(db_path)
+            result = fetch_wunderground_pws_city("shanghai", dry_run=True, session=session)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result.get("skipped", False))
+        self.assertEqual(result["station_id"], "WU_PWS_ZSPD")
+        self.assertEqual(result["source_station_ids"], ["ISHANG123"])
+        self.assertEqual(session.calls[0][1]["geocode"], "31.1443,121.8083")
+        self.assertEqual(session.calls[1][1]["stationId"], "ISHANG123")
+
+    def test_wunderground_pws_discovery_404_is_optional_no_coverage(self):
+        db_path = test_db_path("pws_asian_no_coverage")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+
+        class NoCoverageSession:
+            def get(self, url, *, params, timeout, headers):
+                response = FakeHTTPResponse({}, url, status_code=200)
+                response.status_code = 404
+
+                def raise_for_status():
+                    raise requests.HTTPError("404 no PWS coverage", response=response)
+
+                response.raise_for_status = raise_for_status
+                return response
+
+        with patch.dict(
+            os.environ,
+            {"V3_DB_PATH": str(db_path), "WUNDERGROUND_API_KEY": "fixture-key"},
+            clear=False,
+        ):
+            init_v3_db(db_path)
+            result = fetch_wunderground_pws_city("shanghai", dry_run=True, session=NoCoverageSession())
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], "pws_discovery_not_available")
 
     def test_hko_china_live_parser_converts_hong_kong_record_time_to_utc(self):
         payload = {

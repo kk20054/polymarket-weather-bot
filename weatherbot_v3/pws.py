@@ -31,7 +31,7 @@ def fetch_wunderground_pws(
     station_limit: int = 5,
     session: requests.Session | None = None,
 ) -> dict[str, Any]:
-    selected = _select_us_profiles(cities, limit_cities=limit_cities)
+    selected = _select_profiles(cities, limit_cities=limit_cities)
     results = [
         fetch_wunderground_pws_city(
             profile.city,
@@ -66,15 +66,6 @@ def fetch_wunderground_pws_city(
     started_perf = time.perf_counter()
     if not profile:
         return _logged_result(started, started_perf, city, {"ok": False, "city": city, "error": "unknown_city"})
-    if profile.region != "us":
-        payload = {
-            "ok": True,
-            "skipped": True,
-            "city": profile.city,
-            "reason": "pws_us_only",
-            "rows_upserted": 0,
-        }
-        return _logged_result(started, started_perf, profile.city, payload)
     api_key = _api_key()
     if not api_key:
         payload = {
@@ -93,12 +84,25 @@ def fetch_wunderground_pws_city(
         station_ids = _configured_station_ids(profile)
         discovery_url = ""
         if not station_ids:
-            station_ids, discovery_url = discover_pws_station_ids(
-                profile,
-                api_key=api_key,
-                station_limit=station_limit,
-                session=client,
-            )
+            try:
+                station_ids, discovery_url = discover_pws_station_ids(
+                    profile,
+                    api_key=api_key,
+                    station_limit=station_limit,
+                    session=client,
+                )
+            except requests.HTTPError as exc:
+                if getattr(exc.response, "status_code", None) != 404:
+                    raise
+                payload = {
+                    "ok": True,
+                    "skipped": True,
+                    "city": profile.city,
+                    "station_id": profile.station_id,
+                    "reason": "pws_discovery_not_available",
+                    "rows_upserted": 0,
+                }
+                return _logged_result(started, started_perf, profile.city, payload)
         if not station_ids:
             payload = {
                 "ok": False,
@@ -318,11 +322,11 @@ def _request_json(client: requests.Session, url: str, params: dict[str, Any]) ->
     return payload, source_url
 
 
-def _select_us_profiles(cities: list[str] | None, *, limit_cities: int) -> list[CitySettlementProfile]:
+def _select_profiles(cities: list[str] | None, *, limit_cities: int) -> list[CitySettlementProfile]:
     requested = {str(city or "").strip().lower() for city in (cities or []) if str(city or "").strip()}
     profiles = [
         profile for profile in SETTLEMENT_REGISTRY.values()
-        if profile.region == "us" and (not requested or profile.city in requested)
+        if not requested or profile.city in requested
     ]
     return profiles[: max(1, int(limit_cities or 5))]
 
