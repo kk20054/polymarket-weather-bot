@@ -457,3 +457,4 @@
 - 阻塞：独立 PWS entitlement、PolyWX 数值 benchmark、操作员 UI 验收、14-30 天权威模拟结算样本仍未完成；live 保持锁定，paper cohort 保持 inactive。
 - 下一步：重启后端，启动新的受控 scheduler，确认 Forecast/NWP/Historical/Derived 首轮闭环，再进入 2 小时与 6 小时门槛。
 - 相关提交：`1fe8a79`。
+- 新验证起点：后端加载修复后，scheduler 于 `2026-07-11T13:36:49.608789+00:00`（北京时间 21:36:49）启动；2 小时与 6 小时门槛只从此时间计算，heartbeat 已同步更新。

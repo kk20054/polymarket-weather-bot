@@ -4,7 +4,7 @@
 - Date: 2026-07-11. Phase 2/3 data-source alignment and Layer 7 operator review are active.
 - Weather.com v3 now drives the dashboard Forecast/Cloud series; Open-Meteo models remain separate DEB inputs.
 - Shanghai China Live uses Pudong station `101020600`; WU same-day Historical is incrementally collectable.
-- Scheduler is stopped while the backend reloads the derive performance fix; every earlier validation start is invalid. Paper validation remains inactive.
+- Scheduler is running the repaired validation from authoritative start `2026-07-11T13:36:49.608789+00:00`; every earlier start is invalid. Paper validation remains inactive.
 - `LIVE_TRADING=false`; the system is research/paper infrastructure, not a proven profitable production bot.
 
 ## Latest Ledger Summaries
@@ -21,7 +21,7 @@
 - The required two-hour smoke and six-hour scheduler stability run have not yet been completed.
 - PolyWX numeric benchmark still needs same-date Shanghai/Chicago Forecast, Cloud, Historical and DEB comparison.
 - WU/HKO truth coverage and resolved paper outcomes are insufficient for profitability claims.
-- The two-hour and six-hour validation clocks must restart after the backend reloads `1fe8a79`.
+- The two-hour and six-hour validation gates are counting from `2026-07-11T13:36:49.608789+00:00` only.
 - Layer 7 still requires operator visual acceptance before starting the 14-30 day cohort.
 - Live dry-run/canary gates remain unaccepted and intentionally locked.
 
