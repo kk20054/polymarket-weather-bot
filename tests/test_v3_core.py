@@ -1860,6 +1860,52 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(parsed["settlement_unit"], "C")
         self.assertEqual(parsed["settlement_timezone"], "Asia/Hong_Kong")
 
+    def test_polymarket_resolution_text_parser_accepts_w_prefix_icao(self):
+        parsed = parse_settlement_rule_text(
+            city_key="singapore",
+            event_slug="highest-temperature-in-singapore-on-july-11-2026",
+            source_url="https://www.wunderground.com/history/daily/sg/singapore/WSSS",
+            description=(
+                "This market resolves to the highest temperature recorded at the Singapore Changi Airport "
+                "Station in degrees Celsius. Wunderground reports all times on this day."
+            ),
+        )
+
+        self.assertEqual(parsed["settlement_station_id"], "WSSS")
+        self.assertEqual(parsed["primary_settlement_source"], "wunderground")
+        self.assertEqual(parsed["settlement_time_basis"], "local_day")
+
+    def test_active_market_with_incomplete_contract_stays_unverified(self):
+        db_path = test_db_path("polymarket_market_probe_incomplete")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        event_payload = {
+            "slug": "highest-temperature-in-singapore-on-july-11-2026",
+            "title": "Highest temperature in Singapore on July 11?",
+            "active": True,
+            "closed": False,
+            "markets": [{
+                "id": "market-singapore-incomplete",
+                "active": True,
+                "closed": False,
+                "description": "This market resolves to a daily temperature range.",
+                "resolutionSource": "",
+            }],
+        }
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            result = probe_polymarket_markets(
+                ["singapore"],
+                today=date(2026, 7, 11),
+                fetch_json=lambda _url: event_payload,
+                path=db_path,
+                sleep_seconds=0,
+            )
+            row = list_stations(db_path, city="singapore")[0]
+
+        self.assertEqual(result["results"][0]["verification_status"], "unverified")
+        self.assertEqual(row["verification_status"], "unverified")
+        self.assertEqual(row["settlement_rule_verified_at"], "")
+
     def test_polymarket_market_probe_writes_verified_station_rule_idempotently(self):
         db_path = test_db_path("polymarket_market_probe")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))

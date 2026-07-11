@@ -66,6 +66,7 @@ def probe_polymarket_markets(
             message=result.get("status") or ("verified" if result.get("active_market") else "no_active_market"),
             details=result,
             log_key=f"{PROBE_VERSION}:{city_key}:{result.get('event_slug') or 'no-active'}",
+            path=path,
         )
         results.append(result)
         if sleep_seconds:
@@ -216,6 +217,7 @@ def _probe_city(
         current_station = str(current.get("station_id") or profile.station_id or "").upper()
         settlement_station = str(parsed.get("settlement_station_id") or "").upper()
         mismatch = bool(current_station and settlement_station and current_station != settlement_station)
+        contract_complete = _parsed_contract_complete(parsed)
         return {
             "ok": True,
             "city_key": city_key,
@@ -229,7 +231,11 @@ def _probe_city(
             "target_date": candidate.target_date,
             "current_station_id": current_station,
             "settlement_mismatch": mismatch,
-            "verification_status": "settlement_mismatch" if mismatch else "verified",
+            "verification_status": (
+                "settlement_mismatch"
+                if contract_complete and mismatch
+                else "verified" if contract_complete else "unverified"
+            ),
             **parsed,
             "market_count": len(markets),
             "market_id": str(market.get("id") or ""),
@@ -289,7 +295,7 @@ def _station_from_text(text: str) -> str:
     if re.search(r"Hong\s+Kong\s+Observatory", text, re.I):
         return "HKO"
     for pattern in (
-        r"\bstation\s+(?P<station>K[A-Z]{3}|R[A-Z]{3}|Z[A-Z]{3}|V[A-Z]{3}|E[A-Z]{3}|L[A-Z]{3}|S[A-Z]{3}|N[A-Z]{3})\b",
+        r"\bstation\s+(?P<station>[A-Z]{4})\b",
         r"\b(?P<station>HKO)\b",
     ):
         match = re.search(pattern, text.upper())
@@ -302,7 +308,21 @@ def _looks_like_station_id(value: str) -> bool:
     text = str(value or "").strip().upper()
     if text == "HKO":
         return True
-    return bool(re.fullmatch(r"(K[A-Z]{3}|R[A-Z]{3}|Z[A-Z]{3}|V[A-Z]{3}|E[A-Z]{3}|L[A-Z]{3}|S[A-Z]{3}|N[A-Z]{3})", text))
+    return bool(re.fullmatch(r"[A-Z]{4}", text))
+
+
+def _parsed_contract_complete(parsed: dict[str, Any]) -> bool:
+    source = str(parsed.get("primary_settlement_source") or "").strip().lower()
+    time_basis = str(parsed.get("settlement_time_basis") or "").strip().lower()
+    return all(
+        str(parsed.get(field) or "").strip()
+        for field in (
+            "settlement_rule_text",
+            "settlement_station_id",
+            "settlement_timezone",
+            "settlement_unit",
+        )
+    ) and source not in {"", "unknown"} and time_basis not in {"", "unknown"}
 
 
 def _station_name_from_text(text: str) -> str:

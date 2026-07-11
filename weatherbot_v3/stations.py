@@ -500,6 +500,23 @@ def apply_market_probe_result(result: dict[str, Any], *, path: Path | None = Non
                 status = "unverified"
         source = str(result.get("primary_settlement_source") or result.get("source_institution") or "")
         rule_text = str(result.get("settlement_rule_text") or "")
+        settlement_timezone = str(result.get("settlement_timezone") or current.get("timezone") or "")
+        settlement_unit = str(result.get("settlement_unit") or current.get("unit") or "")
+        settlement_time_basis = str(result.get("settlement_time_basis") or "local_day")
+        contract_complete = all(
+            value.strip()
+            for value in (
+                settlement_station,
+                rule_text,
+                source,
+                settlement_timezone,
+                settlement_unit,
+                settlement_time_basis,
+            )
+        ) and source.lower() != "unknown" and settlement_time_basis.lower() != "unknown"
+        if active_market and not contract_complete:
+            status = "unverified"
+            mismatch = False
         if not active_market:
             settlement_station = str(current.get("settlement_station_id") or current.get("station_id") or "").upper()
             source = source or "no_active_market"
@@ -531,10 +548,10 @@ def apply_market_probe_result(result: dict[str, Any], *, path: Path | None = Non
                 rule_text,
                 settlement_station,
                 str(result.get("settlement_station_name") or current.get("settlement_station_name") or current.get("station_name") or ""),
-                str(result.get("settlement_timezone") or current.get("timezone") or ""),
-                str(result.get("settlement_unit") or current.get("unit") or ""),
-                str(result.get("settlement_time_basis") or "local_day"),
-                now if active_market else "",
+                settlement_timezone,
+                settlement_unit,
+                settlement_time_basis,
+                now if active_market and contract_complete else "",
                 source,
                 confidence,
                 status,
