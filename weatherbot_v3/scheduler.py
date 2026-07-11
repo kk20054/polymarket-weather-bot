@@ -15,6 +15,7 @@ from .env_utils import env_value
 from .metar import fetch_recent_hours
 from .paper_settlement import settle_open_paper_orders
 from .paper_validation import run_paper_validation_tick
+from .qualification import build_data_readiness, persist_data_readiness
 from .source_health import compact_source_health
 from .stations import enabled_station_rows, sync_station_registry
 
@@ -465,9 +466,28 @@ class WeatherBotScheduler:
             city_target_dates = targets_by_city.get(city) or []
             date_results = []
             for target_date in city_target_dates:
-                hourly = await asyncio.to_thread(run_hourly_consensus_build, city, target_date, limit_cities=1)
-                daily = await asyncio.to_thread(run_daily_max_build, city, target_date, limit_cities=1)
-                decisions = await asyncio.to_thread(run_signal_decisions_build, city, target_date, limit_cities=1, limit=120)
+                hourly = await asyncio.to_thread(
+                    run_hourly_consensus_build,
+                    city,
+                    target_date,
+                    limit_cities=1,
+                    refresh_readiness=False,
+                )
+                daily = await asyncio.to_thread(
+                    run_daily_max_build,
+                    city,
+                    target_date,
+                    limit_cities=1,
+                    refresh_readiness=False,
+                )
+                decisions = await asyncio.to_thread(
+                    run_signal_decisions_build,
+                    city,
+                    target_date,
+                    limit_cities=1,
+                    limit=120,
+                    refresh_readiness=False,
+                )
                 decision_results = decisions.get("results") if isinstance(decisions.get("results"), list) else []
                 bucket_count = int(decision_results[0].get("bucket_count") or 0) if decision_results else 0
                 date_results.append({
@@ -486,13 +506,17 @@ class WeatherBotScheduler:
                 "dates": date_results,
             }
 
-        return await _run_city_batch(
+        result = await _run_city_batch(
             rows,
             self.city_concurrency,
             run_city,
             poller_key="derive_poller",
             timeout_seconds=DERIVE_CITY_TIMEOUT_SECONDS,
         )
+        readiness = await asyncio.to_thread(build_data_readiness)
+        await asyncio.to_thread(persist_data_readiness, readiness)
+        result["readiness_refreshed"] = True
+        return result
 
     async def _run_china_live_poller(self) -> dict[str, Any]:
         rows = [

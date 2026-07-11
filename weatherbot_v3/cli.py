@@ -125,6 +125,7 @@ def run_hourly_consensus_build(
     days_arg: int | None = None,
     limit_cities: int = 5,
     force_rebuild: bool = False,
+    refresh_readiness: bool = True,
 ) -> dict:
     from .hourly import build_hourly_consensus
 
@@ -153,12 +154,13 @@ def run_hourly_consensus_build(
         payload = build_hourly_consensus(cities or None, target_date=target_date or None)
     payload["force_rebuild"] = bool(force_rebuild)
     payload["days_requested"] = days_arg
-    readiness = build_data_readiness()
-    persist_data_readiness(readiness)
-    payload["hourly_consensus_stage"] = next(
-        (stage for stage in readiness.get("stages", []) if stage.get("key") == "hourly_consensus"),
-        None,
-    )
+    if refresh_readiness:
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        payload["hourly_consensus_stage"] = next(
+            (stage for stage in readiness.get("stages", []) if stage.get("key") == "hourly_consensus"),
+            None,
+        )
     return payload
 
 
@@ -169,6 +171,7 @@ def run_daily_max_build(
     days_arg: int | None = None,
     dry_run: bool = False,
     limit_cities: int = 5,
+    refresh_readiness: bool = True,
 ) -> dict:
     from .deb import build_daily_max_predictions
 
@@ -193,8 +196,9 @@ def run_daily_max_build(
                 limit=max(1, int(days_arg or 50)),
                 dry_run=dry_run,
             ))
-    readiness = build_data_readiness()
-    persist_data_readiness(readiness)
+    if refresh_readiness:
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
     return {
         "ok": all(item.get("ok") for item in results),
         "dry_run": dry_run,
@@ -581,6 +585,7 @@ def run_signal_decisions_build(
     dry_run: bool = False,
     limit_cities: int = 5,
     limit: int = 200,
+    refresh_readiness: bool = True,
 ) -> dict:
     from .signals import build_signal_decisions_for_targets
 
@@ -592,9 +597,10 @@ def run_signal_decisions_build(
     else:
         targets = _signal_decision_targets_from_db(cities, days_arg or 7)
     payload = build_signal_decisions_for_targets(targets, dry_run=dry_run, limit=limit)
-    readiness = build_data_readiness()
-    persist_data_readiness(readiness)
-    payload["signal_decisions_stage"] = readiness_stage(readiness, "signal_decisions")
+    if refresh_readiness:
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        payload["signal_decisions_stage"] = readiness_stage(readiness, "signal_decisions")
     return payload
 
 

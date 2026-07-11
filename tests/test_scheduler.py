@@ -285,12 +285,22 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "weatherbot_v3.scheduler.run_signal_decisions_build",
             return_value={"ok": True, "stored": 11, "results": [{"bucket_count": 11}]},
-        ):
+        ) as decisions, patch(
+            "weatherbot_v3.scheduler.build_data_readiness", return_value={"stages": []}
+        ) as readiness, patch(
+            "weatherbot_v3.scheduler.persist_data_readiness"
+        ) as persist_readiness:
             result = await WeatherBotScheduler(city_concurrency=2)._run_derive_poller()
 
         self.assertTrue(result["ok"])
         market_sync.assert_not_called()
         self.assertEqual(result["ok_cities"], 2)
+        self.assertTrue(result["readiness_refreshed"])
+        self.assertEqual(readiness.call_count, 1)
+        persist_readiness.assert_called_once_with({"stages": []})
+        self.assertEqual(decisions.call_count, 4)
+        for call in decisions.call_args_list:
+            self.assertFalse(call.kwargs["refresh_readiness"])
 
     async def test_gamma_poller_refreshes_active_buckets_by_target_date(self):
         rows = [
