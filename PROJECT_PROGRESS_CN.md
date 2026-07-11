@@ -1,5 +1,14 @@
 # WeatherBot 项目进度台账
 
+### 2026-07-11: PolyWX leakage-safe replay and observed-floor source contract
+
+- 目标：用本地保存的 PolyWX Chicago 2026-07-02/07-04 与 Shanghai 2026-07-06 证据重建 Forecast/Cloud/DEB/peak 对标，同时禁止目标日及之后 truth、晚于 capture 的 forecast snapshot 污染历史 replay。
+- 改动：Bias trainer 新增 `as_of_date_exclusive` 与非持久化模式；ensemble 按 `issued_at` 过滤 forecast run；DEB 支持显式 walk-forward bias。修复 P0：`observed_floor` 不再读取 `hourly_consensus` 或 display-only mesonet fallback，只接受截至 issued_at 的 METAR，香港额外允许与结算机构一致的 HKO current；PWS/历史格点/上海城市级 China Live 仍为趋势或展示证据。
+- 对标结果：Chicago 07-02 Forecast MAE 1.88F、Cloud MAE 22.53pp、DEB mu 差 0.13F、peak 17:00 vs 16:00；Chicago 07-04 为 1.61F、20.67pp、3.09F、14:00 vs 12:00；Shanghai 07-06 为 2.11C、46.36pp、1.37C。PolyWX US API 的 `temperature_c` 实际存 F、`pressure_hpa` 实际呈 inHg 尺度，工具现按城市单位契约读取，不再相信误导字段名。
+- 验证：`python -m unittest tests.test_v3_core tests.test_ensemble_vs_market` 通过 206 tests；benchmark 输出在 `audits/polywx-replay-2026-07-11/`；`git diff --check` 通过。调度器、live 与 auto simulation 均未启动。
+- 结论：Cloud 大差异是数据源差异；Chicago 07-04 与 Shanghai DEB 仍有模型融合/硬 floor 契约差异，不能通过抄 PolyWX 数值修饰。下一步应先闭合 paper settlement/PnL/Brier，才能判断差异是否具备交易价值。
+- 相关提交：`02ee52e`、`193422d`。
+
 ### 2026-07-11: Layer 3/4 Previous Runs 30-day calibration archive
 
 - 目标：在不降低 20 个独立结算日门槛的前提下，为 14 个 enabled 城市补齐固定 T+24 的 Open-Meteo Previous Runs，并让成熟 bias 真正进入 DEB。
