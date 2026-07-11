@@ -15,7 +15,7 @@
 - 2026-07-11 / Data foundation: 14-city settlement verification, 30-day WU/IEM/HKO truth, 69 mature bias rows, and leakage-safe PolyWX replay are complete. Commits `1e90c5c`, `26d887f`, `937a203`, `02ee52e`.
 
 ## Production Blockers
-- Layer 7 is materially cleaner but `WeatherPanel.tsx` remains oversized and still needs component extraction plus operator review of lower-page DEB/tables.
+- Layer 7 is materially cleaner; the Hourly chart is now isolated and has passed desktop/768px QA, but `WeatherPanel.tsx` still needs DEB/table extraction and operator review.
 - PWS v2 returns HTTP 401 with the current entitlement, so PWS peak-lock is unavailable.
 - Saved PolyWX replay still shows material Cloud, Forecast, and Chicago 07-04 DEB differences.
 - Scheduler status is in-memory; after a backend restart badges honestly show “未运行” instead of persisted source freshness.
@@ -24,7 +24,7 @@
 - Live dry-run, balance, duplicate-order, and canary gates are not accepted.
 
 ## Next Step
-- Continue Layer 7: split Hourly/DEB/table components and finish browser QA at desktop and narrow widths.
+- Continue Layer 7: split DEB/table components, then run the final production-workbench audit with Product Design, data-visualization, and browser evidence.
 - Obtain operator acceptance, then explicitly start the inactive Layer 9 cohort; do not start it beforehand.
 - Run 14-30 days using only new `paper-execution-v1` orders and authoritative settlements.
 - Resolve or explicitly disable PWS; quantify Cloud/Forecast/DEB differences through paper scoring.

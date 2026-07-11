@@ -410,3 +410,12 @@
 - 阻塞：PWS entitlement 仍为 HTTP 401；重启后 scheduler badge 只反映本进程状态而非持久化 source freshness；Cloud/Forecast/DEB 与保存的 PolyWX benchmark 仍有差异；尚无新 cohort 权威结算样本。
 - 下一步：完成 Hourly/DEB/table 组件拆分和浏览器窄屏 QA，人工确认看板后才显式启动 14-30 天 cohort。
 - 相关提交：概率修复 `e978b73`；看板减法 `110bfc2`。
+
+### 2026-07-11：Layer 7 Hourly 图组件拆分与响应式验收
+
+- 目标：继续收敛生产看板代码边界，先把 Hourly Temperature 图从超大的 `WeatherPanel.tsx` 中拆出，并完成桌面与窄屏浏览器验收；不启动 scheduler、paper cohort 或 live。
+- 改动：新增 `frontend/src/components/HourlyTemperatureChart.tsx`，集中管理多源折线、云量、峰值线、24 小时刻度和三行差异统计；`WeatherPanel.tsx` 只保留数据标准化与面板编排；PolyWX 契约测试同步覆盖拆分后的组件。
+- 验证：`python -m unittest discover tests` 257/257 通过；`npm run build` 通过；桌面 1280px 与窄屏 768px 均无横向溢出，浏览器 console error=0，Hourly 图、峰值线、刻度与统计行未发生遮挡。
+- 结论：Hourly 展示已形成可独立维护的组件边界，且拆分没有改变数据、策略或执行语义。`WeatherPanel.tsx` 仍然偏大，DEB 概率分布和下方明细表仍需继续拆分并由操作员最终验收。
+- 阻塞：PWS entitlement 仍为 HTTP 401；Cloud/Forecast/DEB 与保存的 PolyWX benchmark 仍有差异；14-30 天 paper cohort 仍为 inactive，`LIVE_TRADING=false`。
+- 下一步：先完成剩余 Layer 连接和数据口径整改，再用 Product Design、数据可视化和浏览器证据完成 DEB/table 与整个工作台 UI 收尾；只有人工验收后才启动 14-30 天模拟内测。
