@@ -121,6 +121,8 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("activeDot={{ r: 5 }}", chart)
         self.assertIn('dataKey="time_minute"', chart)
         self.assertIn('ticks={HOUR_TICKS}', chart)
+        self.assertIn('labelFormatter={value => formatTooltipTime(dateLabel, value)}', chart)
+        self.assertIn('`${dateLabel} ${formatMinute(Number(value))}`', chart)
         self.assertIn('domain={temperatureDomain}', chart)
         self.assertIn('allowDataOverflow', chart)
         self.assertIn('<Area yAxisId="percent"', chart)

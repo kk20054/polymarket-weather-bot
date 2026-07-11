@@ -474,3 +474,11 @@
 - UI：浏览器确认 China Live `03:40` 按分钟定位，没有挤到右端；温度 Y 轴自适应约 `26-31C`；METAR/WU 徽章按真实 series 变绿；DEB 显示 `实测 27.00C (metar, 8 样本)`；Forecast 表显示 condition、precip chance、revision 与 fetched time；console error/warn 为 0。
 - 结论：上海 Forecast/Cloud/DEB 已达到本轮 PolyWX 数值对照目标，且不复制 PolyWX 运行值。Chicago 7 月 12 日 WU 请求的 HTTP 400 是当地仍处 7 月 11 日、目标日尚未成为历史日，不是美洲数据源断开。scheduler 保持停止，paper cohort inactive，live 继续锁定。
 - 阻塞/下一步：PWS entitlement 仍缺；Chicago 需在当地 7 月 12 日开始后完成 WU Historical 与数值 benchmark；随后做运营者 UI 验收，再决定是否启动 14-30 天模拟 cohort。
+
+### 2026-07-12：三城 PolyWX 横向对照与悬浮日期修复
+
+- 改动：对上海 ZSPD、东京 RJTT、Chicago KORD 做当前动态 PolyWX 与本地同日字段级对照；`HourlyTemperatureChart.tsx` 新增 tooltip 日期格式化，混合频率数字分钟轴不再向用户显示 `660/1203`，而是显示 `YYYY/MM/DD HH:mm`。
+- 验证：三城 Weather.com v3 与 AWC METAR 受控刷新成功；WU 当日历史在上海、东京成功，Chicago 因当地目标日尚未开始诚实返回 HTTP 400。浏览器悬浮实测显示 `2026/07/12 12:00`，无 console error。
+- 结论：上海和 Chicago 的 Forecast/Cloud 与 PolyWX 接近；东京过去小时 Forecast 仍比 PolyWX 低约 2C，但 METAR/Historical 抽样一致，因此数值口径尚未完全闭环。WeatherBot Forecast/Historical 默认 30 分钟，PolyWX 抽样约 10-13 分钟，刷新速度尚未等价。
+- 阻塞：需追踪东京 forecast archive 选取逻辑；PWS entitlement 仍缺；活动城市是否改为分层 10 分钟轮询需先评估 API 配额与写放大。scheduler 保持停止，paper cohort inactive，`LIVE_TRADING=false`。
+- 下一步：先修东京过去小时 Forecast 快照选择，再决定只对活跃市场城市缩短 Forecast/WU Historical 周期，避免 14 城无差别高频写入。

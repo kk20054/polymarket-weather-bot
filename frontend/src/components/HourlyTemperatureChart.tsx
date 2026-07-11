@@ -53,6 +53,10 @@ function formatMinute(value: number) {
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
 }
 
+function formatTooltipTime(dateLabel: string, value: number | string) {
+  return `${dateLabel} ${formatMinute(Number(value))}`
+}
+
 type DotProps = { cx?: number; cy?: number; value?: number | null; active?: boolean }
 
 function SquareDot({ cx, cy, value, active = false }: DotProps) {
@@ -186,6 +190,7 @@ export function HourlyTemperatureChart({
               <YAxis yAxisId="percent" orientation="right" domain={[0, 100]} stroke="#475569" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}%`} />
               <Tooltip
                 contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
+                labelFormatter={value => formatTooltipTime(dateLabel, value)}
                 formatter={(value: unknown, name: string) => name === '云量 %' ? [`${Number(value).toFixed(0)}%`, name] : [formatTemp(Number(value), unit), name]}
               />
               {visibleSeries.cloud && <Area yAxisId="percent" type="monotone" dataKey="cloud_pct" name="云量 %" stroke="#94A3B8" fill="#94A3B8" fillOpacity={0.25} strokeOpacity={0.65} connectNulls />}
