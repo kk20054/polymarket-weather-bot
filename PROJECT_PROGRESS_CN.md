@@ -419,3 +419,13 @@
 - 结论：Hourly 展示已形成可独立维护的组件边界，且拆分没有改变数据、策略或执行语义。`WeatherPanel.tsx` 仍然偏大，DEB 概率分布和下方明细表仍需继续拆分并由操作员最终验收。
 - 阻塞：PWS entitlement 仍为 HTTP 401；Cloud/Forecast/DEB 与保存的 PolyWX benchmark 仍有差异；14-30 天 paper cohort 仍为 inactive，`LIVE_TRADING=false`。
 - 下一步：先完成剩余 Layer 连接和数据口径整改，再用 Product Design、数据可视化和浏览器证据完成 DEB/table 与整个工作台 UI 收尾；只有人工验收后才启动 14-30 天模拟内测。
+
+### 2026-07-11：Layer 1 核验状态不变量与 source-health-v2
+
+- 目标：回到生产化顺序的第 1、2 步，确保 `verification_status` 与 `settlement_rule_verified_at` 双向一致，并把按源汇总扩展成 14 城逐源健康矩阵。
+- 改动：reconciliation 现在会清理无有效合约证据的 verified timestamp、降级缺 timestamp 的 terminal status，并可从真实 probe 日志恢复 timestamp；`source-health-v2` 新增 `city_matrix`、逐城样本数、age、history days、live eligibility 与 Hong Kong paper-only 标记。
+- 验证：生产库 26 站检查 `repaired=0/inconsistent=0`；14 个启用城市为 13 verified + Hong Kong settlement_mismatch。Core/scheduler/dashboard contract 共 226 tests 通过，`git diff --check` 通过。
+- 运行证据：后端重启后 `/api/source-health` 返回 v2 与 14 个 city rows；scheduler 于 `2026-07-11T08:17:11.679287Z` 启动，首轮 METAR 14/14（56.989s）、China Live 2/2（44.249s）成功，Forecast 与 Orderbook 首轮正在运行。
+- 结论：状态倒挂不再只被报告而会被确定性修复；每个城市缺哪个源、是 missing/stale/degraded/healthy 现可直接读取。PWS 仍是可选 entitlement 缺口，Hong Kong 仍正确 paper-only，live 与 paper cohort 均未开启。
+- 下一步：连续观察 24 小时并按 v2 矩阵验收各 poller；通过后进入保存 PolyWX 日期的 Forecast/Cloud/DEB 重建与字段级差异分析。
+- 相关提交：`25d2396`。
