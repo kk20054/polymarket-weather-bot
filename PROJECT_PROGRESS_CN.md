@@ -400,3 +400,13 @@
 - 结论：长期内测的风险预算、身份链、显式启停和结算消费者已经就绪，但遵照人工验收顺序没有启动 cohort，也没有产生新模拟仓位。旧版 auto simulation 继续关闭，live 继续锁定。
 - 下一步：使用 Product Design audit、数据可视化和浏览器截图证据完成 Layer 7 UI 减法、组件拆分和 PolyWX 工作台对齐；人工验收通过后再启动 14-30 天 cohort。
 - 相关提交：`d1876b5`。
+
+### 2026-07-11：Layer 6 概率批次修复与 Layer 7 看板第一轮减法
+
+- 目标：在启动 14-30 天模拟内测前，先修复上海整数摄氏度桶显示为全 0 的 P0 问题，并按 PolyWX 城市工作台做看板减法；不启动 cohort、不解锁 live。
+- 改动：整数摄氏度 exact bucket 改为复用统一 truncation 边界，上海最新 ensemble 分布由 `sum_probability=0.0` 修复为 `1.0`；前端只消费最新 `issued_at` 决策批次，旧批次不再覆盖新概率。看板移除重复城市筛选、未启用城市、首屏内部规则标签、重复 Forecast Options 和旧版一键模拟，共净减 322 行；右侧新增只读 `paper-validation-v1` 状态卡，旧模拟入口不再误导操作员。`/api/dashboard` 不再每次同步重扫 4.5GB SQLite 计算推荐，热请求从约 2.3-4.8 秒降至约 0.6 秒。
+- 验证：全套 `python -m unittest discover tests` 257/257 通过；`npm run build` 通过；`git diff --check` 通过。浏览器验证上海最新桶出现 `model 20.0% / 80.0%`，前一天/今天同步 URL，无横向溢出，浅色中间面板不再发黑，新标签页 console error=0；截图见 `audits/ui-audit-2026-07-11/`。
+- 结论：Layer 7 已从“功能堆叠”进入可读的生产工作台方向，概率展示链已闭合；但 `WeatherPanel.tsx` 仍需继续拆分，DEB 下半区、表格密度和窄屏还未完成人工验收。cohort 仍为 `inactive`，scheduler 停止，`LIVE_TRADING=false`。
+- 阻塞：PWS entitlement 仍为 HTTP 401；重启后 scheduler badge 只反映本进程状态而非持久化 source freshness；Cloud/Forecast/DEB 与保存的 PolyWX benchmark 仍有差异；尚无新 cohort 权威结算样本。
+- 下一步：完成 Hourly/DEB/table 组件拆分和浏览器窄屏 QA，人工确认看板后才显式启动 14-30 天 cohort。
+- 相关提交：概率修复 `e978b73`；看板减法 `110bfc2`。
