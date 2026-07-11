@@ -215,10 +215,29 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("source_health", payload)
         self.assertIn("overall_status", payload["source_health"])
         self.assertIn("required_blockers", payload["source_health"])
-        for key in ("forecast_poller", "metar_poller", "china_live_poller", "derive_poller", "gamma_orderbook_poller"):
+        for key in ("forecast_poller", "metar_poller", "china_live_poller", "derive_poller", "gamma_orderbook_poller", "paper_settlement_poller"):
             self.assertIn(key, payload["pollers"])
             for field in ("last_run_at", "age_seconds", "last_duration_ms", "fails_last_hour", "next_run_at", "initial_delay_seconds"):
                 self.assertIn(field, payload["pollers"][key])
+
+    async def test_paper_settlement_poller_is_controlled_and_reports_counts(self):
+        scheduler = WeatherBotScheduler(city_concurrency=1)
+        with patch(
+            "weatherbot_v3.scheduler.settle_open_paper_orders",
+            return_value={
+                "ok": True,
+                "resolved_now": 2,
+                "provisional_now": 1,
+                "pending_now": 3,
+                "results": [],
+            },
+        ) as settle:
+            result = await scheduler.run_once("paper_settlement_poller")
+
+        self.assertTrue(result["ok"])
+        settle.assert_called_once_with(limit=1000, refresh_gamma=True, apply=True)
+        status = scheduler.status()["pollers"]["paper_settlement_poller"]
+        self.assertIn("2 resolved", status["last_message"])
 
     async def test_derive_poller_consumes_pre_refreshed_market_buckets(self):
         rows = [

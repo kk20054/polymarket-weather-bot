@@ -634,6 +634,35 @@ def run_paper_execute(
     return payload
 
 
+def run_paper_settle(
+    *,
+    cities_arg: str = "",
+    target_date: str = "",
+    limit: int = 200,
+    apply: bool = False,
+    refresh_gamma: bool = False,
+) -> dict:
+    from .paper_settlement import settle_open_paper_orders
+
+    cities = _cities_from_arg(cities_arg)
+    results = [
+        settle_open_paper_orders(
+            city_key=city or None,
+            target_date=target_date or None,
+            limit=limit,
+            refresh_gamma=refresh_gamma,
+            apply=apply,
+        )
+        for city in (cities or [""])
+    ]
+    return {
+        "ok": all(result.get("ok") for result in results),
+        "apply": apply,
+        "refresh_gamma": refresh_gamma,
+        "results": results,
+    }
+
+
 def _json_object(raw: str) -> dict:
     try:
         value = json.loads(raw)
@@ -1368,6 +1397,7 @@ def main() -> None:
             "signal-decisions-build",
             "model-timing-reprice",
             "paper-execute",
+            "paper-settle",
             "forecast-archive-import",
             "forecast-archive-manifest",
             "orderbook-backfill",
@@ -1423,6 +1453,7 @@ def main() -> None:
     parser.add_argument("--force-rebuild", action="store_true", help="Force upsert/rebuild where supported")
     parser.add_argument("--active-weather", action="store_true", help="Sync active Polymarket weather events from Gamma/CLOB")
     parser.add_argument("--skip-orderbooks", action="store_true", help="Skip CLOB orderbook fetches for active weather market buckets")
+    parser.add_argument("--refresh-gamma", action="store_true", help="Refresh paper market resolution from Gamma before settlement")
     args = parser.parse_args()
     cities_arg = ",".join(item for item in [args.cities, *args.city] if item)
 
@@ -1667,6 +1698,18 @@ def main() -> None:
                 limit=args.limit,
                 amount=args.amount,
                 apply=args.apply,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "paper-settle":
+        print(json.dumps(
+            run_paper_settle(
+                cities_arg=cities_arg,
+                target_date=args.target_date or args.start_date,
+                limit=args.limit,
+                apply=args.apply,
+                refresh_gamma=args.refresh_gamma,
             ),
             ensure_ascii=False,
             indent=2,

@@ -263,16 +263,30 @@ def init_v3_db(path: Path | None = None) -> None:
 
             CREATE TABLE IF NOT EXISTS settlements (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                settlement_key TEXT UNIQUE,
+                paper_order_id INTEGER,
+                decision_id TEXT,
                 market_id TEXT,
+                yes_token_id TEXT,
+                city_key TEXT,
+                target_date TEXT,
                 result TEXT,
+                outcome_yes INTEGER,
+                settlement_status TEXT,
+                settlement_source TEXT,
                 actual_temp REAL,
                 actual_provider TEXT,
                 actual_station TEXT,
                 actual_confidence REAL,
                 calibration_eligible INTEGER,
+                payout REAL,
                 pnl REAL,
+                brier_score REAL,
+                market_brier_score REAL,
+                settled_at TEXT,
                 raw_json TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                updated_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS market_rules (
@@ -1159,6 +1173,22 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "fill_status": "TEXT",
             "source": "TEXT",
         },
+        "settlements": {
+            "settlement_key": "TEXT",
+            "paper_order_id": "INTEGER",
+            "decision_id": "TEXT",
+            "yes_token_id": "TEXT",
+            "city_key": "TEXT",
+            "target_date": "TEXT",
+            "outcome_yes": "INTEGER",
+            "settlement_status": "TEXT",
+            "settlement_source": "TEXT",
+            "payout": "REAL",
+            "brier_score": "REAL",
+            "market_brier_score": "REAL",
+            "settled_at": "TEXT",
+            "updated_at": "TEXT",
+        },
         "mesonet_observations": {
             "raw_response": "TEXT",
             "raw_response_hash": "TEXT",
@@ -1211,6 +1241,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_orderbooks_snapshot_key ON orderbooks(snapshot_key)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_settlements_key ON settlements(settlement_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_settlements_order ON settlements(paper_order_id, settlement_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_stations_station_id ON stations(station_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_stations_region ON stations(region)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_metar_reports_city_time ON metar_reports(city, report_time)")
@@ -4036,6 +4068,12 @@ def paper_execution_summary(
     path: Path | None = None,
 ) -> dict[str, Any]:
     orders = list_paper_orders(city_key=city_key, target_date=target_date, limit=limit, path=path)
+    settlements = list_settlements(
+        city_key=city_key,
+        target_date=target_date,
+        limit=limit,
+        path=path,
+    )
     status_counts: dict[str, int] = {}
     reason_counts: dict[str, int] = {}
     total_filled = 0.0
@@ -4050,6 +4088,23 @@ def paper_execution_summary(
         total_unrealized += _num(order.get("unrealized_pnl"), 0.0)
         if str(order.get("lifecycle_status") or "") == "open":
             open_orders += 1
+    resolved = [row for row in settlements if row.get("settlement_status") == "resolved"]
+    provisional = [
+        row
+        for row in settlements
+        if str(row.get("settlement_status") or "").startswith("provisional")
+    ]
+    wins = sum(1 for row in resolved if row.get("result") == "win")
+    brier_values = [
+        float(row["brier_score"])
+        for row in resolved
+        if row.get("brier_score") is not None
+    ]
+    market_brier_values = [
+        float(row["market_brier_score"])
+        for row in resolved
+        if row.get("market_brier_score") is not None
+    ]
     return {
         "ok": True,
         "execution_version": "paper-execution-v1",
@@ -4059,19 +4114,172 @@ def paper_execution_summary(
         "open_orders": open_orders,
         "filled_amount": round(total_filled, 4),
         "unrealized_pnl": round(total_unrealized, 4),
+        "resolved_orders": len(resolved),
+        "provisional_orders": len(provisional),
+        "wins": wins,
+        "losses": len(resolved) - wins,
+        "win_rate": wins / len(resolved) if resolved else None,
+        "realized_pnl": round(sum(_num(row.get("pnl"), 0.0) for row in resolved), 4),
+        "brier_score": sum(brier_values) / len(brier_values) if brier_values else None,
+        "market_brier_score": (
+            sum(market_brier_values) / len(market_brier_values)
+            if market_brier_values
+            else None
+        ),
         "status_counts": status_counts,
         "reason_counts": [
             {"reason": reason, "count": count}
             for reason, count in sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))
         ],
+        "settlements": settlements,
         "orders": orders,
     }
+
+
+def apply_paper_settlement_record(
+    order_id: int,
+    settlement: dict[str, Any],
+    *,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Upsert one paper settlement and atomically close authoritative outcomes."""
+    init_v3_db(path)
+    now = utc_now()
+    settlement_status = str(settlement.get("settlement_status") or "provisional_truth")
+    authoritative = settlement_status == "resolved"
+    with connect(path) as conn:
+        order_row = conn.execute("SELECT * FROM paper_orders WHERE id = ?", (int(order_id),)).fetchone()
+        if not order_row:
+            return {"ok": False, "reason": "paper_order_not_found", "paper_order_id": int(order_id)}
+        order = _decode_paper_order(dict(order_row))
+        settlement_key = str(settlement.get("settlement_key") or f"paper_settlement:{int(order_id)}")
+        outcome_yes = 1 if bool(settlement.get("outcome_yes")) else 0
+        result = str(settlement.get("result") or ("win" if outcome_yes else "loss"))
+        raw_payload = {**settlement, "paper_order": order}
+        row = {
+            "settlement_key": settlement_key,
+            "paper_order_id": int(order_id),
+            "decision_id": str(order.get("decision_id") or settlement.get("decision_id") or ""),
+            "market_id": str(order.get("market_id") or settlement.get("market_id") or ""),
+            "yes_token_id": str(order.get("yes_token_id") or settlement.get("yes_token_id") or ""),
+            "city_key": str(order.get("city_key") or settlement.get("city_key") or ""),
+            "target_date": str(order.get("target_date") or settlement.get("target_date") or ""),
+            "result": result,
+            "outcome_yes": outcome_yes,
+            "settlement_status": settlement_status,
+            "settlement_source": str(settlement.get("settlement_source") or ""),
+            "actual_temp": _nullable_num(settlement.get("actual_temp")),
+            "actual_provider": str(settlement.get("actual_provider") or ""),
+            "actual_station": str(settlement.get("actual_station") or ""),
+            "actual_confidence": _nullable_num(settlement.get("actual_confidence")),
+            "calibration_eligible": 1 if settlement.get("calibration_eligible") else 0,
+            "payout": _nullable_num(settlement.get("payout")) if authoritative else None,
+            "pnl": _nullable_num(settlement.get("pnl")) if authoritative else None,
+            "brier_score": _nullable_num(settlement.get("brier_score")),
+            "market_brier_score": _nullable_num(settlement.get("market_brier_score")),
+            "settled_at": str(settlement.get("settled_at") or now) if authoritative else "",
+            "raw_json": dump_json(raw_payload),
+            "created_at": now,
+            "updated_at": now,
+        }
+        conn.execute(
+            """
+            INSERT INTO settlements (
+                settlement_key, paper_order_id, decision_id, market_id, yes_token_id,
+                city_key, target_date, result, outcome_yes, settlement_status,
+                settlement_source, actual_temp, actual_provider, actual_station,
+                actual_confidence, calibration_eligible, payout, pnl, brier_score,
+                market_brier_score, settled_at, raw_json, created_at, updated_at
+            ) VALUES (
+                :settlement_key, :paper_order_id, :decision_id, :market_id, :yes_token_id,
+                :city_key, :target_date, :result, :outcome_yes, :settlement_status,
+                :settlement_source, :actual_temp, :actual_provider, :actual_station,
+                :actual_confidence, :calibration_eligible, :payout, :pnl, :brier_score,
+                :market_brier_score, :settled_at, :raw_json, :created_at, :updated_at
+            )
+            ON CONFLICT(settlement_key) DO UPDATE SET
+                result=excluded.result,
+                outcome_yes=excluded.outcome_yes,
+                settlement_status=excluded.settlement_status,
+                settlement_source=excluded.settlement_source,
+                actual_temp=excluded.actual_temp,
+                actual_provider=excluded.actual_provider,
+                actual_station=excluded.actual_station,
+                actual_confidence=excluded.actual_confidence,
+                calibration_eligible=excluded.calibration_eligible,
+                payout=excluded.payout,
+                pnl=excluded.pnl,
+                brier_score=excluded.brier_score,
+                market_brier_score=excluded.market_brier_score,
+                settled_at=excluded.settled_at,
+                raw_json=excluded.raw_json,
+                updated_at=excluded.updated_at
+            """,
+            row,
+        )
+        if authoritative:
+            order_raw = dict(order.get("raw") or {})
+            order_raw["settlement"] = {key: value for key, value in row.items() if key != "raw_json"}
+            conn.execute(
+                """
+                UPDATE paper_orders
+                SET status = ?, lifecycle_status = 'settled', mark_price = ?,
+                    unrealized_pnl = 0, realized_pnl = ?, closed_at = ?,
+                    raw_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    "paper_won" if outcome_yes else "paper_lost",
+                    float(outcome_yes),
+                    row["pnl"],
+                    row["settled_at"],
+                    dump_json(order_raw),
+                    now,
+                    int(order_id),
+                ),
+            )
+        stored = conn.execute("SELECT * FROM settlements WHERE settlement_key = ?", (settlement_key,)).fetchone()
+    return {"ok": True, "settlement": _decode_settlement(dict(stored)) if stored else row}
+
+
+def list_settlements(
+    *,
+    city_key: str | None = None,
+    target_date: str | None = None,
+    status: str | None = None,
+    limit: int = 200,
+    path: Path | None = None,
+) -> list[dict[str, Any]]:
+    init_v3_db(path)
+    where: list[str] = []
+    params: list[Any] = []
+    if city_key:
+        where.append("city_key = ?")
+        params.append(city_key)
+    if target_date:
+        where.append("target_date = ?")
+        params.append(target_date)
+    if status:
+        where.append("settlement_status = ?")
+        params.append(status)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    with connect(path) as conn:
+        rows = conn.execute(
+            f"SELECT * FROM settlements {clause} ORDER BY id DESC LIMIT ?",
+            (*params, max(1, min(int(limit or 200), 2000))),
+        ).fetchall()
+    return [_decode_settlement(dict(row)) for row in rows]
 
 
 def _decode_paper_order(row: dict[str, Any]) -> dict[str, Any]:
     row["risk_reasons"] = _loads_list(row.get("risk_reasons_json"))
     row["orderbook_snapshot"] = _loads_obj(row.get("orderbook_snapshot_json"))
     row["evidence_links"] = _loads_obj(row.get("evidence_links_json"))
+    row["raw"] = _loads_obj(row.get("raw_json"))
+    return row
+
+
+def _decode_settlement(row: dict[str, Any]) -> dict[str, Any]:
     row["raw"] = _loads_obj(row.get("raw_json"))
     return row
 

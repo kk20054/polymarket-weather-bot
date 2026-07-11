@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from .cli import run_china_weather_fetch, run_daily_max_build, run_gamma_structured_sync, run_hourly_consensus_build, run_market_buckets_sync, run_model_timing_reprice, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build, run_weathercom_fetch
 from .db import log_data_fetch, utc_now
 from .metar import fetch_recent_hours
+from .paper_settlement import settle_open_paper_orders
 from .source_health import build_source_health_matrix, compact_source_health
 from .stations import enabled_station_rows, sync_station_registry
 
@@ -23,6 +24,7 @@ DERIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_DERIVE_SECONDS", "
 CHINA_LIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_CHINA_LIVE_SECONDS", "300") or "300")
 GAMMA_ORDERBOOK_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_GAMMA_ORDERBOOK_SECONDS", "300") or "300")
 MODEL_TIMING_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_MODEL_TIMING_SECONDS", "60") or "60")
+PAPER_SETTLEMENT_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PAPER_SETTLEMENT_SECONDS", "900") or "900")
 METAR_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_METAR_CITY_TIMEOUT", "120") or "120")
 FORECAST_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_CITY_TIMEOUT", "240") or "240")
 DERIVE_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_DERIVE_CITY_TIMEOUT", "300") or "300")
@@ -103,6 +105,7 @@ class WeatherBotScheduler:
             "forecast_poller": PollerState("forecast_poller", "Forecast", FORECAST_INTERVAL_SECONDS, 15),
             "gamma_orderbook_poller": PollerState("gamma_orderbook_poller", "Orderbook", GAMMA_ORDERBOOK_INTERVAL_SECONDS, 45),
             "derive_poller": PollerState("derive_poller", "Historical", DERIVE_INTERVAL_SECONDS, 420),
+            "paper_settlement_poller": PollerState("paper_settlement_poller", "Paper Settlement", PAPER_SETTLEMENT_INTERVAL_SECONDS, 600),
             "model_timing_poller": PollerState("model_timing_poller", "Model Timing", MODEL_TIMING_INTERVAL_SECONDS, 0),
         }
 
@@ -158,6 +161,8 @@ class WeatherBotScheduler:
                     result = await self._run_gamma_orderbook_poller()
                 elif poller_key == "model_timing_poller":
                     result = await self._run_model_timing_poller()
+                elif poller_key == "paper_settlement_poller":
+                    result = await self._run_paper_settlement_poller()
                 else:
                     raise KeyError(poller_key)
             except Exception as exc:
@@ -486,6 +491,14 @@ class WeatherBotScheduler:
             }
         return await asyncio.to_thread(run_model_timing_reprice, "", days_arg=2, dry_run=False)
 
+    async def _run_paper_settlement_poller(self) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            settle_open_paper_orders,
+            limit=1000,
+            refresh_gamma=True,
+            apply=True,
+        )
+
 
 async def _run_city_batch(
     rows: list[dict[str, Any]],
@@ -640,6 +653,12 @@ def _compact_result(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _poller_message(poller_key: str, result: dict[str, Any]) -> str:
+    if poller_key == "paper_settlement_poller":
+        return (
+            f"{poller_key} completed: {int(result.get('resolved_now') or 0)} resolved, "
+            f"{int(result.get('provisional_now') or 0)} provisional, "
+            f"{int(result.get('pending_now') or 0)} pending"
+        )
     if poller_key == "gamma_orderbook_poller":
         return (
             f"{poller_key} completed: {int(result.get('events_stored') or 0)} events, "
