@@ -392,3 +392,11 @@
 - 阻塞：PWS 权限仍为 HTTP 401；derive 周期偏长；Layer 9 尚需 14-30 天新订单和权威结算样本；live 保持锁定。
 - 下一步：启动受控的新 v1 paper cohort，先验证订单生成、模拟成交、provisional truth、Gamma finalization 的连续链路，再进入 14-30 天统计验证。
 - 相关提交：`4245bf4`。
+### 2026-07-11：Layer 9 受控模拟验证 cohort 底座
+
+- 目标：在 UI 验收前补齐 14-30 天内测所需的可审计运行容器，但默认不启动、不创建模拟订单。
+- 改动：新增 `paper_validation_runs` 与 `weatherbot_v3/paper_validation.py`；cohort 仅消费启动后且不超过 30 分钟的新决策，默认只允许 `single_bucket_ev`，排除 monitor-only 城市，并限制 `$40` 本金、单笔 `$2`、每日 `$10`、最多 5 个未结算仓位和每日 5 单。订单新增 `cohort_run_id`；scheduler 新增 inactive-by-default 的 paper execution poller；CLI 支持 start/status/stop/tick，start/stop 必须显式 `--apply`。
+- 验证：paper cohort/settlement/scheduler 19 tests 通过；core/PolyWX/ensemble 219 tests 通过；真实库 `paper-cohort-status` 返回 `inactive`；`git diff --check` 通过。一次合并测试因后台 derive 与 4.5GB SQLite 竞争超过 300 秒，停止 scheduler 后拆分复跑全部通过，不是测试失败。
+- 结论：长期内测的风险预算、身份链、显式启停和结算消费者已经就绪，但遵照人工验收顺序没有启动 cohort，也没有产生新模拟仓位。旧版 auto simulation 继续关闭，live 继续锁定。
+- 下一步：使用 Product Design audit、数据可视化和浏览器截图证据完成 Layer 7 UI 减法、组件拆分和 PolyWX 工作台对齐；人工验收通过后再启动 14-30 天 cohort。
+- 相关提交：`d1876b5`。

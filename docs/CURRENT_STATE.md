@@ -8,6 +8,7 @@
 
 ## Latest Ledger Summaries
 - 2026-07-11 / Paper settlement: new v1 paper orders can move from provisional WU/HKO truth to authoritative closed Gamma outcomes, atomically realizing PnL and recording win rate, model/market Brier scores. The 60 legacy rows remain explicitly unscorable. Commit `4245bf4`.
+- 2026-07-11 / Paper validation cohort: an explicit, inactive-by-default 14-30 day cohort now enforces post-start fresh decisions, $40 bankroll, $2/trade, $10/day, five open positions/orders per day, strategy/city allowlists, and cohort-linked orders. It is intentionally not started until dashboard acceptance. Commit `d1876b5`.
 - 2026-07-11 / PolyWX replay: leakage-safe replay now cuts off future truth and forecast snapshots. It also fixed a P0 where display-only historical data could raise the DEB observed floor. Chicago 07-02 DEB mu is now within 0.13F of saved PolyWX. Commits `02ee52e`, `193422d`.
 - 2026-07-11 / Previous Runs calibration: 14 cities received 30 fixed T+24 archive dates for their regional primary models plus ICON/GEM coverage. Bias retraining now has 69 runtime-eligible city/model rows, and DEB consumes the weighted correction. Commit `937a203`.
 - 2026-07-11 / Bias audit baseline: the trainer now uses HKO/WU exact truth before IEM, enforces a pre-local-day forecast cutoff, and records real corrected MAE/RMSE. This pre-backfill baseline was later superseded by the 69 mature rows above. Commit `bbe104b`.
@@ -26,6 +27,7 @@
 - Live dry-run, balance, duplicate-order, and canary gates are not accepted for production use.
 
 ## Next Step
-- Start a controlled Layer 9 paper cohort using only new `paper-execution-v1` orders, keep scheduler and auto-simulation explicitly controlled, and collect 14-30 days of authoritative settlements.
+- Complete Layer 7 dashboard reduction and component splitting, then obtain operator acceptance before starting the inactive Layer 9 paper cohort.
+- After dashboard acceptance, start the cohort using only new `paper-execution-v1` orders and collect 14-30 days of authoritative settlements.
 - Resolve or explicitly disable the unavailable PWS entitlement path.
 - Revisit Cloud/DEB source parity while paper scoring quantifies whether the differences help or hurt calibration; do not discuss a live canary before the validation gate passes.
