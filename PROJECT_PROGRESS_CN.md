@@ -446,3 +446,5 @@
 - 结论：采集、派生与主图展示职责已经闭合，PWS 仍因独立产品 entitlement 缺失不可用；2 小时与 6 小时连续调度验收尚未完成，不能据此宣称生产稳定或盈利。
 - 下一步：基于提交 `84ab4f0` 启动 2 小时 scheduler smoke，检查全部启用城市的源新鲜度、WU 当日增量、无重复 PWS 401；通过后再做 6 小时稳定性验证与 PolyWX 数值 benchmark。
 - 启动前修复：首次 scheduler 启动暴露 `/api/scheduler/status` 同步扫描 4GB SQLite、阻塞事件循环超过 30 秒的 P0。提交 `446cc22` 将 status 改为纯内存读取，`/api/source-health` 改在线程中计算并回填缓存；并发实测 source-health 运行时 status 仍可在约 182ms 返回，热请求约 6ms。
+- 继续修复：提交 `a4b8385` 将 scheduler 的 registry 读取和 per-city/overall fetch log 写入全部移出事件循环；提交 `f7de6c1` 删除 Weather.com v3 内层错误的 40 秒硬超时。首轮取证显示 WU Historical 13/13、NWP 14/14，PWS 无 key 时无 401；旧 forecast 3 个 timeout 由该 40 秒限制造成。
+- 当前验证：唯一有效的连续 scheduler 起点为 `2026-07-11T12:56:56.701552+00:00`（北京时间 20:56:56）。启动 20 秒后 status 在 forecast 运行中仍于 49ms 返回；此前所有起点均作废。
