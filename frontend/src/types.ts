@@ -1003,6 +1003,27 @@ export interface SchedulerStatus {
   pollers: Record<string, SchedulerPollerStatus>
 }
 
+export interface PaperValidationStatus {
+  ok: boolean
+  status: 'inactive' | 'active' | 'stopped' | 'completed' | string
+  version?: string
+  run_id?: string
+  started_at?: string
+  ends_at?: string
+  bankroll_usd?: number
+  orders_total?: number
+  orders_today?: number
+  open_positions?: number
+  resolved_orders?: number
+  wins?: number
+  losses?: number
+  win_rate?: number | null
+  realized_pnl?: number
+  brier_score?: number | null
+  spent_today_usd?: number
+  cash_available_usd?: number
+}
+
 export interface CityEvidenceModule {
   rows?: number
   signals?: number

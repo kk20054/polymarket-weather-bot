@@ -8,7 +8,6 @@ import {
   PauseCircle,
   RefreshCw,
   ShieldAlert,
-  Star,
   Wallet,
 } from 'lucide-react'
 import {
@@ -24,12 +23,9 @@ import {
   fetchSignalDecisions,
   fetchSettlementContracts,
   placeLiveOrder,
-  resetSimulation,
   runProductionAction,
   runProductionRefresh,
-  setAutoSimulation,
-  setStationEnabled,
-  settleTradesApi,
+  fetchPaperValidationStatus,
   startScheduler,
   stopScheduler,
   stopBot,
@@ -44,7 +40,7 @@ import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
 import { useT, type I18nLanguage } from './i18n/useT'
-import type { AutoSimulationStatus, BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommendationItem, DataReadiness, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerPollerStatus, SchedulerStatus } from './types'
+import type { BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommendationItem, DataReadiness, PaperValidationStatus, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerPollerStatus, SchedulerStatus } from './types'
 
 type TradeMode = 'paper' | 'live'
 type UiLanguage = 'zh' | 'en'
@@ -104,8 +100,6 @@ const UI_COPY = {
   },
 } satisfies Record<UiLanguage, Record<string, string>>
 
-const MAINLAND_CITY_KEYS = new Set(['shanghai', 'beijing', 'wuhan', 'qingdao', 'shenzhen'])
-const ASIA_OTHER_CITY_KEYS = new Set(['hong-kong', 'tokyo', 'seoul', 'taipei', 'singapore'])
 const ROUND5_STATUS_FALLBACK: Record<string, CityStatusConfig> = {
   shanghai: { status: 'fully_active', rank: 1, settlement: 'verified WU' },
   'hong-kong': { status: 'paper_only', rank: 2, settlement: 'HKO mismatch' },
@@ -144,12 +138,6 @@ function statusTone(status: CityTradingStatus) {
   if (status === 'paper_only') return 'border-amber-500/35 bg-amber-500/10 text-amber-100'
   if (status === 'monitor_only') return 'border-red-500/35 bg-red-500/10 text-red-100'
   return 'border-neutral-700 bg-neutral-900/50 text-neutral-400'
-}
-
-function cityGroupKey(cityKey: string, continent?: string) {
-  if (MAINLAND_CITY_KEYS.has(cityKey)) return 'mainland'
-  if (ASIA_OTHER_CITY_KEYS.has(cityKey)) return 'asia'
-  return continent === 'Asia Pacific' || continent === 'Asia' ? 'asia' : 'us'
 }
 
 const EMPTY_STATS: BotStats = {
@@ -205,11 +193,11 @@ function relativeTime(value?: string | null) {
 
 function pollerAgeLabel(poller?: SchedulerPollerStatus | null) {
   const age = poller?.age_seconds
-  if (age === null || age === undefined || !Number.isFinite(Number(age))) return 'never'
-  if (Number(age) < 60) return `${Math.round(Number(age))}s ago`
-  if (Number(age) < 3600) return `${Math.round(Number(age) / 60)}m ago`
-  if (Number(age) < 86400) return `${(Number(age) / 3600).toFixed(1)}h ago`
-  return `${(Number(age) / 86400).toFixed(1)}d ago`
+  if (age === null || age === undefined || !Number.isFinite(Number(age))) return '未运行'
+  if (Number(age) < 60) return `${Math.round(Number(age))}秒前`
+  if (Number(age) < 3600) return `${Math.round(Number(age) / 60)}分钟前`
+  if (Number(age) < 86400) return `${(Number(age) / 3600).toFixed(1)}小时前`
+  return `${(Number(age) / 86400).toFixed(1)}天前`
 }
 
 function durationLabel(ms?: number | null) {
@@ -345,8 +333,6 @@ function cityKeyFromParam(value: string | null) {
   if (!value) return ''
   return value.split('-').slice(0, -1).join('-') || value
 }
-
-const CONTINENT_FILTERS = ['全部', 'Americas', 'Europe', 'Asia', 'Pacific', 'Africa', 'Other'] as const
 
 function cityContinent(cityKey?: string, cityName?: string) {
   const value = `${cityKey || ''} ${cityName || ''}`.toLowerCase()
@@ -692,201 +678,54 @@ function TradeModeSwitch({
   )
 }
 
-function SimulationCard({
-  stats,
-  value,
-  clearMarks,
-  autoSimulation,
-  onValue,
-  onClearMarks,
-  onReset,
-  onSettle,
-  onToggleAuto,
-  resetting,
-  settling,
-  autoPending,
-}: {
-  stats: BotStats
-  value: string
-  clearMarks: boolean
-  autoSimulation: AutoSimulationStatus
-  onValue: (value: string) => void
-  onClearMarks: (value: boolean) => void
-  onReset: () => void
-  onSettle: () => void
-  onToggleAuto: () => void
-  resetting: boolean
-  settling: boolean
-  autoPending: boolean
-}) {
-  const autoRunning = autoSimulation.enabled
-
+function PaperValidationCard({ status }: { status?: PaperValidationStatus | null }) {
+  const active = status?.status === 'active'
+  const stateLabel = active ? '运行中' : status?.status === 'completed' ? '已完成' : '待人工验收'
+  const bankroll = status?.bankroll_usd ?? 40
   return (
     <div className="border border-neutral-800 bg-black p-3">
       <div className="mb-3 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Wallet className="h-4 w-4 text-cyan-300" />
           <div>
-            <div className="text-sm font-medium text-neutral-100">模拟账户</div>
+            <div className="text-sm font-medium text-neutral-100">模拟内测</div>
+            <div className="mt-0.5 text-[9px] text-neutral-600">paper-validation-v1 · 权威结算后计分</div>
           </div>
         </div>
         <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${
-          autoRunning ? 'border-green-500/30 text-green-300' : 'border-neutral-700 text-neutral-500'
+          active ? 'border-green-500/30 text-green-300' : 'border-amber-500/30 text-amber-300'
         }`}>
-          {autoRunning ? '运行中' : '已停止'}
+          {stateLabel}
         </span>
       </div>
 
       <div className="grid grid-cols-2 gap-2 text-[11px]">
         <div className="border border-neutral-800 p-2">
-          <div className="text-neutral-600">权益</div>
-          <div className="tabular-nums text-lg text-neutral-100">{money(stats.bankroll)}</div>
+          <div className="text-neutral-600">本金 / 可用现金</div>
+          <div className="tabular-nums text-base text-neutral-100">{money(bankroll)} / {money(status?.cash_available_usd ?? bankroll)}</div>
         </div>
         <div className="border border-neutral-800 p-2">
-          <div className="text-neutral-600">未实现</div>
-          <div className={`tabular-nums text-lg ${(stats.unrealized_pnl ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
-            {money(stats.unrealized_pnl ?? 0)}
+          <div className="text-neutral-600">已实现 PnL</div>
+          <div className={`tabular-nums text-base ${(status?.realized_pnl ?? 0) >= 0 ? 'text-green-300' : 'text-red-300'}`}>
+            {money(status?.realized_pnl ?? 0)}
           </div>
         </div>
         <div className="border border-neutral-800 p-2">
-          <div className="text-neutral-600">现金 / 占用</div>
-          <div className="tabular-nums text-neutral-200">{money(stats.cash_balance ?? stats.bankroll)} / {money(stats.reserved_capital ?? 0)}</div>
+          <div className="text-neutral-600">订单 / 持仓 / 结算</div>
+          <div className="tabular-nums text-neutral-200">{status?.orders_total ?? 0} / {status?.open_positions ?? 0} / {status?.resolved_orders ?? 0}</div>
         </div>
         <div className="border border-neutral-800 p-2">
-          <div className="text-neutral-600">持仓 / 结算</div>
-          <div className="tabular-nums text-neutral-200">{stats.open_trades ?? 0} / {stats.settled_trades ?? 0}</div>
+          <div className="text-neutral-600">胜率 / Brier</div>
+          <div className="tabular-nums text-neutral-200">
+            {status?.win_rate === null || status?.win_rate === undefined ? '--' : `${(status.win_rate * 100).toFixed(1)}%`} / {status?.brier_score === null || status?.brier_score === undefined ? '--' : status.brier_score.toFixed(3)}
+          </div>
         </div>
       </div>
-
-      <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
-        <label className="grid min-w-0 grid-cols-[auto_1fr] items-center border border-neutral-800 bg-neutral-950/70 px-2 py-1 text-[10px] text-neutral-500">
-          本金
-          <input
-            type="number"
-            min="0"
-            step="1"
-            value={value}
-            onChange={event => onValue(event.target.value)}
-            className="min-w-0 border-0 bg-transparent p-0 text-right text-xs tabular-nums text-neutral-100 focus:outline-none"
-            aria-label="设置模拟本金"
-          />
-        </label>
-        <button
-          onClick={onReset}
-          disabled={resetting}
-          className="border border-cyan-500/30 px-2 py-1 text-[11px] text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-40"
-        >
-          应用
-        </button>
-      </div>
-
-      <label className="mt-2 flex items-center gap-2 text-[10px] text-neutral-500">
-        <input
-          type="checkbox"
-          checked={clearMarks}
-          onChange={event => onClearMarks(event.target.checked)}
-          className="h-3 w-3 p-0"
-        />
-        重置时清除模拟标记
-      </label>
-
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <button
-          onClick={onToggleAuto}
-          disabled={autoPending}
-          className={`border px-2 py-1.5 disabled:opacity-40 ${
-            autoRunning
-              ? 'border-red-500/30 bg-red-500/5 text-red-300 hover:bg-red-500/10'
-              : 'border-green-500/30 bg-green-500/10 text-green-300 hover:border-green-500/60'
-          }`}
-        >
-          {autoPending ? '更新中...' : autoRunning ? '停止模拟' : '一键模拟'}
-        </button>
-        <button
-          onClick={onSettle}
-          disabled={settling || (stats.open_trades ?? 0) === 0}
-          className="border border-amber-500/30 px-2 py-1.5 text-amber-300 hover:bg-amber-500/10 disabled:opacity-40"
-        >
-          检查结算
-        </button>
-      </div>
-
-      {autoSimulation.last_error && (
-        <div className="mt-3 border border-red-500/30 bg-red-500/5 p-2 text-[10px] leading-relaxed text-red-300">
-          {autoSimulation.last_error}
+      {!active && (
+        <div className="mt-3 border border-amber-500/20 bg-amber-500/5 p-2 text-[10px] leading-relaxed text-amber-200/80">
+          看板人工验收后再启动 14–30 天内测；当前不会自动创建模拟订单。
         </div>
       )}
-
-      <details className="mt-3 text-[10px] text-neutral-600">
-        <summary className="cursor-pointer select-none hover:text-neutral-300">估值口径</summary>
-        <p className="mt-1 leading-relaxed">
-          新买入会按卖一成交、按买一估值，spread 先进入未实现亏损；这只是执行成本，不代表最终结算已经错。
-        </p>
-      </details>
-    </div>
-  )
-}
-
-function ForecastOptionsCard({
-  cityName,
-  station,
-  selectedDate,
-  dataAgeLabel,
-  signals,
-  actionable,
-  refreshing,
-  language,
-  onRefresh,
-}: {
-  cityName: string
-  station: string
-  selectedDate: string
-  dataAgeLabel: string
-  signals: number
-  actionable: number
-  refreshing: boolean
-  language: UiLanguage
-  onRefresh: () => void
-}) {
-  const zh = language === 'zh'
-  return (
-    <div className="grid gap-2 border border-neutral-800 bg-black p-2 text-[10px] text-neutral-500">
-      <div className="flex items-center justify-between gap-2">
-        <div>
-          <div className="text-xs text-neutral-200">Forecast Options</div>
-          <div className="mt-0.5 text-[9px] text-neutral-600">
-            {cityName || (zh ? '等待城市' : 'Waiting city')} {station ? `· ${station}` : ''}
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={onRefresh}
-          disabled={refreshing}
-          className="inline-flex items-center gap-1 border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-300 hover:bg-cyan-500/10 disabled:opacity-40"
-        >
-          <RefreshCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} />
-          {refreshing ? (zh ? '抓取中' : 'Fetching') : (zh ? '刷新' : 'Refresh')}
-        </button>
-      </div>
-      <div className="grid grid-cols-3 gap-1">
-        <StatusTile label={zh ? '日期' : 'Date'} value={selectedDate || '--'} />
-        <StatusTile label={zh ? '数据' : 'Data'} value={dataAgeLabel} />
-        <StatusTile label={zh ? '信号' : 'Signals'} value={`${actionable}/${signals}`} tone={actionable > 0 ? 'green' : 'neutral'} />
-      </div>
-      <div className="border border-neutral-800 bg-neutral-950/60 p-2">
-        <div className="mb-1 flex items-center justify-between gap-2">
-          <span className="text-xs text-neutral-200">Alerts</span>
-          <span className={`border px-1.5 py-0.5 text-[9px] ${actionable > 0 ? 'border-green-500/30 text-green-300' : 'border-neutral-700 text-neutral-500'}`}>
-            {actionable > 0 ? (zh ? '有可行动信号' : 'Actionable') : (zh ? '观察中' : 'Watching')}
-          </span>
-        </div>
-        <div className="grid grid-cols-2 gap-1">
-          <span className="border border-neutral-800 px-2 py-1">{zh ? '峰值温度' : 'Peak temp'}</span>
-          <span className="border border-neutral-800 px-2 py-1">{zh ? '信号队列' : 'Signal queue'}</span>
-          <span className="border border-neutral-800 px-2 py-1">{zh ? '盘口刷新' : 'Orderbook'}</span>
-          <span className="border border-neutral-800 px-2 py-1">{zh ? '结算样本' : 'Truth sample'}</span>
-        </div>
-      </div>
     </div>
   )
 }
@@ -903,12 +742,8 @@ function App() {
     if (typeof window === 'undefined') return ''
     return new URLSearchParams(window.location.search).get('date') ?? ''
   })
-  const [simBalance, setSimBalance] = useState('40')
-  const [clearMarks, setClearMarks] = useState(false)
   const [contractStatus, setContractStatus] = useState('mature-auto')
   const [citySearch, setCitySearch] = useState('')
-  const [citySort, setCitySort] = useState<'signal' | 'alpha'>('signal')
-  const [continentFilter, setContinentFilter] = useState<(typeof CONTINENT_FILTERS)[number]>('全部')
   const [uiLanguage, setUiLanguage] = useState<UiLanguage>(() => {
     if (typeof window === 'undefined') return 'zh'
     return window.localStorage.getItem('weatherbot-ui-language') === 'en' ? 'en' : 'zh'
@@ -919,7 +754,6 @@ function App() {
   })
   const [productionActionResult, setProductionActionResult] = useState<ProductionActionRunResult | null>(null)
   const [refreshNotices, setRefreshNotices] = useState<RefreshNotice[]>([])
-  const balanceInitRef = useRef(false)
   const seenSchedulerRunsRef = useRef<Record<string, string>>({})
   const copy = UI_COPY[uiLanguage]
   const i18nLanguage: I18nLanguage = uiLanguage === 'zh' ? 'zh-CN' : 'en'
@@ -969,6 +803,13 @@ function App() {
   const schedulerStatusQuery = useQuery({
     queryKey: ['scheduler-status'],
     queryFn: fetchSchedulerStatus,
+    refetchInterval: 30000,
+    retry: 1,
+  })
+
+  const paperValidationStatusQuery = useQuery({
+    queryKey: ['paper-validation-status'],
+    queryFn: fetchPaperValidationStatus,
     refetchInterval: 30000,
     retry: 1,
   })
@@ -1029,14 +870,6 @@ function App() {
     },
   })
 
-  const autoSimulationMutation = useMutation({
-    mutationFn: (enabled: boolean) => setAutoSimulation(enabled, 300),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
-    },
-  })
-
   const schedulerStartMutation = useMutation({
     mutationFn: startScheduler,
     onMutate: () => {
@@ -1084,33 +917,6 @@ function App() {
         message: result.message || (uiLanguage === 'zh' ? '后端 poller 已停止，数据只会由手动刷新更新。' : 'Backend pollers stopped.'),
         details: ['scheduler/stop'],
       }, 8000)
-    },
-  })
-
-  const stationEnabledMutation = useMutation({
-    mutationFn: ({ cityKey, enabled }: { cityKey: string; enabled: boolean }) =>
-      setStationEnabled(cityKey, enabled),
-    onSuccess: result => {
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-      queryClient.invalidateQueries({ queryKey: ['scheduler-status'] })
-      showRefreshNotice({
-        id: Date.now() + 4,
-        tone: result.enabled ? 'success' : 'warning',
-        title: result.enabled
-          ? (uiLanguage === 'zh' ? '城市已加入调度' : 'City enabled')
-          : (uiLanguage === 'zh' ? '城市已暂停调度' : 'City disabled'),
-        message: `${result.city_key} · tier ${result.tier}`,
-        details: ['stations enabled watchlist'],
-      }, 6000)
-    },
-    onError: error => {
-      showRefreshNotice({
-        id: Date.now() + 5,
-        tone: 'error',
-        title: uiLanguage === 'zh' ? '城市调度状态更新失败' : 'City watchlist update failed',
-        message: error instanceof Error ? error.message : String(error),
-        details: ['stations/enabled'],
-      }, 10000)
     },
   })
 
@@ -1206,23 +1012,6 @@ function App() {
     },
   })
 
-  const resetSimulationMutation = useMutation({
-    mutationFn: ({ balance, clear }: { balance: number; clear: boolean }) => resetSimulation(balance, clear),
-    onSuccess: result => {
-      setSimBalance(String(result.balance))
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
-    },
-  })
-
-  const settleMutation = useMutation({
-    mutationFn: settleTradesApi,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
-    },
-  })
-
   const historyBackfillMutation = useMutation({
     mutationFn: () => backfillWeatherHistory(30),
     onSuccess: () => {
@@ -1255,13 +1044,6 @@ function App() {
   const liveAvailable = Boolean(stats.strategy_live_ready && data?.v3?.config?.live_trading)
   const debugMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1'
   const needsManualRefresh = data?._meta?.reason === 'manual_refresh_required'
-  const autoSimulation = stats.auto_simulation ?? {
-    enabled: false,
-    interval_seconds: 300,
-    last_run: null,
-    last_result: null,
-    last_error: null,
-  }
   const runValidationActionDryRun = (action: ProductionValidationAction) => {
     if (!action.key) return
     productionActionMutation.mutate({ action, apply: false })
@@ -1394,19 +1176,12 @@ function App() {
     }
 
     return [...rows.values()].sort((a, b) => {
-      if (citySort === 'alpha') return a.name.localeCompare(b.name)
       if (b.actionable !== a.actionable) return b.actionable - a.actionable
+      if (Number(b.enabled) !== Number(a.enabled)) return Number(b.enabled) - Number(a.enabled)
       if (b.signals !== a.signals) return b.signals - a.signals
       return a.name.localeCompare(b.name)
     })
-  }, [citySeries, forecasts, signals, citySort])
-
-  useEffect(() => {
-    if (!balanceInitRef.current && data?.stats?.bankroll !== undefined) {
-      setSimBalance(String(Math.round(data.stats.bankroll)))
-      balanceInitRef.current = true
-    }
-  }, [data?.stats?.bankroll])
+  }, [citySeries, forecasts, signals])
 
   useEffect(() => {
     if (!liveAvailable && tradeMode === 'live') {
@@ -1427,18 +1202,6 @@ function App() {
   const selectedDateEvidence = selectedCityEvidence?.dates.find(item => item.target_date === selectedDate) ?? selectedCityEvidence?.dates[0]
   const selectedTradingStatus = resolveCityTradingStatus(selectedCityMeta?.key, selectedCityMeta?.verificationStatus, cityStatusMap)
   const selectedStatusConfig = selectedCityMeta?.key ? (cityStatusMap[selectedCityMeta.key] ?? ROUND5_STATUS_FALLBACK[selectedCityMeta.key]) : undefined
-  const selectedMarketBucket = marketBucketsQuery.data?.latest?.find(bucket => bucket.event_slug || bucket.event_url)
-  const cityGroups = useMemo(() => {
-    const groups: Record<'mainland' | 'asia' | 'us', typeof cityOptions> = {
-      mainland: [],
-      asia: [],
-      us: [],
-    }
-    for (const city of cityOptions) {
-      groups[cityGroupKey(city.key, city.continent)].push(city)
-    }
-    return groups
-  }, [cityOptions])
   const recommendations = data?.recommendations ?? null
   const recommendedItems = recommendations?.items ?? []
   const actionableCityCount = recommendations?.trade_candidate_count ?? cityOptions.filter(city => city.actionable > 0).length
@@ -1488,8 +1251,7 @@ function App() {
 
   const filteredCityOptions = cityOptions.filter(city => {
     const query = citySearch.trim().toLowerCase()
-    const continentOk = continentFilter === '全部' || city.continent === continentFilter
-    if (!continentOk) return false
+    if (!city.enabled && city.key !== selectedCity) return false
     if (!query) return true
     return `${city.name} ${city.station ?? ''} ${city.key} ${city.continent}`.toLowerCase().includes(query)
   })
@@ -1602,34 +1364,6 @@ function App() {
             </span>
           )}
         </div>
-        <label className="inline-flex items-center gap-1 border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400">
-          <span>{t('city.selector')}</span>
-          <select
-            value={selectedCity}
-            onChange={event => setSelectedCity(event.target.value)}
-            className="min-w-[180px] bg-transparent text-neutral-100 outline-none"
-            aria-label={t('city.selector')}
-          >
-            <optgroup label={t('city.group.mainland')}>
-              {cityGroups.mainland.map(city => {
-                const status = resolveCityTradingStatus(city.key, city.verificationStatus, cityStatusMap)
-                return <option key={city.key} value={city.key}>{STATUS_ICON[status]} {city.name} · {city.station || '--'}</option>
-              })}
-            </optgroup>
-            <optgroup label={t('city.group.asia')}>
-              {cityGroups.asia.map(city => {
-                const status = resolveCityTradingStatus(city.key, city.verificationStatus, cityStatusMap)
-                return <option key={city.key} value={city.key}>{STATUS_ICON[status]} {city.name} · {city.station || '--'}</option>
-              })}
-            </optgroup>
-            <optgroup label={t('city.group.us')}>
-              {cityGroups.us.map(city => {
-                const status = resolveCityTradingStatus(city.key, city.verificationStatus, cityStatusMap)
-                return <option key={city.key} value={city.key}>{STATUS_ICON[status]} {city.name} · {city.station || '--'}</option>
-              })}
-            </optgroup>
-          </select>
-        </label>
         <label className="inline-flex items-center gap-1 border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400" aria-label={t('language.label')}>
           <span>{t('language.label')}</span>
           <select
@@ -1774,38 +1508,15 @@ function App() {
                   {actionableCityCount > 0 ? `${actionableCityCount} 个城市有可执行信号` : '无信号时按城市浏览证据'}
                 </div>
               </div>
-              <span className="border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">{cityOptions.length}</span>
+              <span className="border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">{filteredCityOptions.length}</span>
             </div>
-            <div className="mb-2 grid gap-1.5">
-              <div className="grid grid-cols-[minmax(0,1fr)_112px] gap-1.5">
-                <input
-                  value={citySearch}
-                  onChange={event => setCitySearch(event.target.value)}
-                  placeholder="搜索城市或机场"
-                  className="w-full border border-neutral-800 bg-black px-2 py-1.5 text-[11px]"
-                  aria-label="搜索城市或机场"
-                />
-                <select
-                  value={continentFilter}
-                  onChange={event => setContinentFilter(event.target.value as (typeof CONTINENT_FILTERS)[number])}
-                  className="border border-neutral-800 bg-black px-1.5 py-1.5 text-[11px] text-neutral-300"
-                  aria-label="按大洲筛选城市"
-                >
-                  {CONTINENT_FILTERS.map(continent => (
-                    <option key={continent} value={continent}>{continent}</option>
-                  ))}
-                </select>
-              </div>
-              <select
-                value={citySort}
-                onChange={event => setCitySort(event.target.value as 'signal' | 'alpha')}
-                className="border border-neutral-800 bg-black px-1.5 py-1.5 text-[11px] text-neutral-300"
-                aria-label="城市排序"
-              >
-                <option value="signal">按信号</option>
-                <option value="alpha">字母</option>
-              </select>
-            </div>
+            <input
+              value={citySearch}
+              onChange={event => setCitySearch(event.target.value)}
+              placeholder="搜索已启用城市或机场"
+              className="mb-2 w-full border border-neutral-800 bg-black px-2 py-1.5 text-[11px]"
+              aria-label="搜索已启用城市或机场"
+            />
             <div className="space-y-1">
               {cityOptions.length === 0 && (
                 <div className="border border-neutral-800 bg-black/40 p-3 text-[11px] leading-relaxed text-neutral-500">
@@ -1827,24 +1538,6 @@ function App() {
                       : 'border-neutral-800 bg-black/40 text-neutral-300 hover:border-neutral-700'
                   }`}
                 >
-                  <button
-                    type="button"
-                    onClick={event => {
-                      event.preventDefault()
-                      event.stopPropagation()
-                      stationEnabledMutation.mutate({ cityKey: city.key, enabled: !city.enabled })
-                    }}
-                    disabled={stationEnabledMutation.isPending}
-                    className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center border disabled:opacity-40 ${
-                      city.enabled
-                        ? 'border-amber-400/40 bg-amber-400/10 text-amber-300'
-                        : 'border-neutral-800 text-neutral-600 hover:text-neutral-200'
-                    }`}
-                    aria-label={`${city.enabled ? '暂停' : '启用'} ${city.name} 调度`}
-                    title={city.enabled ? '点击后暂停该城市调度' : '点击后加入后端调度 watchlist'}
-                  >
-                    <Star className="h-3.5 w-3.5" fill={city.enabled ? 'currentColor' : 'none'} />
-                  </button>
                   <a
                     href={cityHref(city)}
                     onClick={event => {
@@ -1859,7 +1552,7 @@ function App() {
                       <div className="min-w-0">
                         <div className="truncate text-xs font-medium leading-tight">{city.name}</div>
                         <div className="mt-1 truncate text-[10px] leading-tight text-neutral-600">
-                          {city.station || 'station 未映射'} · {city.enabled ? `已启用 · ${relativeTime(city.lastRefreshedAt)}` : '未调度'}
+                          {city.station || 'station 未映射'} · {relativeTime(city.lastRefreshedAt)}
                         </div>
                       </div>
                     </div>
@@ -1867,7 +1560,7 @@ function App() {
                       <div className="tabular-nums text-[11px] leading-tight text-neutral-200">
                         {city.latest === null || city.latest === undefined ? '--' : `${Number(city.latest).toFixed(1)}°${city.unit}`}
                       </div>
-                      <div className="mt-1 text-[9px] tabular-nums text-neutral-600">T{city.tier}</div>
+                      <div className="mt-1 text-[9px] tabular-nums text-neutral-600">{city.actionable > 0 ? `${city.actionable} 信号` : ''}</div>
                     </div>
                     </div>
                   </a>
@@ -1912,29 +1605,25 @@ function App() {
                   {selectedCityMeta?.latest === null || selectedCityMeta?.latest === undefined ? '预测 --' : `预测 ${Number(selectedCityMeta.latest).toFixed(1)}°${selectedCityMeta.unit}`}
                 </span>
               </div>
-              <div className="mt-1 flex flex-wrap gap-1.5 text-[9px]">
-                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500" title={selectedCityMeta?.settlementStationName || selectedCityMeta?.stationName || ''}>
-                  Settlement station {selectedCityMeta?.settlementStation || selectedCityMeta?.station || '--'}
-                </span>
-                <span className={`border px-1.5 py-0.5 ${
-                  selectedCityMeta?.verificationStatus === 'verified'
-                    ? 'border-green-500/30 text-green-300'
-                    : selectedCityMeta?.verificationStatus === 'settlement_mismatch'
-                      ? 'border-red-500/30 text-red-300'
-                      : 'border-amber-500/30 text-amber-300'
-                }`}>
-                  Rule verified {selectedCityMeta?.settlementRuleVerifiedAt ? relativeTime(selectedCityMeta.settlementRuleVerifiedAt) : 'unverified'}
-                </span>
-                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">
-                  Timezone {selectedCityMeta?.settlementTimezone || '--'}
-                </span>
-                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">
-                  Truth source {selectedCityMeta?.primarySettlementSource || 'pending'}
-                </span>
-                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-600">
-                  Non-truth metar_reports/IEM display only
-                </span>
-              </div>
+              <details className="mt-1 text-[9px] text-neutral-500">
+                <summary className="w-fit cursor-pointer select-none hover:text-neutral-300">市场规则</summary>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  <span className="border border-neutral-800 px-1.5 py-0.5" title={selectedCityMeta?.settlementStationName || selectedCityMeta?.stationName || ''}>
+                    结算站 {selectedCityMeta?.settlementStation || selectedCityMeta?.station || '--'}
+                  </span>
+                  <span className={`border px-1.5 py-0.5 ${
+                    selectedCityMeta?.verificationStatus === 'verified'
+                      ? 'border-green-500/30 text-green-300'
+                      : selectedCityMeta?.verificationStatus === 'settlement_mismatch'
+                        ? 'border-red-500/30 text-red-300'
+                        : 'border-amber-500/30 text-amber-300'
+                  }`}>
+                    {selectedCityMeta?.settlementRuleVerifiedAt ? `已核验 ${relativeTime(selectedCityMeta.settlementRuleVerifiedAt)}` : '未核验'}
+                  </span>
+                  <span className="border border-neutral-800 px-1.5 py-0.5">{selectedCityMeta?.settlementTimezone || '--'}</span>
+                  <span className="border border-neutral-800 px-1.5 py-0.5">truth {selectedCityMeta?.primarySettlementSource || 'pending'}</span>
+                </div>
+              </details>
             </div>
             <div className="flex flex-wrap gap-1.5 text-[10px]">
               {needsManualRefresh && (
@@ -1946,7 +1635,7 @@ function App() {
             </div>
           </div>
 
-          {selectedCityMeta && (
+          {selectedCityMeta && selectedTradingStatus !== 'fully_active' && (
             <div className={`border-b px-3 py-2 text-[11px] ${statusTone(selectedTradingStatus)}`}>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-semibold">
@@ -1956,18 +1645,6 @@ function App() {
                   <span>{t('banner.hk')}</span>
                 ) : selectedTradingStatus === 'monitor_only' && selectedCityMeta.key === 'seoul' ? (
                   <span>{t('banner.seoul')}</span>
-                ) : selectedTradingStatus === 'fully_active' ? (
-                  <span>
-                    {t('banner.active', {
-                      slug: selectedMarketBucket?.event_slug || selectedMarketBucket?.event_url || selectedCityMeta.key,
-                      source: selectedCityMeta.primarySettlementSource || selectedStatusConfig?.settlement || 'verified',
-                    })}
-                    {selectedMarketBucket?.event_url ? (
-                      <a href={selectedMarketBucket.event_url} target="_blank" rel="noreferrer" className="ml-2 underline decoration-dotted underline-offset-2">
-                        Polymarket
-                      </a>
-                    ) : null}
-                  </span>
                 ) : (
                   <span>{selectedStatusConfig?.reason || selectedCityMeta.verificationStatus || 'no active market'}</span>
                 )}
@@ -2021,49 +1698,14 @@ function App() {
             </div>
             <div className="mt-2 grid grid-cols-2 gap-1 text-[10px]">
               <StatusTile label="模式" value={tradeMode === 'paper' ? '模拟盘' : '实盘检查'} tone={tradeMode === 'paper' ? 'cyan' : 'amber'} />
-              <StatusTile label="一键模拟" value={autoSimulation.enabled ? '运行中' : '已停止'} active={autoSimulation.enabled} />
+              <StatusTile label="模拟内测" value={paperValidationStatusQuery.data?.status === 'active' ? '运行中' : '未启动'} active={paperValidationStatusQuery.data?.status === 'active'} />
               <StatusTile label="信号队列" value={`${actionable}/${signals.length}`} tone={actionable > 0 ? 'green' : 'neutral'} />
               <StatusTile label="订单记录" value={`${stats.open_trades ?? 0}/${stats.settled_trades ?? 0}`} />
             </div>
           </div>
           <div className="space-y-3 border-b border-neutral-800 p-3">
             <TradeModeSwitch mode={tradeMode} liveAvailable={liveAvailable} onMode={setTradeMode} />
-            <SimulationCard
-              stats={stats}
-              value={simBalance}
-              clearMarks={clearMarks}
-              autoSimulation={autoSimulation}
-              onValue={setSimBalance}
-              onClearMarks={setClearMarks}
-              onReset={() => {
-                const parsed = Number(simBalance)
-                if (Number.isFinite(parsed) && parsed >= 0) {
-                  resetSimulationMutation.mutate({ balance: parsed, clear: clearMarks })
-                }
-              }}
-              onSettle={() => settleMutation.mutate()}
-              onToggleAuto={() => autoSimulationMutation.mutate(!autoSimulation.enabled)}
-              resetting={resetSimulationMutation.isPending}
-              settling={settleMutation.isPending}
-              autoPending={autoSimulationMutation.isPending}
-            />
-            <ForecastOptionsCard
-              cityName={selectedCityMeta?.name ?? ''}
-              station={selectedCityMeta?.station ?? ''}
-              selectedDate={selectedDate}
-              dataAgeLabel={dataAge(stats.data_age_minutes)}
-              signals={signals.length}
-              actionable={actionable}
-              refreshing={productionRefreshRunning}
-              language={uiLanguage}
-              onRefresh={() => productionRefreshMutation.mutate({
-                cities: selectedCity ? [selectedCity] : [],
-                days: refreshDaysForDate(selectedDate),
-                limit: 20,
-                startDate: selectedDate || '',
-                endDate: selectedDate || '',
-              })}
-            />
+            <PaperValidationCard status={paperValidationStatusQuery.data} />
           </div>
           <div className="grid grid-cols-2 border-b border-neutral-800" role="tablist" aria-label="行动与交易记录">
             <button

@@ -56,6 +56,7 @@ from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.notifier import FeishuNotifier
 from weatherbot_v3.paper import execute_paper_decision, execute_paper_decisions
+from weatherbot_v3.paper_validation import paper_validation_status
 from weatherbot_v3.polymarket import PolymarketDataClient
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
@@ -4029,7 +4030,12 @@ def build_dashboard_payload():
         "weather_city_series": weather_city_series,
         "city_statuses": asian_city_priority_config(),
         "city_evidence": city_evidence,
-        "recommendations": _recommendations_payload(),
+        "recommendations": {
+            "items": [],
+            "trade_candidate_count": 0,
+            "observation_only_count": 0,
+            "message": "recommendation_cache_warming",
+        },
         "events": events,
         "fetch_log": fetch_log,
     }
@@ -4321,7 +4327,12 @@ async def dashboard():
         payload["production_refresh"] = latest_refresh
     scheduler_payload = get_scheduler().status()
     payload["scheduler_status"] = scheduler_payload
-    payload["recommendations"] = _recommendations_payload(scheduler_status=scheduler_payload)
+    payload.setdefault("recommendations", {
+        "items": [],
+        "trade_candidate_count": 0,
+        "observation_only_count": 0,
+        "message": "recommendation_cache_warming",
+    })
     return _json_safe(payload)
 
 
@@ -4341,6 +4352,11 @@ async def production_refresh_status():
 @app.get("/api/scheduler/status")
 async def scheduler_status():
     return get_scheduler().status()
+
+
+@app.get("/api/paper-validation/status")
+async def paper_validation_status_api():
+    return paper_validation_status()
 
 
 @app.get("/api/source-health")

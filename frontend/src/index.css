@@ -133,6 +133,14 @@ body {
   background: #f9fafb !important;
 }
 
+.polywx-light .recharts-cartesian-grid line {
+  stroke: #d8e0ea !important;
+}
+
+.polywx-light .recharts-text {
+  fill: #64748b;
+}
+
 .polywx-light * {
   scrollbar-color: #d1d5db #ffffff;
 }

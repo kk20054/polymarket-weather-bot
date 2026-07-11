@@ -82,17 +82,20 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("background: #161a22", css)
         self.assertIn("background: #ffffff", css)
 
-    def test_city_workbench_exposes_polywx_filters_and_tabs(self):
+    def test_city_workbench_exposes_single_navigation_and_tabs(self):
         panel = read_text("frontend/src/components/WeatherPanel.tsx")
+        app = read_text("frontend/src/App.tsx")
 
         for tab_id in ("'forecast'", "'metar'", "'historical'", "'diff'", "'fetch'"):
             self.assertIn(tab_id, panel)
         for label in ("预报", "METAR", "历史观测", "偏差统计", "抓取日志"):
             self.assertIn(label, panel)
 
-        self.assertIn("const CONTINENTS", panel)
-        self.assertIn("value={continentFilter}", panel)
-        self.assertIn("value={cityKey}", panel)
+        self.assertNotIn("const CONTINENTS", panel)
+        self.assertNotIn("value={continentFilter}", panel)
+        self.assertNotIn("value={cityKey}", panel)
+        self.assertIn("filteredCityOptions.map", app)
+        self.assertIn("搜索已启用城市或机场", app)
         self.assertIn('type="date"', panel)
         self.assertIn('aria-label="选择日期"', panel)
 
@@ -168,6 +171,7 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("fmtDualDelta", panel)
         self.assertIn("normalCdf", panel)
         self.assertIn("buildGaussianFallbackItems", panel)
+        self.assertIn("latestDecisionBatch", panel)
         self.assertIn("topBucketIndexes", panel)
         self.assertIn("'#2563EB' : '#4B5563'", panel)
         self.assertIn("domain={[0, 25]}", panel)
@@ -201,13 +205,8 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("export function useT", use_t)
         self.assertIn("天气量化交易平台", zh)
         self.assertIn("Weather Quant Trading Platform", en)
-        self.assertIn("const MAINLAND_CITY_KEYS", app)
-        self.assertIn("const ASIA_OTHER_CITY_KEYS", app)
         self.assertIn("ROUND5_STATUS_FALLBACK", app)
         self.assertIn("resolveCityTradingStatus", app)
-        self.assertIn("city.group.mainland", app)
-        self.assertIn("city.group.asia", app)
-        self.assertIn("city.group.us", app)
         self.assertIn("此市场按 HKO 天文台每日摘要结算", zh)
         self.assertIn("外部案例 -$4,259", zh)
         self.assertNotIn("DeltaAuditPanel", app)
@@ -277,7 +276,11 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("schedulerStatusQuery", app)
         self.assertIn("schedulerStartMutation", app)
         self.assertIn("schedulerStopMutation", app)
-        self.assertIn("stationEnabledMutation", app)
+        self.assertNotIn("stationEnabledMutation", app)
+        self.assertIn('@app.get("/api/paper-validation/status")', server)
+        self.assertIn("fetchPaperValidationStatus", api)
+        self.assertIn("PaperValidationCard", app)
+        self.assertNotIn("SimulationCard", app)
 
     def test_settlement_station_truth_contract_is_visible_to_dashboard(self):
         app = read_text("frontend/src/App.tsx")
@@ -301,11 +304,11 @@ class PolyWXDashboardContractTests(unittest.TestCase):
             self.assertIn(field, server)
             self.assertIn(field, types)
         self.assertIn("apply_market_probe_result", stations)
-        self.assertIn("Settlement station", app)
-        self.assertIn("Rule verified", app)
-        self.assertIn("Timezone", app)
-        self.assertIn("Truth source", app)
-        self.assertIn("Non-truth metar_reports/IEM display only", app)
+        self.assertIn("市场规则", app)
+        self.assertIn("结算站", app)
+        self.assertIn("已核验", app)
+        self.assertIn("truth", app)
+        self.assertNotIn("Non-truth metar_reports/IEM display only", app)
 
     def test_china_weather_live_contract_is_mesonet_display_only(self):
         app = read_text("frontend/src/App.tsx")

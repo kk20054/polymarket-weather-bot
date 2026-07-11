@@ -161,18 +161,7 @@ const WORKBENCH_TABS: Array<{ id: WeatherWorkbenchTab; label: string }> = [
   { id: 'fetch', label: '抓取日志' },
 ]
 
-const CONTINENTS = ['全部', 'Americas', 'Europe', 'Asia', 'Pacific', 'Africa', 'Other'] as const
 const HOUR_LABELS = Array.from({ length: 24 }, (_, hour) => `${String(hour).padStart(2, '0')}:00`)
-
-function cityContinent(cityKey?: string, cityName?: string) {
-  const value = `${cityKey || ''} ${cityName || ''}`.toLowerCase()
-  if (/london|paris|munich|madrid|milan|amsterdam|warsaw|helsinki|moscow|istanbul|ankara/.test(value)) return 'Europe'
-  if (/tokyo|seoul|shanghai|beijing|wuhan|singapore|taipei|hong|busan|chengdu|chongqing|guangzhou|jakarta|jeddah|karachi|kuala|lucknow|manila|qingdao|tel-aviv/.test(value)) return 'Asia'
-  if (/sydney|wellington/.test(value)) return 'Pacific'
-  if (/cape|lagos/.test(value)) return 'Africa'
-  if (/new-york|nyc|chicago|miami|dallas|seattle|atlanta|toronto|sao|paulo|austin|denver|houston|los-angeles|san-francisco|mexico|panama|buenos/.test(value)) return 'Americas'
-  return 'Other'
-}
 
 function fmtTemp(value?: number | null, unit = 'F') {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
@@ -627,25 +616,27 @@ function buildDebSourceRows(deb: DailyMaxPredictionSummary['latest'], unit: stri
 type DotShapeProps = {
   cx?: number
   cy?: number
+  value?: number | null
+  payload?: Record<string, unknown>
   fill?: string
   stroke?: string
   active?: boolean
 }
 
-function SquareDot({ cx, cy, fill = '#EF4444', active = false }: DotShapeProps) {
-  if (cx === undefined || cy === undefined) return null
+function SquareDot({ cx, cy, value, fill = '#EF4444', active = false }: DotShapeProps) {
+  if (cx === undefined || cy === undefined || value === null || value === undefined || !Number.isFinite(Number(value))) return null
   const size = active ? 8 : 6
   return <rect x={cx - size / 2} y={cy - size / 2} width={size} height={size} fill={fill} stroke="#FEE2E2" strokeWidth={active ? 1.5 : 1} />
 }
 
-function TriangleDot({ cx, cy, fill = '#A855F7', active = false }: DotShapeProps) {
-  if (cx === undefined || cy === undefined) return null
+function TriangleDot({ cx, cy, value, fill = '#A855F7', active = false }: DotShapeProps) {
+  if (cx === undefined || cy === undefined || value === null || value === undefined || !Number.isFinite(Number(value))) return null
   const size = active ? 7 : 5
   return <path d={`M ${cx} ${cy - size} L ${cx + size} ${cy + size} L ${cx - size} ${cy + size} Z`} fill={fill} stroke="#F3E8FF" strokeWidth={active ? 1.5 : 1} />
 }
 
-function HollowCircleDot({ cx, cy, stroke = '#3B82F6', active = false }: DotShapeProps) {
-  if (cx === undefined || cy === undefined) return null
+function HollowCircleDot({ cx, cy, value, stroke = '#3B82F6', active = false }: DotShapeProps) {
+  if (cx === undefined || cy === undefined || value === null || value === undefined || !Number.isFinite(Number(value))) return null
   return <circle cx={cx} cy={cy} r={active ? 5 : 3} fill="transparent" stroke={stroke} strokeWidth={active ? 2 : 1.5} />
 }
 
@@ -787,8 +778,17 @@ function layerDecisionRank(decision: SignalDecisionRecord) {
   return paper + edge
 }
 
+function latestDecisionBatch(decisions: SignalDecisionRecord[]) {
+  const latestIssuedAt = decisions.reduce((latest, decision) => {
+    const issuedAt = String(decision.issued_at ?? '')
+    return issuedAt > latest ? issuedAt : latest
+  }, '')
+  if (!latestIssuedAt) return decisions
+  return decisions.filter(decision => String(decision.issued_at ?? '') === latestIssuedAt)
+}
+
 function bestLayerDecision(summary?: SignalDecisionSummary | null) {
-  return [...(summary?.decisions ?? [])].sort((a, b) => layerDecisionRank(b) - layerDecisionRank(a))[0]
+  return latestDecisionBatch(summary?.decisions ?? []).sort((a, b) => layerDecisionRank(b) - layerDecisionRank(a))[0]
 }
 
 function findBucketForDecision(decision: SignalDecisionRecord | undefined, buckets?: MarketBucketSummary | null) {
@@ -803,7 +803,7 @@ function findBucketForDecision(decision: SignalDecisionRecord | undefined, bucke
 function buildLayerDistributionItems(buckets?: MarketBucketSummary | null, decisions?: SignalDecisionSummary | null): LayerDistributionItem[] {
   const decisionByMarket = new Map<string, SignalDecisionRecord>()
   const decisionByBucket = new Map<string, SignalDecisionRecord>()
-  for (const decision of decisions?.decisions ?? []) {
+  for (const decision of latestDecisionBatch(decisions?.decisions ?? [])) {
     if (decision.market_id) decisionByMarket.set(String(decision.market_id), decision)
     const bucketKey = decision.model_bucket_probs?.bucket_key ?? decision.bucket_key
     if (bucketKey) decisionByBucket.set(String(bucketKey), decision)
@@ -1044,7 +1044,6 @@ export function WeatherPanel({
     return new URLSearchParams(window.location.search).get('date') ?? ''
   })
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WeatherWorkbenchTab>('forecast')
-  const [continentFilter, setContinentFilter] = useState<(typeof CONTINENTS)[number]>('全部')
   const selected = selectedCity ?? internalSelected
   const setSelected = (cityKey: string) => {
     setInternalSelected(cityKey)
@@ -1062,16 +1061,6 @@ export function WeatherPanel({
       setSelected(cities[0].key)
     }
   }, [cities, selected])
-
-  const filteredCities = useMemo(() => {
-    if (continentFilter === '全部') return cities
-    const rows = cities.filter(city => cityContinent(city.key, city.name) === continentFilter)
-    if (selected && !rows.some(city => city.key === selected)) {
-      const current = cities.find(city => city.key === selected)
-      return current ? [current, ...rows] : rows
-    }
-    return rows
-  }, [cities, continentFilter, selected])
 
   const series = citySeries.find(row => row.city_key === selected) ?? citySeries[0]
   const forecastFallback = forecasts.find(row => row.city_key === selected) ?? forecasts[0]
@@ -1277,27 +1266,7 @@ export function WeatherPanel({
 
   return (
     <div className="min-h-full space-y-2 bg-transparent p-3 text-[11px] text-[#CBD2DC]">
-      <div className="flex flex-wrap items-center gap-2">
-        <select
-          value={continentFilter}
-          onChange={event => setContinentFilter(event.target.value as (typeof CONTINENTS)[number])}
-          className="min-w-[130px] border border-gray-200 bg-white px-2 py-1 text-gray-900 outline-none focus:border-gray-400"
-          aria-label="按大洲筛选"
-        >
-          {CONTINENTS.map(continent => (
-            <option key={continent} value={continent}>{continent}</option>
-          ))}
-        </select>
-        <select
-          value={cityKey}
-          onChange={event => setSelected(event.target.value)}
-          className="min-w-[180px] flex-1 border border-gray-200 bg-white px-2 py-1 text-gray-900 outline-none focus:border-gray-400"
-          aria-label="选择城市"
-        >
-          {filteredCities.map(row => (
-            <option key={row.key} value={row.key}>{row.name}</option>
-          ))}
-        </select>
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="inline-flex shrink-0 items-center border border-neutral-800">
           <button
             type="button"
@@ -1335,10 +1304,11 @@ export function WeatherPanel({
         )}
       </div>
 
+      {(hasLayerDecision || bestSignal) && (
       <details className={`border px-2 py-1.5 text-[10px] ${decisionTone === 'green' ? 'border-green-500/30 bg-green-500/5' : decisionTone === 'amber' ? 'border-amber-500/30 bg-amber-500/5' : 'border-neutral-800 bg-black'}`}>
         <summary className="flex cursor-pointer select-none items-center justify-between gap-3 text-neutral-300 hover:text-neutral-100">
           <span className="min-w-0 truncate">
-            选中日期判断：<span className={decisionTone === 'green' ? 'text-green-300' : decisionTone === 'amber' ? 'text-amber-300' : 'text-neutral-200'}>{decisionLabel}</span>
+            市场判断：<span className={decisionTone === 'green' ? 'text-green-300' : decisionTone === 'amber' ? 'text-amber-300' : 'text-neutral-200'}>{decisionLabel}</span>
           </span>
           <span className="shrink-0 tabular-nums text-neutral-500">{hasLayerDecision ? fmtSignedPct(layerEdge) : bestSignal ? fmtSignedPct(bestSignal.probability_edge ?? bestSignal.edge) : '--'}</span>
         </summary>
@@ -1372,6 +1342,7 @@ export function WeatherPanel({
           )}
         </div>
       </details>
+      )}
 
       <section className="border border-[#2C3445] bg-[#1B212C]">
         <div className="border-b border-[#2C3445]">
@@ -2043,7 +2014,19 @@ function HourlyEvidencePanel({
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={chartRows} margin={{ top: 22, right: 18, bottom: 0, left: -6 }}>
               <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" />
-              <XAxis dataKey="label" ticks={HOUR_LABELS} interval={0} stroke="#7D8694" fontSize={9} tickLine={false} axisLine={false} minTickGap={0} height={34} />
+              <XAxis
+                dataKey="label"
+                ticks={HOUR_LABELS}
+                interval={0}
+                stroke="#7D8694"
+                fontSize={8}
+                tickLine={false}
+                axisLine={false}
+                minTickGap={0}
+                angle={-45}
+                textAnchor="end"
+                height={52}
+              />
               <YAxis yAxisId="temp" stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°${unit}`} />
               <YAxis yAxisId="percent" orientation="right" domain={[0, 100]} stroke="#475569" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}%`} />
               <Tooltip
