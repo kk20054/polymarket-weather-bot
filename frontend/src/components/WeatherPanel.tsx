@@ -1,18 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Area,
   Bar,
   CartesianGrid,
   Cell,
   ComposedChart,
-  Line,
-  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts'
 import { ExternalLink } from 'lucide-react'
+import { HourlyTemperatureChart } from './HourlyTemperatureChart'
 import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
@@ -160,8 +158,6 @@ const WORKBENCH_TABS: Array<{ id: WeatherWorkbenchTab; label: string }> = [
   { id: 'diff', label: '偏差统计' },
   { id: 'fetch', label: '抓取日志' },
 ]
-
-const HOUR_LABELS = Array.from({ length: 24 }, (_, hour) => `${String(hour).padStart(2, '0')}:00`)
 
 function fmtTemp(value?: number | null, unit = 'F') {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '--'
@@ -613,48 +609,6 @@ function buildDebSourceRows(deb: DailyMaxPredictionSummary['latest'], unit: stri
     .sort((a, b) => Number(b.weight ?? 0) - Number(a.weight ?? 0))
 }
 
-type DotShapeProps = {
-  cx?: number
-  cy?: number
-  value?: number | null
-  payload?: Record<string, unknown>
-  fill?: string
-  stroke?: string
-  active?: boolean
-}
-
-function SquareDot({ cx, cy, value, fill = '#EF4444', active = false }: DotShapeProps) {
-  if (cx === undefined || cy === undefined || value === null || value === undefined || !Number.isFinite(Number(value))) return null
-  const size = active ? 8 : 6
-  return <rect x={cx - size / 2} y={cy - size / 2} width={size} height={size} fill={fill} stroke="#FEE2E2" strokeWidth={active ? 1.5 : 1} />
-}
-
-function TriangleDot({ cx, cy, value, fill = '#A855F7', active = false }: DotShapeProps) {
-  if (cx === undefined || cy === undefined || value === null || value === undefined || !Number.isFinite(Number(value))) return null
-  const size = active ? 7 : 5
-  return <path d={`M ${cx} ${cy - size} L ${cx + size} ${cy + size} L ${cx - size} ${cy + size} Z`} fill={fill} stroke="#F3E8FF" strokeWidth={active ? 1.5 : 1} />
-}
-
-function HollowCircleDot({ cx, cy, value, stroke = '#3B82F6', active = false }: DotShapeProps) {
-  if (cx === undefined || cy === undefined || value === null || value === undefined || !Number.isFinite(Number(value))) return null
-  return <circle cx={cx} cy={cy} r={active ? 5 : 3} fill="transparent" stroke={stroke} strokeWidth={active ? 2 : 1.5} />
-}
-
-function PeakReferenceLabel({ viewBox, value }: { viewBox?: { x?: number; y?: number }; value?: string }) {
-  const x = viewBox?.x
-  const y = viewBox?.y
-  if (x === undefined || y === undefined || !value) return null
-  const width = Math.max(64, value.length * 6.4)
-  return (
-    <g transform={`translate(${x - width / 2}, ${Math.max(0, y - 18)})`}>
-      <rect width={width} height={16} rx={2} fill="#EC4899" />
-      <text x={width / 2} y={11.5} fill="#FFFFFF" fontSize={10} textAnchor="middle">
-        {value}
-      </text>
-    </g>
-  )
-}
-
 function normalizePeakHour(value: unknown) {
   if (value === null || value === undefined || value === '') return null
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -728,25 +682,6 @@ function overlapPill(rows: Array<Record<string, unknown>>) {
   const latest = paired[paired.length - 1]
   const upTo = typeof latest.label === 'string' ? latest.label.replace(':00', ':00') : '--'
   return `${Math.round((paired.length / historicalRows.length) * 100)}% (${paired.length}/${historicalRows.length} pts, up to ${upTo})`
-}
-
-function StatBadgeRow({ label, items, empty, tone = 'green' }: { label: string; items: Array<string | null>; empty: string; tone?: 'green' | 'orange' }) {
-  const visible = items.filter((item): item is string => Boolean(item))
-  const toneClass = tone === 'orange'
-    ? 'border-orange-500/25 bg-orange-500/10 text-orange-200'
-    : 'border-green-500/25 bg-green-500/10 text-green-200'
-  return (
-    <div className="flex flex-wrap items-center gap-2 border-t border-[#2C3445] px-2 py-1.5 text-[10px]">
-      <span className="min-w-[150px] text-[#7D8694]">{label}</span>
-      {visible.length > 0 ? visible.map(item => (
-        <span key={`${label}-${item}`} className={`rounded-full border px-2 py-0.5 tabular-nums ${toneClass}`}>
-          {item}
-        </span>
-      )) : (
-        <span className="text-[#7D8694]">{empty}</span>
-      )}
-    </div>
-  )
 }
 
 function decisionBucket(decision?: SignalDecisionRecord) {
@@ -1984,88 +1919,21 @@ function HourlyEvidencePanel({
   }
 
   return (
-    <section className="min-h-0 border border-[#2C3445] bg-[#161A22]">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#2C3445] px-2 py-1.5">
-        <div>
-          <div className="text-[10px] text-[#7D8694]">Hourly Temperature</div>
-          <div className="text-xs text-[#CBD2DC]">{cityName || '当前城市'} · {longDate(selectedDate)}</div>
-        </div>
-        <div className="flex flex-wrap gap-1 text-[9px] text-[#7D8694]">
-          <span className="border border-[#2C3445] px-1.5 py-0.5">预报最高 {fmtTemp(forecastMax, unit)}</span>
-          <span className="border border-[#2C3445] px-1.5 py-0.5">METAR最高 {fmtTemp(metarMax, unit)}</span>
-          <span className="border border-[#2C3445] px-1.5 py-0.5">峰值 {peakRow?.label ?? '--'}</span>
-        </div>
-      </div>
-
-      <div
-        className="p-2"
-        role="img"
-        aria-label={`${cityName || '当前城市'}逐小时温度图：METAR 为橙色实线，历史为绿色实线，中国实况为红色方块，PWS 为紫色三角，预报为蓝色虚线空心点，云量为灰色面积，峰值用粉色竖线标记。`}
-      >
-        <div className="mb-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[10px] text-[#7D8694]">
-          <span className={`inline-flex items-center gap-1 ${hasChinaLive ? '' : 'opacity-45'}`}><span className="h-2.5 w-2.5 bg-[#EF4444]" />中国实况</span>
-          <span className={`inline-flex items-center gap-1 ${hasPws ? '' : 'opacity-45'}`}><span className="h-0 w-0 border-x-[5px] border-b-[9px] border-x-transparent border-b-[#A855F7]" />PWS（实时）</span>
-          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full bg-[#F97316]" />METAR（本地时）</span>
-          <span className={`inline-flex items-center gap-1 ${hasHistorical ? '' : 'opacity-45'}`}><span className="h-2.5 w-2.5 rounded-full bg-[#22C55E]" />历史（本地时）</span>
-          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full border border-[#3B82F6]" />预报（本地时）</span>
-          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-3 bg-[#94A3B8]/30" />云量 %</span>
-        </div>
-        <div className="relative h-[320px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={chartRows} margin={{ top: 22, right: 18, bottom: 0, left: -6 }}>
-              <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" />
-              <XAxis
-                dataKey="label"
-                ticks={HOUR_LABELS}
-                interval={0}
-                stroke="#7D8694"
-                fontSize={8}
-                tickLine={false}
-                axisLine={false}
-                minTickGap={0}
-                angle={-45}
-                textAnchor="end"
-                height={52}
-              />
-              <YAxis yAxisId="temp" stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°${unit}`} />
-              <YAxis yAxisId="percent" orientation="right" domain={[0, 100]} stroke="#475569" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}%`} />
-              <Tooltip
-                contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
-                formatter={(value: any, name: any) => {
-                  if (name === '云量 %') return [`${Number(value).toFixed(0)}%`, name]
-                  return [fmtTemp(Number(value), unit), name]
-                }}
-                labelFormatter={(_, payload) => payload?.[0]?.payload?.timestamp ? shortTime(payload[0].payload.timestamp) : ''}
-              />
-              <Area yAxisId="percent" type="monotone" dataKey="cloud_pct" name="云量 %" stroke="#94A3B8" fill="#94A3B8" fillOpacity={0.25} strokeOpacity={0.65} connectNulls={false} />
-              <Line yAxisId="temp" type="monotone" dataKey="metar_value" name="METAR" stroke="#F97316" dot={{ r: 3, fill: '#F97316', stroke: '#F97316', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />
-              <Line yAxisId="temp" type="monotone" dataKey="historical_value" name="历史" stroke="#22C55E" dot={{ r: 3, fill: '#22C55E', stroke: '#22C55E', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />
-              {hasChinaLive && (
-                <Line yAxisId="temp" type="monotone" dataKey="china_live_value" name="中国实况" stroke="#EF4444" dot={<SquareDot fill="#EF4444" />} activeDot={<SquareDot fill="#EF4444" active />} strokeWidth={2} connectNulls={false} />
-              )}
-              {hasPws && (
-                <Line yAxisId="temp" type="monotone" dataKey="pws_value" name="PWS" stroke="#A855F7" dot={<TriangleDot fill="#A855F7" />} activeDot={<TriangleDot fill="#A855F7" active />} strokeWidth={2} connectNulls={false} />
-              )}
-              <Line yAxisId="temp" type="monotone" dataKey="forecast_value" name="预报" stroke="#3B82F6" strokeDasharray="4 4" dot={<HollowCircleDot stroke="#3B82F6" />} activeDot={<HollowCircleDot stroke="#3B82F6" active />} strokeWidth={2} connectNulls={false} />
-              {peakHour && (
-                <ReferenceLine
-                  yAxisId="temp"
-                  x={peakHour}
-                  stroke="#EC4899"
-                  strokeDasharray="4 4"
-                  label={<PeakReferenceLabel value={`peak ${peakHour}`} />}
-                />
-              )}
-            </ComposedChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      <StatBadgeRow label="AVG Δ (OBS−FC)" items={[statDeltaPill('METAR', metarStats, unit), statDeltaPill('Historical', historicalStats, unit)]} empty="No diff stats yet" tone="green" />
-      <StatBadgeRow label="ACCURACY (PEARSON R)" items={[statAccuracyPill('METAR', metarStats), statAccuracyPill('Historical', historicalStats)]} empty="No accuracy stats yet" tone="orange" />
-      <StatBadgeRow label="HIST↔METAR OVERLAP" items={[overlapStats]} empty="No overlap data yet" tone="green" />
-
-    </section>
+    <HourlyTemperatureChart
+      rows={chartRows}
+      unit={unit}
+      cityName={cityName || '当前城市'}
+      dateLabel={longDate(selectedDate)}
+      forecastMax={forecastMax}
+      metarMax={metarMax}
+      peakHour={peakHour || null}
+      hasChinaLive={hasChinaLive}
+      hasPws={hasPws}
+      hasHistorical={hasHistorical}
+      averageDelta={[statDeltaPill('METAR', metarStats, unit), statDeltaPill('Historical', historicalStats, unit)]}
+      accuracy={[statAccuracyPill('METAR', metarStats), statAccuracyPill('Historical', historicalStats)]}
+      overlap={overlapStats}
+    />
   )
 }
 
