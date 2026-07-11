@@ -206,7 +206,8 @@ class WeatherBotScheduler:
                 state.failure_times.append(now)
             delay = state.next_delay()
             state.next_run_at = (now + timedelta(seconds=delay)).isoformat()
-            log_data_fetch(
+            await asyncio.to_thread(
+                log_data_fetch,
                 source="scheduler",
                 stage=poller_key,
                 status="OK" if ok else "WARN",
@@ -270,7 +271,7 @@ class WeatherBotScheduler:
                 continue
 
     async def _run_metar_poller(self) -> dict[str, Any]:
-        rows = _enabled_rows()
+        rows = await asyncio.to_thread(_enabled_rows)
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
@@ -302,7 +303,7 @@ class WeatherBotScheduler:
         )
 
     async def _run_forecast_poller(self) -> dict[str, Any]:
-        rows = _enabled_rows()
+        rows = await asyncio.to_thread(_enabled_rows)
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
@@ -332,7 +333,7 @@ class WeatherBotScheduler:
         )
 
     async def _run_nwp_poller(self) -> dict[str, Any]:
-        rows = _enabled_rows()
+        rows = await asyncio.to_thread(_enabled_rows)
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
@@ -362,7 +363,7 @@ class WeatherBotScheduler:
         )
 
     async def _run_historical_poller(self) -> dict[str, Any]:
-        rows = [row for row in _enabled_rows() if str(row.get("city_key") or row.get("city")) != "hong-kong"]
+        rows = [row for row in await asyncio.to_thread(_enabled_rows) if str(row.get("city_key") or row.get("city")) != "hong-kong"]
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
@@ -391,7 +392,7 @@ class WeatherBotScheduler:
         )
 
     async def _run_pws_poller(self) -> dict[str, Any]:
-        rows = _enabled_rows()
+        rows = await asyncio.to_thread(_enabled_rows)
         if not env_value("WUNDERGROUND_API_KEY"):
             return {
                 "ok": True,
@@ -456,7 +457,7 @@ class WeatherBotScheduler:
         )
 
     async def _run_derive_poller(self) -> dict[str, Any]:
-        rows = _enabled_rows()
+        rows = await asyncio.to_thread(_enabled_rows)
         targets_by_city = {
             str(row.get("city_key") or row.get("city") or ""): _target_dates_for_station(row)
             for row in rows
@@ -498,7 +499,7 @@ class WeatherBotScheduler:
 
     async def _run_china_live_poller(self) -> dict[str, Any]:
         rows = [
-            row for row in _enabled_rows()
+            row for row in await asyncio.to_thread(_enabled_rows)
             if str(row.get("city_key") or row.get("city") or "") in {"shanghai", "hong-kong"}
         ]
         return await _run_city_batch(
@@ -520,7 +521,7 @@ class WeatherBotScheduler:
             dry_run=False,
             fetch_orderbooks=True,
         )
-        rows = _enabled_rows()
+        rows = await asyncio.to_thread(_enabled_rows)
         targets_by_city = {
             str(row.get("city_key") or row.get("city") or ""): _target_dates_for_station(row)
             for row in rows
@@ -619,7 +620,8 @@ async def _run_city_batch(
                 ok = _payload_ok(payload)
                 finished = utc_now()
                 details = {**payload, "poller": poller_key}
-                log_data_fetch(
+                await asyncio.to_thread(
+                    log_data_fetch,
                     source="scheduler",
                     stage="city_refresh",
                     status="OK" if ok else "WARN",
@@ -639,7 +641,8 @@ async def _run_city_batch(
                     "poller": poller_key,
                     "error": f"city_timeout_{int(timeout_seconds)}s",
                 }
-                log_data_fetch(
+                await asyncio.to_thread(
+                    log_data_fetch,
                     source="scheduler",
                     stage="city_refresh",
                     status="ERROR",
@@ -654,7 +657,8 @@ async def _run_city_batch(
             except Exception as exc:
                 finished = utc_now()
                 error = {"city": city, "ok": False, "poller": poller_key, "error": str(exc)}
-                log_data_fetch(
+                await asyncio.to_thread(
+                    log_data_fetch,
                     source="scheduler",
                     stage="city_refresh",
                     status="ERROR",
