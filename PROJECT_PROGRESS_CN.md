@@ -179,6 +179,16 @@
 - Changes: added `docs/polymarket_asia_markets_snapshot.md`, `docs/polymarket_asia_markets_snapshot.csv`, and `docs/open_meteo_asia_samples.json`. The snapshot covers active Gamma Asian highest-temperature events, per-bucket CSV rows, Wunderground/HKO source reachability, ZBAA Wunderground vs AWC/IEM feasibility, Open-Meteo CMA/JMA/GFS ensemble/historical/previous-runs availability, unit/timezone contract notes, Asian city strategy priority, and UMA MOOV2 settlement-delay constraints.
 - Verification: Gamma exact slug probes found 31 active Asian events and 341 bucket rows; Wunderground base URLs are reachable for 9 non-HK Asian airport markets; Hong Kong uses HKO Daily Extract rather than Wunderground. Open-Meteo forecast, ensemble, historical forecast, and previous-runs probes succeeded for Shanghai, Beijing, Hong Kong, Tokyo, Seoul, Taipei, and Chicago.
 - Conclusion: Asian markets are confirmed and worth integrating, but exact settlement replication still needs a dedicated Wunderground daily-history path; IEM/AWC METAR max should remain an approximation, not live-unlocking settlement truth.
+
+### 2026-07-11：Layer 2 Truth 30 天回填与调度器初验
+
+- 目标：在不解锁实盘的前提下，用 6 小时以上调度器连续运行作为开发初验，并补齐 WU、HKO、IEM 的固定 30 天 truth 数据基座。
+- 改动：IEM 改为每站一次区间请求、每站一个 SQLite 事务和每区间一条结构化日志；HKO 改为每月一次请求并只持久化目标日紧凑原文；CLI 返回紧凑结果；`log_data_fetch` 支持显式测试数据库路径。
+- 验证：调度器连续运行约 9 小时后停止，METAR/forecast/Gamma/derive 分别完成 102/8/90/20 个周期，瞬时单城 WARN 可恢复，PWS 仍因权限返回 401。固定窗口 2026-06-08 至 2026-07-07：WU 13 城 390/390 天、IEM 14 城 420/420 天、HKO 30/30 天；WU-IEM overlap=390，HKO-VHHH overlap=30。全量 `tests.test_v3_core` 187 tests 通过，`git diff --check` 通过。
+- 结论：6 小时门槛足够继续开发，且实际已取得约 9 小时证据；但它只证明调度器具有初步连续性，不证明策略盈利或无人值守生产稳定。三类 truth 历史源现均为 healthy，实时源因调度器停止而 stale 属预期。
+- 阻塞：7 个亚洲城市 settlement contract 仍 provisional；Hong Kong 保持 settlement mismatch；PWS key 无 v2 权限；derive 周期可能超过 15 分钟；paper settlement/PnL/Brier 生命周期未闭合。
+- 下一步：先核验 7 个 provisional settlement contracts，再用 30 天 truth 做逐城市/模型 bias 训练与 PolyWX benchmark；之后实现 paper settlement/scoring，实盘继续锁定。
+- 相关提交：`26d887f`。
 - Next: wire Asian station registry/model preferences in a separate implementation turn; prioritize Shanghai/Wuhan/Beijing, keep Hong Kong truth-gated until HKO collector is production-ready, and keep Seoul monitor-only unless paper evidence improves.
 - Commit: not committed in this research turn; workspace already had unrelated dirty files.
 ## 2026-07-05：Round 3 Truth Layer 三源协议 + Gamma 结构化持久化
