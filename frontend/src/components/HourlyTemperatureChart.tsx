@@ -9,6 +9,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { useState, type ReactNode } from 'react'
 
 export type HourlyChartRow = {
   label: string
@@ -38,15 +39,10 @@ type Props = {
 }
 
 const HOUR_LABELS = Array.from({ length: 24 }, (_, hour) => `${String(hour).padStart(2, '0')}:00`)
+type SeriesKey = 'china' | 'pws' | 'metar' | 'historical' | 'forecast' | 'cloud'
 
 function formatTemp(value: number | null, unit: string) {
   return value === null || !Number.isFinite(value) ? '--' : `${value.toFixed(1)}°${unit}`
-}
-
-function timeLabel(value?: string) {
-  if (!value) return ''
-  const match = value.match(/T(\d{2}:\d{2})/)
-  return match?.[1] ?? value
 }
 
 type DotProps = { cx?: number; cy?: number; value?: number | null; active?: boolean }
@@ -111,6 +107,29 @@ export function HourlyTemperatureChart({
   accuracy,
   overlap,
 }: Props) {
+  const [visibleSeries, setVisibleSeries] = useState<Record<SeriesKey, boolean>>({
+    china: true,
+    pws: true,
+    metar: true,
+    historical: true,
+    forecast: true,
+    cloud: true,
+  })
+  const toggleSeries = (key: SeriesKey) => {
+    setVisibleSeries(current => ({ ...current, [key]: !current[key] }))
+  }
+  const legendButton = (key: SeriesKey, label: string, marker: ReactNode, available = true) => (
+    <button
+      type="button"
+      onClick={() => available && toggleSeries(key)}
+      disabled={!available}
+      aria-pressed={visibleSeries[key]}
+      className={`inline-flex items-center gap-1 border-0 bg-transparent p-0 text-[10px] transition ${available && visibleSeries[key] ? 'text-[#AEB7C4]' : 'text-[#596272] opacity-55'}`}
+      title={available ? `${visibleSeries[key] ? '隐藏' : '显示'}${label}` : `${label}当前不可用`}
+    >
+      {marker}{label}
+    </button>
+  )
   return (
     <section className="min-h-0 border border-[#2C3445] bg-[#161A22]">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#2C3445] px-2 py-1.5">
@@ -120,19 +139,19 @@ export function HourlyTemperatureChart({
         </div>
         <div className="flex flex-wrap gap-1 text-[9px] text-[#7D8694]">
           <span className="border border-[#2C3445] px-1.5 py-0.5">预报最高 {formatTemp(forecastMax, unit)}</span>
-          <span className="border border-[#2C3445] px-1.5 py-0.5">METAR最高 {formatTemp(metarMax, unit)}</span>
+          <span className="border border-[#2C3445] px-1.5 py-0.5">METAR 最高 {formatTemp(metarMax, unit)}</span>
           <span className="border border-[#2C3445] px-1.5 py-0.5">峰值 {peakHour ?? '--'}</span>
         </div>
       </div>
 
-      <div className="p-2" role="img" aria-label={`${cityName}逐小时温度图`}>
+      <div className="p-2" role="img" aria-label={`${cityName} 逐小时温度图`}>
         <div className="mb-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[10px] text-[#7D8694]">
-          <span className={`inline-flex items-center gap-1 ${hasChinaLive ? '' : 'opacity-45'}`}><span className="h-2.5 w-2.5 bg-[#EF4444]" />中国实况</span>
-          <span className={`inline-flex items-center gap-1 ${hasPws ? '' : 'opacity-45'}`}><span className="h-0 w-0 border-x-[5px] border-b-[9px] border-x-transparent border-b-[#A855F7]" />PWS（实时）</span>
-          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full bg-[#F97316]" />METAR（本地时）</span>
-          <span className={`inline-flex items-center gap-1 ${hasHistorical ? '' : 'opacity-45'}`}><span className="h-2.5 w-2.5 rounded-full bg-[#22C55E]" />历史（本地时）</span>
-          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full border border-[#3B82F6]" />预报（本地时）</span>
-          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-3 bg-[#94A3B8]/30" />云量 %</span>
+          {legendButton('china', '中国实况', <span className="h-2.5 w-2.5 bg-[#EF4444]" />, hasChinaLive)}
+          {legendButton('pws', hasPws ? 'PWS（实时）' : 'PWS（未授权/无数据）', <span className="h-0 w-0 border-x-[5px] border-b-[9px] border-x-transparent border-b-[#A855F7]" />, hasPws)}
+          {legendButton('metar', 'METAR（本地时）', <span className="h-2.5 w-2.5 rounded-full bg-[#F97316]" />)}
+          {legendButton('historical', '历史（本地时）', <span className="h-2.5 w-2.5 rounded-full bg-[#22C55E]" />, hasHistorical)}
+          {legendButton('forecast', '本系统预报（本地时）', <span className="h-2.5 w-2.5 rounded-full border border-[#3B82F6]" />)}
+          {legendButton('cloud', '云量 %', <span className="h-2.5 w-3 bg-[#94A3B8]/30" />)}
         </div>
         <div className="relative h-[340px]">
           <ResponsiveContainer width="100%" height="100%">
@@ -144,14 +163,13 @@ export function HourlyTemperatureChart({
               <Tooltip
                 contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
                 formatter={(value: unknown, name: string) => name === '云量 %' ? [`${Number(value).toFixed(0)}%`, name] : [formatTemp(Number(value), unit), name]}
-                labelFormatter={(_, payload) => timeLabel(payload?.[0]?.payload?.timestamp)}
               />
-              <Area yAxisId="percent" type="monotone" dataKey="cloud_pct" name="云量 %" stroke="#94A3B8" fill="#94A3B8" fillOpacity={0.25} strokeOpacity={0.65} connectNulls={false} />
-              <Line yAxisId="temp" type="monotone" dataKey="metar_value" name="METAR" stroke="#F97316" dot={{ r: 3, fill: '#F97316', stroke: '#F97316', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />
-              <Line yAxisId="temp" type="monotone" dataKey="historical_value" name="历史" stroke="#22C55E" dot={{ r: 3, fill: '#22C55E', stroke: '#22C55E', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />
-              {hasChinaLive && <Line yAxisId="temp" type="monotone" dataKey="china_live_value" name="中国实况" stroke="#EF4444" dot={<SquareDot />} activeDot={<SquareDot active />} strokeWidth={2} connectNulls={false} />}
-              {hasPws && <Line yAxisId="temp" type="monotone" dataKey="pws_value" name="PWS" stroke="#A855F7" dot={<TriangleDot />} activeDot={<TriangleDot active />} strokeWidth={2} connectNulls={false} />}
-              <Line yAxisId="temp" type="monotone" dataKey="forecast_value" name="预报" stroke="#3B82F6" strokeDasharray="4 4" dot={<HollowCircleDot />} activeDot={<HollowCircleDot active />} strokeWidth={2} connectNulls={false} />
+              {visibleSeries.cloud && <Area yAxisId="percent" type="monotone" dataKey="cloud_pct" name="云量 %" stroke="#94A3B8" fill="#94A3B8" fillOpacity={0.25} strokeOpacity={0.65} connectNulls={false} />}
+              {visibleSeries.metar && <Line yAxisId="temp" type="monotone" dataKey="metar_value" name="METAR" stroke="#F97316" dot={{ r: 3, fill: '#F97316', stroke: '#F97316', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />}
+              {visibleSeries.historical && <Line yAxisId="temp" type="monotone" dataKey="historical_value" name="历史" stroke="#22C55E" dot={{ r: 3, fill: '#22C55E', stroke: '#22C55E', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />}
+              {hasChinaLive && visibleSeries.china && <Line yAxisId="temp" type="monotone" dataKey="china_live_value" name="中国实况" stroke="#EF4444" dot={<SquareDot />} activeDot={<SquareDot active />} strokeWidth={2} connectNulls={false} />}
+              {hasPws && visibleSeries.pws && <Line yAxisId="temp" type="monotone" dataKey="pws_value" name="PWS" stroke="#A855F7" dot={<TriangleDot />} activeDot={<TriangleDot active />} strokeWidth={2} connectNulls={false} />}
+              {visibleSeries.forecast && <Line yAxisId="temp" type="monotone" dataKey="forecast_value" name="预报" stroke="#3B82F6" strokeDasharray="4 4" dot={<HollowCircleDot />} activeDot={<HollowCircleDot active />} strokeWidth={2} connectNulls={false} />}
               {peakHour && <ReferenceLine yAxisId="temp" x={peakHour} stroke="#EC4899" strokeDasharray="4 4" label={<PeakLabel value={`peak ${peakHour}`} />} />}
             </ComposedChart>
           </ResponsiveContainer>

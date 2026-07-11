@@ -74,7 +74,7 @@ def fetch_wunderground_pws_city(
             "city": profile.city,
             "station_id": profile.station_id,
             "reason": "missing_wunderground_api_key",
-            "required_env": ["WUNDERGROUND_API_KEY", "WEATHER_COM_API_KEY"],
+            "required_env": ["WUNDERGROUND_API_KEY"],
             "rows_upserted": 0,
         }
         return _logged_result(started, started_perf, profile.city, payload)
@@ -351,7 +351,10 @@ def _configured_station_ids(profile: CitySettlementProfile) -> list[str]:
 
 
 def _api_key() -> str:
-    return str(env_value("WUNDERGROUND_API_KEY") or env_value("WEATHER_COM_API_KEY") or "").strip()
+    # Forecast/browser keys commonly have no PWS product entitlement. Keep
+    # credentials separate so an otherwise healthy forecast key cannot create
+    # a stream of misleading PWS 401 errors.
+    return str(env_value("WUNDERGROUND_API_KEY") or "").strip()
 
 
 def _split_station_ids(value: str) -> list[str]:

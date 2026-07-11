@@ -69,7 +69,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result["ok"])
             self.assertGreaterEqual(result["cities"], 3)
             self.assertLessEqual(max_active, 2)
-            self.assertEqual(pws_fetch.call_count, result["cities"])
+            self.assertEqual(pws_fetch.call_count, 0)
             self.assertTrue(seen_hours)
             self.assertTrue(all(hours == 24.0 for hours in seen_hours))
             status = scheduler.status()["pollers"]["metar_poller"]
@@ -154,15 +154,15 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             init_v3_db()
             configure_enabled_cities(["chicago", "atlanta"])
             scheduler = WeatherBotScheduler(city_concurrency=1)
-            with patch("weatherbot_v3.scheduler.fetch_recent_hours", side_effect=fake_recent), patch(
+            with patch.dict(os.environ, {"WUNDERGROUND_API_KEY": "test-pws-key"}, clear=False), patch(
                 "weatherbot_v3.scheduler.run_pws_fetch", return_value=rejected
             ) as pws_fetch:
-                result = await scheduler.run_once("metar_poller")
+                result = await scheduler.run_once("pws_poller")
 
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
         self.assertEqual(pws_fetch.call_count, 1)
         city_results = [row["payload"] for row in result["results"]]
-        self.assertTrue(any("pws_auth_cooldown" in row.get("optional_warnings", []) for row in city_results))
+        self.assertTrue(any(row.get("reason") == "pws_auth_cooldown" for row in city_results))
 
     async def test_metar_city_timeout_is_reported_without_blocking_batch_forever(self):
         db_path = test_db_path("scheduler_city_timeout")

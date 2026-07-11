@@ -208,12 +208,15 @@ npm run build
 | `WEATHERBOT_SCHEDULER` | `false` | 是否后端启动时自动启动 scheduler；默认不要开。 |
 | `MINIMAX_API_KEY` | 空 | 可选 AI 审核。 |
 | `FEISHU_WEBHOOK_URL` | 空 | 可选飞书通知。 |
-| `WUNDERGROUND_API_KEY` / `WEATHER_COM_API_KEY` | 空 | 可选 PWS 数据。 |
+| `WEATHER_COM_API_KEY` | 空 | Weather.com v3 逐小时预报与 WU/Weather.com 历史接口；不等于 PWS 权限。 |
+| `WUNDERGROUND_API_KEY` | 空 | 独立的 WU PWS current 权限；缺失时 PWS poller 诚实跳过，不重复请求 401。 |
+| `DEB_WEIGHT_MODE` | `polywx_aligned` | DEB 使用 v3/ECMWF/GFS/ICON/GEM/JMA 六模型先验并按可用源归一。 |
 
 ## 当前限制
 
 - 不能承诺稳定赚钱；必须先完成 14-30 天 paper validation。
-- Open-Meteo Historical、China Live、PWS 当前多数是 display-only 或 research evidence，不直接解锁 live gate。
+- Weather.com v3 是主图预报/云量快照；Open-Meteo NWP 主要供 DEB。China Live、PWS 是 display-only / research evidence，不直接解锁 live gate。
+- WU 当日 Historical 由独立 30 分钟 poller 增量更新；香港 settlement truth 仍以 HKO 为准。
 - 部分城市 settlement truth 和 Polymarket 规则仍需持续核验。
 - 推荐为空不一定是抓取失败，常见原因是 gate、settlement verification、paper gate 或 decision round 过滤。
 - legacy `weatherbet.py` 可以运行旧流程，但不代表 v6 生产化平台主路径。

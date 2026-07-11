@@ -65,7 +65,7 @@ def build_source_health_matrix(
                 expected_interval_seconds=3600,
                 stale_after_seconds=int(max(60.0, cfg.forecast_max_age_minutes) * 60),
                 required=True,
-                stages=("forecast_poller", "refresh_forecast_runs"),
+                stages=("nwp_poller", "refresh_forecast_runs"),
                 now=now,
             ),
             _freshness_source(
@@ -78,7 +78,7 @@ def build_source_health_matrix(
                 timestamp_column="retrieved_at",
                 where="source = 'weathercom_v3_forecast' AND COALESCE(parse_status, '') != 'failed'",
                 expected_cities=enabled,
-                expected_interval_seconds=3600,
+                expected_interval_seconds=1800,
                 stale_after_seconds=int(max(60.0, cfg.forecast_max_age_minutes) * 60),
                 required=bool(cfg.weather_com_forecast_enabled) or str(cfg.deb_weight_mode).lower() in {
                     "polywx", "polywx_aligned", "polywx_aligned_deb_v1"
@@ -97,7 +97,7 @@ def build_source_health_matrix(
                 freshness_column="COALESCE(fetched_at, updated_at)",
                 where="network = 'china_live' AND COALESCE(parse_status, '') != 'failed'",
                 expected_cities=[city for city in ("shanghai", "hong-kong") if city in enabled_set],
-                expected_interval_seconds=300,
+                expected_interval_seconds=60,
                 stale_after_seconds=900,
                 required=False,
                 stages=("china_live_poller", "china_weather_fetch"),
@@ -114,10 +114,10 @@ def build_source_health_matrix(
                 freshness_column="COALESCE(fetched_at, updated_at)",
                 where="network = 'wunderground_pws' AND COALESCE(parse_status, '') != 'failed'",
                 expected_cities=enabled,
-                expected_interval_seconds=300,
+                expected_interval_seconds=600,
                 stale_after_seconds=900,
                 required=False,
-                stages=("metar_poller", "pws_fetch"),
+                stages=("pws_poller", "pws_fetch"),
                 now=now,
             ),
         ]
@@ -153,7 +153,7 @@ def build_source_health_matrix(
                 expected_station_rows=enabled_rows,
                 expected_cities=wu_expected,
                 target_days=max(30, int(cfg.min_independent_settlement_days)),
-                stages=("truth_wunderground_hourly",),
+                stages=("historical_poller", "truth_wunderground_hourly"),
                 now=now,
             )
         )

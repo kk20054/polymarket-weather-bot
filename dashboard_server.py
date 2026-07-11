@@ -2688,6 +2688,7 @@ def _build_weather_city_series(markets):
         if not points and not history_points and not hourly_points:
             continue
         latest = points[-1] if points else (hourly_points[-1] if hourly_points else {})
+        latest_metar_point = next((point for point in reversed(hourly_points) if point.get("metar") is not None), {})
         humidity_values = [p.get("humidity") for p in points if p.get("humidity") is not None]
         humidity_values += [p.get("humidity") for p in hourly_points if p.get("humidity") is not None]
         humidity_values += [p.get("humidity_mean") for p in history_points if p.get("humidity_mean") is not None]
@@ -2696,11 +2697,14 @@ def _build_weather_city_series(markets):
         city["hourly_points"] = hourly_points
         city["points"] = points
         city["latest_best"] = latest.get("best")
-        city["latest_metar"] = latest.get("metar")
+        city["latest_metar"] = latest_metar_point.get("metar")
         city["latest_source"] = latest.get("source")
         city["latest_timestamp"] = latest.get("timestamp")
         city["humidity_status"] = "available" if humidity_values else "not_collected"
-        city["history_count"] = len(history_points)
+        city["history_count"] = max(
+            len(history_points),
+            sum(1 for point in hourly_points if point.get("historical") is not None),
+        )
         city["forecast_count"] = len(points) + sum(
             1 for point in hourly_points if _point_forecast_value(point) is not None
         )
@@ -2722,6 +2726,7 @@ def _registry_city_series(targets: dict[str, set[str]] | None = None):
             key=lambda point: str(point.get("timestamp") or point.get("local_hour") or ""),
         )[-240:]
         latest = hourly_points[-1] if hourly_points else {}
+        latest_metar_point = next((point for point in reversed(hourly_points) if point.get("metar") is not None), {})
         humidity_values = [p.get("humidity") for p in hourly_points if p.get("humidity") is not None]
         forecast_count = sum(1 for point in hourly_points if _point_forecast_value(point) is not None)
         rows.append({
@@ -2742,11 +2747,11 @@ def _registry_city_series(targets: dict[str, set[str]] | None = None):
             "verification_status": station_row.get("verification_status") or "provisional",
             "last_refreshed_at": latest_fetch.get(profile.city),
             "latest_best": _point_forecast_value(latest) if latest else None,
-            "latest_metar": latest.get("metar") if latest else None,
+            "latest_metar": latest_metar_point.get("metar") if latest_metar_point else None,
             "latest_source": latest.get("source") or latest.get("forecast_source") if latest else None,
             "latest_timestamp": latest.get("timestamp") if latest else None,
             "humidity_status": "available" if humidity_values else "not_collected",
-            "history_count": 0,
+            "history_count": sum(1 for point in hourly_points if point.get("historical") is not None),
             "forecast_count": forecast_count,
             "hourly_count": len(hourly_points),
             "history_points": [],

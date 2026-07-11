@@ -29,7 +29,9 @@ CHINA_LIVE_CITY_ALIASES = {
 }
 
 WEATHERCN_STATION_CODES = {
-    "shanghai": "101020100",
+    # Pudong New Area is the closest public weather.com.cn feed to ZSPD and
+    # matches the station used by the PolyWX Shanghai workbench.
+    "shanghai": "101020600",
 }
 
 WIND_DIRECTION_DEGREES = {
@@ -186,7 +188,7 @@ def weathercn_sk2d_observation(
     raw_text: str,
     profile: CitySettlementProfile | None = None,
     *,
-    station_code: str = "101020100",
+    station_code: str = "101020600",
     source_url: str = "",
     fetched_at: str | None = None,
 ) -> dict[str, Any]:

@@ -67,6 +67,7 @@ WEATHER_CODE_LABELS = {
 
 HOURLY_CONSENSUS_VERSION = "hourly-consensus-v2"
 HOURLY_CONSENSUS_METHOD = "median_primary_v1"
+WEATHERCOM_SOURCE = "weathercom_v3_forecast"
 
 CONUS_PRIMARY_SOURCES = (
     "openmeteo_ncep_hrrr_conus",
@@ -487,7 +488,149 @@ def hourly_consensus_summary(
         "rows": len(selected),
         "source": source,
         "points": selected,
+        "series": source_series_summary(str(city), str(target_date), db_path=db_path) if city and target_date else {},
     }
+
+
+def source_series_summary(
+    city: str,
+    target_date: str,
+    *,
+    db_path: Path | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return independent, native-frequency evidence series for the chart."""
+    city_key = str(city or "").strip().lower()
+    profile = SETTLEMENT_REGISTRY.get(city_key)
+    if not profile or not target_date:
+        return {}
+    zone = ZoneInfo(profile.timezone)
+    start_local = datetime.fromisoformat(str(target_date)).replace(tzinfo=zone)
+    end_local = start_local.replace(hour=23, minute=59, second=59, microsecond=999999)
+    start_utc = start_local.astimezone(timezone.utc).isoformat()
+    end_utc = end_local.astimezone(timezone.utc).isoformat()
+    with connect(db_path) as conn:
+        metar_rows = [
+            dict(row) for row in conn.execute(
+                """
+                SELECT * FROM metar_reports
+                WHERE city = ? AND report_time >= ? AND report_time <= ?
+                ORDER BY report_time
+                """,
+                (city_key, start_utc, end_utc),
+            ).fetchall()
+        ]
+        mesonet_rows = [
+            dict(row) for row in conn.execute(
+                """
+                SELECT * FROM mesonet_observations
+                WHERE city = ? AND observed_at >= ? AND observed_at <= ?
+                  AND network IN ('china_live', 'wunderground_pws', 'open_meteo_historical')
+                ORDER BY observed_at
+                """,
+                (city_key, start_utc, end_utc),
+            ).fetchall()
+        ]
+        historical_rows = [
+            dict(row) for row in conn.execute(
+                """
+                SELECT * FROM truth_wunderground_hourly
+                WHERE UPPER(icao) = ? AND date_local = ?
+                ORDER BY observed_at_utc
+                """,
+                (str(profile.station_id or "").upper(), str(target_date)),
+            ).fetchall()
+        ]
+
+    series: dict[str, list[dict[str, Any]]] = {
+        "forecast": list(forecast_hourly_points({city_key: {str(target_date)}}, db_path=db_path).get(city_key) or []),
+        "metar": [],
+        "historical": [],
+        "china_live": [],
+        "pws": [],
+        "historical_fallback": [],
+    }
+    for row in metar_rows:
+        point = _observation_point(
+            profile,
+            report_time=row.get("report_time"),
+            temperature=row.get("temperature"),
+            source_unit=_metar_temperature_unit(row, profile),
+            source="metar",
+            station_id=row.get("station_id"),
+            humidity=None,
+            cloud_cover=_metar_cloud_cover_percent(row),
+            wind_speed=row.get("wind_speed"),
+            wind_direction=row.get("wind_direction"),
+            pressure=row.get("pressure") or row.get("altimeter"),
+            dew_point=row.get("dew_point"),
+            visibility=row.get("visibility"),
+            condition=_metar_weather_tokens(row),
+            raw=row,
+        )
+        if point:
+            series["metar"].append(_native_series_point(point, row.get("report_time"), profile))
+    for row in historical_rows:
+        point = _observation_point(
+            profile,
+            report_time=row.get("observed_at_utc"),
+            temperature=row.get("temp_c"),
+            source_unit="C",
+            source="wunderground_history",
+            station_id=row.get("icao"),
+            humidity=row.get("humidity"),
+            cloud_cover=row.get("cloud_cover_pct"),
+            wind_speed=row.get("wind_speed_kph"),
+            wind_direction=row.get("wind_direction"),
+            pressure=row.get("pressure_hpa"),
+            dew_point=row.get("dew_point_c"),
+            visibility=row.get("visibility_km"),
+            condition=row.get("condition"),
+            raw=row,
+        )
+        if point:
+            series["historical"].append(_native_series_point(point, row.get("observed_at_utc"), profile))
+    for row in mesonet_rows:
+        network = str(row.get("network") or "")
+        if network == "china_live" and city_key == "shanghai" and str(row.get("station_id") or "") != "101020600":
+            # Keep legacy downtown snapshots in the audit trail, but the
+            # production chart is aligned to the Pudong/ZSPD reference feed.
+            continue
+        point = _observation_point(
+            profile,
+            report_time=row.get("observed_at"),
+            temperature=row.get("temperature"),
+            source_unit=str(row.get("raw_unit") or "C"),
+            source=network,
+            station_id=row.get("station_id"),
+            humidity=row.get("humidity"),
+            cloud_cover=None,
+            wind_speed=row.get("wind_speed"),
+            wind_direction=row.get("wind_direction"),
+            pressure=row.get("pressure"),
+            dew_point=row.get("dew_point"),
+            visibility=None,
+            condition=_condition_label(row),
+            raw=row,
+        )
+        if not point:
+            continue
+        key = "pws" if network == "wunderground_pws" else ("historical_fallback" if network == "open_meteo_historical" else network)
+        series.setdefault(key, []).append(_native_series_point(point, row.get("observed_at"), profile))
+    return series
+
+
+def _native_series_point(
+    point: dict[str, Any],
+    report_time: Any,
+    profile: CitySettlementProfile,
+) -> dict[str, Any]:
+    result = dict(point)
+    parsed = _parse_report_time(report_time)
+    if parsed is not None:
+        local = parsed.astimezone(ZoneInfo(profile.timezone))
+        result["timestamp"] = local.isoformat()
+        result["local_time"] = local.strftime("%H:%M")
+    return result
 
 
 def forecast_hourly_points(
@@ -545,7 +688,10 @@ def forecast_hourly_points(
                 str(run.get("provider") or ""),
                 str(run.get("model") or ""),
             )
-            if source_key in seen_source_keys:
+            # Keep Weather.com snapshots so past local hours can be filled from
+            # the most recent snapshot that still contained that hour. Other
+            # model sources keep only their latest run.
+            if source_key in seen_source_keys and str(run.get("source") or "") != WEATHERCOM_SOURCE:
                 continue
             seen_source_keys.add(source_key)
             latest_runs.append(run)
@@ -569,7 +715,7 @@ def forecast_hourly_points(
                 SELECT *
                 FROM forecast_members
                 WHERE run_id IN ({placeholders})
-                ORDER BY run_id, member_id
+                ORDER BY run_id DESC, member_id
                 """,
                 run_ids,
             ).fetchall()
@@ -577,6 +723,8 @@ def forecast_hourly_points(
 
     runs_by_id = {int(run["id"]): run for run in selected_runs}
     buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
+    seen_weathercom_hours: set[tuple[str, str, str]] = set()
+    weathercom_revision_counts: dict[tuple[str, str, str], int] = defaultdict(int)
     for member in member_rows:
         run = runs_by_id.get(int(member.get("run_id") or 0))
         if not run:
@@ -606,6 +754,11 @@ def forecast_hourly_points(
             if local_date != target_date:
                 continue
             key = (city, target_date, local_hour)
+            if source == WEATHERCOM_SOURCE:
+                weathercom_revision_counts[key] += 1
+                if key in seen_weathercom_hours:
+                    continue
+                seen_weathercom_hours.add(key)
             bucket = buckets.setdefault(
                 key,
                 {
@@ -620,8 +773,11 @@ def forecast_hourly_points(
                     "primary_sources": set(),
                     "fallback_sources": set(),
                     "source_values": defaultdict(list),
+                    "weathercom_values": [],
+                    **{f"weathercom_{field}_values": [] for field in FIELD_KEYS},
                     "unit": unit,
                     "horizon": run.get("horizon") or "",
+                    "retrieved_at": run.get("retrieved_at") or run.get("run_at") or run.get("created_at"),
                     "roles": set(),
                 },
             )
@@ -633,10 +789,14 @@ def forecast_hourly_points(
             else:
                 bucket["primary_sources"].add(source)
             bucket["source_values"][source].append(float(temp))
+            if source == WEATHERCOM_SOURCE:
+                bucket["weathercom_values"].append(float(temp))
             for field, keys in FIELD_KEYS.items():
                 value = _first_float(item, keys)
                 if value is not None:
                     bucket[f"{field}_values"].append(value)
+                    if source == WEATHERCOM_SOURCE:
+                        bucket[f"weathercom_{field}_values"].append(value)
             condition = _condition_label(item)
             if condition:
                 bucket["condition_values"].append(condition)
@@ -651,7 +811,8 @@ def forecast_hourly_points(
         primary_sources = sorted(str(source) for source in bucket["primary_sources"] if source)
         fallback_sources = sorted(str(source) for source in bucket["fallback_sources"] if source)
         values_sorted = sorted(float(value) for value in values if math.isfinite(float(value)))
-        forecast_temp = _median(values_sorted)
+        display_values = sorted(float(value) for value in bucket["weathercom_values"] if math.isfinite(float(value))) or values_sorted
+        forecast_temp = _median(display_values)
         forecast_spread = _percentile(values_sorted, 75) - _percentile(values_sorted, 25) if values_sorted else None
         fallback_only = bool(values_sorted) and not primary_sources and bool(fallback_sources)
         point = {
@@ -662,22 +823,22 @@ def forecast_hourly_points(
             "best": forecast_temp,
             "ensemble_mean": forecast_temp,
             "ensemble_std": _std(values),
-            "forecast_values": values_sorted,
+            "forecast_values": display_values,
             "forecast_spread": forecast_spread,
             "forecast_member_count": len(values_sorted),
-            "forecast_source": "polywx_fallback" if fallback_only else ("openmeteo_multi_model" if any(source.startswith("openmeteo_") for source in primary_sources) else "forecast_archive"),
+            "forecast_source": WEATHERCOM_SOURCE if bucket["weathercom_values"] else ("polywx_fallback" if fallback_only else ("openmeteo_multi_model" if any(source.startswith("openmeteo_") for source in primary_sources) else "forecast_archive")),
             "forecast_sources": source_parts,
             "fallback_only": fallback_only,
             "warnings": ["fallback_polywx_only"] if fallback_only else [],
-            "consensus_method": HOURLY_CONSENSUS_METHOD,
-            "humidity": _mean(bucket["humidity_values"]),
-            "cloud_cover": _mean(bucket["cloud_cover_values"]),
-            "precipitation": _mean(bucket["precipitation_values"]),
-            "precipitation_probability": _mean(bucket["precipitation_probability_values"]),
-            "wind_speed": _mean(bucket["wind_speed_values"]),
-            "wind_direction": _circular_mean_degrees(bucket["wind_direction_values"]),
-            "pressure": _mean(bucket["pressure_values"]),
-            "dew_point": _mean(bucket["dew_point_values"]),
+            "consensus_method": "weathercom_v3_display_v2" if bucket["weathercom_values"] else HOURLY_CONSENSUS_METHOD,
+            "humidity": _mean(bucket["weathercom_humidity_values"]) if bucket["weathercom_humidity_values"] else _mean(bucket["humidity_values"]),
+            "cloud_cover": _mean(bucket["weathercom_cloud_cover_values"]) if bucket["weathercom_cloud_cover_values"] else _mean(bucket["cloud_cover_values"]),
+            "precipitation": _mean(bucket["weathercom_precipitation_values"]) if bucket["weathercom_precipitation_values"] else _mean(bucket["precipitation_values"]),
+            "precipitation_probability": _mean(bucket["weathercom_precipitation_probability_values"]) if bucket["weathercom_precipitation_probability_values"] else _mean(bucket["precipitation_probability_values"]),
+            "wind_speed": _mean(bucket["weathercom_wind_speed_values"]) if bucket["weathercom_wind_speed_values"] else _mean(bucket["wind_speed_values"]),
+            "wind_direction": _circular_mean_degrees(bucket["weathercom_wind_direction_values"]) if bucket["weathercom_wind_direction_values"] else _circular_mean_degrees(bucket["wind_direction_values"]),
+            "pressure": _mean(bucket["weathercom_pressure_values"]) if bucket["weathercom_pressure_values"] else _mean(bucket["pressure_values"]),
+            "dew_point": _mean(bucket["weathercom_dew_point_values"]) if bucket["weathercom_dew_point_values"] else _mean(bucket["dew_point_values"]),
             "shortwave_radiation": _mean(bucket["shortwave_radiation_values"]),
             "condition": _mode(bucket["condition_values"]),
             "source": " + ".join(source_parts) if source_parts else "forecast_archive",
@@ -685,6 +846,8 @@ def forecast_hourly_points(
             "ecmwf": _mean(_matching_source_values(source_values, "ecmwf")),
             "hrrr": _mean(_matching_source_values(source_values, "hrrr", "gfs")),
             "archive": True,
+            "revision_count": weathercom_revision_counts.get((city, bucket["target_date"], bucket["local_hour"]), 0),
+            "retrieved_at": bucket.get("retrieved_at"),
         }
         by_city[city].append(point)
 
@@ -698,6 +861,17 @@ def _select_forecast_runs_for_target(city: str, runs: list[dict[str, Any]]) -> l
     profile = SETTLEMENT_REGISTRY.get(str(city or "").strip().lower())
     primary_sources = set(_primary_sources_for_profile(profile))
     eligible = [run for run in runs if _is_training_eligible(run)]
+    weathercom = [run for run in eligible if _source_label(run) == WEATHERCOM_SOURCE]
+    if weathercom:
+        supplemental = [
+            run for run in eligible
+            if _source_label(run) != WEATHERCOM_SOURCE
+            and any(token in _source_label(run).lower() for token in ("ecmwf", "gfs", "hrrr", "nbm", "icon", "gem", "jma", "cma"))
+        ]
+        return [
+            *(_with_forecast_role(run, "display") for run in weathercom[:48]),
+            *(_with_forecast_role(run, "supplemental") for run in supplemental[:6]),
+        ]
     exact_primary = [run for run in eligible if _source_label(run) in primary_sources]
     if exact_primary:
         exact_labels = {_source_label(run) for run in exact_primary}
@@ -1124,7 +1298,7 @@ def _combined_forecast(points: list[dict[str, Any]]) -> dict[str, Any]:
         "temperature": _median(values),
         "spread": spread if spread is not None else (_percentile(values, 75) - _percentile(values, 25) if values else None),
         "member_count": len(values),
-        "method": HOURLY_CONSENSUS_METHOD,
+        "method": "weathercom_v3_display_v2" if WEATHERCOM_SOURCE in sources_sorted else HOURLY_CONSENSUS_METHOD,
         "forecast_source": forecast_source or ("polywx_fallback" if fallback_only else ("openmeteo_multi_model" if any(source.startswith("openmeteo_") for source in sources_sorted) else "forecast_archive")),
         "fallback_only": fallback_only,
         "warnings": sorted(set(warnings)),

@@ -9,8 +9,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from .cli import run_china_weather_fetch, run_daily_max_build, run_gamma_structured_sync, run_hourly_consensus_build, run_market_buckets_sync, run_model_timing_reprice, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build, run_weathercom_fetch
+from .cli import run_china_weather_fetch, run_daily_max_build, run_gamma_structured_sync, run_hourly_consensus_build, run_market_buckets_sync, run_model_timing_reprice, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build, run_weathercom_fetch, run_wunderground_hourly_fetch
 from .db import log_data_fetch, utc_now
+from .env_utils import env_value
 from .metar import fetch_recent_hours
 from .paper_settlement import settle_open_paper_orders
 from .paper_validation import run_paper_validation_tick
@@ -20,9 +21,12 @@ from .stations import enabled_station_rows, sync_station_registry
 
 MAX_CITY_CONCURRENCY = int(os.getenv("WEATHERBOT_SCHEDULER_CITY_CONCURRENCY", "2") or "2")
 METAR_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_METAR_SECONDS", "300") or "300")
-FORECAST_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_SECONDS", "3600") or "3600")
+FORECAST_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_SECONDS", "1800") or "1800")
+NWP_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_NWP_SECONDS", "3600") or "3600")
+HISTORICAL_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_HISTORICAL_SECONDS", "1800") or "1800")
+PWS_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PWS_SECONDS", "600") or "600")
 DERIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_DERIVE_SECONDS", "900") or "900")
-CHINA_LIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_CHINA_LIVE_SECONDS", "300") or "300")
+CHINA_LIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_CHINA_LIVE_SECONDS", "60") or "60")
 GAMMA_ORDERBOOK_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_GAMMA_ORDERBOOK_SECONDS", "300") or "300")
 MODEL_TIMING_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_MODEL_TIMING_SECONDS", "60") or "60")
 PAPER_SETTLEMENT_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PAPER_SETTLEMENT_SECONDS", "900") or "900")
@@ -105,8 +109,11 @@ class WeatherBotScheduler:
             "metar_poller": PollerState("metar_poller", "METAR", METAR_INTERVAL_SECONDS, 0),
             "china_live_poller": PollerState("china_live_poller", "China Live", CHINA_LIVE_INTERVAL_SECONDS, 5),
             "forecast_poller": PollerState("forecast_poller", "Forecast", FORECAST_INTERVAL_SECONDS, 15),
+            "nwp_poller": PollerState("nwp_poller", "NWP", NWP_INTERVAL_SECONDS, 30),
+            "historical_poller": PollerState("historical_poller", "Historical", HISTORICAL_INTERVAL_SECONDS, 90),
+            "pws_poller": PollerState("pws_poller", "PWS", PWS_INTERVAL_SECONDS, 120),
             "gamma_orderbook_poller": PollerState("gamma_orderbook_poller", "Orderbook", GAMMA_ORDERBOOK_INTERVAL_SECONDS, 45),
-            "derive_poller": PollerState("derive_poller", "Historical", DERIVE_INTERVAL_SECONDS, 420),
+            "derive_poller": PollerState("derive_poller", "Derived", DERIVE_INTERVAL_SECONDS, 420),
             "paper_settlement_poller": PollerState("paper_settlement_poller", "Paper Settlement", PAPER_SETTLEMENT_INTERVAL_SECONDS, 600),
             "paper_execution_poller": PollerState("paper_execution_poller", "Paper Validation", PAPER_EXECUTION_INTERVAL_SECONDS, 720),
             "model_timing_poller": PollerState("model_timing_poller", "Model Timing", MODEL_TIMING_INTERVAL_SECONDS, 0),
@@ -156,6 +163,12 @@ class WeatherBotScheduler:
                     result = await self._run_metar_poller()
                 elif poller_key == "forecast_poller":
                     result = await self._run_forecast_poller()
+                elif poller_key == "nwp_poller":
+                    result = await self._run_nwp_poller()
+                elif poller_key == "historical_poller":
+                    result = await self._run_historical_poller()
+                elif poller_key == "pws_poller":
+                    result = await self._run_pws_poller()
                 elif poller_key == "derive_poller":
                     result = await self._run_derive_poller()
                 elif poller_key == "china_live_poller":
@@ -274,47 +287,11 @@ class WeatherBotScheduler:
                     "station_id": row.get("station_id"),
                     "error": f"metar_timeout_{METAR_CITY_TIMEOUT_SECONDS}s",
                 }
-            optional_warnings = []
-            cooldown_remaining = max(0, round(self._pws_auth_disabled_until - time.monotonic()))
-            if cooldown_remaining:
-                pws = {
-                    "ok": True,
-                    "optional": True,
-                    "skipped": True,
-                    "reason": "pws_auth_cooldown",
-                    "retry_after_seconds": cooldown_remaining,
-                }
-                optional_warnings.append("pws_auth_cooldown")
-            else:
-                try:
-                    pws = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            run_pws_fetch,
-                            city,
-                            dry_run=False,
-                            all_cities=False,
-                            limit_cities=1,
-                            station_limit=5,
-                        ),
-                        timeout=PWS_OPTIONAL_TIMEOUT_SECONDS,
-                    )
-                    if _pws_auth_failure(pws):
-                        self._pws_auth_disabled_until = time.monotonic() + PWS_AUTH_COOLDOWN_SECONDS
-                        pws["auth_cooldown_seconds"] = PWS_AUTH_COOLDOWN_SECONDS
-                        optional_warnings.append("pws_auth_cooldown")
-                except asyncio.TimeoutError:
-                    pws = {"ok": False, "optional": True, "error": "pws_timeout"}
-                    optional_warnings.append("pws_timeout")
-                except Exception as exc:
-                    pws = {"ok": False, "optional": True, "error": str(exc)}
-                    optional_warnings.append("pws_failed")
             return {
                 "ok": _payload_ok(metar),
                 "city": city,
                 "station_id": row.get("station_id"),
                 "metar": metar,
-                "pws": pws,
-                "optional_warnings": optional_warnings,
             }
 
         return await _run_city_batch(
@@ -322,10 +299,40 @@ class WeatherBotScheduler:
             self.city_concurrency,
             run_city,
             poller_key="metar_poller",
-            timeout_seconds=METAR_CITY_TIMEOUT_SECONDS + PWS_OPTIONAL_TIMEOUT_SECONDS + 10,
+            timeout_seconds=METAR_CITY_TIMEOUT_SECONDS + 10,
         )
 
     async def _run_forecast_poller(self) -> dict[str, Any]:
+        rows = _enabled_rows()
+
+        async def run_city(row: dict[str, Any]) -> dict[str, Any]:
+            city = str(row.get("city_key") or row.get("city"))
+            weathercom = await asyncio.wait_for(
+                asyncio.to_thread(
+                    run_weathercom_fetch,
+                    city,
+                    dry_run=False,
+                    limit_cities=1,
+                    forecast_days=3,
+                ),
+                timeout=40,
+            )
+            return {
+                "ok": _payload_ok(weathercom),
+                "city": city,
+                "station_id": row.get("station_id"),
+                "weathercom": weathercom,
+            }
+
+        return await _run_city_batch(
+            rows,
+            self.city_concurrency,
+            run_city,
+            poller_key="forecast_poller",
+            timeout_seconds=FORECAST_CITY_TIMEOUT_SECONDS,
+        )
+
+    async def _run_nwp_poller(self) -> dict[str, Any]:
         rows = _enabled_rows()
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
@@ -338,33 +345,115 @@ class WeatherBotScheduler:
                     limit_cities=1,
                     forecast_days=7,
                 ),
-                timeout=max(30, FORECAST_CITY_TIMEOUT_SECONDS - 50),
-            )
-            weathercom = await asyncio.wait_for(
-                asyncio.to_thread(
-                    run_weathercom_fetch,
-                    city,
-                    dry_run=False,
-                    limit_cities=1,
-                    forecast_days=3,
-                ),
-                timeout=40,
+                timeout=FORECAST_CITY_TIMEOUT_SECONDS,
             )
             return {
                 "ok": _payload_ok(openmeteo),
                 "city": city,
                 "station_id": row.get("station_id"),
                 "openmeteo": openmeteo,
-                "weathercom": weathercom,
-                "optional_warnings": [] if _payload_ok(weathercom) else ["weathercom_v3_unavailable"],
             }
 
         return await _run_city_batch(
             rows,
             self.city_concurrency,
             run_city,
-            poller_key="forecast_poller",
+            poller_key="nwp_poller",
             timeout_seconds=FORECAST_CITY_TIMEOUT_SECONDS,
+        )
+
+    async def _run_historical_poller(self) -> dict[str, Any]:
+        rows = [row for row in _enabled_rows() if str(row.get("city_key") or row.get("city")) != "hong-kong"]
+
+        async def run_city(row: dict[str, Any]) -> dict[str, Any]:
+            city = str(row.get("city_key") or row.get("city"))
+            target_date = _local_today(row)
+            payload = await asyncio.to_thread(
+                run_wunderground_hourly_fetch,
+                city,
+                target_date=target_date,
+                limit_cities=1,
+                dry_run=False,
+            )
+            return {
+                "ok": _payload_ok(payload),
+                "city": city,
+                "station_id": row.get("station_id"),
+                "target_date": target_date,
+                "historical": payload,
+            }
+
+        return await _run_city_batch(
+            rows,
+            self.city_concurrency,
+            run_city,
+            poller_key="historical_poller",
+            timeout_seconds=FORECAST_CITY_TIMEOUT_SECONDS,
+        )
+
+    async def _run_pws_poller(self) -> dict[str, Any]:
+        rows = _enabled_rows()
+        if not env_value("WUNDERGROUND_API_KEY"):
+            return {
+                "ok": True,
+                "cities": len(rows),
+                "ok_cities": 0,
+                "failed_cities": 0,
+                "result_count": 0,
+                "city_results": [],
+                "skipped": True,
+                "reason": "missing_wunderground_api_key",
+            }
+        cooldown_remaining = max(0, round(self._pws_auth_disabled_until - time.monotonic()))
+        if cooldown_remaining:
+            return {
+                "ok": True,
+                "cities": len(rows),
+                "ok_cities": 0,
+                "failed_cities": 0,
+                "result_count": 0,
+                "city_results": [],
+                "skipped": True,
+                "reason": "pws_auth_cooldown",
+                "retry_after_seconds": cooldown_remaining,
+            }
+
+        async def run_city(row: dict[str, Any]) -> dict[str, Any]:
+            city = str(row.get("city_key") or row.get("city"))
+            if self._pws_auth_disabled_until > time.monotonic():
+                return {
+                    "ok": True,
+                    "city": city,
+                    "station_id": row.get("station_id"),
+                    "skipped": True,
+                    "reason": "pws_auth_cooldown",
+                }
+            payload = await asyncio.wait_for(
+                asyncio.to_thread(
+                    run_pws_fetch,
+                    city,
+                    dry_run=False,
+                    all_cities=False,
+                    limit_cities=1,
+                    station_limit=5,
+                ),
+                timeout=PWS_OPTIONAL_TIMEOUT_SECONDS,
+            )
+            if _pws_auth_failure(payload):
+                self._pws_auth_disabled_until = time.monotonic() + PWS_AUTH_COOLDOWN_SECONDS
+            return {
+                "ok": _payload_ok(payload),
+                "city": city,
+                "station_id": row.get("station_id"),
+                "pws": payload,
+            }
+
+        return await _run_city_batch(
+            rows,
+            self.city_concurrency,
+            run_city,
+            poller_key="pws_poller",
+            timeout_seconds=PWS_OPTIONAL_TIMEOUT_SECONDS + 10,
         )
 
     async def _run_derive_poller(self) -> dict[str, Any]:
@@ -605,6 +694,15 @@ def _target_dates_for_station(row: dict[str, Any]) -> list[str]:
     except Exception:
         local_today = datetime.now(timezone.utc).date()
     return [local_today.isoformat(), (local_today + timedelta(days=1)).isoformat()]
+
+
+def _local_today(row: dict[str, Any]) -> str:
+    timezone_name = str(row.get("settlement_timezone") or row.get("timezone") or "UTC")
+    try:
+        zone = ZoneInfo(timezone_name)
+    except Exception:
+        zone = timezone.utc
+    return datetime.now(timezone.utc).astimezone(zone).date().isoformat()
 
 
 def _payload_ok(payload: Any) -> bool:

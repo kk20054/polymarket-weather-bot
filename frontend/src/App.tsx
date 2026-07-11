@@ -15,6 +15,7 @@ import {
   fetchDashboard,
   fetchDailyMaxPredictions,
   fetchForecastArchiveManifest,
+  fetchHourlyConsensus,
   fetchMarketBuckets,
   fetchModelRepriceEvents,
   fetchProductionRefreshStatus,
@@ -1209,7 +1210,7 @@ function App() {
     const pollers = schedulerStatus?.pollers ?? {}
     let shouldRefreshDashboard = false
     let shouldRefreshLayer7 = false
-    for (const key of ['forecast_poller', 'metar_poller', 'china_live_poller', 'derive_poller']) {
+    for (const key of ['forecast_poller', 'nwp_poller', 'metar_poller', 'historical_poller', 'pws_poller', 'china_live_poller', 'derive_poller']) {
       const poller = pollers[key]
       const runKey = poller?.last_run_at
       if (!poller || !runKey || seenSchedulerRunsRef.current[key] === runKey) continue
@@ -1246,6 +1247,7 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['signal-decisions'] })
       queryClient.invalidateQueries({ queryKey: ['daily-max-predictions'] })
       queryClient.invalidateQueries({ queryKey: ['model-reprice-events'] })
+      queryClient.invalidateQueries({ queryKey: ['hourly-consensus'] })
     }
   }, [schedulerStatus, uiLanguage, queryClient])
 
@@ -1254,6 +1256,14 @@ function App() {
     if (!city.enabled && city.key !== selectedCity) return false
     if (!query) return true
     return `${city.name} ${city.station ?? ''} ${city.key} ${city.continent}`.toLowerCase().includes(query)
+  })
+
+  const hourlyConsensusQuery = useQuery({
+    queryKey: ['hourly-consensus', selectedCity, selectedDate],
+    queryFn: () => fetchHourlyConsensus(selectedCity, selectedDate),
+    enabled: selectedEvidenceReadyForLayer7,
+    refetchInterval: 30000,
+    retry: 1,
   })
   const cityHref = (city: { key: string; station?: string }) => {
     const params = new URLSearchParams()
@@ -1339,7 +1349,7 @@ function App() {
             poller={schedulerStatus?.pollers?.metar_poller}
             label="METAR"
           />
-          <SchedulerBadge poller={schedulerStatus?.pollers?.derive_poller} label="历史观测" />
+          <SchedulerBadge poller={schedulerStatus?.pollers?.historical_poller} label="历史观测" />
           <SchedulerBadge
             poller={schedulerStatus?.pollers?.china_live_poller}
             label="中国天气实况"
@@ -1663,6 +1673,7 @@ function App() {
               marketBuckets={marketBucketsQuery.data ?? null}
               signalDecisions={signalDecisionsQuery.data ?? null}
               dailyMaxPrediction={dailyMaxPredictionQuery.data ?? null}
+              hourlySourceSeries={hourlyConsensusQuery.data?.series ?? null}
               layer7Loading={marketBucketsQuery.isFetching || signalDecisionsQuery.isFetching || dailyMaxPredictionQuery.isFetching}
               selectedCity={selectedCity}
               onSelectedCity={setSelectedCity}

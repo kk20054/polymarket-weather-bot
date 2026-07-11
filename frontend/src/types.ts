@@ -911,6 +911,33 @@ export interface WeatherCityPoint {
   archive?: boolean
 }
 
+export interface HourlySourcePoint extends WeatherCityPoint {
+  local_hour?: string
+  local_time?: string
+  temperature?: number | null
+  revision_count?: number
+  retrieved_at?: string | null
+}
+
+export interface HourlySourceSeries {
+  forecast?: HourlySourcePoint[]
+  metar?: HourlySourcePoint[]
+  historical?: HourlySourcePoint[]
+  china_live?: HourlySourcePoint[]
+  pws?: HourlySourcePoint[]
+  historical_fallback?: HourlySourcePoint[]
+}
+
+export interface HourlyConsensusSummary {
+  ok: boolean
+  city: string
+  target_date: string
+  rows: number
+  source: string
+  points: HourlySourcePoint[]
+  series?: HourlySourceSeries
+}
+
 export interface HistoricalWeatherPoint {
   city: string
   city_name: string

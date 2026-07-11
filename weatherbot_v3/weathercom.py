@@ -190,7 +190,10 @@ def weathercom_runs_from_response(
             "model": "v3",
             "model_version": "weather.com-v3-hourly",
             "run_type": "forecast",
-            "run_at": "",
+            # Weather.com does not expose a model-cycle timestamp. The
+            # retrieval timestamp is the auditable snapshot time used for
+            # ordering and as-of replay.
+            "run_at": retrieved.isoformat(),
             "retrieved_at": retrieved.isoformat(),
             "valid_at": str(peak.get("valid_at") or ""),
             "horizon": _horizon(profile, target_date, retrieved),

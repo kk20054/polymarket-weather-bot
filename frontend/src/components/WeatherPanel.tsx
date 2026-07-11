@@ -10,8 +10,8 @@ import {
   YAxis,
 } from 'recharts'
 import { ExternalLink } from 'lucide-react'
-import { HourlyTemperatureChart } from './HourlyTemperatureChart'
-import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import { HourlyTemperatureChart, type HourlyChartRow } from './HourlyTemperatureChart'
+import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlySourcePoint, HourlySourceSeries, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -23,6 +23,7 @@ interface Props {
   marketBuckets?: MarketBucketSummary | null
   signalDecisions?: SignalDecisionSummary | null
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
+  hourlySourceSeries?: HourlySourceSeries | null
   alphaEvents?: ModelRepriceEvent[]
   layer7Loading?: boolean
   selectedCity?: string
@@ -86,6 +87,8 @@ type HourlyWeatherRow = {
   horizon?: string
   member_count?: number
   archive?: boolean
+  fetched_at?: string | null
+  revision_count?: number
 }
 
 type LayerDistributionItem = DistributionItem & {
@@ -894,6 +897,33 @@ function buildChartData(series?: WeatherCitySeries): WeatherChartRow[] {
     .slice(-60)
 }
 
+function forecastTableRowsFromSeries(points: HourlySourcePoint[] | undefined, fallback: HourlyWeatherRow[]): HourlyWeatherRow[] {
+  if (!points?.length) return fallback
+  return points.map((point, index) => ({
+    id: `forecast-${point.timestamp}-${index}`,
+    timestamp: point.timestamp,
+    target_date: point.target_date,
+    label: String(point.local_hour || point.local_time || point.timestamp.slice(11, 16)),
+    forecast: asNumber(point.temperature ?? point.ensemble_mean ?? point.best),
+    humidity: asNumber(point.humidity),
+    cloud_cover: null,
+    forecast_cloud_cover: asNumber(point.cloud_cover),
+    precipitation: asNumber(point.precipitation),
+    precipitation_probability: asNumber(point.precipitation_probability),
+    wind_speed: asNumber(point.wind_speed),
+    wind_direction: asNumber(point.wind_direction),
+    pressure: asNumber(point.pressure),
+    dew_point: asNumber(point.dew_point),
+    condition: point.condition ?? null,
+    source: point.source || 'weathercom_v3_forecast',
+    horizon: point.horizon || '--',
+    member_count: point.member_count,
+    archive: Boolean(point.archive),
+    fetched_at: point.retrieved_at ?? null,
+    revision_count: point.revision_count,
+  }))
+}
+
 function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): HourlyWeatherRow[] {
   const rows = new Map<string, HourlyWeatherRow>()
   const sourcePoints = (series?.hourly_points?.length ? series.hourly_points : (series?.forecast_points ?? series?.points ?? []))
@@ -963,6 +993,7 @@ export function WeatherPanel({
   marketBuckets,
   signalDecisions,
   dailyMaxPrediction,
+  hourlySourceSeries,
   alphaEvents = [],
   layer7Loading = false,
   selectedCity,
@@ -1054,6 +1085,10 @@ export function WeatherPanel({
   )
   const chartData = useMemo(() => buildChartData(series), [series])
   const hourlyRows = useMemo(() => buildHourlyRows(series, selectedDate), [series, selectedDate])
+  const forecastTableRows = useMemo(
+    () => forecastTableRowsFromSeries(hourlySourceSeries?.forecast, hourlyRows),
+    [hourlySourceSeries, hourlyRows],
+  )
   const availableDates = useMemo(() => {
     return [...new Set(chartData.map(row => String(row.date)).filter(Boolean))]
       .sort((a, b) => a.localeCompare(b))
@@ -1304,6 +1339,7 @@ export function WeatherPanel({
           <div className="space-y-2 p-2">
             <HourlyEvidencePanel
               rows={hourlyRows}
+              sourceSeries={hourlySourceSeries}
               unit={unit}
               cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
               selectedDate={selectedDate}
@@ -1321,7 +1357,7 @@ export function WeatherPanel({
               alphaEvents={alphaEvents}
               loading={layer7Loading}
             />
-            <ForecastDataTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
+            <ForecastDataTable rows={forecastTableRows} unit={unit} selectedDate={selectedDate} />
           </div>
         )}
 
@@ -1493,9 +1529,9 @@ function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRo
                   </td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-400">{row.archive ? 'archive' : row.member_count ? `n ${row.member_count}` : '--'}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.timestamp)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortHour(row.timestamp)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">{row.revision_count ? `↻ ${row.revision_count}` : row.archive ? 'archive' : row.member_count ? `n ${row.member_count}` : '--'}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.fetched_at)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortHour(row.fetched_at)}</td>
                 </tr>
               ))}
             </tbody>
@@ -1847,14 +1883,53 @@ function DiffStatsPanel({
   )
 }
 
+function mergeNativeHourlySeries(series: HourlySourceSeries): HourlyChartRow[] {
+  const rows = new Map<string, HourlyChartRow>()
+  const put = (
+    point: HourlySourcePoint,
+    field: 'forecast_value' | 'metar_value' | 'historical_value' | 'china_live_value' | 'pws_value',
+  ) => {
+    const timestamp = String(point.timestamp || '')
+    const label = String(point.local_time || point.local_hour || timestamp.slice(11, 16))
+    if (!timestamp || !label) return
+    const row = rows.get(label) ?? {
+      label,
+      timestamp,
+      forecast_value: null,
+      metar_value: null,
+      historical_value: null,
+      china_live_value: null,
+      pws_value: null,
+      cloud_pct: null,
+    }
+    row[field] = field === 'forecast_value'
+      ? asNumber(point.temperature ?? point.ensemble_mean ?? point.best)
+      : asNumber(point.temperature)
+    if (field === 'forecast_value') row.cloud_pct = asNumber(point.cloud_cover)
+    rows.set(label, row)
+  }
+
+  for (const point of series.forecast ?? []) put(point, 'forecast_value')
+  for (const point of series.metar ?? []) put(point, 'metar_value')
+  for (const point of series.historical ?? []) put(point, 'historical_value')
+  if ((series.historical?.length ?? 0) === 0) {
+    for (const point of series.historical_fallback ?? []) put(point, 'historical_value')
+  }
+  for (const point of series.china_live ?? []) put(point, 'china_live_value')
+  for (const point of series.pws ?? []) put(point, 'pws_value')
+  return [...rows.values()].sort((left, right) => left.label.localeCompare(right.label))
+}
+
 function HourlyEvidencePanel({
   rows,
+  sourceSeries,
   unit,
   cityName,
   selectedDate,
   dailyMaxPrediction,
 }: {
   rows: HourlyWeatherRow[]
+  sourceSeries?: HourlySourceSeries | null
   unit: string
   cityName?: string
   selectedDate: string
@@ -1869,7 +1944,7 @@ function HourlyEvidencePanel({
   const pwsValues = numericValues(rows.map(row => row.pws))
   const forecastMax = forecastValues.length > 0 ? Math.max(...forecastValues) : null
   const metarMax = metarValues.length > 0 ? Math.max(...metarValues) : null
-  const chartRows = rows.map(row => ({
+  const hourlyChartRows = rows.map(row => ({
     ...row,
     forecast_value: asNumber(row.forecast),
     metar_value: asNumber(row.metar),
@@ -1879,6 +1954,11 @@ function HourlyEvidencePanel({
     gap_value: asNumber(row.gap),
     cloud_pct: asNumber(row.forecast_cloud_cover),
   }))
+  const nativeSeries = sourceSeries ?? {}
+  const hasNativeSeries = Object.values(nativeSeries).some(seriesRows => (seriesRows?.length ?? 0) > 0)
+  const chartRows = hasNativeSeries
+    ? mergeNativeHourlySeries(nativeSeries)
+    : hourlyChartRows
   const hasChartEvidence = chartRows.some(row =>
     row.forecast_value !== null
     || row.metar_value !== null
@@ -1887,9 +1967,9 @@ function HourlyEvidencePanel({
     || row.pws_value !== null
     || row.cloud_pct !== null
   )
-  const metarStats = sourceStats(chartRows, 'metar_value')
-  const historicalStats = sourceStats(chartRows, 'historical_value')
-  const overlapStats = overlapPill(chartRows)
+  const metarStats = sourceStats(hourlyChartRows, 'metar_value')
+  const historicalStats = sourceStats(hourlyChartRows, 'historical_value')
+  const overlapStats = overlapPill(hourlyChartRows)
   const hasHistorical = historicalValues.length > 0
   const hasChinaLive = chinaLiveValues.length > 0
   const hasPws = pwsValues.length > 0

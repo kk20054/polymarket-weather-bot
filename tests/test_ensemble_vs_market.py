@@ -62,7 +62,7 @@ class EnsembleProbabilityTests(unittest.TestCase):
 
     def test_build_ensemble_prediction_from_persisted_openmeteo_members(self):
         db_path = test_db_path("ensemble_prediction")
-        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "ensemble"}, clear=False):
             init_v3_db(db_path)
             insert_forecast_run(
                 _run("beijing", "2026-07-05", "openmeteo_ecmwf_ifs025", 34.0),
@@ -91,7 +91,7 @@ class EnsembleProbabilityTests(unittest.TestCase):
 
     def test_ensemble_prediction_reports_weighted_runtime_bias(self):
         db_path = test_db_path("ensemble_weighted_bias")
-        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "ensemble"}, clear=False):
             init_v3_db(db_path)
             insert_forecast_run(
                 _run("beijing", "2026-07-05", "openmeteo_ecmwf_ifs025", 34.0),

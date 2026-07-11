@@ -1,31 +1,29 @@
 # WeatherBot Current State
 
 ## Current Phase And Usability
-- Date: 2026-07-11. Phase 2 source-health verification is active; a new 24-hour scheduler soak started at `2026-07-11T08:17:11Z` before the remaining PolyWX benchmark and Layer 7 acceptance work.
-- All 14 enabled cities have verified settlement coverage; Hong Kong intentionally remains HKO/VHHH mismatch and paper-only.
-- The scheduler is running. Its first new cycle completed METAR 14/14 and China Live 2/2; paper validation remains explicitly inactive.
-- The system supports audited collection, truth deltas, decisions, controlled paper execution, and authoritative Gamma settlement. It has not proved unattended profitability.
-- `LIVE_TRADING=false`; no live or canary execution is permitted.
+- Date: 2026-07-11. Phase 2/3 data-source alignment and Layer 7 operator review are active.
+- Weather.com v3 now drives the dashboard Forecast/Cloud series; Open-Meteo models remain separate DEB inputs.
+- Shanghai China Live uses Pudong station `101020600`; WU same-day Historical is incrementally collectable.
+- Scheduler is stopped after the implementation smoke test. Paper validation remains inactive.
+- `LIVE_TRADING=false`; the system is research/paper infrastructure, not a proven profitable production bot.
 
 ## Latest Ledger Summaries
-- 2026-07-11 / Asian PWS audit: removed the US-only collector gate. Tokyo/Seoul/Taipei/Hong Kong/Singapore discover real station IDs but current observations return 401; Shanghai/Beijing discovery returns honest no-coverage. Commit `eb1f21f`, pending backend restart after soak.
-- 2026-07-11 / Source health v2: station verification invariants are enforced in both directions; `/api/source-health` now exposes 14 city rows across 13 sources. Scheduler soak started at `08:17:11Z`. Commit `25d2396`.
-- 2026-07-11 / Layer 6 probability repair: exact integer-C market buckets now use the same canonical truncation boundaries as Gaussian CDF buckets. Shanghai distribution sums to 1.0 instead of 0.0. Commit `e978b73`.
-- 2026-07-11 / Layer 7 reduction: removed duplicate city filters, inactive cities, internal rule badges, repeated forecast controls, and legacy one-click simulation. The right rail now reads the inactive paper cohort status. Commit `110bfc2`.
-- 2026-07-11 / Paper cohort: inactive-by-default 14-30 day validation enforces $40 bankroll, $2/trade, $10/day, five open positions/orders, and fresh post-start decisions. Commit `d1876b5`.
+- 2026-07-11 / Source-role repair: split Weather.com, NWP, WU Historical, METAR, China Live and PWS pollers. PWS now requires an independent WU key and no longer floods 401 with the forecast key.
+- 2026-07-11 / Native-series dashboard: `/api/hourly-consensus` exposes native-frequency source series. Shanghai smoke returned Forecast 24, METAR 36, WU Historical 36, and Pudong China Live rows.
+- 2026-07-11 / DEB v3 repair: default mode is `polywx_aligned`; latest Shanghai build includes v3 and five available families, with traceable weights and truth basis.
+- 2026-07-11 / Layer 7 cleanup: the Hourly chart labels and provenance are explicit; Forecast cloud comes only from the same Weather.com v3 snapshot.
+- 2026-07-11 / Prior foundation: settlement verification, source-health-v2, paper cohort controls and authoritative Gamma settlement remain intact.
 
 ## Production Blockers
-- Layer 7 is materially cleaner; the Hourly chart is now isolated and has passed desktop/768px QA, but `WeatherPanel.tsx` still needs DEB/table extraction and operator review.
-- PWS no longer has a US-only code restriction, but the current API entitlement returns HTTP 401 for discovered Asian station IDs; PWS peak-lock remains unavailable.
-- Saved PolyWX replay still shows material Cloud, Forecast, and Chicago 07-04 DEB differences.
-- Scheduler status is in-memory; source-health v2 now provides a persistent-data-derived 14-city/source matrix even after process restart.
-- Derive can exceed its 15-minute interval under load.
-- No new cohort orders have resolved, so production PnL, win rate, and Brier evidence remain empty.
-- Live dry-run, balance, duplicate-order, and canary gates are not accepted.
+- Independent WU PWS entitlement is missing; PWS series and peak-lock are unavailable.
+- The required two-hour smoke and six-hour scheduler stability run have not yet been completed.
+- PolyWX numeric benchmark still needs same-date Shanghai/Chicago Forecast, Cloud, Historical and DEB comparison.
+- WU/HKO truth coverage and resolved paper outcomes are insufficient for profitability claims.
+- Derive duration under full-city load needs remeasurement after the poller split.
+- Layer 7 still requires operator visual acceptance before starting the 14-30 day cohort.
+- Live dry-run/canary gates remain unaccepted and intentionally locked.
 
 ## Next Step
-- Complete the 24-hour source-health soak; stop and diagnose any material core-source regression.
-- Then rebuild the saved PolyWX Forecast/Cloud/DEB dates before the remaining Layer 7 UI audit.
-- Obtain operator acceptance, then explicitly start the inactive Layer 9 cohort; do not start it beforehand.
-- Run 14-30 days using only new `paper-execution-v1` orders and authoritative settlements.
-- Resolve or explicitly disable PWS; quantify Cloud/Forecast/DEB differences through paper scoring.
+- Run a controlled scheduler smoke and verify each split poller, source freshness and no repeated PWS 401.
+- Complete browser QA for Shanghai and Chicago against saved/current PolyWX evidence.
+- After operator acceptance, start the explicit 14-30 day paper cohort; keep live locked.

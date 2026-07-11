@@ -436,6 +436,15 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertNotIn("marketSummary?: CityEvidenceMarketBucketSummary", panel)
         self.assertNotIn("模块", app)
 
+    def test_hourly_legend_can_toggle_each_source_without_mutating_data(self):
+        chart = read_text("frontend/src/components/HourlyTemperatureChart.tsx")
+        self.assertIn("type SeriesKey", chart)
+        self.assertIn("toggleSeries", chart)
+        self.assertIn("aria-pressed={visibleSeries[key]}", chart)
+        for key in ("china", "pws", "metar", "historical", "forecast", "cloud"):
+            self.assertIn(f"visibleSeries.{key}", chart)
+        self.assertIn("PWS（未授权/无数据）", chart)
+
 
 if __name__ == "__main__":
     unittest.main()

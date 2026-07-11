@@ -36,9 +36,6 @@ POLYWX_ALIGNED_MODEL_WEIGHTS = {
     "icon": 0.095,
     "gem": 0.093,
     "jma": 0.073,
-    "cma": 0.073,
-    "hrrr": 0.073,
-    "nbm": 0.073,
 }
 
 
@@ -212,7 +209,20 @@ def build_ensemble_prediction(
     values = [value for value, _weight, _meta in weighted]
     weights = [weight for _value, weight, _meta in weighted]
     mu = _weighted_mean(values, weights)
-    sigma_c = _weighted_std(values, weights)
+    sigma_from_spread_c = _weighted_std(values, weights)
+    residual_terms = [
+        (float(component.get("mae_7d")), float(component.get("weight") or 0.0))
+        for component in usable
+        if _first_number(component.get("mae_7d")) is not None
+    ]
+    residual_weight = sum(weight for _value, weight in residual_terms)
+    sigma_from_history_c = math.sqrt(
+        sum((value ** 2) * weight for value, weight in residual_terms) / residual_weight
+    ) if residual_weight > 0 else 0.0
+    # Independent model spread and recent forecast error are orthogonal
+    # uncertainty terms. Combining them prevents deterministic source means
+    # from producing unrealistically narrow one-degree market distributions.
+    sigma_c = math.sqrt(sigma_from_spread_c ** 2 + sigma_from_history_c ** 2)
     sigma_floor = convert_temperature_delta(SIGMA_FLOOR_C, "C", profile.unit)
     sigma = sigma_with_floor(sigma_c if profile.unit == "C" else convert_temperature_delta(sigma_c, "C", profile.unit), sigma_floor)
     issued = issued_at or utc_now()
@@ -252,8 +262,8 @@ def build_ensemble_prediction(
             ]
             for component in usable
         },
-        "sigma_from_spread": _weighted_spread(values),
-        "sigma_from_history": sigma_c,
+        "sigma_from_spread": round(convert_temperature_delta(sigma_from_spread_c, "C", profile.unit), 4),
+        "sigma_from_history": round(convert_temperature_delta(sigma_from_history_c, "C", profile.unit), 4),
         "bias_correction": round(convert_temperature_delta(weighted_bias_c, "C", profile.unit), 4),
         "bias_sample_count": min((int(component.get("bias_sample_count") or 0) for component in usable), default=0),
         "observed_floor": None,
@@ -761,7 +771,7 @@ def _bias_for(bias_table: list[dict[str, Any]], station_id: str, family: str) ->
 
 
 def _deb_algo() -> str:
-    mode = env_value("DEB_WEIGHT_MODE", "ensemble").strip().lower()
+    mode = env_value("DEB_WEIGHT_MODE", "polywx_aligned").strip().lower()
     return POLYWX_ALIGNED_ALGO if mode in {"polywx", "polywx_aligned", "polywx_aligned_deb_v1"} else ALGO
 
 

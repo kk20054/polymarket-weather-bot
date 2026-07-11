@@ -878,7 +878,12 @@ def _metar_temperature_unit(row: dict[str, Any], default_unit: str) -> str:
 
 
 def _floor_issued_at(value: str | None) -> str:
-    parsed = _parse_datetime(value) if value else datetime.now(timezone.utc)
+    # Explicit timestamps represent replay cohorts and remain hour-idempotent.
+    # A live build must keep the exact current time so a snapshot fetched after
+    # the top of the hour is not incorrectly excluded from the DEB inputs.
+    if not value:
+        return datetime.now(timezone.utc).isoformat()
+    parsed = _parse_datetime(value) or datetime.now(timezone.utc)
     parsed = parsed.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
     return parsed.isoformat()
 

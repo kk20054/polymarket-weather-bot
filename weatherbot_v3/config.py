@@ -140,6 +140,6 @@ def load_config() -> V3Config:
         default_tick_size=_float(get("DEFAULT_TICK_SIZE", 0.01), 0.01),
         weather_com_forecast_enabled=_bool(get("WEATHER_COM_FORECAST_ENABLED", True), True),
         pws_peak_lock_enabled=_bool(get("PWS_PEAK_LOCK_ENABLED", True), True),
-        deb_weight_mode=str(get("DEB_WEIGHT_MODE", "ensemble") or "ensemble"),
+        deb_weight_mode=str(get("DEB_WEIGHT_MODE", "polywx_aligned") or "polywx_aligned"),
         v3_db_path=Path(str(get("V3_DB_PATH", DATA_DIR / "weatherbot_v3.db"))),
     )

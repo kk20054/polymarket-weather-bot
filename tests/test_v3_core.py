@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.china_weather import hko_rhrread_observation, weathercn_sk2d_observation
+from weatherbot_v3.china_weather import WEATHERCN_STATION_CODES, hko_rhrread_observation, weathercn_sk2d_observation
 from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_forecast_runs, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, model_reprice_event_summary, paper_execution_summary, set_settlement_contract_verification, truth_delta_audit_summary, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_metar_reports, upsert_model_reprice_event, upsert_settlement_contracts, upsert_signal_decision_record, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.env_utils import redact_secret_text, redact_secrets
@@ -22,7 +22,7 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
 from weatherbot_v3.forecast import ingest_polywx_forecasts, forecast_run_from_polywx_rows
 from weatherbot_v3.history import fetch_open_meteo_historical_backfill, open_meteo_historical_rows_from_response
-from weatherbot_v3.hourly import build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary
+from weatherbot_v3.hourly import build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary, source_series_summary
 from weatherbot_v3.deb import bucket_probabilities, build_and_store_daily_max_prediction, build_daily_max_prediction
 from weatherbot_v3.market_buckets import ingest_market_buckets, market_bucket_from_payload, parse_temperature_bucket, sync_active_weather_market_buckets
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
@@ -1902,7 +1902,7 @@ class V3CoreTests(unittest.TestCase):
         sources = {row["key"]: row for row in matrix["sources"]}
         self.assertEqual(sources["metar"]["status"], "healthy")
         self.assertEqual(sources["forecast_openmeteo"]["status"], "healthy")
-        self.assertFalse(sources["forecast_weathercom_v3"]["required"])
+        self.assertTrue(sources["forecast_weathercom_v3"]["required"])
         self.assertEqual(sources["truth_wunderground_daily"]["status"], "missing")
         self.assertIn("truth_wunderground_daily", matrix["required_blockers"])
         self.assertEqual(matrix["overall_status"], "blocked")
@@ -5070,6 +5070,7 @@ class V3CoreTests(unittest.TestCase):
             persisted = persist_wunderground_hourly(result, path=db_path)
             build_hourly_consensus(["shanghai"], target_date="2026-07-06", db_path=db_path)
             points = hourly_consensus_points({"shanghai": {"2026-07-06"}}, db_path=db_path)
+            native_series = source_series_summary("shanghai", "2026-07-06", db_path=db_path)
             with connect(db_path) as conn:
                 row = conn.execute("SELECT * FROM truth_wunderground_hourly").fetchone()
 
@@ -5082,6 +5083,11 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("shanghai", points)
         self.assertAlmostEqual(points["shanghai"][0]["historical"], 35.4)
         self.assertIsNone(points["shanghai"][0]["metar"])
+        self.assertEqual(len(native_series["historical"]), 1)
+        self.assertEqual(native_series["historical"][0]["local_time"], "12:00")
+
+    def test_shanghai_china_live_uses_pudong_station(self):
+        self.assertEqual(WEATHERCN_STATION_CODES["shanghai"], "101020600")
 
     def test_celsius_bucket_probability_uses_truncation_not_rounding_window(self):
         result = bucket_probabilities(
