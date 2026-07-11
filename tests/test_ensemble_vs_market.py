@@ -81,13 +81,43 @@ class EnsembleProbabilityTests(unittest.TestCase):
                 [_member("deterministic", [33.6, 34.2, 34.0])],
             )
 
-            prediction = build_ensemble_prediction("beijing", "2026-07-05", path=db_path)
+            prediction = build_ensemble_prediction("beijing", "2026-07-05", path=db_path, bias_table=[])
 
         self.assertTrue(prediction["ok"], prediction)
         self.assertEqual(prediction["forecast_algo"], ALGO)
         self.assertGreaterEqual(prediction["member_count"], 5)
         self.assertGreater(prediction["mu"], 33.5)
         self.assertLess(prediction["mu"], 34.5)
+
+    def test_ensemble_prediction_reports_weighted_runtime_bias(self):
+        db_path = test_db_path("ensemble_weighted_bias")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db(db_path)
+            insert_forecast_run(
+                _run("beijing", "2026-07-05", "openmeteo_ecmwf_ifs025", 34.0),
+                [_member("deterministic", [33.5, 34.0, 33.2])],
+            )
+            insert_forecast_run(
+                _run("beijing", "2026-07-05", "openmeteo_gfs_seamless", 34.0),
+                [_member("deterministic", [33.5, 34.0, 33.2])],
+            )
+            insert_forecast_run(
+                _run("beijing", "2026-07-05", "openmeteo_cma_grapes", 34.0),
+                [_member("deterministic", [33.5, 34.0, 33.2])],
+            )
+            prediction = build_ensemble_prediction(
+                "beijing",
+                "2026-07-05",
+                path=db_path,
+                bias_table=[
+                    {"icao": "ZBAA", "model": "ecmwf", "sample_count": 30, "additive_bias_c": 1.0},
+                    {"icao": "ZBAA", "model": "gfs", "sample_count": 30, "additive_bias_c": 2.0},
+                    {"icao": "ZBAA", "model": "cma", "sample_count": 30, "additive_bias_c": 3.0},
+                ],
+            )
+
+        self.assertTrue(prediction["ok"], prediction)
+        self.assertAlmostEqual(prediction["bias_correction"], 1.8, places=4)
 
     def test_signal_distribution_can_use_ensemble_samples(self):
         prediction = {

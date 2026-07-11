@@ -225,6 +225,10 @@ def build_ensemble_prediction(
         for value, weight, meta in weighted
     ]
     peak = _weighted_peak_hour(usable)
+    weighted_bias_c = sum(
+        float(component.get("bias_correction_c") or 0.0) * float(component.get("weight") or 0.0)
+        for component in usable
+    )
     return {
         "ok": True,
         "city_key": profile.city,
@@ -250,7 +254,7 @@ def build_ensemble_prediction(
         },
         "sigma_from_spread": _weighted_spread(values),
         "sigma_from_history": sigma_c,
-        "bias_correction": 0.0,
+        "bias_correction": round(convert_temperature_delta(weighted_bias_c, "C", profile.unit), 4),
         "bias_sample_count": min((int(component.get("bias_sample_count") or 0) for component in usable), default=0),
         "observed_floor": None,
         "sigma_floor": sigma_floor,

@@ -91,6 +91,10 @@ def train_bias_table(
                 "last_trained_at": now,
                 "bias_definition": "forecast_high_c_minus_truth_high_c",
                 "correction_application": "forecast_high_c_minus_additive_bias_c",
+                "lead_time_policy": "prefer_openmeteo_previous_day1_then_latest_pre_local_day",
+                "archived_previous_day1_samples": sum(
+                    1 for record in records if record.get("forecast_snapshot_type") == "openmeteo_previous_day1"
+                ),
                 "runtime_eligible": len(records) >= BIAS_MIN_SAMPLE_COUNT,
                 "minimum_runtime_samples": BIAS_MIN_SAMPLE_COUNT,
                 **audit,
@@ -104,7 +108,7 @@ def train_bias_table(
         "source": "weatherbot_v3.bias.train_bias_table",
         "training_policy": {
             "truth_priority": ["hong_kong_observatory_daily_extract", "wunderground_daily", "iem_asos_approximation"],
-            "forecast_cutoff": "latest forecast as_of strictly before target local-day start",
+            "forecast_cutoff": "prefer fixed T+24 previous_day1; otherwise latest forecast as_of strictly before target local-day start",
             "independent_sample": "one forecast snapshot per city/model/target_date",
             "minimum_runtime_samples": BIAS_MIN_SAMPLE_COUNT,
         },
@@ -229,7 +233,8 @@ def _residual_records_for_family(
         candidates.setdefault(target_date, []).append(row)
     records: list[dict[str, Any]] = []
     for target_date in sorted(candidates):
-        selected = max(candidates[target_date], key=lambda row: (row["as_of"], int(row.get("id") or 0)))
+        preferred = [row for row in candidates[target_date] if _is_previous_day1(row)]
+        selected = max(preferred or candidates[target_date], key=lambda row: (row["as_of"], int(row.get("id") or 0)))
         truth = truth_by_date[target_date]
         forecast_c = _to_c(float(selected["mean_high"]), str(selected.get("unit") or "C"))
         records.append({
@@ -240,6 +245,7 @@ def _residual_records_for_family(
             "truth_exact": bool(truth["exact"]),
             "residual_c": forecast_c - float(truth["high_c"]),
             "source": str(selected.get("source") or ""),
+            "forecast_snapshot_type": "openmeteo_previous_day1" if _is_previous_day1(selected) else "latest_pre_local_day",
             "forecast_run_id": int(selected.get("id") or 0),
             "forecast_as_of": selected["as_of"].isoformat(),
             "lead_hours": selected.get("lead_hours"),
@@ -255,6 +261,12 @@ def _residual_records_for_family(
 
 def _forecast_as_of(row: dict[str, Any]) -> datetime | None:
     return _parse_datetime(row.get("run_at")) or _parse_datetime(row.get("retrieved_at"))
+
+
+def _is_previous_day1(row: dict[str, Any]) -> bool:
+    source = str(row.get("source") or "").lower()
+    horizon = str(row.get("horizon") or "").upper()
+    return "openmeteo_previous_" in source and source.endswith("_day1") and horizon == "D+1"
 
 
 def _target_local_start_utc(target_date: str, timezone_name: str) -> datetime | None:

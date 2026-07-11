@@ -253,7 +253,7 @@ def fetch_openmeteo_previous_runs(
     without mixing D+1, D+2, and D+3 forecasts.
     """
     profiles = _select_profiles(cities, limit_cities=limit_cities)
-    targets = [str(item) for item in (target_dates or []) if str(item).strip()]
+    targets = sorted({str(item) for item in (target_dates or []) if str(item).strip()})
     if not targets:
         now_utc = _parse_time(utc_now()) or datetime.now(timezone.utc)
         targets = [now_utc.date().isoformat()]
@@ -280,45 +280,51 @@ def fetch_openmeteo_previous_runs(
             "failures": [],
             "models": [],
         }
-        for target_date in targets:
-            for model in selected_models:
-                request = build_previous_runs_request(profile, model, target_date, previous_days=lead_days)
-                preview_url = _preview_url(OPENMETEO_PREVIOUS_RUNS_URL, request)
-                requests_planned.append({
-                    "city": profile.city,
-                    "target_date": target_date,
+        for model in selected_models:
+            request = build_previous_runs_range_request(profile, model, targets, previous_days=lead_days)
+            preview_url = _preview_url(OPENMETEO_PREVIOUS_RUNS_URL, request)
+            requests_planned.append({
+                "city": profile.city,
+                "target_dates": targets,
+                "start_date": request.get("start_date"),
+                "end_date": request.get("end_date"),
+                "model": model,
+                "endpoint": "previous_runs",
+                "url": preview_url,
+            })
+            if dry_run:
+                continue
+            started = utc_now()
+            started_perf = time.perf_counter()
+            response = _request_json(client, OPENMETEO_PREVIOUS_RUNS_URL, request)
+            duration_ms = round((time.perf_counter() - started_perf) * 1000)
+            if not response.get("ok"):
+                failures += 1
+                error = {
+                    "start_date": targets[0],
+                    "end_date": targets[-1],
+                    "target_count": len(targets),
                     "model": model,
-                    "endpoint": "previous_runs",
-                    "url": preview_url,
-                })
-                if dry_run:
-                    continue
-                started = utc_now()
-                started_perf = time.perf_counter()
-                response = _request_json(client, OPENMETEO_PREVIOUS_RUNS_URL, request)
-                duration_ms = round((time.perf_counter() - started_perf) * 1000)
-                if not response.get("ok"):
-                    failures += 1
-                    error = {
-                        "target_date": target_date,
-                        "model": model,
-                        "reason": "openmeteo_previous_runs_http_error",
-                        "status_code": response.get("status_code"),
-                        "message": response.get("error") or response.get("text", "")[:200],
-                    }
-                    city_result["failures"].append(error)
-                    log_data_fetch(
-                        source="openmeteo",
-                        stage=OPENMETEO_PREVIOUS_STAGE,
-                        status="WARN",
-                        duration_ms=duration_ms,
-                        city=profile.city,
-                        message=f"Open-Meteo previous-runs fetch failed for {profile.city}/{model}/{target_date}",
-                        details={**error, "url": response.get("url")},
-                        started_at=started,
-                        finished_at=utc_now(),
-                    )
-                    continue
+                    "reason": "openmeteo_previous_runs_http_error",
+                    "status_code": response.get("status_code"),
+                    "message": response.get("error") or response.get("text", "")[:200],
+                }
+                city_result["failures"].append(error)
+                log_data_fetch(
+                    source="openmeteo",
+                    stage=OPENMETEO_PREVIOUS_STAGE,
+                    status="WARN",
+                    duration_ms=duration_ms,
+                    city=profile.city,
+                    target_date=f"{targets[0]}..{targets[-1]}",
+                    message=f"Open-Meteo previous-runs range failed for {profile.city}/{model}",
+                    details={**error, "url": response.get("url")},
+                    started_at=started,
+                    finished_at=utc_now(),
+                )
+                continue
+            run_items: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+            for target_date in targets:
                 runs, members = openmeteo_previous_runs_from_response(
                     profile.city,
                     model,
@@ -328,43 +334,53 @@ def fetch_openmeteo_previous_runs(
                     source_url=response.get("url") or preview_url,
                     retrieved_at=retrieved.isoformat() if retrieved else None,
                 )
-                run_items = list(zip(runs, members))
-                run_ids = insert_forecast_runs(run_items)
-                city_result["runs_upserted"] += len(run_ids)
-                city_result["members_upserted"] += sum(len(run_members) for _, run_members in run_items)
-                total_runs += len(run_ids)
-                total_members += sum(len(item) for item in members)
-                parse_statuses = sorted({str(run.get("parse_status") or "") for run in runs})
-                city_result["models"].append({
-                    "target_date": target_date,
+                run_items.extend(zip(runs, members))
+            run_ids = insert_forecast_runs(run_items)
+            run_members_count = sum(len(run_members) for _, run_members in run_items)
+            city_result["runs_upserted"] += len(run_ids)
+            city_result["members_upserted"] += run_members_count
+            total_runs += len(run_ids)
+            total_members += run_members_count
+            parse_statuses = sorted({str(run.get("parse_status") or "") for run, _members in run_items})
+            parsed_targets = len({str(run.get("target_date") or "") for run, _members in run_items if run.get("parse_status") == "parsed"})
+            city_result["models"].append({
+                "start_date": targets[0],
+                "end_date": targets[-1],
+                "target_count": len(targets),
+                "parsed_target_count": parsed_targets,
+                "model": model,
+                "run_ids": run_ids,
+                "runs": len(run_ids),
+                "members": run_members_count,
+                "parse_statuses": parse_statuses,
+            })
+            log_data_fetch(
+                source="openmeteo",
+                stage=OPENMETEO_PREVIOUS_STAGE,
+                status="OK" if parse_statuses == ["parsed"] and parsed_targets == len(targets) else "WARN",
+                duration_ms=duration_ms,
+                city=profile.city,
+                target_date=f"{targets[0]}..{targets[-1]}",
+                message=f"Open-Meteo previous-runs range fetched {profile.city}/{model}",
+                details={
+                    "endpoint": "previous_runs",
+                    "start_date": targets[0],
+                    "end_date": targets[-1],
+                    "target_count": len(targets),
+                    "parsed_target_count": parsed_targets,
                     "model": model,
-                    "run_ids": run_ids,
+                    "previous_days": lead_days,
                     "runs": len(run_ids),
-                    "members": sum(len(item) for item in members),
+                    "members": run_members_count,
                     "parse_statuses": parse_statuses,
-                })
-                log_data_fetch(
-                    source="openmeteo",
-                    stage=OPENMETEO_PREVIOUS_STAGE,
-                    status="OK" if parse_statuses == ["parsed"] else "WARN",
-                    duration_ms=duration_ms,
-                    city=profile.city,
-                    message=f"Open-Meteo previous-runs fetched {profile.city}/{model}/{target_date}",
-                    details={
-                        "endpoint": "previous_runs",
-                        "target_date": target_date,
-                        "model": model,
-                        "previous_days": lead_days,
-                        "runs": len(run_ids),
-                        "members": sum(len(item) for item in members),
-                        "parse_statuses": parse_statuses,
-                        "url": response.get("url"),
-                    },
-                    started_at=started,
-                    finished_at=utc_now(),
-                )
-                if session is None and delay > 0:
-                    time.sleep(delay)
+                    "url": response.get("url"),
+                },
+                started_at=started,
+                finished_at=utc_now(),
+                log_key=f"{OPENMETEO_PREVIOUS_PARSER_VERSION}:{profile.city}:{model}:{targets[0]}:{targets[-1]}:{','.join(map(str, lead_days))}",
+            )
+            if session is None and delay > 0:
+                time.sleep(delay)
         results.append(city_result)
     return {
         "ok": failures == 0,
@@ -423,7 +439,27 @@ def build_previous_runs_request(
     *,
     previous_days: list[int] | tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
-    start_date, end_date = _utc_date_window_for_local_day(target_date, profile.timezone)
+    return build_previous_runs_range_request(
+        profile,
+        model,
+        [target_date],
+        previous_days=previous_days,
+    )
+
+
+def build_previous_runs_range_request(
+    profile: CitySettlementProfile,
+    model: str,
+    target_dates: list[str] | tuple[str, ...],
+    *,
+    previous_days: list[int] | tuple[int, ...] | None = None,
+) -> dict[str, Any]:
+    targets = sorted({str(value) for value in target_dates if str(value).strip()})
+    if not targets:
+        raise ValueError("target_dates_required")
+    windows = [_utc_date_window_for_local_day(target, profile.timezone) for target in targets]
+    start_date = min(window[0] for window in windows)
+    end_date = max(window[1] for window in windows)
     fields = [f"temperature_2m_previous_day{day}" for day in _normalize_previous_days(previous_days)]
     return {
         "latitude": profile.latitude,

@@ -4186,6 +4186,68 @@ class V3CoreTests(unittest.TestCase):
         self.assertGreaterEqual(len(payload["requests_planned"]), 5)
         self.assertEqual(run_count, 0)
 
+    def test_openmeteo_previous_runs_range_request_covers_local_dates_once(self):
+        from weatherbot_v3.openmeteo import build_previous_runs_range_request
+
+        profile = SETTLEMENT_REGISTRY["singapore"]
+        request = build_previous_runs_range_request(
+            profile,
+            "gfs_seamless",
+            ["2026-07-01", "2026-07-02"],
+            previous_days=[1, 2, 3],
+        )
+
+        self.assertEqual(request["start_date"], "2026-06-30")
+        self.assertEqual(request["end_date"], "2026-07-02")
+        self.assertEqual(request["models"], "gfs_seamless")
+        self.assertIn("temperature_2m_previous_day1", request["hourly"])
+        self.assertIn("temperature_2m_previous_day3", request["hourly"])
+
+    def test_openmeteo_previous_runs_fetches_date_range_once_per_model(self):
+        from weatherbot_v3.openmeteo import fetch_openmeteo_previous_runs
+
+        db_path = test_db_path("openmeteo_previous_range")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        payload = {
+            "hourly": {
+                "time": ["2026-07-01T12:00", "2026-07-02T12:00"],
+                "temperature_2m_previous_day1": [20.0, 21.0],
+            }
+        }
+
+        class CountingSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                return FakeHTTPResponse(payload, url="https://previous-runs-api.open-meteo.com/v1/forecast")
+
+        session = CountingSession()
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            result = fetch_openmeteo_previous_runs(
+                ["chicago"],
+                target_dates=["2026-07-01", "2026-07-02"],
+                models=["gfs_seamless"],
+                previous_days=[1],
+                session=session,
+                sleep_seconds=0,
+                retrieved_at="2026-07-11T00:00:00+00:00",
+            )
+            with connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT target_date, run_at, mean_high, parse_status FROM forecast_runs ORDER BY target_date"
+                ).fetchall()
+
+        self.assertEqual(session.calls, 1)
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["requests_planned"]), 1)
+        self.assertEqual(result["runs_upserted"], 2)
+        self.assertEqual([row["target_date"] for row in rows], ["2026-07-01", "2026-07-02"])
+        self.assertEqual([row["parse_status"] for row in rows], ["parsed", "parsed"])
+        self.assertAlmostEqual(float(rows[0]["mean_high"]), 68.0, places=1)
+        self.assertTrue(all(row["run_at"] for row in rows))
+
     def test_forecast_hourly_points_use_latest_source_run(self):
         db_path = test_db_path("forecast_hourly_points")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -6066,6 +6128,45 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(row["raw_mae_c"], 2.0)
         self.assertAlmostEqual(row["mae_c"], 0.0)
         self.assertFalse(row["runtime_eligible"])
+
+    def test_bias_training_prefers_fixed_previous_day1_over_later_current_snapshot(self):
+        from weatherbot_v3.bias import train_bias_table
+
+        path = test_db_path("bias_previous_day1")
+        output = path.with_name(f"{path.stem}-bias.json")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        self.addCleanup(lambda: output.unlink(missing_ok=True))
+        init_v3_db(path)
+        now = "2026-07-11T00:00:00+00:00"
+        with connect(path) as conn:
+            conn.execute(
+                "INSERT INTO truth_wunderground_daily (truth_key, icao, date_local, high_c, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("wu:KORD:2026-07-01", "KORD", "2026-07-01", 30.0, now, now),
+            )
+            runs = (
+                ("previous-day1", "openmeteo_previous_ecmwf_ifs025_day1", "2026-06-30T05:00:00+00:00", "2026-07-11T00:00:00+00:00", "D+1", 31.0),
+                ("later-current", "openmeteo_ecmwf_ifs025", "", "2026-07-01T04:00:00+00:00", "D+0", 35.0),
+            )
+            for run_key, source, run_at, retrieved_at, horizon, mean_high in runs:
+                conn.execute(
+                    """
+                    INSERT INTO forecast_runs (
+                        run_key, city, target_date, source, model, run_at, retrieved_at,
+                        horizon, unit, mean_high, training_eligible, parse_status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_key, "chicago", "2026-07-01", source, "ecmwf_ifs025",
+                        run_at, retrieved_at, horizon, "C", mean_high, 1, "parsed", now,
+                    ),
+                )
+
+        payload = train_bias_table(cities=["chicago"], days=30, path=path, output_path=output)
+        row = next(item for item in payload["rows"] if item["model"] == "ecmwf")
+
+        self.assertEqual(row["sample_count"], 1)
+        self.assertEqual(row["archived_previous_day1_samples"], 1)
+        self.assertAlmostEqual(row["additive_bias_c"], 1.0)
 
     def test_low_sample_bias_mae_cannot_change_runtime_weights(self):
         from weatherbot_v3.forecasts.ensemble import _mae_for
