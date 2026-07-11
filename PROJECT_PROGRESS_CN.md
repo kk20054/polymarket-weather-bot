@@ -383,3 +383,12 @@
 - 结论：回填前置条件已齐备。仍需等 scheduler 六小时预验收结束后，再显式运行 WU/HKO/IEM 日期范围回填和 `truth-delta-build`。
 - 下一步：六小时审计结果通过后，先做 3 天 Chicago/Hong Kong 冒烟，再做 30 天可缓存批次。
 - 相关提交：`649e2d8`。
+### 2026-07-11：Layer 8/9 模拟结算与评分生命周期
+
+- 目标：把新一代模拟订单从“已成交/浮盈亏”推进到可审计的权威结算、已实现 PnL、胜率和 Brier score，实盘继续锁定。
+- 改动：新增 `weatherbot_v3/paper_settlement.py` 与 `paper-settle` CLI；扩展 `settlements` 表、模拟账户摘要和受控 scheduler poller。WU/HKO/IEM 只形成 provisional truth，只有 Gamma 市场 `closed=true` 且 YES/NO 为终态 1/0 才关闭订单并兑现 PnL；重复执行按订单 settlement key 幂等。
+- 验证：定向 settlement/scheduler 16 tests 通过；核心、scheduler、PolyWX contract、ensemble 合计 235 tests 全通过；真实库 dry-run 扫描 60 笔旧单，`candidates=0`、`legacy_skipped=60`、`resolved_total=0`，没有写入伪造盈亏；`git diff --check` 通过。
+- 结论：今后完整身份链的 `paper-execution-v1` 订单已经能自动等待权威结算并产出 realized PnL、win rate、model/market Brier；旧 60 笔记录缺少 decision/token/city/date，明确保留但不可评分。当前仍没有已结算的新样本，因此不能声称策略盈利。
+- 阻塞：PWS 权限仍为 HTTP 401；derive 周期偏长；Layer 9 尚需 14-30 天新订单和权威结算样本；live 保持锁定。
+- 下一步：启动受控的新 v1 paper cohort，先验证订单生成、模拟成交、provisional truth、Gamma finalization 的连续链路，再进入 14-30 天统计验证。
+- 相关提交：`4245bf4`。
