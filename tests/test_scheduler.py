@@ -220,6 +220,14 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             for field in ("last_run_at", "age_seconds", "last_duration_ms", "fails_last_hour", "next_run_at", "initial_delay_seconds"):
                 self.assertIn(field, payload["pollers"][key])
 
+    async def test_scheduler_status_is_memory_only(self):
+        scheduler = WeatherBotScheduler(city_concurrency=1)
+        started = time.perf_counter()
+        payload = scheduler.status()
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 0.1)
+        self.assertEqual(payload["source_health"]["overall_status"], "warming")
+
     async def test_paper_settlement_poller_is_controlled_and_reports_counts(self):
         scheduler = WeatherBotScheduler(city_concurrency=1)
         with patch(

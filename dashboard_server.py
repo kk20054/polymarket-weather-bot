@@ -4366,7 +4366,9 @@ async def paper_validation_status_api():
 
 @app.get("/api/source-health")
 async def source_health():
-    return build_source_health_matrix()
+    matrix = await asyncio.to_thread(build_source_health_matrix)
+    get_scheduler().update_source_health_cache(matrix)
+    return matrix
 
 
 @app.post("/api/scheduler/start")

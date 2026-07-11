@@ -15,7 +15,7 @@ from .env_utils import env_value
 from .metar import fetch_recent_hours
 from .paper_settlement import settle_open_paper_orders
 from .paper_validation import run_paper_validation_tick
-from .source_health import build_source_health_matrix, compact_source_health
+from .source_health import compact_source_health
 from .stations import enabled_station_rows, sync_station_registry
 
 
@@ -145,6 +145,10 @@ class WeatherBotScheduler:
     def running(self) -> bool:
         return any(state.task is not None and not state.task.done() for state in self.pollers.values())
 
+    def update_source_health_cache(self, matrix: dict[str, Any]) -> None:
+        self._source_health_cache = compact_source_health(matrix)
+        self._source_health_cache_at = time.monotonic()
+
     async def run_once(self, poller_key: str) -> dict[str, Any]:
         state = self.pollers[poller_key]
         if state.lock.locked():
@@ -234,18 +238,13 @@ class WeatherBotScheduler:
             "city_concurrency": self.city_concurrency,
             "pollers": {key: state.status() for key, state in self.pollers.items()},
         }
-        try:
-            now = time.monotonic()
-            if self._source_health_cache is None or now - self._source_health_cache_at >= 30.0:
-                self._source_health_cache = compact_source_health(build_source_health_matrix())
-                self._source_health_cache_at = now
-            payload["source_health"] = self._source_health_cache
-        except Exception as exc:
-            payload["source_health"] = {
-                "overall_status": "unknown",
-                "required_blockers": ["source_health_unavailable"],
-                "error": str(exc),
-            }
+        # Status is called on the FastAPI event loop and must remain an
+        # in-memory read. A full source-health scan touches a multi-GB SQLite
+        # database and belongs on /api/source-health's worker thread.
+        payload["source_health"] = self._source_health_cache or {
+            "overall_status": "warming",
+            "required_blockers": [],
+        }
         return payload
 
     async def _poll_loop(self, poller_key: str) -> None:
