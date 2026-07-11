@@ -5983,6 +5983,99 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(int(daily["obs_count"]), 3)
         self.assertEqual(hourly_count, 3)
 
+    def test_bias_truth_priority_uses_wu_and_hko_before_iem(self):
+        from weatherbot_v3.bias import _truth_by_date
+
+        path = test_db_path("bias_truth_priority")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        init_v3_db(path)
+        now = "2026-07-11T00:00:00+00:00"
+        with connect(path) as conn:
+            conn.execute(
+                "INSERT INTO truth_iem_daily (truth_key, icao, date_local, high_c, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("iem:KORD:2026-07-01", "KORD", "2026-07-01", 29.0, now, now),
+            )
+            conn.execute(
+                "INSERT INTO truth_wunderground_daily (truth_key, icao, date_local, high_c, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("wu:KORD:2026-07-01", "KORD", "2026-07-01", 30.0, now, now),
+            )
+            conn.execute(
+                "INSERT INTO truth_iem_daily (truth_key, icao, date_local, high_c, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("iem:VHHH:2026-07-01", "VHHH", "2026-07-01", 31.0, now, now),
+            )
+            conn.execute(
+                "INSERT INTO truth_hko_daily (truth_key, date_local, high_c, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                ("hko:2026-07-01", "2026-07-01", 32.0, now, now),
+            )
+
+        chicago = _truth_by_date("KORD", "chicago", path)
+        hong_kong = _truth_by_date("VHHH", "hong-kong", path)
+
+        self.assertEqual(chicago["2026-07-01"]["high_c"], 30.0)
+        self.assertEqual(chicago["2026-07-01"]["basis"], "wunderground_daily")
+        self.assertEqual(hong_kong["2026-07-01"]["high_c"], 32.0)
+        self.assertEqual(hong_kong["2026-07-01"]["basis"], "hong_kong_observatory_daily_extract")
+
+    def test_bias_training_excludes_target_day_leakage_and_reports_real_mae(self):
+        from weatherbot_v3.bias import train_bias_table
+
+        path = test_db_path("bias_leakage")
+        output = path.with_name(f"{path.stem}-bias.json")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        self.addCleanup(lambda: output.unlink(missing_ok=True))
+        init_v3_db(path)
+        now = "2026-07-11T00:00:00+00:00"
+        with connect(path) as conn:
+            conn.execute(
+                "INSERT INTO truth_wunderground_daily (truth_key, icao, date_local, high_c, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("wu:KORD:2026-07-01", "KORD", "2026-07-01", 30.0, now, now),
+            )
+            for run_key, retrieved_at, mean_high in (
+                ("pre-day", "2026-06-30T12:00:00+00:00", 32.0),
+                ("leaked", "2026-07-01T12:00:00+00:00", 40.0),
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO forecast_runs (
+                        run_key, city, target_date, source, model, retrieved_at,
+                        unit, mean_high, training_eligible, parse_status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_key,
+                        "chicago",
+                        "2026-07-01",
+                        "openmeteo_ecmwf_ifs025",
+                        "ecmwf_ifs025",
+                        retrieved_at,
+                        "C",
+                        mean_high,
+                        1,
+                        "parsed",
+                        now,
+                    ),
+                )
+
+        payload = train_bias_table(cities=["chicago"], days=30, path=path, output_path=output)
+        row = next(item for item in payload["rows"] if item["model"] == "ecmwf")
+
+        self.assertEqual(row["sample_count"], 1)
+        self.assertEqual(row["leakage_excluded_rows"], 1)
+        self.assertEqual(row["truth_basis_counts"], {"wunderground_daily": 1})
+        self.assertAlmostEqual(row["additive_bias_c"], 2.0)
+        self.assertAlmostEqual(row["raw_mae_c"], 2.0)
+        self.assertAlmostEqual(row["mae_c"], 0.0)
+        self.assertFalse(row["runtime_eligible"])
+
+    def test_low_sample_bias_mae_cannot_change_runtime_weights(self):
+        from weatherbot_v3.forecasts.ensemble import _mae_for
+
+        low_sample = [{"icao": "KORD", "model": "ecmwf", "sample_count": 7, "mae_7d_c": 0.2}]
+        mature = [{"icao": "KORD", "model": "ecmwf", "sample_count": 20, "mae_7d_c": 0.4}]
+
+        self.assertIsNone(_mae_for(low_sample, "KORD", "ecmwf"))
+        self.assertAlmostEqual(_mae_for(mature, "KORD", "ecmwf"), 0.4)
+
     def test_truth_hko_daily_extract_parser_handles_hko_json_payload(self):
         from weatherbot_v3.truth.hko import parse_hko_daily_extract, persist_hko_daily
 

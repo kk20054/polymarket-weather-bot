@@ -762,7 +762,9 @@ def _mae_for(bias_table: list[dict[str, Any]], station_id: str, family: str) -> 
             continue
         if str(row.get("model") or "").lower() != fam:
             continue
-        for key in ("mae_c", "mae", "rmse_c", "rmse"):
+        if int(row.get("sample_count") or 0) < BIAS_MIN_SAMPLE_COUNT:
+            return None
+        for key in ("mae_7d_c", "mae_c", "mae", "rmse_c", "rmse"):
             value = _first_number(row.get(key))
             if value is not None:
                 return round(float(value), 4)
