@@ -1,5 +1,15 @@
 # WeatherBot 项目进度台账
 
+### 2026-07-11: Layer 3/4 Previous Runs 30-day calibration archive
+
+- 目标：在不降低 20 个独立结算日门槛的前提下，为 14 个 enabled 城市补齐固定 T+24 的 Open-Meteo Previous Runs，并让成熟 bias 真正进入 DEB。
+- 改动：Previous Runs collector 改为每个 city/model 一次日期范围请求，而不是逐日请求；按目标城市本地日拆分持久化，保留幂等 run key、原始响应哈希和结构化范围日志。Bias trainer 固定优先 `previous_day1`，避免混入更晚的 current snapshot；DEB 顶层 `bias_correction` 改为真实的分量加权 bias。
+- 真实数据：区域主模型完成 41 次请求、写入 1,230 runs 和 1,230 members；ICON/GEM 补充完成 28 次请求、写入 840 runs 和 818 members，HTTP failure=0。重训生成 87 个 city/model 行，其中 69 行达到 20+ 独立日期并可在 runtime 使用。
+- 质量样例：Chicago corrected MAE 为 ECMWF 1.0633C、GFS 1.1067C、ICON 0.7467C、GEM 1.3033C、HRRR 1.1067C；Shanghai 为 ECMWF 1.21C、GFS 1.06C、ICON 1.3133C、GEM 1.4286C、CMA 1.6733C。Chicago/Shanghai DEB 冒烟均读取 30 个样本并应用非零加权 bias。
+- 验证：`python -m unittest tests.test_v3_core tests.test_ensemble_vs_market` 通过 203 tests；`git diff --check` 通过。Weather.com v3 尚无历史 archive，NBM 仍低于样本门槛；PWS 401 未改变；live 与 auto simulation 保持关闭。
+- 结论：此前“没有模型达到 20 个独立日期”的阻塞已解除，下一步可以使用成熟 bias 重建保存日期的 PolyWX Forecast/Cloud/DEB benchmark；这仍不等于策略盈利或 live readiness。
+- 相关提交：`937a203`。
+
 最后更新：2026-07-07
 
 > 更早记录见 `docs/PROGRESS_ARCHIVE_CN.md`。日常 Turn Start 只读 `docs/CURRENT_STATE.md`，不要通读本文件或归档，除非任务明确涉及历史决策。
