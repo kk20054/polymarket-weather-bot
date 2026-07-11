@@ -4107,8 +4107,9 @@ def log_data_fetch(
     started_at: str = "",
     finished_at: str = "",
     log_key: str = "",
+    path: Path | None = None,
 ) -> int:
-    init_v3_db()
+    init_v3_db(path)
     now = utc_now()
     clean_source = str(source or "unknown")
     clean_stage = str(stage or clean_source)
@@ -4124,7 +4125,7 @@ def log_data_fetch(
         finished_at or now,
         message,
     )
-    with connect() as conn:
+    with connect(path) as conn:
         conn.execute(
             """
             INSERT INTO data_fetch_logs (

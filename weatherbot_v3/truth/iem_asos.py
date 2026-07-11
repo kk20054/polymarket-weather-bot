@@ -4,7 +4,7 @@ import csv
 import io
 import json
 import time
-from datetime import date, datetime, time as dt_time, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -36,12 +36,45 @@ def fetch_iem_asos_daily(
     it uses the same airport ASOS/METAR stream but stores explicit provenance so
     live gates can distinguish it from exact Wunderground settlement truth.
     """
-    station = str(icao or "").strip().upper()
     target = _as_date(date_local)
+    return fetch_iem_asos_range(
+        icao,
+        target,
+        target,
+        tz,
+        session=session,
+        persist=persist,
+        path=path,
+        timeout=timeout,
+    )[0]
+
+
+def fetch_iem_asos_range(
+    icao: str,
+    start_date_local: str | date,
+    end_date_local: str | date,
+    tz: str,
+    *,
+    session: requests.Session | None = None,
+    persist: bool = True,
+    path: Path | None = None,
+    timeout: float = 60.0,
+) -> list[dict[str, Any]]:
+    """Fetch one station/date range in a single IEM request, then split by local day."""
+    station = str(icao or "").strip().upper()
+    start_target = _as_date(start_date_local)
+    end_target = _as_date(end_date_local)
+    if end_target < start_target:
+        start_target, end_target = end_target, start_target
+    targets: list[date] = []
+    cursor = start_target
+    while cursor <= end_target:
+        targets.append(cursor)
+        cursor += timedelta(days=1)
     tz_name = str(tz or "UTC")
     zone = ZoneInfo(tz_name)
-    start_local = datetime.combine(target, dt_time(0, 0), tzinfo=zone)
-    end_local = datetime.combine(target, dt_time(23, 59), tzinfo=zone)
+    start_local = datetime.combine(start_target, dt_time(0, 0), tzinfo=zone)
+    end_local = datetime.combine(end_target, dt_time(23, 59), tzinfo=zone)
     params = _iem_params(station, start_local, end_local, tz_name)
     client = session or requests.Session()
     started_at = utc_now()
@@ -58,29 +91,60 @@ def fetch_iem_asos_daily(
         text = str(getattr(response, "text", "") or "")
         source_url = str(getattr(response, "url", "") or url)
         if not (200 <= status_code < 300):
-            result = _empty_result(station, target, tz_name, source_url, f"http_{status_code}")
+            results = [_empty_result(station, target, tz_name, source_url, f"http_{status_code}") for target in targets]
         else:
-            result = parse_iem_asos_daily_csv(text, station, target.isoformat(), tz_name, source_url=source_url)
+            results = [
+                parse_iem_asos_daily_csv(text, station, target.isoformat(), tz_name, source_url=source_url)
+                for target in targets
+            ]
     except Exception as exc:
-        result = _empty_result(station, target, tz_name, url, str(exc))
+        results = [_empty_result(station, target, tz_name, url, str(exc)) for target in targets]
 
-    result["duration_ms"] = round((time.perf_counter() - started_perf) * 1000, 2)
-    if persist and result.get("ok"):
-        persist_iem_asos_daily(result, path=path)
+    duration_ms = round((time.perf_counter() - started_perf) * 1000, 2)
+    finished_at = utc_now()
+    if persist:
+        successful = [result for result in results if result.get("ok")]
+        if successful:
+            init_v3_db(path)
+            with connect(path) as conn:
+                for result in successful:
+                    _persist_iem_asos_daily(conn, result)
+
+    for result in results:
+        result["duration_ms"] = duration_ms
+    failed = [result for result in results if not result.get("ok")]
     log_data_fetch(
         source="iem_asos",
         stage="truth_iem_daily",
-        status="OK" if result.get("ok") else "WARN",
-        city=str(result.get("icao") or station),
-        target_date=target.isoformat(),
-        duration_ms=result.get("duration_ms"),
-        message="IEM ASOS daily truth approximation fetched" if result.get("ok") else str(result.get("reason") or "iem_fetch_failed"),
-        details={k: v for k, v in result.items() if k != "all_hourly"},
+        status="OK" if not failed else "WARN",
+        city=station,
+        target_date=f"{start_target.isoformat()}..{end_target.isoformat()}",
+        duration_ms=duration_ms,
+        message=(
+            "IEM ASOS truth approximation range fetched"
+            if not failed
+            else f"IEM ASOS truth range incomplete: {len(failed)}/{len(results)} failed"
+        ),
+        details={
+            "station": station,
+            "timezone": tz_name,
+            "start_date": start_target.isoformat(),
+            "end_date": end_target.isoformat(),
+            "requested_days": len(results),
+            "ok_days": len(results) - len(failed),
+            "failed_days": [
+                {"date_local": result.get("date_local"), "reason": result.get("reason")}
+                for result in failed
+            ],
+            "persisted": bool(persist),
+            "parser_version": PARSER_VERSION,
+        },
         started_at=started_at,
-        finished_at=utc_now(),
-        log_key=f"{PARSER_VERSION}:{station}:{target.isoformat()}",
+        finished_at=finished_at,
+        log_key=f"{PARSER_VERSION}:{station}:{start_target.isoformat()}:{end_target.isoformat()}",
+        path=path,
     )
-    return result
+    return results
 
 
 def parse_iem_asos_daily_csv(
@@ -138,13 +202,17 @@ def parse_iem_asos_daily_csv(
 
 def persist_iem_asos_daily(result: dict[str, Any], *, path: Path | None = None) -> dict[str, Any]:
     init_v3_db(path)
+    with connect(path) as conn:
+        return _persist_iem_asos_daily(conn, result)
+
+
+def _persist_iem_asos_daily(conn: Any, result: dict[str, Any]) -> dict[str, Any]:
     now = utc_now()
     icao = str(result.get("icao") or "").upper()
     date_local = str(result.get("date_local") or "")
     truth_key = f"iem_asos:{icao}:{date_local}"
-    with connect(path) as conn:
-        conn.execute(
-            """
+    conn.execute(
+        """
             INSERT INTO truth_iem_daily (
                 truth_key, icao, date_local, timezone, high_c, low_c,
                 high_time_local, low_time_local, obs_count, source_url,
@@ -162,31 +230,31 @@ def persist_iem_asos_daily(result: dict[str, Any], *, path: Path | None = None) 
                 parser_version=excluded.parser_version,
                 raw_json=excluded.raw_json,
                 updated_at=excluded.updated_at
-            """,
-            (
-                truth_key,
-                icao,
-                date_local,
-                str(result.get("timezone") or ""),
-                result.get("high_c"),
-                result.get("low_c"),
-                str(result.get("high_time_local") or ""),
-                str(result.get("low_time_local") or ""),
-                int(result.get("obs_count") or 0),
-                str(result.get("source_url") or ""),
-                str(result.get("settlement_truth_type") or SETTLEMENT_TRUTH_TYPE),
-                str(result.get("parser_version") or PARSER_VERSION),
-                dump_json({k: v for k, v in result.items() if k != "all_hourly"}),
-                now,
-                now,
-            ),
-        )
-        hourly_count = 0
-        for item in result.get("all_hourly") or []:
-            observed_local = str(item.get("observed_at_local") or "")
-            observation_key = f"iem_asos_hourly:{icao}:{observed_local}"
-            conn.execute(
-                """
+        """,
+        (
+            truth_key,
+            icao,
+            date_local,
+            str(result.get("timezone") or ""),
+            result.get("high_c"),
+            result.get("low_c"),
+            str(result.get("high_time_local") or ""),
+            str(result.get("low_time_local") or ""),
+            int(result.get("obs_count") or 0),
+            str(result.get("source_url") or ""),
+            str(result.get("settlement_truth_type") or SETTLEMENT_TRUTH_TYPE),
+            str(result.get("parser_version") or PARSER_VERSION),
+            dump_json({k: v for k, v in result.items() if k != "all_hourly"}),
+            now,
+            now,
+        ),
+    )
+    hourly_count = 0
+    for item in result.get("all_hourly") or []:
+        observed_local = str(item.get("observed_at_local") or "")
+        observation_key = f"iem_asos_hourly:{icao}:{observed_local}"
+        conn.execute(
+            """
                 INSERT INTO truth_iem_hourly (
                     observation_key, icao, date_local, timezone, observed_at_local,
                     observed_at_utc, temp_c, tmpf, raw_text, source_url,
@@ -200,25 +268,25 @@ def persist_iem_asos_daily(result: dict[str, Any], *, path: Path | None = None) 
                     parser_version=excluded.parser_version,
                     raw_json=excluded.raw_json,
                     updated_at=excluded.updated_at
-                """,
-                (
-                    observation_key,
-                    icao,
-                    date_local,
-                    str(item.get("timezone") or result.get("timezone") or ""),
-                    observed_local,
-                    str(item.get("observed_at_utc") or ""),
-                    item.get("temp_c"),
-                    item.get("tmpf"),
-                    str(item.get("raw_text") or ""),
-                    str(item.get("source_url") or result.get("source_url") or ""),
-                    str(item.get("parser_version") or PARSER_VERSION),
-                    dump_json(item.get("raw") or item),
-                    now,
-                    now,
-                ),
-            )
-            hourly_count += 1
+            """,
+            (
+                observation_key,
+                icao,
+                date_local,
+                str(item.get("timezone") or result.get("timezone") or ""),
+                observed_local,
+                str(item.get("observed_at_utc") or ""),
+                item.get("temp_c"),
+                item.get("tmpf"),
+                str(item.get("raw_text") or ""),
+                str(item.get("source_url") or result.get("source_url") or ""),
+                str(item.get("parser_version") or PARSER_VERSION),
+                dump_json(item.get("raw") or item),
+                now,
+                now,
+            ),
+        )
+        hourly_count += 1
     return {"ok": True, "truth_key": truth_key, "hourly_upserted": hourly_count}
 
 

@@ -5965,6 +5965,50 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(float(row["high_c"]), 33.5)
         self.assertEqual(row["parser_version"], "truth-hko-daily-extract-v1")
 
+    def test_hko_truth_batch_fetches_each_month_once_and_persists_compact_raw_rows(self):
+        from weatherbot_v3.truth.hko import fetch_hko_daily_extract_many
+
+        path = test_db_path("truth_hko_month_batch")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        payload = {
+            "stn": {
+                "data": [{
+                    "month": 6,
+                    "dayData": [
+                        ["28", "1005.3", "30.0", "27.9", "26.1"],
+                        ["29", "1006.9", "31.6", "28.7", "26.3"],
+                        ["30", "1008.2", "32.1", "28.7", "26.4"],
+                    ],
+                }]
+            }
+        }
+
+        class CountingSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                return FakeHTTPResponse(payload, url="https://hko.example/dailyExtract_202606.xml")
+
+        session = CountingSession()
+        results = fetch_hko_daily_extract_many(
+            ["2026-06-28", "2026-06-29", "2026-06-30"],
+            session=session,
+            path=path,
+        )
+
+        self.assertEqual(session.calls, 1)
+        self.assertEqual([row["high_c"] for row in results], [30.0, 31.6, 32.1])
+        with connect(path) as conn:
+            rows = conn.execute("SELECT raw_json FROM truth_hko_daily ORDER BY date_local").fetchall()
+        self.assertEqual(len(rows), 3)
+        for row in rows:
+            raw = json.loads(row["raw_json"])
+            self.assertIn("row", raw)
+            self.assertIn("payload_sha256", raw)
+            self.assertNotIn("payload", raw)
+
     def test_truth_delta_rebuild_tracks_hko_against_vhhh_observation_station(self):
         from weatherbot_v3.truth.delta import rebuild_truth_delta_from_tables
 
@@ -6025,17 +6069,61 @@ class V3CoreTests(unittest.TestCase):
         }
         captured: list[tuple[str, str, str]] = []
 
-        def fake_fetch(station, target, timezone_name, *, persist):
-            captured.append((station, target, timezone_name))
-            return {"ok": True, "icao": station, "date_local": target}
+        def fake_fetch(station, start_target, end_target, timezone_name, *, persist):
+            captured.append((station, start_target, end_target, timezone_name))
+            return [{"ok": True, "icao": station, "date_local": start_target}]
 
         with patch("weatherbot_v3.cli.sync_station_registry"), patch(
             "weatherbot_v3.cli.list_stations", return_value=[station_row]
-        ), patch("weatherbot_v3.truth.iem_asos.fetch_iem_asos_daily", side_effect=fake_fetch):
+        ), patch("weatherbot_v3.truth.iem_asos.fetch_iem_asos_range", side_effect=fake_fetch):
             result = run_iem_asos_truth_fetch("hong-kong", target_date="2026-07-04", dry_run=True)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(captured, [("VHHH", "2026-07-04", "Asia/Hong_Kong")])
+        self.assertEqual(captured, [("VHHH", "2026-07-04", "2026-07-04", "Asia/Hong_Kong")])
+
+    def test_iem_truth_range_fetches_station_once_and_splits_local_days(self):
+        from weatherbot_v3.truth.iem_asos import fetch_iem_asos_range
+
+        path = test_db_path("truth_iem_range")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        csv_text = "\n".join([
+            "station,valid,tmpf,metar",
+            "VHHH,2026-06-28 00:00,86.0,VHHH 271600Z 20008KT 9999 FEW010 30/25 Q1005",
+            "VHHH,2026-06-28 12:00,80.6,VHHH 280400Z 18006KT 1500 SHRA 27/25 Q1006",
+            "VHHH,2026-06-29 00:00,84.2,VHHH 281600Z 18005KT 9999 FEW010 29/25 Q1005",
+            "VHHH,2026-06-29 13:00,89.6,VHHH 290500Z 22008KT 9999 FEW015 32/25 Q1004",
+        ])
+
+        class CountingSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                return FakeHTTPResponse(csv_text, url="https://mesonet.example/asos.csv")
+
+        session = CountingSession()
+        results = fetch_iem_asos_range(
+            "VHHH",
+            "2026-06-28",
+            "2026-06-29",
+            "Asia/Hong_Kong",
+            session=session,
+            path=path,
+        )
+
+        self.assertEqual(session.calls, 1)
+        self.assertEqual([result["high_c"] for result in results], [30.0, 32.0])
+        with connect(path) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM truth_iem_daily").fetchone()[0], 2)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM truth_iem_hourly").fetchone()[0], 4)
+            logs = conn.execute(
+                "SELECT target_date, status, details_json FROM data_fetch_logs WHERE source='iem_asos'"
+            ).fetchall()
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0]["target_date"], "2026-06-28..2026-06-29")
+        self.assertEqual(logs[0]["status"], "OK")
+        self.assertEqual(json.loads(logs[0]["details_json"])["ok_days"], 2)
 
     def test_wunderground_truth_cli_passes_force_rebuild(self):
         from io import StringIO
@@ -6051,6 +6139,21 @@ class V3CoreTests(unittest.TestCase):
                 cli.main()
 
         self.assertTrue(fetch.call_args.kwargs["force_rebuild"])
+
+    def test_iem_truth_cli_does_not_forward_wunderground_force_rebuild_option(self):
+        from io import StringIO
+        from weatherbot_v3 import cli
+
+        output = StringIO()
+        with patch("weatherbot_v3.cli.run_iem_asos_truth_fetch", return_value={"ok": True}) as fetch:
+            with patch.object(
+                cli.sys,
+                "argv",
+                ["weatherbot_v3.cli", "iem-asos-fetch", "--city", "hong-kong", "--force-rebuild"],
+            ), patch.object(cli.sys, "stdout", output):
+                cli.main()
+
+        self.assertNotIn("force_rebuild", fetch.call_args.kwargs)
 
     def test_truth_wunderground_returns_structured_skip_when_no_endpoint_has_daily_high(self):
         from weatherbot_v3.truth.wunderground import fetch_wunderground_daily_result

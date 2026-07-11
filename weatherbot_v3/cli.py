@@ -875,7 +875,7 @@ def run_iem_asos_truth_fetch(
     limit_cities: int = 10,
     dry_run: bool = False,
 ) -> dict:
-    from .truth.iem_asos import fetch_iem_asos_daily
+    from .truth.iem_asos import fetch_iem_asos_range
 
     sync_station_registry()
     requested = _cities_from_arg(cities_arg)
@@ -885,7 +885,7 @@ def run_iem_asos_truth_fetch(
         rows = [row for row in rows if str(row.get("city_key") or "").lower() in wanted or str(row.get("station_id") or "").lower() in wanted]
     elif not all_cities:
         rows = [row for row in rows if row.get("enabled")][: max(1, int(limit_cities or 10))]
-    targets = _cli_date_window(target_date=target_date, start_date=start_date, end_date=end_date, days=days)
+    targets = sorted(set(_cli_date_window(target_date=target_date, start_date=start_date, end_date=end_date, days=days)))
     results = []
     for row in rows:
         # IEM is an observation-side approximation used for deltas. It must
@@ -893,10 +893,16 @@ def run_iem_asos_truth_fetch(
         # authority such as Hong Kong Observatory.
         station = str(row.get("station_id") or "").upper()
         tz = str(row.get("timezone") or row.get("settlement_timezone") or "UTC")
-        for target in targets:
-            if station == "HKO":
-                continue
-            results.append(fetch_iem_asos_daily(station, target, tz, persist=not dry_run))
+        if not station:
+            continue
+        station_results = fetch_iem_asos_range(
+            station,
+            targets[0],
+            targets[-1],
+            tz,
+            persist=not dry_run,
+        )
+        results.extend(_compact_iem_truth_result(result) for result in station_results)
     return {
         "ok": all(item.get("ok") for item in results) if results else False,
         "source": "iem_asos",
@@ -917,10 +923,13 @@ def run_hko_truth_fetch(
     days: int = 1,
     dry_run: bool = False,
 ) -> dict:
-    from .truth.hko import fetch_hko_daily_extract
+    from .truth.hko import fetch_hko_daily_extract_many
 
     targets = _cli_date_window(target_date=target_date, start_date=start_date, end_date=end_date, days=days)
-    results = [fetch_hko_daily_extract(target, persist=not dry_run) for target in targets]
+    results = [
+        _compact_hko_truth_result(result)
+        for result in fetch_hko_daily_extract_many(targets, persist=not dry_run)
+    ]
     return {
         "ok": all(item.get("ok") for item in results) if results else False,
         "source": "hko",
@@ -929,6 +938,36 @@ def run_hko_truth_fetch(
         "target_dates": targets,
         "stored": 0 if dry_run else sum(1 for item in results if item.get("ok")),
         "results": results,
+    }
+
+
+def _compact_iem_truth_result(result: dict) -> dict:
+    return {
+        "ok": bool(result.get("ok")),
+        "icao": result.get("icao"),
+        "date_local": result.get("date_local"),
+        "timezone": result.get("timezone"),
+        "high_c": result.get("high_c"),
+        "low_c": result.get("low_c"),
+        "high_time_local": result.get("high_time_local"),
+        "low_time_local": result.get("low_time_local"),
+        "obs_count": result.get("obs_count"),
+        "settlement_truth_type": result.get("settlement_truth_type"),
+        "reason": result.get("reason"),
+        "duration_ms": result.get("duration_ms"),
+    }
+
+
+def _compact_hko_truth_result(result: dict) -> dict:
+    return {
+        "ok": bool(result.get("ok")),
+        "date_local": result.get("date_local"),
+        "high_c": result.get("high_c"),
+        "low_c": result.get("low_c"),
+        "mean_c": result.get("mean_c"),
+        "settlement_truth_type": result.get("settlement_truth_type"),
+        "reason": result.get("reason"),
+        "duration_ms": result.get("duration_ms"),
     }
 
 
@@ -1742,7 +1781,6 @@ def main() -> None:
                 all_cities=args.all_cities,
                 limit_cities=args.limit_cities,
                 dry_run=args.dry_run,
-                force_rebuild=args.force_rebuild,
             ),
             ensure_ascii=False,
             indent=2,
