@@ -438,3 +438,10 @@
 - 结论：US-only 技术阻塞已解除。亚洲 PWS 的剩余阻塞是外部 API entitlement；中国大陆坐标还存在公开 PWS discovery 无覆盖。此源继续保持 display/peak-lock only，不影响 METAR、truth 或 live gate。
 - 下一步：24 小时 soak 结束并重启后端后启用新代码；若取得支持 PWS current 的 Weather.com/WU key，可直接复跑亚洲 dry-run，无需再改 collector。
 - 相关提交：`eb1f21f`。
+### 2026-07-11：PolyWX 数据源职责闭环与原始多频率看板
+
+- 改动：上海 China Live 切到浦东 `101020600`；调度器拆为 METAR、China Live、Weather.com v3、Open-Meteo NWP、WU Historical、PWS 与 derive 独立 poller；PWS 只接受独立 `WUNDERGROUND_API_KEY`。Forecast/Cloud 统一读取同一 v3 快照，WU/METAR/China Live/PWS 以原始频率独立返回；DEB 默认 `polywx_aligned` 并修复整点截断遗漏最新 v3 的问题。
+- 展示：上海与 Chicago 均显示 24 行 v3 Forecast、同快照 Cloud/天气状况/修订次数、当日 WU Historical 和含 v3 的 DEB；主图六个图例支持点击隐藏/恢复曲线，PWS 无权限时显示诚实禁用态。
+- 验证：真实上海冒烟得到 Forecast 24、METAR 41、WU Historical 38、浦东 China Live 7、PWS 0；Chicago v3 Forecast 24 行。浏览器两城无 console error、无横向溢出；全套 `python -m unittest discover tests` 263/263 OK；`npm run build` OK；`git diff --check` 仅 Windows 换行提示。
+- 结论：采集、派生与主图展示职责已经闭合，PWS 仍因独立产品 entitlement 缺失不可用；2 小时与 6 小时连续调度验收尚未完成，不能据此宣称生产稳定或盈利。
+- 下一步：基于提交 `84ab4f0` 启动 2 小时 scheduler smoke，检查全部启用城市的源新鲜度、WU 当日增量、无重复 PWS 401；通过后再做 6 小时稳定性验证与 PolyWX 数值 benchmark。
