@@ -307,15 +307,12 @@ class WeatherBotScheduler:
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
-            weathercom = await asyncio.wait_for(
-                asyncio.to_thread(
-                    run_weathercom_fetch,
-                    city,
-                    dry_run=False,
-                    limit_cities=1,
-                    forecast_days=3,
-                ),
-                timeout=40,
+            weathercom = await asyncio.to_thread(
+                run_weathercom_fetch,
+                city,
+                dry_run=False,
+                limit_cities=1,
+                forecast_days=3,
             )
             return {
                 "ok": _payload_ok(weathercom),
