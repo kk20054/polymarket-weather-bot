@@ -445,3 +445,4 @@
 - 验证：真实上海冒烟得到 Forecast 24、METAR 41、WU Historical 38、浦东 China Live 7、PWS 0；Chicago v3 Forecast 24 行。浏览器两城无 console error、无横向溢出；全套 `python -m unittest discover tests` 263/263 OK；`npm run build` OK；`git diff --check` 仅 Windows 换行提示。
 - 结论：采集、派生与主图展示职责已经闭合，PWS 仍因独立产品 entitlement 缺失不可用；2 小时与 6 小时连续调度验收尚未完成，不能据此宣称生产稳定或盈利。
 - 下一步：基于提交 `84ab4f0` 启动 2 小时 scheduler smoke，检查全部启用城市的源新鲜度、WU 当日增量、无重复 PWS 401；通过后再做 6 小时稳定性验证与 PolyWX 数值 benchmark。
+- 启动前修复：首次 scheduler 启动暴露 `/api/scheduler/status` 同步扫描 4GB SQLite、阻塞事件循环超过 30 秒的 P0。提交 `446cc22` 将 status 改为纯内存读取，`/api/source-health` 改在线程中计算并回填缓存；并发实测 source-health 运行时 status 仍可在约 182ms 返回，热请求约 6ms。
