@@ -198,6 +198,15 @@
 - 结论：站点核验状态倒挂已闭环，空站点或半截 Gamma 规则不能再误解锁 live gate。source health 仍 blocked 是因为香港真实 mismatch，以及调度器停止后实时 METAR/orderbook/derive 数据 stale，并非结算覆盖缺失。
 - 下一步：用 30 天 WU/HKO/IEM truth 训练逐城市/模型 bias，并单独处理 PWS 401 entitlement；随后重建保存日期的 PolyWX Forecast/Cloud/DEB benchmark。
 - 相关提交：`1e90c5c`。
+
+### 2026-07-11：Layer 3/4 无泄漏模型 Bias 校准审计
+
+- 目标：使用已经补齐的 30 天 WU/HKO/IEM truth 训练逐城市、逐模型 bias，同时证明训练不会读取目标日之后的 forecast 快照。
+- 改动：`bias.py` 改为 Hong Kong 优先 HKO、其他城市优先 WU、IEM 仅 fallback；每个 city/model/date 只选 target local-day 开始前的最新 forecast as-of，Previous Runs 使用其归档 run_at。bias 表新增 raw MAE、去偏后 MAE/RMSE、最近 7 日 MAE、truth basis、独立日期、泄漏排除数和 runtime eligibility；少于 20 个独立日期时 bias 和 MAE 均不得改变 DEB。输出采用临时文件原子替换。
+- 验证：真实生成 14 城、87 个 city-model 行；runtime_eligible_rows=0。Chicago/Atlanta/Dallas 的最大独立样本为 13/12/13，Shanghai/Tokyo 为 9/11，多数新增亚洲城仅 1-7；被 as-of 规则排除的目标日后快照数量已逐模型记录。`tests.test_v3_core` 192 tests 通过，`tests.test_ensemble_vs_market` 7 tests 通过，`git diff --check` 通过。
+- 结论：此前 trainer 错把 IEM 放在 WU 前、用绝对 bias 冒充 MAE，并可能选择目标日后快照；三项问题均已修复。当前没有足够 forecast archive，系统继续安全地不应用 runtime bias，不能通过降低 20 日门槛伪造校准成熟度。
+- 下一步：按城市和模型批量补 Open-Meteo Previous Runs，目标至少 20 个独立日期；重训后再重建保存日期的 PolyWX Forecast/Cloud/DEB benchmark。
+- 相关提交：`bbe104b`。
 - Next: wire Asian station registry/model preferences in a separate implementation turn; prioritize Shanghai/Wuhan/Beijing, keep Hong Kong truth-gated until HKO collector is production-ready, and keep Seoul monitor-only unless paper evidence improves.
 - Commit: not committed in this research turn; workspace already had unrelated dirty files.
 ## 2026-07-05：Round 3 Truth Layer 三源协议 + Gamma 结构化持久化
