@@ -31,6 +31,25 @@ def configure_enabled_cities(cities: list[str]) -> None:
 
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_historical_poller_keeps_hong_kong_as_display_evidence(self):
+        rows = [
+            {"city_key": "shanghai", "station_id": "ZSPD", "timezone": "Asia/Shanghai"},
+            {"city_key": "hong-kong", "station_id": "VHHH", "timezone": "Asia/Hong_Kong"},
+        ]
+        seen: list[str] = []
+
+        def fake_fetch(city: str, **_kwargs):
+            seen.append(city)
+            return {"ok": True, "city": city, "rows_upserted": 1}
+
+        with patch("weatherbot_v3.scheduler._enabled_rows", return_value=rows), patch(
+            "weatherbot_v3.scheduler._local_today", return_value="2026-07-11"
+        ), patch("weatherbot_v3.scheduler.run_wunderground_hourly_fetch", side_effect=fake_fetch):
+            result = await WeatherBotScheduler(city_concurrency=2)._run_historical_poller()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(sorted(seen), ["hong-kong", "shanghai"])
+
     async def test_metar_run_once_limits_concurrency_and_logs_per_city(self):
         db_path = test_db_path("scheduler_concurrency")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))

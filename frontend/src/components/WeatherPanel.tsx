@@ -4,6 +4,8 @@ import {
   CartesianGrid,
   Cell,
   ComposedChart,
+  Line,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -24,6 +26,7 @@ interface Props {
   signalDecisions?: SignalDecisionSummary | null
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
   hourlySourceSeries?: HourlySourceSeries | null
+  hourlySourceLoading?: boolean
   alphaEvents?: ModelRepriceEvent[]
   layer7Loading?: boolean
   selectedCity?: string
@@ -89,6 +92,7 @@ type HourlyWeatherRow = {
   archive?: boolean
   fetched_at?: string | null
   revision_count?: number
+  raw_text?: string | null
 }
 
 type LayerDistributionItem = DistributionItem & {
@@ -924,6 +928,34 @@ function forecastTableRowsFromSeries(points: HourlySourcePoint[] | undefined, fa
   }))
 }
 
+function observationTableRowsFromSeries(
+  points: HourlySourcePoint[] | undefined,
+  kind: 'metar' | 'historical',
+): HourlyWeatherRow[] {
+  return (points ?? []).map((point, index) => {
+    const temperature = asNumber(point.temperature)
+    return {
+      id: `${kind}-${point.timestamp}-${index}`,
+      timestamp: point.timestamp,
+      target_date: point.target_date,
+      label: String(point.local_time || point.local_hour || point.timestamp.slice(11, 16)),
+      metar: kind === 'metar' ? temperature : null,
+      historical: kind === 'historical' ? temperature : null,
+      humidity: asNumber(point.humidity),
+      cloud_cover: asNumber(point.cloud_cover),
+      wind_speed: asNumber(point.wind_speed),
+      wind_direction: asNumber(point.wind_direction),
+      visibility: asNumber(point.visibility),
+      pressure: asNumber(point.pressure),
+      dew_point: asNumber(point.dew_point),
+      condition: point.condition ?? null,
+      source: point.source || kind,
+      fetched_at: point.retrieved_at ?? null,
+      raw_text: point.raw_text ?? null,
+    }
+  })
+}
+
 function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): HourlyWeatherRow[] {
   const rows = new Map<string, HourlyWeatherRow>()
   const sourcePoints = (series?.hourly_points?.length ? series.hourly_points : (series?.forecast_points ?? series?.points ?? []))
@@ -994,6 +1026,7 @@ export function WeatherPanel({
   signalDecisions,
   dailyMaxPrediction,
   hourlySourceSeries,
+  hourlySourceLoading = false,
   alphaEvents = [],
   layer7Loading = false,
   selectedCity,
@@ -1088,6 +1121,14 @@ export function WeatherPanel({
   const forecastTableRows = useMemo(
     () => forecastTableRowsFromSeries(hourlySourceSeries?.forecast, hourlyRows),
     [hourlySourceSeries, hourlyRows],
+  )
+  const metarTableRows = useMemo(
+    () => observationTableRowsFromSeries(hourlySourceSeries?.metar, 'metar'),
+    [hourlySourceSeries],
+  )
+  const historicalTableRows = useMemo(
+    () => observationTableRowsFromSeries(hourlySourceSeries?.historical, 'historical'),
+    [hourlySourceSeries],
   )
   const availableDates = useMemo(() => {
     return [...new Set(chartData.map(row => String(row.date)).filter(Boolean))]
@@ -1344,6 +1385,7 @@ export function WeatherPanel({
               cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
               selectedDate={selectedDate}
               dailyMaxPrediction={dailyMaxPrediction}
+              loading={hourlySourceLoading}
             />
             <TemperatureDistributionPanel
               signal={distributionSignal}
@@ -1363,7 +1405,7 @@ export function WeatherPanel({
 
         {activeWorkbenchTab === 'metar' && (
           <div className="space-y-2 p-2">
-            <MetarObservationTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
+            <MetarObservationTable rows={metarTableRows} unit={unit} selectedDate={selectedDate} loading={hourlySourceLoading} />
             <details className="border border-[#2C3445] bg-[#161A22]">
               <summary className="cursor-pointer select-none px-2 py-2 text-xs text-[#CBD2DC] hover:bg-[#222A37]">
                 METAR snapshots · {metarCards.length}
@@ -1377,8 +1419,13 @@ export function WeatherPanel({
 
         {activeWorkbenchTab === 'historical' && (
           <div className="space-y-2 p-2">
-            <HistoricalHourlyObservationTable rows={hourlyRows} unit={unit} selectedDate={selectedDate} />
-            <HistoricalObservationTable rows={historyRows} unit={unit} stationId={series?.station_id} />
+            <HistoricalHourlyObservationTable rows={historicalTableRows} unit={unit} selectedDate={selectedDate} loading={hourlySourceLoading} />
+            <details className="border border-[#2C3445] bg-[#161A22]">
+              <summary className="cursor-pointer select-none px-2 py-2 text-xs text-[#CBD2DC] hover:bg-[#222A37]">
+                每日结算高温 · {historyRows.length}
+              </summary>
+              <HistoricalObservationTable rows={historyRows} unit={unit} stationId={series?.station_id} />
+            </details>
             <details className="border border-[#2C3445] bg-[#161A22]">
               <summary className="cursor-pointer select-none px-2 py-2 text-xs text-[#CBD2DC] hover:bg-[#222A37]">
                 Historical truth snapshots · {historyCards.length}
@@ -1398,6 +1445,7 @@ export function WeatherPanel({
               unit={unit}
               selectedDate={selectedDate}
               evidenceSummary={selectedDateEvidence?.modules?.diff_stats?.summary}
+              sourceSeries={hourlySourceSeries}
             />
             <details className="border border-[#2C3445] bg-[#161A22]">
               <summary className="cursor-pointer select-none px-2 py-2 text-xs text-[#CBD2DC] hover:bg-[#222A37]">
@@ -1446,7 +1494,7 @@ function tabCopy(tab: WeatherWorkbenchTab) {
   const copy: Record<WeatherWorkbenchTab, { label: string }> = {
     forecast: { label: '预报' },
     metar: { label: 'METAR' },
-    historical: { label: '历史' },
+    historical: { label: '历史观测' },
     diff: { label: '偏差统计' },
     fetch: { label: '抓取日志' },
   }
@@ -1542,18 +1590,18 @@ function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRo
   )
 }
 
-function MetarObservationTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRow[]; unit: string; selectedDate: string }) {
+function MetarObservationTable({ rows, unit, selectedDate, loading = false }: { rows: HourlyWeatherRow[]; unit: string; selectedDate: string; loading?: boolean }) {
   const metarRows = rows.filter(row => row.metar !== null && row.metar !== undefined)
-  const columns = ['Time', 'Observed', 'Forecast', 'Delta', 'Humidity', 'Cloud', 'Wx', 'Vis', 'Wind', 'Pres', 'Dew', 'Fetched']
+  const columns = ['时间', '气温', '云量', '天气现象', '能见度', '风', '气压', '露点', 'METAR 原文', '抓取（系统时）', '抓取（本地时）']
 
   return (
     <section className="min-w-0 border border-neutral-800 bg-black">
       <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
         <div>
-          <div className="text-[10px] text-neutral-500">METAR</div>
-          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {metarRows.length} observations</div>
+          <div className="text-[10px] text-neutral-500">METAR 观测</div>
+          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {metarRows.length} 行</div>
         </div>
-        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">local station</span>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">机场原始报文</span>
       </div>
       {metarRows.length === 0 ? (
         <div className="max-h-[560px] overflow-auto">
@@ -1568,7 +1616,7 @@ function MetarObservationTable({ rows, unit, selectedDate }: { rows: HourlyWeath
             <tbody>
               <tr>
                 <td colSpan={columns.length} className="px-2 py-12 text-center text-neutral-600">
-                  No METAR observations for this date yet.
+                  {loading ? '正在读取 METAR 原始序列…' : '该日期暂无 METAR 观测。'}
                 </td>
               </tr>
             </tbody>
@@ -1589,16 +1637,15 @@ function MetarObservationTable({ rows, unit, selectedDate }: { rows: HourlyWeath
                 <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
                   <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
                   <td className="px-2 py-1 tabular-nums text-amber-300">{fmtTemp(row.metar, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-300">{fmtSignedTemp(row.gap, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.humidity)}</td>
                   <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.cloud_cover)}</td>
-                  <td className="max-w-[140px] truncate px-2 py-1 text-neutral-500" title={`${row.condition || row.source || '--'} · ${row.horizon || '--'}`}>{row.condition || row.source || '--'}</td>
+                  <td className="max-w-[140px] truncate px-2 py-1 text-neutral-500" title={row.condition || '--'}>{row.condition || '--'}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtVisibility(row.visibility)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.timestamp)}</td>
+                  <td className="max-w-[360px] truncate px-2 py-1 font-mono text-neutral-400" title={row.raw_text || '--'}>{row.raw_text || '--'}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.fetched_at)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortHour(row.fetched_at)}</td>
                 </tr>
               ))}
             </tbody>
@@ -1673,18 +1720,18 @@ function HistoricalObservationTable({ rows, unit, stationId }: { rows: Historica
   )
 }
 
-function HistoricalHourlyObservationTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRow[]; unit: string; selectedDate: string }) {
+function HistoricalHourlyObservationTable({ rows, unit, selectedDate, loading = false }: { rows: HourlyWeatherRow[]; unit: string; selectedDate: string; loading?: boolean }) {
   const historicalRows = rows.filter(row => row.historical !== null && row.historical !== undefined)
-  const columns = ['Time', 'Historical', 'Forecast', 'Delta', 'Humidity', 'Cloud', 'Wx', 'Vis', 'Wind', 'Pres', 'Dew', 'Fetched']
+  const columns = ['时间', '气温', '云量', '天气现象', '能见度', '风', '气压', '露点', '抓取（系统时）', '抓取（本地时）']
 
   return (
     <section className="min-w-0 border border-neutral-800 bg-black">
       <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
         <div>
-          <div className="text-[10px] text-neutral-500">Historical hourly</div>
-          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {historicalRows.length} rows</div>
+          <div className="text-[10px] text-neutral-500">历史观测</div>
+          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {historicalRows.length} 行</div>
         </div>
-        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">display-only research</span>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">Wunderground</span>
       </div>
       <div className="max-h-[560px] overflow-auto">
         <table className="min-w-[1080px] w-full border-collapse text-left text-[10px]">
@@ -1699,30 +1746,23 @@ function HistoricalHourlyObservationTable({ rows, unit, selectedDate }: { rows: 
             {historicalRows.length === 0 ? (
               <tr>
                 <td colSpan={columns.length} className="px-2 py-12 text-center text-neutral-600">
-                  No historical hourly observations for this date. Run Open-Meteo history backfill to populate this table.
+                  {loading ? '正在读取 Wunderground 历史观测…' : '该日期暂无 Wunderground 历史观测。'}
                 </td>
               </tr>
-            ) : historicalRows.map(row => {
-              const delta = row.forecast !== null && row.forecast !== undefined && row.historical !== null && row.historical !== undefined
-                ? Number(row.historical) - Number(row.forecast)
-                : null
-              return (
+            ) : historicalRows.map(row => (
                 <tr key={`historical-${row.id}`} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
                   <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
                   <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.historical, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-blue-300">{fmtTemp(row.forecast, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-300">{fmtSignedTemp(delta, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPct(row.humidity)}</td>
                   <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.cloud_cover)}</td>
-                  <td className="max-w-[140px] truncate px-2 py-1 text-neutral-500" title={`${row.condition || row.source || '--'} · ${row.horizon || '--'}`}>{row.condition || row.source || '--'}</td>
+                  <td className="max-w-[140px] truncate px-2 py-1 text-neutral-500" title={row.condition || '--'}>{row.condition || '--'}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtVisibility(row.visibility)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.timestamp)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.fetched_at)}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-500">{shortHour(row.fetched_at)}</td>
                 </tr>
-              )
-            })}
+              ))}
           </tbody>
         </table>
       </div>
@@ -1736,21 +1776,51 @@ function DiffStatsPanel({
   unit,
   selectedDate,
   evidenceSummary,
+  sourceSeries,
 }: {
   rows: HourlyWeatherRow[]
   chartData: WeatherChartRow[]
   unit: string
   selectedDate: string
   evidenceSummary?: CityEvidenceDiffStatsSummary
+  sourceSeries?: HourlySourceSeries | null
 }) {
+  const [observedSource, setObservedSource] = useState<'metar' | 'historical'>('metar')
+  const forecastByHour = new Map(
+    (sourceSeries?.forecast ?? []).map(point => [String(point.local_hour || point.local_time || '').slice(0, 2), point]),
+  )
+  const nativeObserved = observedSource === 'metar' ? sourceSeries?.metar : sourceSeries?.historical
+  const nativePairs = (nativeObserved ?? []).flatMap((point, index) => {
+    const hour = String(point.local_time || point.local_hour || '').slice(0, 2)
+    const forecastPoint = forecastByHour.get(hour)
+    const observed = asNumber(point.temperature)
+    const forecast = asNumber(forecastPoint?.temperature ?? forecastPoint?.ensemble_mean ?? forecastPoint?.best)
+    if (observed === null || forecast === null) return []
+    return [{
+      id: `${observedSource}-${point.timestamp}-${index}`,
+      time: String(point.local_time || point.local_hour || point.timestamp.slice(11, 16)),
+      observed,
+      forecast,
+      delta: observed - forecast,
+      cloud_cover: asNumber(point.cloud_cover),
+      condition: point.condition ?? null,
+      wind_speed: asNumber(point.wind_speed),
+      wind_direction: asNumber(point.wind_direction),
+      pressure: asNumber(point.pressure),
+      dew_point: asNumber(point.dew_point),
+      fetched_sys: point.retrieved_at || point.timestamp,
+      fetched_local: point.retrieved_at || point.timestamp,
+      source: point.source || observedSource,
+    }]
+  })
   const hourlyPairs = rows
-    .filter(row => row.forecast !== null && row.forecast !== undefined && row.metar !== null && row.metar !== undefined)
+    .filter(row => row.forecast !== null && row.forecast !== undefined && (observedSource === 'metar' ? row.metar : row.historical) !== null && (observedSource === 'metar' ? row.metar : row.historical) !== undefined)
     .map(row => ({
       id: row.id,
       time: row.label,
-      observed: Number(row.metar),
+      observed: Number(observedSource === 'metar' ? row.metar : row.historical),
       forecast: Number(row.forecast),
-      delta: Number(row.metar) - Number(row.forecast),
+      delta: Number(observedSource === 'metar' ? row.metar : row.historical) - Number(row.forecast),
       cloud_cover: row.cloud_cover,
       condition: row.condition,
       wind_speed: row.wind_speed,
@@ -1759,7 +1829,7 @@ function DiffStatsPanel({
       dew_point: row.dew_point,
       fetched_sys: row.timestamp,
       fetched_local: row.timestamp,
-      source: row.source || 'METAR',
+      source: row.source || observedSource,
     }))
   const dailyPairs = chartData
     .filter(row => row.actual_high !== null && row.actual_high !== undefined && row.forecast_high !== null && row.forecast_high !== undefined)
@@ -1779,7 +1849,7 @@ function DiffStatsPanel({
       fetched_local: row.forecast_timestamp || row.date,
       source: row.historical_provider || row.forecast_source || 'history',
     }))
-  const tableRows = hourlyPairs.length > 0 ? hourlyPairs : dailyPairs.slice(-30).reverse()
+  const tableRows = nativePairs.length > 0 ? nativePairs : hourlyPairs.length > 0 ? hourlyPairs : dailyPairs.slice(-30).reverse()
   const diffColumns = ['Time', 'Temp', 'Cloud', 'Wx', 'Vis', 'Wind', 'Pres', 'Dew', 'Fetched (Sys)', 'Fetched (Local)']
   const deltas = tableRows.map(row => row.delta)
   const avgDelta = mean(deltas)
@@ -1788,10 +1858,11 @@ function DiffStatsPanel({
     tableRows.map(row => row.observed)
   )
   const maxAbsDelta = Math.max(1, ...deltas.map(delta => Math.abs(delta)))
-  const summaryCount = evidenceSummary?.count ?? tableRows.length
-  const summaryAvgDelta = evidenceSummary?.avg_delta ?? avgDelta
-  const summaryMae = evidenceSummary?.mae ?? (deltas.length ? mean(deltas.map(delta => Math.abs(delta))) : null)
-  const summaryPearson = evidenceSummary?.pearson_r ?? correlation
+  const nativeSelected = nativePairs.length > 0
+  const summaryCount = nativeSelected ? tableRows.length : evidenceSummary?.count ?? tableRows.length
+  const summaryAvgDelta = nativeSelected ? avgDelta : evidenceSummary?.avg_delta ?? avgDelta
+  const summaryMae = nativeSelected ? (deltas.length ? mean(deltas.map(delta => Math.abs(delta))) : null) : evidenceSummary?.mae ?? (deltas.length ? mean(deltas.map(delta => Math.abs(delta))) : null)
+  const summaryPearson = nativeSelected ? correlation : evidenceSummary?.pearson_r ?? correlation
   const summaryOverlap = evidenceSummary?.overlap_ratio
   const summaryOverlapLabel = summaryOverlap === null || summaryOverlap === undefined
     ? (summaryCount ? `${summaryCount}` : '--')
@@ -1800,15 +1871,31 @@ function DiffStatsPanel({
     ? 'paired samples'
     : `${evidenceSummary?.overlap_count ?? 0}/${Math.max(evidenceSummary?.metar_hours ?? 0, evidenceSummary?.forecast_hours ?? 0, 1)} hours`
   const historyMetarOverlap = evidenceSummary?.historical_metar_overlap_ratio
+  let cumulative = 0
+  const diffChartRows = tableRows.map((row, index) => {
+    cumulative += row.delta
+    return { ...row, cumulative_avg: cumulative / (index + 1) }
+  })
 
   return (
     <section className="border border-neutral-800 bg-black">
       <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
         <div>
-          <div className="text-[10px] text-neutral-500">Diff Stats (Observed - Forecast)</div>
-          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {tableRows.length} paired rows</div>
+          <div className="text-[10px] text-neutral-500">偏差统计（实测 − 预报）</div>
+          <div className="text-xs text-neutral-100">{longDate(selectedDate)} · {tableRows.length} 个匹配点</div>
         </div>
-        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">{hourlyPairs.length > 0 ? 'hourly' : 'daily history'}</span>
+        <div className="inline-flex border border-neutral-800 p-0.5 text-[10px]">
+          {(['metar', 'historical'] as const).map(source => (
+            <button
+              key={source}
+              type="button"
+              onClick={() => setObservedSource(source)}
+              className={`px-2 py-1 ${observedSource === source ? 'bg-blue-600 text-white' : 'text-neutral-500 hover:text-neutral-200'}`}
+            >
+              {source === 'metar' ? 'METAR' : '历史观测'}
+            </button>
+          ))}
+        </div>
       </div>
       <div className="grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] gap-2 border-b border-neutral-900 p-2">
         <MetricCard label="Average Delta" value={fmtSignedTemp(summaryAvgDelta, unit)} sub="Observed - Forecast" />
@@ -1818,6 +1905,26 @@ function DiffStatsPanel({
         <MetricCard label="Hist↔METAR" value={historyMetarOverlap === null || historyMetarOverlap === undefined ? '--' : fmtProb(historyMetarOverlap)} sub={`${evidenceSummary?.historical_metar_overlap_count ?? 0} hrs`} />
         <MetricCard label="Max Abs Delta" value={fmtTemp(Math.max(0, ...deltas.map(delta => Math.abs(delta))), unit)} sub="worst visible row" />
       </div>
+      {diffChartRows.length > 0 && (
+        <div className="h-[300px] border-b border-neutral-900 p-3" role="img" aria-label="实测减预报偏差柱状图与累计均值线">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={diffChartRows} margin={{ top: 16, right: 24, bottom: 24, left: 4 }}>
+              <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" />
+              <XAxis dataKey="time" stroke="#7D8694" fontSize={9} tickLine={false} axisLine={false} />
+              <YAxis stroke="#7D8694" fontSize={9} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(1)}°${unit}`} />
+              <ReferenceLine y={0} stroke="#64748B" />
+              <Tooltip
+                contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
+                formatter={(value: unknown, name: string) => [fmtSignedTemp(Number(value), unit), name === 'delta' ? '偏差（实测−预报）' : '累计均值']}
+              />
+              <Bar dataKey="delta" name="偏差（实测−预报）" maxBarSize={42}>
+                {diffChartRows.map(row => <Cell key={row.id} fill={row.delta >= 0 ? '#22C55E' : '#EF4444'} fillOpacity={0.75} />)}
+              </Bar>
+              <Line type="monotone" dataKey="cumulative_avg" name="累计均值" stroke="#6366F1" strokeWidth={2} dot={{ r: 2, fill: '#6366F1' }} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      )}
       {tableRows.length === 0 ? (
         <div className="max-h-[460px] overflow-auto">
           <table className="min-w-[980px] w-full border-collapse text-left text-[10px]">
@@ -1884,7 +1991,7 @@ function DiffStatsPanel({
 }
 
 function mergeNativeHourlySeries(series: HourlySourceSeries): HourlyChartRow[] {
-  const rows = new Map<string, HourlyChartRow>()
+  const rows = new Map<number, HourlyChartRow>()
   const put = (
     point: HourlySourcePoint,
     field: 'forecast_value' | 'metar_value' | 'historical_value' | 'china_live_value' | 'pws_value',
@@ -1892,8 +1999,12 @@ function mergeNativeHourlySeries(series: HourlySourceSeries): HourlyChartRow[] {
     const timestamp = String(point.timestamp || '')
     const label = String(point.local_time || point.local_hour || timestamp.slice(11, 16))
     if (!timestamp || !label) return
-    const row = rows.get(label) ?? {
+    const [hourText, minuteText] = label.split(':')
+    const timeMinute = Number(hourText) * 60 + Number(minuteText || 0)
+    if (!Number.isFinite(timeMinute)) return
+    const row = rows.get(timeMinute) ?? {
       label,
+      time_minute: timeMinute,
       timestamp,
       forecast_value: null,
       metar_value: null,
@@ -1906,7 +2017,7 @@ function mergeNativeHourlySeries(series: HourlySourceSeries): HourlyChartRow[] {
       ? asNumber(point.temperature ?? point.ensemble_mean ?? point.best)
       : asNumber(point.temperature)
     if (field === 'forecast_value') row.cloud_pct = asNumber(point.cloud_cover)
-    rows.set(label, row)
+    rows.set(timeMinute, row)
   }
 
   for (const point of series.forecast ?? []) put(point, 'forecast_value')
@@ -1917,7 +2028,7 @@ function mergeNativeHourlySeries(series: HourlySourceSeries): HourlyChartRow[] {
   }
   for (const point of series.china_live ?? []) put(point, 'china_live_value')
   for (const point of series.pws ?? []) put(point, 'pws_value')
-  return [...rows.values()].sort((left, right) => left.label.localeCompare(right.label))
+  return [...rows.values()].sort((left, right) => left.time_minute - right.time_minute)
 }
 
 function HourlyEvidencePanel({
@@ -1927,6 +2038,7 @@ function HourlyEvidencePanel({
   cityName,
   selectedDate,
   dailyMaxPrediction,
+  loading,
 }: {
   rows: HourlyWeatherRow[]
   sourceSeries?: HourlySourceSeries | null
@@ -1934,6 +2046,7 @@ function HourlyEvidencePanel({
   cityName?: string
   selectedDate: string
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
+  loading?: boolean
 }) {
   const numericValues = (values: unknown[]) =>
     values.map(asNumber).filter((value): value is number => value !== null)
@@ -1946,6 +2059,7 @@ function HourlyEvidencePanel({
   const metarMax = metarValues.length > 0 ? Math.max(...metarValues) : null
   const hourlyChartRows = rows.map(row => ({
     ...row,
+    time_minute: Number(row.label.slice(0, 2)) * 60 + Number(row.label.slice(3, 5) || 0),
     forecast_value: asNumber(row.forecast),
     metar_value: asNumber(row.metar),
     historical_value: asNumber(row.historical),
@@ -1959,6 +2073,14 @@ function HourlyEvidencePanel({
   const chartRows = hasNativeSeries
     ? mergeNativeHourlySeries(nativeSeries)
     : hourlyChartRows
+
+  if (loading && !hasNativeSeries) {
+    return (
+      <section className="border border-[#2C3445] bg-[#161A22] px-3 py-16 text-center text-xs text-[#7D8694]">
+        正在读取预报、METAR 与历史观测原始序列…
+      </section>
+    )
+  }
   const hasChartEvidence = chartRows.some(row =>
     row.forecast_value !== null
     || row.metar_value !== null
@@ -2547,7 +2669,6 @@ function TemperatureDistributionPanel({
           </div>
         )}
       </div>
-
       <div className="border-b border-[#2C3445] px-2 py-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="text-[10px] text-[#7D8694]">Probability buckets (Gaussian)</div>

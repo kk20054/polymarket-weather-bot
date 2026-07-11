@@ -1674,6 +1674,7 @@ function App() {
               signalDecisions={signalDecisionsQuery.data ?? null}
               dailyMaxPrediction={dailyMaxPredictionQuery.data ?? null}
               hourlySourceSeries={hourlyConsensusQuery.data?.series ?? null}
+              hourlySourceLoading={hourlyConsensusQuery.isLoading || (hourlyConsensusQuery.isFetching && !hourlyConsensusQuery.data)}
               layer7Loading={marketBucketsQuery.isFetching || signalDecisionsQuery.isFetching || dailyMaxPredictionQuery.isFetching}
               selectedCity={selectedCity}
               onSelectedCity={setSelectedCity}

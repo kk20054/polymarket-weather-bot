@@ -197,7 +197,7 @@ def metar_report_from_awc(item: dict[str, Any], profile: CitySettlementProfile) 
         "wind_direction": _as_float(item.get("wdir")),
         "wind_speed": _as_float(item.get("wspd")),
         "wind_gust": _as_float(item.get("wgst")),
-        "visibility": _as_float(item.get("visib")),
+        "visibility": _awc_visibility(item.get("visib"), profile.unit),
         "cloud_layers": item.get("clouds") or item.get("cloudLayers") or [],
         "altimeter": _as_float(item.get("altim") or item.get("altimeter")),
         "pressure": _as_float(item.get("presTend") or item.get("pressure")),
@@ -216,6 +216,17 @@ def metar_report_from_awc(item: dict[str, Any], profile: CitySettlementProfile) 
             "payload": item,
         },
     }
+
+
+def _awc_visibility(value: Any, display_unit: str) -> float | None:
+    """Convert AWC statute-mile visibility into the city's display convention."""
+    text = str(value or "").strip().rstrip("+")
+    visibility_miles = _as_float(text)
+    if visibility_miles is None:
+        return None
+    if str(display_unit or "").upper() == "C":
+        return round(visibility_miles * 1.609344, 1)
+    return round(visibility_miles, 1)
 
 
 def iem_user_agent() -> str:

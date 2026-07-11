@@ -917,6 +917,8 @@ export interface HourlySourcePoint extends WeatherCityPoint {
   temperature?: number | null
   revision_count?: number
   retrieved_at?: string | null
+  raw_text?: string | null
+  raw?: Record<string, unknown>
 }
 
 export interface HourlySourceSeries {

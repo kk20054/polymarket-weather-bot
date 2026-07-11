@@ -458,3 +458,11 @@
 - 下一步：重启后端，启动新的受控 scheduler，确认 Forecast/NWP/Historical/Derived 首轮闭环，再进入 2 小时与 6 小时门槛。
 - 相关提交：`1fe8a79`。
 - 新验证起点：后端加载修复后，scheduler 于 `2026-07-11T13:36:49.608789+00:00`（北京时间 21:36:49）启动；2 小时与 6 小时门槛只从此时间计算，heartbeat 已同步更新。
+
+### 2026-07-11：Layer 7 原始历史观测、偏差图与分钟时间轴修复
+
+- 改动：撤销尚未到阶段的 2/6 小时长跑并停止 scheduler；`历史观测` Tab 改为直接消费 `truth_wunderground_hourly` 原生 30/60 分钟序列，METAR Tab 直接消费原始报文序列，不再用 24 行 hourly consensus 冒充。主图 X 轴改为本地日分钟 `0-1439`，中国实况 5-10 分钟点、WU 30 分钟点、METAR 与整点预报按真实时间定位；温度 Y 轴按可见温度范围自适应并保留最小边距，云量继续使用独立 0-100% 右轴。偏差统计新增正负残差柱和累计均值线，可切换 METAR/历史观测。
+- 数据修复：WU parser 补 `dewPt`；AWC `6+SM` 按城市制式显示；美国 WU 的 km/kph/hPa 在 API 展示层转换为 mi/mph/inHg。香港小时历史改用 VHHH + HK country code 作为 display-only evidence，HKO Daily Extract 仍是唯一结算 truth。
+- 验证：显式增量抓取得到 Shanghai WU 44 行、Chicago 9 行、Hong Kong 46 行；上海 WU 首行 `28°C / 75% / 9.0km / 1006hPa / dew 27°C` 与保存的 PolyWX 样本一致；Chicago 首行换算为约 `68°F / 75% / 10mi / 7mph / 29inHg / dew 62.6°F`。全套测试 267/267、前端 build 通过；浏览器温度左轴自适应为 26-32°C、云量右轴保持 0-100%，console error/warn 为 0。
+- 结论：历史观测“空模块”和历史曲线缺失已修复；中国实况此前挤在右侧同时包含分类轴错误与真实留档从 18:20 才开始两层原因。时间轴错误已修，缺失的早间 China Live 不用 WU/Forecast 伪造回填。
+- 阻塞/下一步：PWS entitlement 仍缺；Forecast/Cloud/DEB 仍需继续做同日字段级 PolyWX benchmark。完成 UI 人工验收前不恢复 scheduler 长跑、不启动 paper cohort，`LIVE_TRADING=false`。

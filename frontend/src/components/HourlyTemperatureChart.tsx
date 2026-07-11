@@ -13,6 +13,7 @@ import { useState, type ReactNode } from 'react'
 
 export type HourlyChartRow = {
   label: string
+  time_minute: number
   timestamp?: string
   forecast_value: number | null
   metar_value: number | null
@@ -38,11 +39,18 @@ type Props = {
   overlap: string | null
 }
 
-const HOUR_LABELS = Array.from({ length: 24 }, (_, hour) => `${String(hour).padStart(2, '0')}:00`)
+const HOUR_TICKS = Array.from({ length: 24 }, (_, hour) => hour * 60)
 type SeriesKey = 'china' | 'pws' | 'metar' | 'historical' | 'forecast' | 'cloud'
 
 function formatTemp(value: number | null, unit: string) {
   return value === null || !Number.isFinite(value) ? '--' : `${value.toFixed(1)}°${unit}`
+}
+
+function formatMinute(value: number) {
+  const minutes = Math.max(0, Math.min(1439, Number(value) || 0))
+  const hour = Math.floor(minutes / 60)
+  const minute = Math.floor(minutes % 60)
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
 }
 
 type DotProps = { cx?: number; cy?: number; value?: number | null; active?: boolean }
@@ -107,6 +115,22 @@ export function HourlyTemperatureChart({
   accuracy,
   overlap,
 }: Props) {
+  const peakMinute = peakHour ? HOUR_TICKS.find(value => formatMinute(value) === peakHour) ?? null : null
+  const temperatureValues = rows.flatMap(row => [
+    row.forecast_value,
+    row.metar_value,
+    row.historical_value,
+    row.china_live_value,
+    row.pws_value,
+  ]).filter((value): value is number => value !== null && Number.isFinite(value))
+  const rawMin = temperatureValues.length ? Math.min(...temperatureValues) : 0
+  const rawMax = temperatureValues.length ? Math.max(...temperatureValues) : 10
+  const minPadding = unit === 'F' ? 2 : 1
+  const padding = Math.max(minPadding, (rawMax - rawMin) * 0.15)
+  const temperatureDomain: [number, number] = [
+    Math.floor((rawMin - padding) * 2) / 2,
+    Math.ceil((rawMax + padding) * 2) / 2,
+  ]
   const [visibleSeries, setVisibleSeries] = useState<Record<SeriesKey, boolean>>({
     china: true,
     pws: true,
@@ -149,7 +173,7 @@ export function HourlyTemperatureChart({
           {legendButton('china', '中国实况', <span className="h-2.5 w-2.5 bg-[#EF4444]" />, hasChinaLive)}
           {legendButton('pws', hasPws ? 'PWS（实时）' : 'PWS（未授权/无数据）', <span className="h-0 w-0 border-x-[5px] border-b-[9px] border-x-transparent border-b-[#A855F7]" />, hasPws)}
           {legendButton('metar', 'METAR（本地时）', <span className="h-2.5 w-2.5 rounded-full bg-[#F97316]" />)}
-          {legendButton('historical', '历史（本地时）', <span className="h-2.5 w-2.5 rounded-full bg-[#22C55E]" />, hasHistorical)}
+          {legendButton('historical', '历史观测（本地时）', <span className="h-2.5 w-2.5 rounded-full bg-[#22C55E]" />, hasHistorical)}
           {legendButton('forecast', '本系统预报（本地时）', <span className="h-2.5 w-2.5 rounded-full border border-[#3B82F6]" />)}
           {legendButton('cloud', '云量 %', <span className="h-2.5 w-3 bg-[#94A3B8]/30" />)}
         </div>
@@ -157,20 +181,20 @@ export function HourlyTemperatureChart({
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={rows} margin={{ top: 22, right: 18, bottom: 0, left: -6 }}>
               <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" />
-              <XAxis dataKey="label" ticks={HOUR_LABELS} interval={0} stroke="#7D8694" fontSize={8} tickLine={false} axisLine={false} minTickGap={0} angle={-45} textAnchor="end" height={52} />
-              <YAxis yAxisId="temp" stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°${unit}`} />
+              <XAxis type="number" dataKey="time_minute" domain={[0, 1380]} ticks={HOUR_TICKS} interval={0} tickFormatter={formatMinute} stroke="#7D8694" fontSize={8} tickLine={false} axisLine={false} minTickGap={0} angle={-45} textAnchor="end" height={52} />
+              <YAxis yAxisId="temp" domain={temperatureDomain} allowDataOverflow stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°${unit}`} />
               <YAxis yAxisId="percent" orientation="right" domain={[0, 100]} stroke="#475569" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}%`} />
               <Tooltip
                 contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
                 formatter={(value: unknown, name: string) => name === '云量 %' ? [`${Number(value).toFixed(0)}%`, name] : [formatTemp(Number(value), unit), name]}
               />
-              {visibleSeries.cloud && <Area yAxisId="percent" type="monotone" dataKey="cloud_pct" name="云量 %" stroke="#94A3B8" fill="#94A3B8" fillOpacity={0.25} strokeOpacity={0.65} connectNulls={false} />}
-              {visibleSeries.metar && <Line yAxisId="temp" type="monotone" dataKey="metar_value" name="METAR" stroke="#F97316" dot={{ r: 3, fill: '#F97316', stroke: '#F97316', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />}
-              {visibleSeries.historical && <Line yAxisId="temp" type="monotone" dataKey="historical_value" name="历史" stroke="#22C55E" dot={{ r: 3, fill: '#22C55E', stroke: '#22C55E', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls={false} />}
-              {hasChinaLive && visibleSeries.china && <Line yAxisId="temp" type="monotone" dataKey="china_live_value" name="中国实况" stroke="#EF4444" dot={<SquareDot />} activeDot={<SquareDot active />} strokeWidth={2} connectNulls={false} />}
-              {hasPws && visibleSeries.pws && <Line yAxisId="temp" type="monotone" dataKey="pws_value" name="PWS" stroke="#A855F7" dot={<TriangleDot />} activeDot={<TriangleDot active />} strokeWidth={2} connectNulls={false} />}
-              {visibleSeries.forecast && <Line yAxisId="temp" type="monotone" dataKey="forecast_value" name="预报" stroke="#3B82F6" strokeDasharray="4 4" dot={<HollowCircleDot />} activeDot={<HollowCircleDot active />} strokeWidth={2} connectNulls={false} />}
-              {peakHour && <ReferenceLine yAxisId="temp" x={peakHour} stroke="#EC4899" strokeDasharray="4 4" label={<PeakLabel value={`peak ${peakHour}`} />} />}
+              {visibleSeries.cloud && <Area yAxisId="percent" type="monotone" dataKey="cloud_pct" name="云量 %" stroke="#94A3B8" fill="#94A3B8" fillOpacity={0.25} strokeOpacity={0.65} connectNulls />}
+              {visibleSeries.metar && <Line yAxisId="temp" type="monotone" dataKey="metar_value" name="METAR" stroke="#F97316" dot={{ r: 3, fill: '#F97316', stroke: '#F97316', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls />}
+              {visibleSeries.historical && <Line yAxisId="temp" type="monotone" dataKey="historical_value" name="历史观测" stroke="#22C55E" dot={{ r: 3, fill: '#22C55E', stroke: '#22C55E', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls />}
+              {hasChinaLive && visibleSeries.china && <Line yAxisId="temp" type="monotone" dataKey="china_live_value" name="中国实况" stroke="#EF4444" dot={<SquareDot />} activeDot={<SquareDot active />} strokeWidth={2} connectNulls />}
+              {hasPws && visibleSeries.pws && <Line yAxisId="temp" type="monotone" dataKey="pws_value" name="PWS" stroke="#A855F7" dot={<TriangleDot />} activeDot={<TriangleDot active />} strokeWidth={2} connectNulls />}
+              {visibleSeries.forecast && <Line yAxisId="temp" type="monotone" dataKey="forecast_value" name="预报" stroke="#3B82F6" strokeDasharray="4 4" dot={<HollowCircleDot />} activeDot={<HollowCircleDot active />} strokeWidth={2} connectNulls />}
+              {peakMinute !== null && <ReferenceLine yAxisId="temp" x={peakMinute} stroke="#EC4899" strokeDasharray="4 4" label={<PeakLabel value={`peak ${peakHour}`} />} />}
             </ComposedChart>
           </ResponsiveContainer>
         </div>

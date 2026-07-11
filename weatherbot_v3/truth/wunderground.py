@@ -554,7 +554,7 @@ def _parse_weather_hourly_payload(
             "observed_at_local": observed_local.isoformat(),
             "observed_at_utc": observed_utc.isoformat(),
             "temp_c": round(float(temp_c), 2),
-            "dew_point_c": _round_or_none(_first_float(item, ("metric.dewpt", "metric.dewPoint", "dewpt", "dewPoint", "dew_point"))),
+            "dew_point_c": _round_or_none(_first_float(item, ("metric.dewpt", "metric.dewPt", "metric.dewPoint", "dewpt", "dewPt", "dewPoint", "dew_point"))),
             "heat_index_c": _round_or_none(_first_float(item, ("metric.heatIndex", "heatIndex", "heat_index"))),
             "humidity": _round_or_none(_first_float(item, ("rh", "humidity", "relativeHumidity"))),
             "pressure_hpa": _round_or_none(_first_float(item, ("metric.pressure", "pressure", "pressureMeanSeaLevel"))),
@@ -708,6 +708,8 @@ def _country_from_icao(icao: str) -> str:
         return "TW"
     if station.startswith("WS"):
         return "SG"
+    if station.startswith("VH"):
+        return "HK"
     if station.startswith("K"):
         return "US"
     return "US"

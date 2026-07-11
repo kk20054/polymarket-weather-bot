@@ -361,7 +361,9 @@ class WeatherBotScheduler:
         )
 
     async def _run_historical_poller(self) -> dict[str, Any]:
-        rows = [row for row in await asyncio.to_thread(_enabled_rows) if str(row.get("city_key") or row.get("city")) != "hong-kong"]
+        # Hong Kong keeps HKO as settlement truth, but VHHH WU history remains
+        # useful display evidence and must not disappear from the operator UI.
+        rows = list(await asyncio.to_thread(_enabled_rows))
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))

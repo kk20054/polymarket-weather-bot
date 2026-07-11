@@ -570,6 +570,13 @@ def source_series_summary(
         if point:
             series["metar"].append(_native_series_point(point, row.get("report_time"), profile))
     for row in historical_rows:
+        historical_wind_speed = _float(row.get("wind_speed_kph"))
+        historical_pressure = _float(row.get("pressure_hpa"))
+        historical_visibility = _float(row.get("visibility_km"))
+        if str(profile.unit or "").upper() == "F":
+            historical_wind_speed = historical_wind_speed / 1.609344 if historical_wind_speed is not None else None
+            historical_pressure = historical_pressure / 33.8638866667 if historical_pressure is not None else None
+            historical_visibility = historical_visibility / 1.609344 if historical_visibility is not None else None
         point = _observation_point(
             profile,
             report_time=row.get("observed_at_utc"),
@@ -579,11 +586,11 @@ def source_series_summary(
             station_id=row.get("icao"),
             humidity=row.get("humidity"),
             cloud_cover=row.get("cloud_cover_pct"),
-            wind_speed=row.get("wind_speed_kph"),
+            wind_speed=historical_wind_speed,
             wind_direction=row.get("wind_direction"),
-            pressure=row.get("pressure_hpa"),
+            pressure=historical_pressure,
             dew_point=row.get("dew_point_c"),
-            visibility=row.get("visibility_km"),
+            visibility=historical_visibility,
             condition=row.get("condition"),
             raw=row,
         )
@@ -630,6 +637,10 @@ def _native_series_point(
         local = parsed.astimezone(ZoneInfo(profile.timezone))
         result["timestamp"] = local.isoformat()
         result["local_time"] = local.strftime("%H:%M")
+    raw = result.get("raw")
+    if isinstance(raw, dict):
+        result["raw_text"] = raw.get("raw_text") or raw.get("rawOb") or raw.get("raw_metar")
+        result["retrieved_at"] = raw.get("fetched_at") or raw.get("updated_at") or raw.get("created_at")
     return result
 
 

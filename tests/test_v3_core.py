@@ -35,9 +35,9 @@ from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summa
 from weatherbot_v3.source_health import build_source_health_matrix
 from weatherbot_v3.stations import apply_market_probe_result, list_stations, reconcile_station_verification_status, station_row_from_profile, sync_station_registry
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
-from weatherbot_v3.metar import backfill_iem_asos_metars, ingest_iem_asos_csv, parse_iem_asos_csv, probe_iem_stations, fetch_awc_metars, refresh_metar_reports
+from weatherbot_v3.metar import backfill_iem_asos_metars, ingest_iem_asos_csv, parse_iem_asos_csv, probe_iem_stations, fetch_awc_metars, metar_report_from_awc, refresh_metar_reports
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
-from weatherbot_v3.truth.wunderground import fetch_wunderground_daily_result, fetch_wunderground_hourly_result, persist_wunderground_hourly
+from weatherbot_v3.truth.wunderground import _country_from_icao, fetch_wunderground_daily_result, fetch_wunderground_hourly_result, persist_wunderground_hourly
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.weathercom import weathercom_runs_from_response
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
@@ -5044,7 +5044,7 @@ class V3CoreTests(unittest.TestCase):
                                 "validTimeUtc": "2026-07-06T04:00:00Z",
                                 "metric": {
                                     "temp": 35.4,
-                                    "dewpt": 25.1,
+                                    "dewPt": 25.1,
                                     "pressure": 1007.1,
                                     "vis": 10.0,
                                     "wspd": 18.0,
@@ -5078,6 +5078,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(result["row_count"], 1)
         self.assertEqual(persisted["rows_upserted"], 1)
         self.assertAlmostEqual(float(row["temp_c"]), 35.4)
+        self.assertAlmostEqual(float(row["dew_point_c"]), 25.1)
         self.assertAlmostEqual(float(row["cloud_cover_pct"]), 50.0)
         self.assertTrue(str(row["observed_at_local"]).startswith("2026-07-06T12:00:00"))
         self.assertIn("shanghai", points)
@@ -5085,6 +5086,24 @@ class V3CoreTests(unittest.TestCase):
         self.assertIsNone(points["shanghai"][0]["metar"])
         self.assertEqual(len(native_series["historical"]), 1)
         self.assertEqual(native_series["historical"][0]["local_time"], "12:00")
+
+    def test_awc_visibility_uses_city_display_convention(self):
+        item = {
+            "stationId": "ZSPD",
+            "obsTime": "2026-07-11T00:00:00Z",
+            "rawOb": "METAR ZSPD 110000Z 12010KT 6+SM 28/27 Q1006",
+            "temp": 28,
+            "dewp": 27,
+            "visib": "6+",
+        }
+        shanghai = metar_report_from_awc(item, SETTLEMENT_REGISTRY["shanghai"])
+        chicago = metar_report_from_awc({**item, "stationId": "KORD"}, SETTLEMENT_REGISTRY["chicago"])
+
+        self.assertAlmostEqual(shanghai["visibility"], 9.7, places=1)
+        self.assertAlmostEqual(chicago["visibility"], 6.0, places=1)
+
+    def test_wunderground_country_mapping_keeps_hong_kong_out_of_us_fallback(self):
+        self.assertEqual(_country_from_icao("VHHH"), "HK")
 
     def test_shanghai_china_live_uses_pudong_station(self):
         self.assertEqual(WEATHERCN_STATION_CODES["shanghai"], "101020600")

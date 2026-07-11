@@ -1089,9 +1089,10 @@ def run_wunderground_hourly_fetch(
     results = []
     rows_upserted = 0
     for row in rows:
-        station = str(row.get("settlement_station_id") or row.get("station_id") or "").upper()
-        if station == "HKO":
-            continue
+        settlement_station = str(row.get("settlement_station_id") or "").upper()
+        # Hong Kong settles from HKO Daily Extract. Its hourly workbench still
+        # uses VHHH WU history as explicitly non-settlement display evidence.
+        station = str(row.get("station_id") if settlement_station == "HKO" else (settlement_station or row.get("station_id") or "")).upper()
         timezone_name = str(row.get("settlement_timezone") or row.get("timezone") or "UTC")
         for target in targets:
             result = fetch_wunderground_hourly_result(station, target, timezone_name=timezone_name)
