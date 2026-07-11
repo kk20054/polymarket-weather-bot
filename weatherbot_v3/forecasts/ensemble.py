@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from ..config import DATA_DIR
 from ..db import connect, init_v3_db, upsert_model_reprice_event, utc_now
-from ..deb import sigma_with_floor
+from ..deb import bucket_bounds_in_prediction_unit, sigma_with_floor
 from ..env_utils import env_value
 from ..registry import CitySettlementProfile, get_city_profile
 
@@ -284,14 +284,15 @@ def distribution_for_prediction(prediction: dict[str, Any], buckets: list[dict[s
         converted.append({"value": convert_temperature(float(value), unit, "C"), "weight": _first_number(sample.get("weight")) or 1.0})
     bucket_edges = []
     for bucket in buckets:
-        low = _first_number(bucket.get("bucket_low"), bucket.get("bucket_lower_c"))
-        high = _first_number(bucket.get("bucket_high"), bucket.get("bucket_upper_c"))
-        bucket_unit = str(bucket.get("unit") or unit).upper()
+        bounds = bucket_bounds_in_prediction_unit(bucket, "C")
+        if bounds is None:
+            continue
+        low, high = bounds
         bucket_edges.append({
             "bucket_key": bucket.get("bucket_key") or "",
             "bucket_label": bucket.get("bucket_label") or "",
-            "lower_c": convert_temperature(float(low), bucket_unit, "C") if low is not None else None,
-            "upper_c": convert_temperature(float(high), bucket_unit, "C") if high is not None else None,
+            "lower_c": None if math.isinf(low) and low < 0 else low,
+            "upper_c": None if math.isinf(high) and high > 0 else high,
         })
     result = bucket_probabilities(converted, bucket_edges)
     for item, bucket in zip(result.get("items") or [], buckets):

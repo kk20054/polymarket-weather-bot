@@ -1035,6 +1035,14 @@ def _bucket_bounds_in_prediction_unit(bucket: dict[str, Any], prediction_unit: s
     return low, high
 
 
+def bucket_bounds_in_prediction_unit(
+    bucket: dict[str, Any],
+    prediction_unit: str,
+) -> tuple[float, float] | None:
+    """Return the canonical settlement interval for Gaussian and ensemble paths."""
+    return _bucket_bounds_in_prediction_unit(bucket, prediction_unit)
+
+
 def _bounded_probability(mu: float, sigma: float, low: float, high: float) -> float:
     if math.isinf(low) and low < 0 and math.isinf(high) and high > 0:
         return 1.0

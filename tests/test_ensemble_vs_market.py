@@ -162,8 +162,8 @@ class EnsembleProbabilityTests(unittest.TestCase):
             ],
         }
         buckets = [
-            {"bucket_key": "34", "bucket_label": "34C", "bucket_low": 34, "bucket_high": 35, "unit": "C", "best_ask": 0.4},
-            {"bucket_key": "35", "bucket_label": "35C", "bucket_low": 35, "bucket_high": 36, "unit": "C", "best_ask": 0.2},
+            {"bucket_key": "34", "bucket_label": "34C", "bucket_low": 34, "bucket_high": 34, "bucket_direction": "exact", "unit": "C", "best_ask": 0.4},
+            {"bucket_key": "35", "bucket_label": "35C", "bucket_low": 35, "bucket_high": 35, "bucket_direction": "exact", "unit": "C", "best_ask": 0.2},
         ]
 
         distribution = distribution_for_prediction(prediction, buckets)
@@ -172,6 +172,32 @@ class EnsembleProbabilityTests(unittest.TestCase):
         self.assertEqual(distribution["method"], "ensemble-sample-v1")
         self.assertAlmostEqual(distribution["items"][0]["probability"], 0.7)
         self.assertAlmostEqual(distribution["items"][1]["probability"], 0.3)
+
+    def test_signal_distribution_expands_raw_celsius_exact_buckets(self):
+        prediction = {
+            "forecast_algo": ALGO,
+            "unit": "C",
+            "mu": 30.8,
+            "sigma": 0.5,
+            "ensemble_samples": [
+                {"value": 30.4, "weight": 0.2},
+                {"value": 31.1, "weight": 0.5},
+                {"value": 32.2, "weight": 0.3},
+            ],
+        }
+        buckets = [
+            {"bucket_key": "low", "bucket_label": "30C or below", "bucket_low": -999, "bucket_high": 30, "bucket_direction": "or_below", "unit": "C"},
+            {"bucket_key": "31", "bucket_label": "31C", "bucket_low": 31, "bucket_high": 31, "bucket_direction": "exact", "unit": "C"},
+            {"bucket_key": "high", "bucket_label": "32C or above", "bucket_low": 32, "bucket_high": 999, "bucket_direction": "or_above", "unit": "C"},
+        ]
+
+        distribution = distribution_for_prediction(prediction, buckets)
+        by_key = {item["bucket_key"]: item["probability"] for item in distribution["items"]}
+
+        self.assertAlmostEqual(by_key["low"], 0.2)
+        self.assertAlmostEqual(by_key["31"], 0.5)
+        self.assertAlmostEqual(by_key["high"], 0.3)
+        self.assertAlmostEqual(distribution["sum_probability"], 1.0)
 
     def test_previous_runs_request_covers_local_day_as_utc_window(self):
         profile = SETTLEMENT_REGISTRY["beijing"]
