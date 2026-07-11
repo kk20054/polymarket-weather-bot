@@ -448,3 +448,12 @@
 - 启动前修复：首次 scheduler 启动暴露 `/api/scheduler/status` 同步扫描 4GB SQLite、阻塞事件循环超过 30 秒的 P0。提交 `446cc22` 将 status 改为纯内存读取，`/api/source-health` 改在线程中计算并回填缓存；并发实测 source-health 运行时 status 仍可在约 182ms 返回，热请求约 6ms。
 - 继续修复：提交 `a4b8385` 将 scheduler 的 registry 读取和 per-city/overall fetch log 写入全部移出事件循环；提交 `f7de6c1` 删除 Weather.com v3 内层错误的 40 秒硬超时。首轮取证显示 WU Historical 13/13、NWP 14/14，PWS 无 key 时无 401；旧 forecast 3 个 timeout 由该 40 秒限制造成。
 - 当前验证：唯一有效的连续 scheduler 起点为 `2026-07-11T12:56:56.701552+00:00`（北京时间 20:56:56）。启动 20 秒后 status 在 forecast 运行中仍于 49ms 返回；此前所有起点均作废。
+
+### 2026-07-11：Layer 4/6 派生批次性能修复
+
+- 改动：`run_hourly_consensus_build`、`run_daily_max_build` 与 `run_signal_decisions_build` 的人工 CLI 默认行为不变；scheduler 批量派生时传入 `refresh_readiness=false`，只在 14 城批次结束后统一刷新一次 readiness。
+- 验证：旧真实批次约 23 分钟，并在后续轮次触发单城市 300 秒超时。修复后真实 14 城 D+0/D+1 派生 `14/14` 成功，耗时 `324.52s`、无超时；Chicago 单日期从约 `60.7s` 降至 `14.6s`。全套测试 `264/264` 通过，`npm run build` 与 `git diff --check` 通过。
+- 结论：根因是针对 4.9GB SQLite 的 readiness 全库扫描被按阶段/日期/城市重复执行。派生批次现已回到单周期内可控完成，但必须加载新后端后重启 2 小时与 6 小时验证时钟。
+- 阻塞：独立 PWS entitlement、PolyWX 数值 benchmark、操作员 UI 验收、14-30 天权威模拟结算样本仍未完成；live 保持锁定，paper cohort 保持 inactive。
+- 下一步：重启后端，启动新的受控 scheduler，确认 Forecast/NWP/Historical/Derived 首轮闭环，再进入 2 小时与 6 小时门槛。
+- 相关提交：`1fe8a79`。
