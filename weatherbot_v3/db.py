@@ -221,6 +221,28 @@ def init_v3_db(path: Path | None = None) -> None:
                 raw_json TEXT,
                 opened_at TEXT,
                 closed_at TEXT,
+                cohort_run_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS paper_validation_runs (
+                run_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ends_at TEXT NOT NULL,
+                stopped_at TEXT,
+                bankroll_usd REAL NOT NULL,
+                max_per_trade_usd REAL NOT NULL,
+                daily_max_usd REAL NOT NULL,
+                max_open_positions INTEGER NOT NULL,
+                max_orders_per_day INTEGER NOT NULL,
+                decision_max_age_minutes REAL NOT NULL,
+                cities_json TEXT,
+                strategies_json TEXT,
+                execution_version TEXT NOT NULL,
+                notes TEXT,
+                raw_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -1164,6 +1186,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "evidence_links_json": "TEXT",
             "opened_at": "TEXT",
             "closed_at": "TEXT",
+            "cohort_run_id": "TEXT",
         },
         "fills": {
             "idempotency_key": "TEXT",
@@ -1285,6 +1308,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_decision ON paper_orders(decision_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_city_date ON paper_orders(city_key, target_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_token_status ON paper_orders(yes_token_id, lifecycle_status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_cohort ON paper_orders(cohort_run_id, opened_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_validation_status ON paper_validation_runs(status, started_at)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_idempotency ON fills(idempotency_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_type, order_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_created ON data_fetch_logs(created_at DESC)")
@@ -3906,6 +3931,7 @@ def upsert_paper_order_record(order: dict[str, Any], path: Path | None = None) -
         "raw_json": dump_json(order),
         "opened_at": str(order.get("opened_at") or ""),
         "closed_at": str(order.get("closed_at") or ""),
+        "cohort_run_id": str(order.get("cohort_run_id") or ""),
         "created_at": str(order.get("created_at") or now),
         "updated_at": now,
     }
@@ -3920,7 +3946,7 @@ def upsert_paper_order_record(order: dict[str, Any], path: Path | None = None) -
                 realized_pnl, status, lifecycle_status, fill_status, order_version,
                 model_probability, market_probability, edge, gate_status,
                 failure_reason, risk_reasons_json, orderbook_snapshot_json,
-                evidence_links_json, raw_json, opened_at, closed_at, created_at,
+                evidence_links_json, raw_json, opened_at, closed_at, cohort_run_id, created_at,
                 updated_at
             ) VALUES (
                 :decision_id, :signal_id, :idempotency_key, :market_id, :yes_token_id,
@@ -3930,7 +3956,7 @@ def upsert_paper_order_record(order: dict[str, Any], path: Path | None = None) -
                 :realized_pnl, :status, :lifecycle_status, :fill_status, :order_version,
                 :model_probability, :market_probability, :edge, :gate_status,
                 :failure_reason, :risk_reasons_json, :orderbook_snapshot_json,
-                :evidence_links_json, :raw_json, :opened_at, :closed_at, :created_at,
+                :evidence_links_json, :raw_json, :opened_at, :closed_at, :cohort_run_id, :created_at,
                 :updated_at
             )
             ON CONFLICT(idempotency_key) DO UPDATE SET

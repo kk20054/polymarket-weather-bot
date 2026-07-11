@@ -1398,6 +1398,10 @@ def main() -> None:
             "model-timing-reprice",
             "paper-execute",
             "paper-settle",
+            "paper-cohort-start",
+            "paper-cohort-status",
+            "paper-cohort-stop",
+            "paper-cohort-tick",
             "forecast-archive-import",
             "forecast-archive-manifest",
             "orderbook-backfill",
@@ -1454,6 +1458,14 @@ def main() -> None:
     parser.add_argument("--active-weather", action="store_true", help="Sync active Polymarket weather events from Gamma/CLOB")
     parser.add_argument("--skip-orderbooks", action="store_true", help="Skip CLOB orderbook fetches for active weather market buckets")
     parser.add_argument("--refresh-gamma", action="store_true", help="Refresh paper market resolution from Gamma before settlement")
+    parser.add_argument("--duration-days", type=int, default=14, help="Paper validation cohort duration, capped at 30 days")
+    parser.add_argument("--bankroll-usd", type=float, default=40.0, help="Paper validation cohort starting bankroll")
+    parser.add_argument("--max-per-trade-usd", type=float, default=2.0, help="Paper validation maximum amount per trade")
+    parser.add_argument("--daily-max-usd", type=float, default=10.0, help="Paper validation maximum new stake per UTC day")
+    parser.add_argument("--max-open", type=int, default=5, help="Paper validation maximum simultaneous open positions")
+    parser.add_argument("--max-orders-per-day", type=int, default=5, help="Paper validation maximum new orders per UTC day")
+    parser.add_argument("--decision-max-age-minutes", type=float, default=30.0, help="Maximum signal decision age for paper validation")
+    parser.add_argument("--strategies", default="single_bucket_ev", help="Comma-separated paper validation strategy allowlist")
     args = parser.parse_args()
     cities_arg = ",".join(item for item in [args.cities, *args.city] if item)
 
@@ -1714,6 +1726,37 @@ def main() -> None:
             ensure_ascii=False,
             indent=2,
         ))
+    elif args.command == "paper-cohort-start":
+        from .paper_validation import start_paper_validation_run
+
+        if not args.apply:
+            raise SystemExit("paper-cohort-start requires --apply")
+        print(json.dumps(start_paper_validation_run(
+            duration_days=args.duration_days,
+            bankroll_usd=args.bankroll_usd,
+            max_per_trade_usd=args.max_per_trade_usd,
+            daily_max_usd=args.daily_max_usd,
+            max_open_positions=args.max_open,
+            max_orders_per_day=args.max_orders_per_day,
+            decision_max_age_minutes=args.decision_max_age_minutes,
+            cities=_cities_from_arg(cities_arg) if cities_arg else None,
+            strategies=[item.strip() for item in args.strategies.split(",") if item.strip()],
+            notes=args.note,
+        ), ensure_ascii=False, indent=2))
+    elif args.command == "paper-cohort-status":
+        from .paper_validation import paper_validation_status
+
+        print(json.dumps(paper_validation_status(), ensure_ascii=False, indent=2))
+    elif args.command == "paper-cohort-stop":
+        from .paper_validation import stop_paper_validation_run
+
+        if not args.apply:
+            raise SystemExit("paper-cohort-stop requires --apply")
+        print(json.dumps(stop_paper_validation_run(), ensure_ascii=False, indent=2))
+    elif args.command == "paper-cohort-tick":
+        from .paper_validation import run_paper_validation_tick
+
+        print(json.dumps(run_paper_validation_tick(apply=args.apply), ensure_ascii=False, indent=2))
     elif args.command == "forecast-archive-import":
         if not args.archive_path:
             raise SystemExit("--archive-path is required")

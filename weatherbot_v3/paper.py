@@ -50,11 +50,25 @@ def execute_paper_decision_record(
     amount: float | None = None,
     dry_run: bool = False,
     path: Path | None = None,
+    cohort_run_id: str = "",
 ) -> dict[str, Any]:
     ladder_group_id = str(decision.get("ladder_group_id") or "").strip()
     if ladder_group_id:
-        return execute_paper_ladder_group(ladder_group_id, amount=amount, dry_run=dry_run, path=path, seed_decision=decision)
-    return _execute_single_paper_decision_record(decision, amount=amount, dry_run=dry_run, path=path)
+        return execute_paper_ladder_group(
+            ladder_group_id,
+            amount=amount,
+            dry_run=dry_run,
+            path=path,
+            seed_decision=decision,
+            cohort_run_id=cohort_run_id,
+        )
+    return _execute_single_paper_decision_record(
+        decision,
+        amount=amount,
+        dry_run=dry_run,
+        path=path,
+        cohort_run_id=cohort_run_id,
+    )
 
 
 def _execute_single_paper_decision_record(
@@ -63,10 +77,11 @@ def _execute_single_paper_decision_record(
     amount: float | None = None,
     dry_run: bool = False,
     path: Path | None = None,
+    cohort_run_id: str = "",
 ) -> dict[str, Any]:
     cfg = load_config()
     now = datetime.now(timezone.utc).isoformat()
-    order = _base_order(decision, amount, now)
+    order = _base_order(decision, amount, now, cohort_run_id=cohort_run_id)
     existing = get_paper_order_by_idempotency_key(order["idempotency_key"], path=path)
     if existing:
         return {
@@ -195,6 +210,7 @@ def execute_paper_ladder_group(
     dry_run: bool = False,
     path: Path | None = None,
     seed_decision: dict[str, Any] | None = None,
+    cohort_run_id: str = "",
 ) -> dict[str, Any]:
     group_id = str(ladder_group_id or "").strip()
     if not group_id:
@@ -220,7 +236,15 @@ def execute_paper_ladder_group(
     cfg = load_config()
     now = datetime.now(timezone.utc).isoformat()
     allocations = _ladder_allocations(rows, amount)
-    orders = [_base_order(row, allocations.get(str(row.get("decision_id") or ""), None), now) for row in rows]
+    orders = [
+        _base_order(
+            row,
+            allocations.get(str(row.get("decision_id") or ""), None),
+            now,
+            cohort_run_id=cohort_run_id,
+        )
+        for row in rows
+    ]
     existing = [get_paper_order_by_idempotency_key(order["idempotency_key"], path=path) for order in orders]
     existing_count = sum(1 for item in existing if item)
     if existing_count == len(rows):
@@ -265,7 +289,13 @@ def execute_paper_ladder_group(
         }
 
     results = [
-        _execute_single_paper_decision_record(row, amount=allocations.get(str(row.get("decision_id") or ""), None), dry_run=dry_run, path=path)
+        _execute_single_paper_decision_record(
+            row,
+            amount=allocations.get(str(row.get("decision_id") or ""), None),
+            dry_run=dry_run,
+            path=path,
+            cohort_run_id=cohort_run_id,
+        )
         for row in rows
     ]
     return {
@@ -280,7 +310,13 @@ def execute_paper_ladder_group(
     }
 
 
-def _base_order(decision: dict[str, Any], amount: float | None, opened_at: str) -> dict[str, Any]:
+def _base_order(
+    decision: dict[str, Any],
+    amount: float | None,
+    opened_at: str,
+    *,
+    cohort_run_id: str = "",
+) -> dict[str, Any]:
     cfg = load_config()
     market_ask = _num(decision.get("market_ask"))
     market_bid = _num(decision.get("market_bid"))
@@ -327,6 +363,7 @@ def _base_order(decision: dict[str, Any], amount: float | None, opened_at: str) 
         "evidence_links": decision.get("evidence_links") or {},
         "opened_at": opened_at,
         "closed_at": "",
+        "cohort_run_id": str(cohort_run_id or ""),
         "derived": {
             "market_ask": market_ask,
             "market_bid": market_bid,

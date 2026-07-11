@@ -215,7 +215,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("source_health", payload)
         self.assertIn("overall_status", payload["source_health"])
         self.assertIn("required_blockers", payload["source_health"])
-        for key in ("forecast_poller", "metar_poller", "china_live_poller", "derive_poller", "gamma_orderbook_poller", "paper_settlement_poller"):
+        for key in ("forecast_poller", "metar_poller", "china_live_poller", "derive_poller", "gamma_orderbook_poller", "paper_settlement_poller", "paper_execution_poller"):
             self.assertIn(key, payload["pollers"])
             for field in ("last_run_at", "age_seconds", "last_duration_ms", "fails_last_hour", "next_run_at", "initial_delay_seconds"):
                 self.assertIn(field, payload["pollers"][key])
@@ -238,6 +238,26 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         settle.assert_called_once_with(limit=1000, refresh_gamma=True, apply=True)
         status = scheduler.status()["pollers"]["paper_settlement_poller"]
         self.assertIn("2 resolved", status["last_message"])
+
+    async def test_paper_execution_poller_is_inactive_without_explicit_cohort(self):
+        scheduler = WeatherBotScheduler(city_concurrency=1)
+        with patch(
+            "weatherbot_v3.scheduler.run_paper_validation_tick",
+            return_value={
+                "ok": True,
+                "status": "inactive",
+                "skipped": True,
+                "reason": "no_active_paper_validation_run",
+            },
+        ) as tick:
+            result = await scheduler.run_once("paper_execution_poller")
+
+        tick.assert_called_once_with(apply=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "inactive")
+        status = scheduler.status()["pollers"]["paper_execution_poller"]
+        self.assertEqual(status["last_status"], "OK")
+        self.assertIn("inactive", status["last_message"])
 
     async def test_derive_poller_consumes_pre_refreshed_market_buckets(self):
         rows = [
