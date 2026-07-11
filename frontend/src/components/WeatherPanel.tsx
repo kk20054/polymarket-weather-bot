@@ -1116,6 +1116,21 @@ export function WeatherPanel({
     point => point.metar !== null && point.metar !== undefined,
     point => point.timestamp
   )
+  const latestForecastSource = latestBy<HourlySourcePoint>(
+    hourlySourceSeries?.forecast ?? [],
+    point => point.temperature !== null && point.temperature !== undefined,
+    point => point.retrieved_at ?? point.timestamp,
+  )
+  const latestMetarSource = latestBy<HourlySourcePoint>(
+    hourlySourceSeries?.metar ?? [],
+    point => point.temperature !== null && point.temperature !== undefined,
+    point => point.timestamp,
+  )
+  const latestHistoricalSource = latestBy<HourlySourcePoint>(
+    hourlySourceSeries?.historical ?? [],
+    point => point.temperature !== null && point.temperature !== undefined,
+    point => point.retrieved_at ?? point.timestamp,
+  )
   const chartData = useMemo(() => buildChartData(series), [series])
   const hourlyRows = useMemo(() => buildHourlyRows(series, selectedDate), [series, selectedDate])
   const forecastTableRows = useMemo(
@@ -1134,12 +1149,12 @@ export function WeatherPanel({
     return [...new Set(chartData.map(row => String(row.date)).filter(Boolean))]
       .sort((a, b) => a.localeCompare(b))
   }, [chartData])
-  const forecastStatus = evidenceStatus(latestForecast?.timestamp)
-  const metarStatus = evidenceStatus(latestMetar?.timestamp, 45)
-  const historyStatus = latestHistory ? 'fresh' : 'missing'
-  const forecastPulseDetail = fetchPulseDetail(fetchLog, ['forecast', 'openmeteo', 'daily_max', 'predictor'], freshnessLabel(latestForecast?.timestamp))
-  const metarPulseDetail = fetchPulseDetail(fetchLog, ['metar', 'asos'], freshnessLabel(latestMetar?.timestamp))
-  const historyPulseDetail = fetchPulseDetail(fetchLog, ['historical', 'history', 'truth', 'actual'], latestHistory ? freshnessLabel(latestHistory.fetched_at ?? latestHistory.target_date) : '无数据')
+  const forecastStatus = evidenceStatus(latestForecastSource?.retrieved_at ?? latestForecast?.timestamp)
+  const metarStatus = evidenceStatus(latestMetarSource?.timestamp ?? latestMetar?.timestamp, 45)
+  const historyStatus = latestHistoricalSource || latestHistory ? 'fresh' : 'missing'
+  const forecastPulseDetail = fetchPulseDetail(fetchLog, ['forecast', 'openmeteo', 'daily_max', 'predictor'], freshnessLabel(latestForecastSource?.retrieved_at ?? latestForecast?.timestamp))
+  const metarPulseDetail = fetchPulseDetail(fetchLog, ['metar', 'asos'], freshnessLabel(latestMetarSource?.timestamp ?? latestMetar?.timestamp))
+  const historyPulseDetail = fetchPulseDetail(fetchLog, ['historical', 'history', 'truth', 'actual'], latestHistoricalSource ? freshnessLabel(latestHistoricalSource.retrieved_at ?? latestHistoricalSource.timestamp) : latestHistory ? freshnessLabel(latestHistory.fetched_at ?? latestHistory.target_date) : '无数据')
   const truthTier = latestHistory?.calibration_tier === 'live_truth'
     ? '实盘 truth'
     : latestHistory?.calibration_tier === 'research_truth'
@@ -1394,6 +1409,7 @@ export function WeatherPanel({
               unit={unit}
               selectedDate={selectedDate}
               actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
+              observedSampleCount={metarTableRows.length}
               cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
               dailyMaxPrediction={dailyMaxPrediction}
               alphaEvents={alphaEvents}
@@ -2568,6 +2584,7 @@ function TemperatureDistributionPanel({
   unit,
   selectedDate,
   actualHigh,
+  observedSampleCount = 0,
   cityName,
   dailyMaxPrediction,
   alphaEvents = [],
@@ -2579,6 +2596,7 @@ function TemperatureDistributionPanel({
   unit: string
   selectedDate: string
   actualHigh?: number | null
+  observedSampleCount?: number
   cityName?: string
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
   alphaEvents?: ModelRepriceEvent[]
@@ -2630,9 +2648,12 @@ function TemperatureDistributionPanel({
   const alphaForItem = (item: LayerDistributionItem) =>
     alphaByMarket.byMarket.get(String(item.market_id || '')) ?? alphaByMarket.byBucket.get(String(item.bucket_key || ''))
   const distributionMethod = decision?.model_distribution?.method ?? deb?.method ?? distribution?.notes?.[0] ?? 'gaussian-cdf'
-  const observedLabel = actualHigh === null || actualHigh === undefined
+  const observedValue = actualHigh ?? (deb?.observed_floor === null || deb?.observed_floor === undefined
+    ? null
+    : convertTempUnit(Number(deb.observed_floor), debUnit, unit))
+  const observedLabel = observedValue === null || observedValue === undefined
     ? '实测 --'
-    : `实测 ${fmtDualTemp(actualHigh, unit)} (metar, ${deb?.member_count ?? '--'} 样本)`
+    : `实测 ${fmtDualTemp(observedValue, unit)} (metar, ${observedSampleCount || '--'} 样本)`
   const debVersionLabel = deb?.deb_version || distributionMethod || 'DEB-v1'
   const debUpdatedLabel = freshnessLabel(deb?.updated_at ?? deb?.issued_at)
   const sourceRows = buildDebSourceRows(deb, unit)

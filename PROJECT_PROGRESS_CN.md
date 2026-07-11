@@ -466,3 +466,11 @@
 - 验证：显式增量抓取得到 Shanghai WU 44 行、Chicago 9 行、Hong Kong 46 行；上海 WU 首行 `28°C / 75% / 9.0km / 1006hPa / dew 27°C` 与保存的 PolyWX 样本一致；Chicago 首行换算为约 `68°F / 75% / 10mi / 7mph / 29inHg / dew 62.6°F`。全套测试 267/267、前端 build 通过；浏览器温度左轴自适应为 26-32°C、云量右轴保持 0-100%，console error/warn 为 0。
 - 结论：历史观测“空模块”和历史曲线缺失已修复；中国实况此前挤在右侧同时包含分类轴错误与真实留档从 18:20 才开始两层原因。时间轴错误已修，缺失的早间 China Live 不用 WU/Forecast 伪造回填。
 - 阻塞/下一步：PWS entitlement 仍缺；Forecast/Cloud/DEB 仍需继续做同日字段级 PolyWX benchmark。完成 UI 人工验收前不恢复 scheduler 长跑、不启动 paper cohort，`LIVE_TRADING=false`。
+
+### 2026-07-12：Forecast 字段闭环、JMA 入模与看板证据状态修复
+
+- 改动：`weatherbot_v3/hourly.py` 将 Weather.com v3 的天气现象、降水概率、修订次数和抓取时间完整保留到 Layer 4 raw payload 与 `/api/hourly-consensus`；`weatherbot_v3/openmeteo.py` 将 `jma_seamless` 纳入中国城市模型 allowlist；`WeatherPanel.tsx` 改为用当前日期原生 Forecast/METAR/WU Historical series 判断证据状态，并用 DEB `observed_floor` + 实际 METAR 行数展示当日已观测最高温。
+- 验证：真实刷新 Shanghai/Chicago Weather.com、METAR 和 WU Historical；Shanghai 得到 Forecast 24、METAR 8、WU Historical 7、China Live 1。Shanghai DEB 为 `30.10+/-1.51C`，包含 v3/GFS/JMA/ECMWF/ICON/GEM 六家；同时间 PolyWX 样本约 `29.88+/-1.62C`，差 `0.22C/0.11C`。Forecast 前三小时温度 `27/27/27C`、云量 `100/99/99%`，字段来源均为同一 Weather.com v3 snapshot。
+- UI：浏览器确认 China Live `03:40` 按分钟定位，没有挤到右端；温度 Y 轴自适应约 `26-31C`；METAR/WU 徽章按真实 series 变绿；DEB 显示 `实测 27.00C (metar, 8 样本)`；Forecast 表显示 condition、precip chance、revision 与 fetched time；console error/warn 为 0。
+- 结论：上海 Forecast/Cloud/DEB 已达到本轮 PolyWX 数值对照目标，且不复制 PolyWX 运行值。Chicago 7 月 12 日 WU 请求的 HTTP 400 是当地仍处 7 月 11 日、目标日尚未成为历史日，不是美洲数据源断开。scheduler 保持停止，paper cohort inactive，live 继续锁定。
+- 阻塞/下一步：PWS entitlement 仍缺；Chicago 需在当地 7 月 12 日开始后完成 WU Historical 与数值 benchmark；随后做运营者 UI 验收，再决定是否启动 14-30 天模拟 cohort。

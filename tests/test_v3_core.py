@@ -4191,6 +4191,8 @@ class V3CoreTests(unittest.TestCase):
             self.assertTrue(meta["run_at_inferred"])
             self.assertIn("inferred_run_at", meta)
 
+        self.assertIn("jma_seamless", model_allowlist_for_city("shanghai"))
+
     def test_openmeteo_ensemble_members_are_persistable(self):
         payload = {
             "generationtime_ms": 0.2,
@@ -4876,6 +4878,45 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(v3_component["role"], "weather.com/WU-style v3 forecast")
         self.assertIn("truth_basis", v3_component)
         self.assertNotIn("missing_weathercom_v3", prediction["build_warnings"])
+
+    def test_weathercom_forecast_fields_survive_hourly_consensus(self):
+        db_path = test_db_path("weathercom_v3_hourly_consensus_fields")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        profile = SETTLEMENT_REGISTRY["shanghai"]
+        payload = {
+            "validTimeUtc": [1783296000],
+            "temperature": [27.0],
+            "cloudCover": [100],
+            "relativeHumidity": [98],
+            "temperatureDewPoint": [26],
+            "precipChance": [94],
+            "qpf": [1.6],
+            "windSpeed": [59],
+            "windDirection": [76],
+            "pressureMeanSeaLevel": [994],
+            "wxPhraseLong": ["Rain/Wind"],
+        }
+        runs, members_by_run = weathercom_runs_from_response(
+            profile,
+            payload,
+            source_url="https://api.weather.com/v3/wx/forecast/hourly/15day?apiKey=***",
+            retrieved_at="2026-07-05T12:00:00+00:00",
+            forecast_days=2,
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            for run, members in zip(runs, members_by_run):
+                insert_forecast_run(run, members)
+            result = build_hourly_consensus(["shanghai"], target_date="2026-07-06", db_path=db_path)
+            summary = hourly_consensus_summary("shanghai", "2026-07-06", db_path=db_path)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(summary["rows"], 1)
+        point = summary["points"][0]
+        self.assertEqual(point["condition"], "Rain/Wind")
+        self.assertEqual(point["precipitation_probability"], 94)
+        self.assertAlmostEqual(point["precipitation"], 1.6, places=1)
+        self.assertEqual(point["forecast_cloud_cover"], 100)
+        self.assertEqual(point["retrieved_at"], "2026-07-05T12:00:00+00:00")
 
     def test_deb_records_missing_weathercom_warning_in_polywx_mode(self):
         db_path = test_db_path("polywx_missing_weathercom")

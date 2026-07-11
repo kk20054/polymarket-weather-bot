@@ -423,17 +423,24 @@ def hourly_consensus_points(
             "forecast_cloud_cover": _float(forecast_payload.get("cloud_cover")) if isinstance(forecast_payload, dict) else None,
             "visibility": _float(observation_payload.get("visibility")) if isinstance(observation_payload, dict) else None,
             "precipitation": _float(row.get("precipitation")),
+            "precipitation_probability": _float(forecast_payload.get("precipitation_probability")) if isinstance(forecast_payload, dict) else None,
             "wind_speed": _float(row.get("wind_speed")),
             "wind_direction": _float(row.get("wind_direction")),
             "pressure": _float(row.get("pressure")),
             "dew_point": _float(row.get("dew_point")),
-            "condition": observation_payload.get("condition") if isinstance(observation_payload, dict) else None,
+            "condition": (
+                observation_payload.get("condition")
+                if isinstance(observation_payload, dict) and observation_payload.get("condition")
+                else (forecast_payload.get("condition") if isinstance(forecast_payload, dict) else None)
+            ),
             "forecast_spread": _float(row.get("forecast_spread")),
             "consensus_method": row.get("consensus_method") or "",
             "diff": residual,
             "source": row.get("observation_source") or "hourly_consensus",
             "forecast_source": row.get("forecast_source") or "",
             "member_count": int(row.get("forecast_member_count") or row.get("source_count") or 0),
+            "revision_count": int(forecast_payload.get("revision_count") or 0) if isinstance(forecast_payload, dict) else 0,
+            "retrieved_at": forecast_payload.get("retrieved_at") if isinstance(forecast_payload, dict) else None,
             "station_id": row.get("station_id"),
             "peak_marker": row.get("peak_marker"),
             "build_status": row.get("build_status") or "",
@@ -1317,10 +1324,14 @@ def _combined_forecast(points: list[dict[str, Any]]) -> dict[str, Any]:
         "humidity": _mean([value for value in (_float(point.get("humidity")) for point in points) if value is not None]),
         "cloud_cover": _mean([value for value in (_float(point.get("cloud_cover")) for point in points) if value is not None]),
         "precipitation": _mean([value for value in (_float(point.get("precipitation")) for point in points) if value is not None]),
+        "precipitation_probability": _mean([value for value in (_float(point.get("precipitation_probability")) for point in points) if value is not None]),
         "wind_speed": _mean([value for value in (_float(point.get("wind_speed")) for point in points) if value is not None]),
         "wind_direction": _circular_mean_degrees([value for value in (_float(point.get("wind_direction")) for point in points) if value is not None]),
         "pressure": _mean([value for value in (_float(point.get("pressure")) for point in points) if value is not None]),
         "dew_point": _mean([value for value in (_float(point.get("dew_point")) for point in points) if value is not None]),
+        "condition": _mode([str(point.get("condition")) for point in points if point.get("condition")]),
+        "revision_count": max((int(point.get("revision_count") or 0) for point in points), default=0),
+        "retrieved_at": max((str(point.get("retrieved_at") or "") for point in points), default=""),
         "sources": sources_sorted,
     }
 

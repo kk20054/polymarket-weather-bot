@@ -57,6 +57,7 @@ CHINA_MODELS = (
     "ecmwf_ifs025",
     "gfs_seamless",
     "cma_grapes_global",
+    "jma_seamless",
     "icon_seamless",
     "gem_seamless",
     "ecmwf_aifs025_single",
