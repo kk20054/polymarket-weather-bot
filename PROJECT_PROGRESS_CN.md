@@ -189,6 +189,15 @@
 - 阻塞：7 个亚洲城市 settlement contract 仍 provisional；Hong Kong 保持 settlement mismatch；PWS key 无 v2 权限；derive 周期可能超过 15 分钟；paper settlement/PnL/Brier 生命周期未闭合。
 - 下一步：先核验 7 个 provisional settlement contracts，再用 30 天 truth 做逐城市/模型 bias 训练与 PolyWX benchmark；之后实现 paper settlement/scoring，实盘继续锁定。
 - 相关提交：`26d887f`。
+
+### 2026-07-11：Layer 1/5 剩余亚洲城市结算规则核验
+
+- 目标：修复 `verification_status` 与 `settlement_rule_verified_at` 的一致性，并把 7 个 provisional 亚洲城市按当前活跃 Polymarket 市场规则真实核验，不自动篡改站点。
+- 改动：Gamma probe 对北京、青岛、首尔、深圳、新加坡、台北、武汉逐城取证。修复 ICAO 解析只接受部分首字母、遗漏 `WSSS` 的问题；`verified` 现在必须同时具备规则原文、结算站、来源、单位、时区和本地日口径，缺字段时保持 `unverified` 且不写 verified timestamp。
+- 验证：7/7 城均找到 2026-07-11 活跃市场，结算站分别为 ZBAA/ZSQD/RKSI/ZGSZ/WSSS/RCSS/ZHHH，与本地 observation station 全部一致；13 城状态为 verified，Hong Kong 保持 HKO/VHHH settlement_mismatch。reconciliation 检查 26 行，repaired=0、inconsistent=0；source health settlement coverage 从 50% 升为 100%；`tests.test_v3_core` 189 tests 全通过，`git diff --check` 通过。
+- 结论：站点核验状态倒挂已闭环，空站点或半截 Gamma 规则不能再误解锁 live gate。source health 仍 blocked 是因为香港真实 mismatch，以及调度器停止后实时 METAR/orderbook/derive 数据 stale，并非结算覆盖缺失。
+- 下一步：用 30 天 WU/HKO/IEM truth 训练逐城市/模型 bias，并单独处理 PWS 401 entitlement；随后重建保存日期的 PolyWX Forecast/Cloud/DEB benchmark。
+- 相关提交：`1e90c5c`。
 - Next: wire Asian station registry/model preferences in a separate implementation turn; prioritize Shanghai/Wuhan/Beijing, keep Hong Kong truth-gated until HKO collector is production-ready, and keep Seoul monitor-only unless paper evidence improves.
 - Commit: not committed in this research turn; workspace already had unrelated dirty files.
 ## 2026-07-05：Round 3 Truth Layer 三源协议 + Gamma 结构化持久化
