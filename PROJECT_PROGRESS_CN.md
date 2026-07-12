@@ -514,3 +514,11 @@
 - Verification: real browser hover shows `2026/07/12 13:00` instead of raw minute coordinates; Shanghai/Tokyo/Chicago were compared against live PolyWX APIs. Local hourly latency fell from 3.7-4.4s to 1.7-2.5s. `python -m unittest tests.test_v3_core tests.test_polywx_contract` passed 226/226; `npm run build` and `git diff --check` passed. Detailed untracked evidence is in `audits/polywx-alignment-2026-07-12/three-city-forecast-marker.md`.
 - Conclusion: UI time formatting and marker computation contracts are closed. Real values are not yet fully equal because WeatherBot has fewer/staler persisted revisions: Shanghai peak 13:00 vs PolyWX 14:00, Tokyo 15:00 vs 16:00, Chicago 18:00/86F vs 17:00/87F. Scheduler remained stopped, paper validation inactive and `LIVE_TRADING=false`.
 - Next: accumulate correct-location Tokyo revisions and repair source freshness before another controlled benchmark; then move to the right-side strategy simulation workbench as the next layer consumer.
+
+### 2026-07-12: Layer 8 策略模拟交易台与原子 ladder 成交
+
+- Layer：Layer 8 paper executor 及其直接的右侧工作台消费者；未修改 live 下单路径，\`LIVE_TRADING=false\`。
+- 改动：右侧工作台不再用旧 \`/signals/{id}/status\` 伪装模拟买入，改为读取最新一批 \`signal_decisions\`，通过 \`/api/paper-orders/execute\` 做成交检查和模拟买入，并从 \`/api/paper-orders\` 展示真实订单、浮动盈亏和结算。策略队列支持 \`single_bucket_ev / ladder_grid / tail_buying\` 标签与 ladder 三腿合并展示。
+- 执行安全：\`paper_orders\` 持久化 \`strategy_name/ladder_group_id\`；ladder 三腿必须全部满足深度与风控，三条订单和 fills 在同一个 SQLite 事务中落库，任一腿不可完整成交时整组零写入。实盘按钮与调用未进入新工作台。
+- 验证：\`tests.test_execution_workbench_contract + tests.test_v3_core + tests.test_polywx_contract\` 共 230 tests 全部通过；\`npm run build\` 通过；浏览器上海页面显示最新批次 11 条策略、0 条可模拟、0 订单，阻塞策略按钮不可点击，订单页诚实空态，console error/warn 为 0。调度器保持 stopped，paper cohort inactive。
+- 结论：右侧“看起来模拟但只改标签”的断链已关闭。当前上海没有通过 paper gate 的策略，因此没有制造演示订单；下一步应审计多城市 blocked reason 分布并做证据驱动的阈值评估，随后由操作员决定是否启动 14-30 天 cohort。

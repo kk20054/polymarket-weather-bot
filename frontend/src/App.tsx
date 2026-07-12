@@ -35,6 +35,7 @@ import {
   verifySettlementContractsBulk,
 } from './api'
 import { DataReadinessPanel } from './components/DataReadinessPanel'
+import { ExecutionWorkbench } from './components/ExecutionWorkbench'
 import { ModelDatasetPanel } from './components/ModelDatasetPanel'
 import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
@@ -828,23 +829,6 @@ function App() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
   })
 
-  const signalStatusMutation = useMutation({
-    mutationFn: ({ signalId, status, amount }: { signalId: number; status: string; amount?: number }) =>
-      updateSignalStatus(signalId, status, amount),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
-    },
-  })
-
-  const liveOrderMutation = useMutation({
-    mutationFn: ({ signalId, amount }: { signalId: number; amount?: number }) => placeLiveOrder(signalId, amount),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
-    },
-  })
-
   const schedulerStartMutation = useMutation({
     mutationFn: startScheduler,
     onMutate: () => {
@@ -1155,12 +1139,6 @@ function App() {
   }, [citySeries, forecasts, signals])
 
   useEffect(() => {
-    if (!liveAvailable && tradeMode === 'live') {
-      setTradeMode('paper')
-    }
-  }, [liveAvailable, tradeMode])
-
-  useEffect(() => {
     if (!selectedCity && cityOptions[0]?.key) {
       setSelectedCity(cityOptions[0].key)
     } else if (selectedCity && cityOptions.length > 0 && !cityOptions.some(city => city.key === selectedCity)) {
@@ -1225,6 +1203,23 @@ function App() {
     if (!city.enabled && city.key !== selectedCity) return false
     if (!query) return true
     return `${city.name} ${city.station ?? ''} ${city.key} ${city.continent}`.toLowerCase().includes(query)
+  })
+
+  const signalStatusMutation = useMutation({
+    mutationFn: ({ signalId, status, amount }: { signalId: number; status: string; amount?: number }) =>
+      updateSignalStatus(signalId, status, amount),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
+    },
+  })
+
+  const liveOrderMutation = useMutation({
+    mutationFn: ({ signalId, amount }: { signalId: number; amount?: number }) => placeLiveOrder(signalId, amount),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['production-validation'] })
+    },
   })
 
   const cityHref = (city: { key: string; station?: string }) => {
@@ -1622,6 +1617,14 @@ function App() {
         </section>
 
         <aside className="order-3 flex h-[900px] min-h-0 flex-col border-t border-neutral-800 xl:h-auto xl:border-l xl:border-t-0">
+          <ExecutionWorkbench
+            cityKey={selectedCity}
+            targetDate={selectedDate}
+            decisions={signalDecisionsQuery.data}
+            validation={paperValidationStatusQuery.data}
+            liveAvailable={liveAvailable}
+          />
+          {false && <>
           <div className="shrink-0 border-b border-neutral-800 bg-black/95 px-3 py-2">
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
@@ -1720,6 +1723,7 @@ function App() {
               </div>
             </div>
           )}
+          </>}
 
           <details
             className="shrink-0 border-t border-neutral-800 bg-black"

@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary, SchedulerStatus, PaperValidationStatus, WeatherCitySeries, TruthDeltaAuditSummary, ModelRepriceEventSummary, HourlyConsensusSummary } from './types'
+import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary, SchedulerStatus, PaperValidationStatus, PaperExecutionSummary, PaperExecutionResult, WeatherCitySeries, TruthDeltaAuditSummary, ModelRepriceEventSummary, HourlyConsensusSummary } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -160,6 +160,32 @@ export async function fetchMarketBuckets(city: string, targetDate: string, limit
 export async function fetchSignalDecisions(city: string, targetDate: string, limit = 120): Promise<SignalDecisionSummary> {
   const { data } = await api.get<SignalDecisionSummary>('/signal-decisions', {
     params: { city, target_date: targetDate, limit },
+  })
+  return data
+}
+
+export async function fetchPaperOrders(city: string, targetDate: string, limit = 100): Promise<PaperExecutionSummary> {
+  const { data } = await api.get<PaperExecutionSummary>('/paper-orders', {
+    params: { city, target_date: targetDate, limit },
+  })
+  return data
+}
+
+export async function executePaperOrders(options: {
+  decisionId?: string
+  city?: string
+  targetDate?: string
+  amount?: number
+  limit?: number
+  dryRun?: boolean
+}): Promise<PaperExecutionResult> {
+  const { data } = await api.post<PaperExecutionResult>('/paper-orders/execute', {
+    decision_id: options.decisionId ?? '',
+    city: options.city ?? '',
+    target_date: options.targetDate ?? '',
+    amount: options.amount,
+    limit: options.limit ?? 20,
+    dry_run: options.dryRun ?? true,
   })
   return data
 }

@@ -548,6 +548,10 @@ export interface SignalDecisionRecord {
   paper_decision?: string
   live_decision?: string
   gate_status?: string
+  strategy_name?: string
+  kelly_fraction?: number | null
+  position_size_usd?: number | null
+  ladder_group_id?: string | null
   blocked_reason_primary?: string | null
   reasons?: string[]
   cautions?: string[]
@@ -605,6 +609,93 @@ export interface SignalDecisionSummary {
   live_counts: Record<string, number>
   reason_counts: CityEvidenceMarketReason[]
   decisions: SignalDecisionRecord[]
+}
+
+export interface PaperOrderRecord {
+  id: number
+  decision_id?: string
+  market_id?: string
+  yes_token_id?: string
+  bucket_key?: string
+  strategy_name?: string
+  ladder_group_id?: string
+  city_key?: string
+  target_date?: string
+  event_url?: string
+  side?: string
+  limit_price?: number | null
+  requested_amount?: number | null
+  filled_amount?: number | null
+  filled_shares?: number | null
+  unfilled_amount?: number | null
+  average_fill_price?: number | null
+  mark_price?: number | null
+  unrealized_pnl?: number | null
+  realized_pnl?: number | null
+  status?: string
+  lifecycle_status?: string
+  fill_status?: string
+  model_probability?: number | null
+  market_probability?: number | null
+  edge?: number | null
+  gate_status?: string
+  failure_reason?: string | null
+  risk_reasons?: string[]
+  orderbook_snapshot?: Record<string, unknown>
+  evidence_links?: Record<string, unknown>
+  opened_at?: string
+  closed_at?: string
+}
+
+export interface PaperSettlementRecord {
+  id?: number
+  paper_order_id?: number
+  decision_id?: string
+  result?: string
+  settlement_status?: string
+  settlement_source?: string
+  payout?: number | null
+  pnl?: number | null
+  brier_score?: number | null
+  settled_at?: string | null
+}
+
+export interface PaperExecutionSummary {
+  ok: boolean
+  execution_version?: string
+  city_key?: string
+  target_date?: string
+  count: number
+  open_orders: number
+  filled_amount: number
+  unrealized_pnl: number
+  resolved_orders: number
+  provisional_orders?: number
+  wins: number
+  losses: number
+  win_rate?: number | null
+  realized_pnl: number
+  brier_score?: number | null
+  status_counts?: Record<string, number>
+  reason_counts?: Array<{ reason: string; count: number }>
+  orders: PaperOrderRecord[]
+  settlements: PaperSettlementRecord[]
+}
+
+export interface PaperExecutionResult {
+  ok: boolean
+  status?: string
+  reason?: string | null
+  dry_run?: boolean
+  requested?: number
+  executed?: number
+  duplicates?: number
+  rejected?: number
+  decision_id?: string
+  ladder_group_id?: string
+  order?: PaperOrderRecord
+  results?: PaperExecutionResult[]
+  summary?: PaperExecutionSummary
 }
 
 export interface DashboardRecommendationItem {

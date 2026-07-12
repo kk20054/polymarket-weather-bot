@@ -15,6 +15,7 @@ from .db import (
     log_risk,
     open_paper_order_for_token,
     paper_execution_summary,
+    persist_paper_order_fill_group,
     upsert_paper_order_record,
 )
 from .polymarket import price_matches_tick
@@ -269,8 +270,12 @@ def execute_paper_ladder_group(
     grouped_reasons: dict[str, list[str]] = {}
     for row, order in zip(rows, orders):
         reasons = _risk_reasons(row, order, cfg, path=path)
+        requested_shares = _num((order.get("derived") or {}).get("requested_shares"), 0.0) or 0.0
+        ask_depth = _num((row.get("orderbook_snapshot") or {}).get("ask_depth"), 0.0) or 0.0
+        if ask_depth + 1e-9 < requested_shares:
+            reasons.append("insufficient_depth_for_atomic_ladder")
         if reasons:
-            grouped_reasons[str(row.get("decision_id") or row.get("bucket_key") or "")] = reasons
+            grouped_reasons[str(row.get("decision_id") or row.get("bucket_key") or "")] = _unique(reasons)
     if grouped_reasons:
         payload = {
             "ladder_group_id": group_id,
@@ -288,18 +293,51 @@ def execute_paper_ladder_group(
             "risk_reasons_by_decision": grouped_reasons,
         }
 
-    results = [
-        _execute_single_paper_decision_record(
-            row,
-            amount=allocations.get(str(row.get("decision_id") or ""), None),
-            dry_run=dry_run,
-            path=path,
-            cohort_run_id=cohort_run_id,
+    simulated: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for row, order in zip(rows, orders):
+        order.update(_simulate_fill(row, order))
+        if order["fill_status"] != "filled":
+            return {
+                "ok": False,
+                "status": "rejected",
+                "reason": "ladder_group_atomic_fill_failed",
+                "dry_run": dry_run,
+                "ladder_group_id": group_id,
+            }
+        fill = {
+            **dict(order["fill"]),
+            "idempotency_key": f"{order['idempotency_key']}:fill:0",
+            "order_type": "paper",
+            "decision_id": order["decision_id"],
+            "market_id": order["market_id"],
+            "yes_token_id": order["yes_token_id"],
+            "fill_status": order["fill_status"],
+            "source": PAPER_EXECUTION_VERSION,
+        }
+        simulated.append((order, fill))
+
+    stored_ids = [] if dry_run else persist_paper_order_fill_group(simulated, path=path)
+    results = []
+    for index, (order, fill) in enumerate(simulated):
+        ids = stored_ids[index] if index < len(stored_ids) else {}
+        stored = (
+            list_paper_orders(decision_id=order["decision_id"], limit=1, path=path)
+            if not dry_run
+            else []
         )
-        for row in rows
-    ]
+        results.append({
+            "ok": True,
+            "status": order["status"],
+            "reason": None,
+            "dry_run": dry_run,
+            "decision_id": order["decision_id"],
+            "order_id": ids.get("order_id"),
+            "fill_id": ids.get("fill_id"),
+            "order": stored[0] if stored else order,
+            "fill": fill,
+        })
     return {
-        "ok": all(result.get("ok") or result.get("status") == "duplicate" for result in results),
+        "ok": True,
         "status": "paper_ladder_filled" if not dry_run else "paper_ladder_dry_run",
         "reason": None,
         "dry_run": dry_run,
@@ -334,6 +372,8 @@ def _base_order(
         "market_id": str(decision.get("market_id") or ""),
         "yes_token_id": str(decision.get("yes_token_id") or decision.get("token_id") or ""),
         "bucket_key": str(decision.get("bucket_key") or ""),
+        "strategy_name": str(decision.get("strategy_name") or "single_bucket_ev"),
+        "ladder_group_id": str(decision.get("ladder_group_id") or ""),
         "city_key": str(decision.get("city_key") or ""),
         "target_date": str(decision.get("target_date") or ""),
         "event_url": str((decision.get("evidence_links") or {}).get("event_url") or ""),

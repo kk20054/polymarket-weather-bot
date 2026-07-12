@@ -2788,6 +2788,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(result["status"], "paper_ladder_filled")
         self.assertEqual(len(orders), 3)
         self.assertEqual({order["fill_status"] for order in orders}, {"filled"})
+        self.assertEqual({order["strategy_name"] for order in orders}, {"ladder_grid"})
+        self.assertEqual({order["ladder_group_id"] for order in orders}, {"ladder-group-1"})
 
     def test_layer8_paper_execution_rejects_ladder_group_without_partial_orders(self):
         db_path = test_db_path("paper_execution_ladder_reject")
@@ -2840,6 +2842,64 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(result["status"], "rejected")
         self.assertEqual(result["reason"], "ladder_group_atomic_precheck_failed")
         self.assertEqual(len(orders), 0)
+
+    def test_layer8_paper_execution_rejects_ladder_when_one_leg_cannot_fully_fill(self):
+        db_path = test_db_path("paper_execution_ladder_partial_depth")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "10.0"}, clear=False):
+            init_v3_db(db_path)
+            for index, bucket in enumerate(("low", "mid", "high")):
+                upsert_signal_decision_record({
+                    "decision_id": f"thin-ladder-{bucket}",
+                    "bucket_key": bucket,
+                    "city_key": "chicago",
+                    "target_date": "2026-07-02",
+                    "issued_at": "2026-07-02T12:00:00+00:00",
+                    "market_id": f"thin-market-{bucket}",
+                    "yes_token_id": f"thin-yes-{bucket}",
+                    "token_id": f"thin-yes-{bucket}",
+                    "bucket_lower": 88 + index,
+                    "bucket_upper": 89 + index,
+                    "model_probability": 0.25,
+                    "market_ask": 0.2,
+                    "market_bid": 0.195,
+                    "market_implied_probability": 0.2,
+                    "edge": 0.05,
+                    "strategy_name": "ladder_grid",
+                    "kelly_fraction": 0.0625,
+                    "position_size_usd": 5.0,
+                    "ladder_group_id": "thin-ladder-group-1",
+                    "tick_size": 0.01,
+                    "order_min_size": 5.0,
+                    "book_age_seconds": 0,
+                    "spread_bps": 250,
+                    "paper_allowed": True,
+                    "paper_decision": "buy",
+                    "live_allowed": False,
+                    "live_decision": "blocked",
+                    "gate_status": "paper_allowed",
+                    "gate_reasons": ["live_trading_disabled"],
+                    "orderbook_snapshot": {
+                        "best_ask": 0.2,
+                        "best_bid": 0.195,
+                        "spread": 0.005,
+                        "ask_depth": 6 if bucket == "high" else 100,
+                    },
+                }, path=db_path)
+
+            result = execute_paper_decision("thin-ladder-mid", path=db_path)
+            orders = list_paper_orders(city_key="chicago", target_date="2026-07-02", path=db_path)
+            with connect(db_path) as conn:
+                fills = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "ladder_group_atomic_precheck_failed")
+        self.assertIn(
+            "insufficient_depth_for_atomic_ladder",
+            result["risk_reasons_by_decision"]["thin-ladder-high"],
+        )
+        self.assertEqual(orders, [])
+        self.assertEqual(fills, 0)
 
     def test_layer8_paper_execution_rejects_blocked_decision_without_fill(self):
         db_path = test_db_path("paper_execution_reject")

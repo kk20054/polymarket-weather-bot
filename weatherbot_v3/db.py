@@ -191,6 +191,8 @@ def init_v3_db(path: Path | None = None) -> None:
                 market_id TEXT,
                 yes_token_id TEXT,
                 bucket_key TEXT,
+                strategy_name TEXT,
+                ladder_group_id TEXT,
                 city_key TEXT,
                 target_date TEXT,
                 event_url TEXT,
@@ -1163,6 +1165,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         "paper_orders": {
             "decision_id": "TEXT",
             "bucket_key": "TEXT",
+            "strategy_name": "TEXT",
+            "ladder_group_id": "TEXT",
             "city_key": "TEXT",
             "target_date": "TEXT",
             "event_url": "TEXT",
@@ -3899,16 +3903,16 @@ def insert_order(table: str, order: dict[str, Any]) -> int:
         return int(row["id"]) if row else 0
 
 
-def upsert_paper_order_record(order: dict[str, Any], path: Path | None = None) -> int:
-    init_v3_db(path)
-    now = utc_now()
-    row = {
+def _paper_order_row(order: dict[str, Any], now: str) -> dict[str, Any]:
+    return {
         "decision_id": str(order.get("decision_id") or ""),
         "signal_id": order.get("signal_id"),
         "idempotency_key": str(order.get("idempotency_key") or _stable_key("paper_order", now)),
         "market_id": str(order.get("market_id") or ""),
         "yes_token_id": str(order.get("yes_token_id") or order.get("token_id") or ""),
         "bucket_key": str(order.get("bucket_key") or ""),
+        "strategy_name": str(order.get("strategy_name") or ""),
+        "ladder_group_id": str(order.get("ladder_group_id") or ""),
         "city_key": str(order.get("city_key") or order.get("city") or ""),
         "target_date": str(order.get("target_date") or ""),
         "event_url": str(order.get("event_url") or ""),
@@ -3943,12 +3947,15 @@ def upsert_paper_order_record(order: dict[str, Any], path: Path | None = None) -
         "created_at": str(order.get("created_at") or now),
         "updated_at": now,
     }
-    with connect(path) as conn:
-        conn.execute(
-            """
+
+
+def _upsert_paper_order_conn(conn: sqlite3.Connection, row: dict[str, Any]) -> int:
+    conn.execute(
+        """
             INSERT INTO paper_orders (
                 decision_id, signal_id, idempotency_key, market_id, yes_token_id,
-                bucket_key, city_key, target_date, event_url, side, limit_price,
+                bucket_key, strategy_name, ladder_group_id, city_key, target_date,
+                event_url, side, limit_price,
                 requested_amount, amount, shares, filled_amount, filled_shares,
                 unfilled_amount, average_fill_price, mark_price, unrealized_pnl,
                 realized_pnl, status, lifecycle_status, fill_status, order_version,
@@ -3958,7 +3965,8 @@ def upsert_paper_order_record(order: dict[str, Any], path: Path | None = None) -
                 updated_at
             ) VALUES (
                 :decision_id, :signal_id, :idempotency_key, :market_id, :yes_token_id,
-                :bucket_key, :city_key, :target_date, :event_url, :side, :limit_price,
+                :bucket_key, :strategy_name, :ladder_group_id, :city_key, :target_date,
+                :event_url, :side, :limit_price,
                 :requested_amount, :amount, :shares, :filled_amount, :filled_shares,
                 :unfilled_amount, :average_fill_price, :mark_price, :unrealized_pnl,
                 :realized_pnl, :status, :lifecycle_status, :fill_status, :order_version,
@@ -3976,17 +3984,22 @@ def upsert_paper_order_record(order: dict[str, Any], path: Path | None = None) -
             """,
             row,
         )
-        found = conn.execute(
-            "SELECT id FROM paper_orders WHERE idempotency_key = ?",
-            (row["idempotency_key"],),
-        ).fetchone()
-        return int(found["id"]) if found else 0
+    found = conn.execute(
+        "SELECT id FROM paper_orders WHERE idempotency_key = ?",
+        (row["idempotency_key"],),
+    ).fetchone()
+    return int(found["id"]) if found else 0
 
 
-def insert_fill_record(fill: dict[str, Any], path: Path | None = None) -> int:
+def upsert_paper_order_record(order: dict[str, Any], path: Path | None = None) -> int:
     init_v3_db(path)
-    now = utc_now()
-    row = {
+    row = _paper_order_row(order, utc_now())
+    with connect(path) as conn:
+        return _upsert_paper_order_conn(conn, row)
+
+
+def _fill_row(fill: dict[str, Any], now: str) -> dict[str, Any]:
+    return {
         "idempotency_key": str(fill.get("idempotency_key") or _stable_key("fill", now)),
         "order_id": fill.get("order_id"),
         "order_type": str(fill.get("order_type") or "paper"),
@@ -4001,9 +4014,11 @@ def insert_fill_record(fill: dict[str, Any], path: Path | None = None) -> int:
         "raw_json": dump_json(fill),
         "created_at": str(fill.get("created_at") or now),
     }
-    with connect(path) as conn:
-        conn.execute(
-            """
+
+
+def _insert_fill_conn(conn: sqlite3.Connection, row: dict[str, Any]) -> int:
+    conn.execute(
+        """
             INSERT INTO fills (
                 idempotency_key, order_id, order_type, decision_id, market_id,
                 yes_token_id, fill_status, price, shares, amount, source, raw_json,
@@ -4020,11 +4035,34 @@ def insert_fill_record(fill: dict[str, Any], path: Path | None = None) -> int:
             """,
             row,
         )
-        found = conn.execute(
-            "SELECT id FROM fills WHERE idempotency_key = ?",
-            (row["idempotency_key"],),
-        ).fetchone()
-        return int(found["id"]) if found else 0
+    found = conn.execute(
+        "SELECT id FROM fills WHERE idempotency_key = ?",
+        (row["idempotency_key"],),
+    ).fetchone()
+    return int(found["id"]) if found else 0
+
+
+def insert_fill_record(fill: dict[str, Any], path: Path | None = None) -> int:
+    init_v3_db(path)
+    row = _fill_row(fill, utc_now())
+    with connect(path) as conn:
+        return _insert_fill_conn(conn, row)
+
+
+def persist_paper_order_fill_group(
+    order_fill_pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    path: Path | None = None,
+) -> list[dict[str, int]]:
+    """Persist a paper ladder as one transaction; any failed leg rolls back all legs."""
+    init_v3_db(path)
+    now = utc_now()
+    stored: list[dict[str, int]] = []
+    with connect(path) as conn:
+        for order, fill in order_fill_pairs:
+            order_id = _upsert_paper_order_conn(conn, _paper_order_row(order, now))
+            fill_id = _insert_fill_conn(conn, _fill_row({**fill, "order_id": order_id}, now))
+            stored.append({"order_id": order_id, "fill_id": fill_id})
+    return stored
 
 
 def get_paper_order_by_idempotency_key(idempotency_key: str, path: Path | None = None) -> dict[str, Any] | None:
