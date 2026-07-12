@@ -4,7 +4,7 @@ import json
 import math
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -489,6 +489,12 @@ def hourly_consensus_summary(
         ]
         if selected:
             source = "forecast_members_transient"
+    series = source_series_summary(str(city), str(target_date), db_path=db_path) if city and target_date else {}
+    peak_marker = (
+        forecast_revision_peak_marker(str(city), str(target_date), db_path=db_path)
+        if city and target_date
+        else None
+    ) or _forecast_peak_marker(series.get("forecast") or [], str(target_date or ""))
     return {
         "ok": True,
         "city": city or "",
@@ -496,8 +502,160 @@ def hourly_consensus_summary(
         "rows": len(selected),
         "source": source,
         "points": selected,
-        "series": source_series_summary(str(city), str(target_date), db_path=db_path) if city and target_date else {},
+        "series": series,
+        "forecast_peak_marker": peak_marker,
     }
+
+
+def _forecast_peak_marker(forecast_rows: list[dict[str, Any]], target_date: str) -> dict[str, Any] | None:
+    revisions = [
+        {
+            "local_hour": row.get("local_time") or row.get("local_hour"),
+            "temperature": next(
+                (row.get(key) for key in ("temperature", "ensemble_mean", "best") if row.get(key) is not None),
+                None,
+            ),
+            "retrieved_at": row.get("retrieved_at"),
+            "source": row.get("forecast_source") or row.get("source") or "forecast",
+        }
+        for row in forecast_rows
+    ]
+    return _peak_marker_from_forecast_revisions(
+        revisions,
+        target_date,
+        method="current_forecast_peak_v1",
+        lookback_hours=0,
+    )
+
+
+def _peak_marker_from_forecast_revisions(
+    revisions: list[dict[str, Any]],
+    target_date: str,
+    *,
+    method: str = "forecast_revision_peak_v1",
+    lookback_hours: int = 72,
+) -> dict[str, Any] | None:
+    """Return the latest hour that reached the archive-wide maximum."""
+    candidates: list[tuple[int, float, dict[str, Any]]] = []
+    for row in revisions:
+        value = _float(row.get("temperature"))
+        local_time = str(row.get("local_time") or row.get("local_hour") or "")
+        match = re.match(r"^(\d{1,2}):(\d{2})", local_time)
+        if value is None or not match:
+            continue
+        minute = int(match.group(1)) * 60 + int(match.group(2))
+        if minute < 0 or minute >= 24 * 60:
+            continue
+        candidates.append((minute, value, row))
+    if not candidates:
+        return None
+    max_temp = max(value for _, value, _ in candidates)
+    peak_minute, _, source_row = max(
+        (row for row in candidates if abs(row[1] - max_temp) <= 1e-9),
+        key=lambda row: row[0],
+    )
+    hour, minute = divmod(peak_minute, 60)
+    retrieved_values = sorted(str(row.get("retrieved_at") or "") for _, _, row in candidates if row.get("retrieved_at"))
+    return {
+        "hour_float": peak_minute / 60,
+        "date": str(target_date or ""),
+        "local_time": f"{hour:02d}:{minute:02d}:00",
+        "temperature": max_temp,
+        "source_hour": f"{hour:02d}:{minute:02d}",
+        "method": method,
+        "tie_policy": "latest_hour_across_maximum_revisions",
+        "lookback_hours": int(lookback_hours),
+        "snapshot_count": len(candidates),
+        "latest_retrieved_at": retrieved_values[-1] if retrieved_values else None,
+        "source": str(source_row.get("source") or "forecast"),
+    }
+
+
+def forecast_revision_peak_marker(
+    city: str,
+    target_date: str,
+    *,
+    db_path: Path | None = None,
+    lookback_hours: int = 72,
+) -> dict[str, Any] | None:
+    """Build the PolyWX-style 3-day forecast peak from persisted revisions."""
+    city_key = str(city or "").strip().lower()
+    profile = SETTLEMENT_REGISTRY.get(city_key)
+    if not profile or not target_date:
+        return None
+    with connect(db_path) as conn:
+        runs = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT id, retrieved_at, run_at, created_at, source_url, training_eligible
+                FROM forecast_runs
+                WHERE city = ? AND target_date = ? AND source = ?
+                  AND COALESCE(parse_status, 'parsed') = 'parsed'
+                ORDER BY COALESCE(retrieved_at, run_at, created_at) DESC, id DESC
+                LIMIT 240
+                """,
+                (city_key, str(target_date), WEATHERCOM_SOURCE),
+            ).fetchall()
+        ]
+        runs = [
+            row for row in runs
+            if _is_training_eligible(row)
+            and forecast_source_matches_profile_location(row.get("source_url"), profile)
+        ]
+        retrieved_times = [
+            parsed for row in runs
+            if (parsed := _parse_report_time(row.get("retrieved_at") or row.get("run_at") or row.get("created_at")))
+        ]
+        if not retrieved_times:
+            return None
+        latest_retrieved = max(retrieved_times)
+        cutoff = latest_retrieved - timedelta(hours=max(1, int(lookback_hours or 72)))
+        selected_runs = [
+            row for row in runs
+            if (parsed := _parse_report_time(row.get("retrieved_at") or row.get("run_at") or row.get("created_at")))
+            and parsed >= cutoff
+        ]
+        if not selected_runs:
+            return None
+        run_ids = [int(row["id"]) for row in selected_runs]
+        placeholders = ",".join("?" for _ in run_ids)
+        members = [
+            dict(row)
+            for row in conn.execute(
+                f"SELECT run_id, hourly_json FROM forecast_members WHERE run_id IN ({placeholders})",
+                run_ids,
+            ).fetchall()
+        ]
+    run_by_id = {int(row["id"]): row for row in selected_runs}
+    revisions: list[dict[str, Any]] = []
+    for member in members:
+        run = run_by_id.get(int(member.get("run_id") or 0))
+        if not run:
+            continue
+        hourly = _loads(member.get("hourly_json"), [])
+        for item in hourly if isinstance(hourly, list) else []:
+            if not isinstance(item, dict):
+                continue
+            valid_at = str(item.get("valid_at") or item.get("time") or item.get("timestamp") or "")
+            parts = _forecast_local_parts(profile, str(target_date), valid_at)
+            if not parts or parts[0] != str(target_date):
+                continue
+            temperature = _temperature_value(item)
+            if temperature is None:
+                continue
+            revisions.append({
+                "local_hour": parts[1],
+                "temperature": temperature,
+                "retrieved_at": run.get("retrieved_at") or run.get("run_at") or run.get("created_at"),
+                "source": WEATHERCOM_SOURCE,
+            })
+    return _peak_marker_from_forecast_revisions(
+        revisions,
+        str(target_date),
+        method="forecast_revision_peak_v1",
+        lookback_hours=lookback_hours,
+    )
 
 
 def source_series_summary(

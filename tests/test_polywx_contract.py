@@ -305,6 +305,8 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertNotIn("市场判断：", panel)
         self.assertIn("enabled: advancedDiagnosticsOpen", app)
         self.assertIn("hourlyEvidenceSettled", app)
+        self.assertIn("forecastPeakMarker={hourlyConsensusQuery.data?.forecast_peak_marker ?? null}", app)
+        self.assertIn("normalizePeakHour(forecastPeakMarker?.local_time)", panel)
         self.assertIn("const forecastSourceTime", panel)
         self.assertIn("point.temperature ?? point.ensemble_mean ?? point.best", panel)
         self.assertIn("const historySourceTime", panel)

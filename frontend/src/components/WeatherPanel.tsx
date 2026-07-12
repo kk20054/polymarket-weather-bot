@@ -13,7 +13,7 @@ import {
 } from 'recharts'
 import { ExternalLink } from 'lucide-react'
 import { HourlyTemperatureChart, type HourlyChartRow } from './HourlyTemperatureChart'
-import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlySourcePoint, HourlySourceSeries, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlyConsensusSummary, HourlySourcePoint, HourlySourceSeries, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -26,6 +26,7 @@ interface Props {
   signalDecisions?: SignalDecisionSummary | null
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
   hourlySourceSeries?: HourlySourceSeries | null
+  forecastPeakMarker?: HourlyConsensusSummary['forecast_peak_marker']
   hourlySourceLoading?: boolean
   alphaEvents?: ModelRepriceEvent[]
   layer7Loading?: boolean
@@ -963,6 +964,7 @@ export function WeatherPanel({
   signalDecisions,
   dailyMaxPrediction,
   hourlySourceSeries,
+  forecastPeakMarker,
   hourlySourceLoading = false,
   alphaEvents = [],
   layer7Loading = false,
@@ -1281,6 +1283,7 @@ export function WeatherPanel({
               cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
               selectedDate={selectedDate}
               dailyMaxPrediction={dailyMaxPrediction}
+              forecastPeakMarker={forecastPeakMarker}
               loading={hourlySourceLoading}
             />
             <TemperatureDistributionPanel
@@ -1935,6 +1938,7 @@ function HourlyEvidencePanel({
   cityName,
   selectedDate,
   dailyMaxPrediction,
+  forecastPeakMarker,
   loading,
 }: {
   rows: HourlyWeatherRow[]
@@ -1943,6 +1947,7 @@ function HourlyEvidencePanel({
   cityName?: string
   selectedDate: string
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
+  forecastPeakMarker?: HourlyConsensusSummary['forecast_peak_marker']
   loading?: boolean
 }) {
   const numericValues = (values: unknown[]) =>
@@ -1995,7 +2000,8 @@ function HourlyEvidencePanel({
   const peakRow = chartRows
     .filter(row => row.forecast_value !== null)
     .sort((a, b) => Number(b.forecast_value ?? -Infinity) - Number(a.forecast_value ?? -Infinity))[0]
-  const peakHour = dailyMaxPeakHour(dailyMaxPrediction, peakRow?.label)
+  const peakHour = normalizePeakHour(forecastPeakMarker?.local_time)
+    ?? dailyMaxPeakHour(dailyMaxPrediction, peakRow?.label)
   if (rows.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-center text-neutral-600">

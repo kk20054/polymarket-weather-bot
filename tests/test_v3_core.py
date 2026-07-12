@@ -22,7 +22,7 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
 from weatherbot_v3.forecast import ingest_polywx_forecasts, forecast_run_from_polywx_rows
 from weatherbot_v3.history import fetch_open_meteo_historical_backfill, open_meteo_historical_rows_from_response
-from weatherbot_v3.hourly import build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary, source_series_summary
+from weatherbot_v3.hourly import _forecast_peak_marker, _peak_marker_from_forecast_revisions, build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary, source_series_summary
 from weatherbot_v3.deb import bucket_probabilities, build_and_store_daily_max_prediction, build_daily_max_prediction
 from weatherbot_v3.market_buckets import ingest_market_buckets, market_bucket_from_payload, parse_temperature_bucket, sync_active_weather_market_buckets
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
@@ -155,6 +155,44 @@ def openmeteo_hourly_run(
 
 
 class V3CoreTests(unittest.TestCase):
+    def test_forecast_runs_have_dashboard_lookup_indexes(self):
+        db_path = test_db_path("forecast_dashboard_indexes")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        init_v3_db(db_path)
+        with connect(db_path) as conn:
+            indexes = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'forecast_runs'"
+                ).fetchall()
+            }
+
+        self.assertIn("idx_forecast_runs_city_date_source_retrieved", indexes)
+        self.assertIn("idx_forecast_runs_city_date_type_retrieved", indexes)
+
+    def test_forecast_peak_marker_matches_polywx_revision_history_contract(self):
+        marker = _peak_marker_from_forecast_revisions([
+            {"local_hour": "10:00", "temperature": 29.0, "retrieved_at": "2026-07-10T00:00:00Z"},
+            {"local_hour": "13:00", "temperature": 29.0, "retrieved_at": "2026-07-11T00:00:00Z"},
+            {"local_hour": "15:00", "temperature": 29.0, "retrieved_at": "2026-07-11T06:00:00Z"},
+            {"local_hour": "16:00", "temperature": 29.0, "retrieved_at": "2026-07-10T12:00:00Z"},
+            {"local_hour": "17:00", "temperature": 28.0, "retrieved_at": "2026-07-12T00:00:00Z"},
+        ], "2026-07-12")
+
+        self.assertEqual(marker["source_hour"], "16:00")
+        self.assertEqual(marker["local_time"], "16:00:00")
+        self.assertEqual(marker["hour_float"], 16.0)
+        self.assertEqual(marker["temperature"], 29.0)
+        self.assertEqual(marker["method"], "forecast_revision_peak_v1")
+        self.assertEqual(marker["snapshot_count"], 5)
+
+    def test_current_forecast_peak_marker_keeps_latest_max_hour_without_offset(self):
+        marker = _forecast_peak_marker([{"local_hour": "23:00", "best": 31.0}], "2026-07-12")
+
+        self.assertEqual(marker["date"], "2026-07-12")
+        self.assertEqual(marker["local_time"], "23:00:00")
+        self.assertEqual(marker["hour_float"], 23.0)
+
     def test_secret_redaction_cleans_api_keys_in_nested_errors(self):
         secret = "0123456789abcdef0123456789abcdef"
         with patch.dict(os.environ, {"WEATHER_COM_API_KEY": secret}, clear=False):
@@ -4944,6 +4982,49 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(point["precipitation"], 1.6, places=1)
         self.assertEqual(point["forecast_cloud_cover"], 100)
         self.assertEqual(point["retrieved_at"], "2026-07-05T12:00:00+00:00")
+
+    def test_weathercom_imperial_payload_preserves_temperature_precision_and_normalizes_units(self):
+        profile = SETTLEMENT_REGISTRY["shanghai"]
+        payload = {
+            "validTimeUtc": [1783296000],
+            "temperature": [87.0],
+            "temperatureDewPoint": [70.0],
+            "qpf": [0.1],
+            "windSpeed": [10.0],
+            "windGust": [15.0],
+            "pressureMeanSeaLevel": [29.5],
+        }
+        runs, members_by_run = weathercom_runs_from_response(
+            profile,
+            payload,
+            source_url="https://api.weather.com/v3/wx/forecast/hourly/15day?units=e&apiKey=***",
+            retrieved_at="2026-07-05T12:00:00+00:00",
+            forecast_days=2,
+            source_unit="F",
+        )
+
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["source_unit"], "F")
+        point = members_by_run[0][0]["hourly"][0]
+        self.assertAlmostEqual(point["temperature_2m"], 30.556, places=3)
+        self.assertAlmostEqual(point["temperature_2m_c"], 30.556, places=3)
+        self.assertAlmostEqual(point["dew_point_2m"], 21.111, places=3)
+        self.assertAlmostEqual(point["wind_speed_10m"], 16.093, places=3)
+        self.assertAlmostEqual(point["wind_gusts_10m"], 24.14, places=2)
+        self.assertAlmostEqual(point["pressure_msl"], 998.985, places=3)
+        self.assertAlmostEqual(point["precipitation"], 2.54, places=2)
+
+    def test_weathercom_failed_imperial_payload_keeps_raw_unit_provenance(self):
+        runs, members_by_run = weathercom_runs_from_response(
+            SETTLEMENT_REGISTRY["shanghai"],
+            {},
+            retrieved_at="2026-07-05T12:00:00+00:00",
+            source_unit="F",
+        )
+
+        self.assertEqual(members_by_run, [[]])
+        self.assertEqual(runs[0]["parse_status"], "failed")
+        self.assertEqual(runs[0]["source_unit"], "F")
 
     def test_weathercom_forecast_excludes_explicit_wrong_station_geocode(self):
         db_path = test_db_path("weathercom_station_geocode")

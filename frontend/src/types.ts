@@ -938,6 +938,19 @@ export interface HourlyConsensusSummary {
   source: string
   points: HourlySourcePoint[]
   series?: HourlySourceSeries
+  forecast_peak_marker?: {
+    hour_float: number
+    date: string
+    local_time: string
+    temperature: number
+    source_hour: string
+    method: string
+    tie_policy: string
+    lookback_hours: number
+    snapshot_count: number
+    latest_retrieved_at?: string | null
+    source: string
+  } | null
 }
 
 export interface HistoricalWeatherPoint {

@@ -22,7 +22,7 @@ WEATHERCOM_FORECAST_URL = os.getenv(
     "WEATHER_COM_FORECAST_URL",
     "https://api.weather.com/v3/wx/forecast/hourly/15day",
 )
-WEATHERCOM_PARSER_VERSION = "weathercom-v3-hourly-forecast-v1"
+WEATHERCOM_PARSER_VERSION = "weathercom-v3-hourly-forecast-v2"
 WEATHERCOM_SOURCE = "weathercom_v3_forecast"
 DEFAULT_USER_AGENT = "WeatherBot/2.5 (weather.com v3 forecast probe)"
 
@@ -93,7 +93,10 @@ def fetch_weathercom_forecast_city(
     params = {
         "geocode": f"{profile.latitude},{profile.longitude}",
         "format": "json",
-        "units": "m",
+        # Weather.com metric temperatures are integer Celsius values. Request
+        # imperial data to preserve the provider's native 1 F precision, then
+        # convert every unit at the ingestion boundary.
+        "units": "e",
         "language": "en-US",
         "apiKey": api_key,
     }
@@ -123,6 +126,7 @@ def fetch_weathercom_forecast_city(
             source_url=_strip_api_key(str(getattr(response, "url", source_url))),
             retrieved_at=retrieved.isoformat(),
             forecast_days=forecast_days,
+            source_unit="F",
         )
         run_ids: list[int] = []
         if not dry_run:
@@ -160,12 +164,22 @@ def weathercom_runs_from_response(
     source_url: str = "",
     retrieved_at: str | None = None,
     forecast_days: int = 3,
+    source_unit: str = "C",
 ) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]]]:
     retrieved = _parse_time(retrieved_at) or datetime.now(timezone.utc)
     raw_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:32]
-    hourly = _hourly_rows_from_payload(profile, payload)
+    source_unit = str(source_unit or "C").strip().upper()
+    hourly = _hourly_rows_from_payload(profile, payload, source_unit=source_unit)
     if not hourly:
-        failed = _failed_run(profile, retrieved, raw_hash, source_url, ["missing_hourly_forecast_rows"], payload)
+        failed = _failed_run(
+            profile,
+            retrieved,
+            raw_hash,
+            source_url,
+            ["missing_hourly_forecast_rows"],
+            payload,
+            source_unit=source_unit,
+        )
         return [failed], [[]]
 
     target_dates = _target_dates_from_retrieved(profile, retrieved, forecast_days)
@@ -213,14 +227,15 @@ def weathercom_runs_from_response(
             "parser_version": WEATHERCOM_PARSER_VERSION,
             "parse_status": "parsed",
             "parse_warnings": [],
-            "source_unit": "C",
+            "source_unit": source_unit,
             "training_eligible": True,
             "ineligibility_reason": "",
             "meta": {
                 "role": "weathercom_v3_forecast",
                 "retrieved_hour": retrieved_hour,
-                "raw_temperature_unit": "C",
+                "raw_temperature_unit": source_unit,
                 "temperature_storage": "converted_to_city_unit",
+                "weather_fields_storage": "wind_kph_pressure_hpa_precip_mm",
             },
             "raw_response_summary": {
                 "hourly_rows": len(day_rows),
@@ -233,14 +248,19 @@ def weathercom_runs_from_response(
             "high_temp": round(high, 2),
             "hourly": day_rows,
             "parser_version": WEATHERCOM_PARSER_VERSION,
-            "source_unit": "C",
+            "source_unit": source_unit,
         }
         runs.append(run)
         members_by_run.append([member])
     return runs, members_by_run
 
 
-def _hourly_rows_from_payload(profile: CitySettlementProfile, payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _hourly_rows_from_payload(
+    profile: CitySettlementProfile,
+    payload: dict[str, Any],
+    *,
+    source_unit: str = "C",
+) -> list[dict[str, Any]]:
     times = payload.get("validTimeUtc") or payload.get("validTimeLocal") or payload.get("fcstValid")
     if not isinstance(times, list):
         return []
@@ -259,26 +279,27 @@ def _hourly_rows_from_payload(profile: CitySettlementProfile, payload: dict[str,
     rows: list[dict[str, Any]] = []
     for index, raw_time in enumerate(times):
         valid = _parse_forecast_time(raw_time)
-        temp_c = _number(_at(temps, index))
-        if valid is None or temp_c is None:
+        raw_temp = _number(_at(temps, index))
+        if valid is None or raw_temp is None:
             continue
         local = valid.astimezone(zone)
+        temp_c = convert_temperature(raw_temp, source_unit, "C")
         rows.append({
             "valid_at": valid.isoformat(),
             "target_date": local.date().isoformat(),
             "local_hour": local.strftime("%H:00"),
-            "temperature_2m": round(convert_temperature(temp_c, "C", profile.unit), 3),
+            "temperature_2m": round(convert_temperature(raw_temp, source_unit, profile.unit), 3),
             "temperature_2m_c": round(float(temp_c), 3),
             "relative_humidity_2m": _number(_at(humidity, index)),
-            "dew_point_2m": _convert_optional(_at(dew, index), "C", profile.unit),
-            "dew_point_2m_c": _number(_at(dew, index)),
+            "dew_point_2m": _convert_optional(_at(dew, index), source_unit, profile.unit),
+            "dew_point_2m_c": _convert_optional(_at(dew, index), source_unit, "C"),
             "cloud_cover": _number(_at(cloud, index)),
             "precipitation_probability": _number(_at(precip_chance, index)),
-            "precipitation": _number(_at(precip, index)),
-            "wind_speed_10m": _number(_at(wind_speed, index)),
-            "wind_gusts_10m": _number(_at(wind_gust, index)),
+            "precipitation": _precipitation_mm(_at(precip, index), source_unit),
+            "wind_speed_10m": _wind_kph(_at(wind_speed, index), source_unit),
+            "wind_gusts_10m": _wind_kph(_at(wind_gust, index), source_unit),
             "wind_direction_10m": _number(_at(wind_dir, index)),
-            "pressure_msl": _number(_at(pressure, index)),
+            "pressure_msl": _pressure_hpa(_at(pressure, index), source_unit),
             "condition": _at(phrase, index),
             "source": WEATHERCOM_SOURCE,
         })
@@ -292,6 +313,8 @@ def _failed_run(
     source_url: str,
     warnings: list[str],
     payload: dict[str, Any],
+    *,
+    source_unit: str = "C",
 ) -> dict[str, Any]:
     target_date = retrieved.astimezone(_zone(profile.timezone)).date().isoformat()
     retrieved_hour = retrieved.replace(minute=0, second=0, microsecond=0).isoformat()
@@ -319,7 +342,7 @@ def _failed_run(
         "parser_version": WEATHERCOM_PARSER_VERSION,
         "parse_status": "failed",
         "parse_warnings": warnings,
-        "source_unit": "C",
+        "source_unit": source_unit,
         "training_eligible": False,
         "ineligibility_reason": "weathercom_parse_failed",
         "raw_response_summary": {"source_keys": sorted(payload.keys())[:30]},
@@ -428,6 +451,27 @@ def _convert_optional(value: Any, source_unit: str, target_unit: str) -> float |
     if numeric is None:
         return None
     return round(convert_temperature(numeric, source_unit, target_unit), 3)
+
+
+def _wind_kph(value: Any, source_unit: str) -> float | None:
+    numeric = _number(value)
+    if numeric is None:
+        return None
+    return round(numeric * 1.609344, 3) if source_unit == "F" else numeric
+
+
+def _pressure_hpa(value: Any, source_unit: str) -> float | None:
+    numeric = _number(value)
+    if numeric is None:
+        return None
+    return round(numeric * 33.8638866667, 3) if source_unit == "F" else numeric
+
+
+def _precipitation_mm(value: Any, source_unit: str) -> float | None:
+    numeric = _number(value)
+    if numeric is None:
+        return None
+    return round(numeric * 25.4, 3) if source_unit == "F" else numeric
 
 
 def _strip_api_key(url: str) -> str:

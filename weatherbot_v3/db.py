@@ -1252,6 +1252,14 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_runs_run_key ON forecast_runs(run_key)")
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_forecast_runs_city_date_source_retrieved "
+        "ON forecast_runs(city, target_date, source, retrieved_at DESC, id DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_forecast_runs_city_date_type_retrieved "
+        "ON forecast_runs(city, target_date, run_type, retrieved_at DESC, id DESC)"
+    )
+    conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_members_run_member "
         "ON forecast_members(run_id, member_id)"
     )
