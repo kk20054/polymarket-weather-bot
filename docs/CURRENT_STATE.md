@@ -6,11 +6,12 @@
 - Dashboard recommendations now separate `weather_focus` cards from Layer 6 `trade_candidate` decisions; Singapore is present in the current local focus set.
 - Weather.com v3 now drives the dashboard Forecast/Cloud series; Open-Meteo models remain separate DEB inputs.
 - Shanghai China Live uses Pudong station `101020600`; WU same-day Historical is incrementally collectable.
-- Scheduler validation was explicitly cancelled. The operator's main backend scheduler was observed running on 2026-07-12; the isolated QA backend remained stopped. Paper validation remains inactive.
+- Scheduler cold-start fan-out is fixed and the backend has loaded commit `1d63438`. A controlled METAR + China Live + Weather.com cycle completed with 80.6-87.3MB RSS and <=59ms status latency; the scheduler is stopped after the test. Paper validation remains inactive.
 - `LIVE_TRADING=false`; the system is research/paper infrastructure, not a proven profitable production bot.
-- The Layer 8 workbench again exposes operator-controlled bankroll, per-trade cap, entry-strategy combinations, one-click paper cohort start/stop, Kelly sizing, market links and authoritative Polymarket settlement. Only `hold_to_settlement` is enabled; information-edge exits remain blocked pending orderbook replay evidence.
+- The Layer 8 workbench exposes operator-controlled bankroll, per-trade cap, entry-strategy combinations, one-click paper cohort start/stop, market links and authoritative Polymarket settlement. Its Kelly suggestion is still computed when the signal is built from the global bankroll, not recomputed from the operator's cohort bankroll; this is the next correctness task. Only `hold_to_settlement` is enabled.
 
 ## Latest Ledger Summaries
+- 2026-07-12 / Scheduler cold-start containment: serialized heavy pollers, reapplied restart staggering, compacted retained payloads, disabled per-city readiness scans, made readiness metadata-only, bounded audit history to 200 rows, and coalesced missed ticks. Real readiness peak fell to 109.6MB; three live collector cycles stayed below 87.3MB. Commit `1d63438`.
 - 2026-07-12 / Layer 8 operator controls: restored visible `$40` bankroll and one-click automatic paper controls over the existing paper-validation cohort; operators can combine single-bucket, atomic three-bucket ladder and low-price-tail entries. All 120 sampled Atlanta decisions now resolve to a Polymarket event URL. Temperature series use exact local-minute linear joins; cloud remains on its independent 0-100% axis.
 - 2026-07-12 / Layer 1 catalog and recommendation contracts: added 25 PolyWX station profiles as display-visible, collector-disabled `observation_only` cities; `stations.enabled` remains the scheduler watchlist. Added a separate near-peak `weather_focus` payload and kept Layer 6 trade candidates independent. Browser QA showed 51 cities, honest Manila/Guangzhou empty states, and Singapore focus with no console errors. Commit `ac968a2`.
 - 2026-07-12 / Layer 8 paper workbench closure: the right workbench now reads the latest Layer 6 strategy batch and writes real \`paper_orders/fills/settlements\` through \`/api/paper-orders/execute\`; legacy signal-status marking is no longer the visible simulation path. Ladder orders require full depth on all three legs and persist all orders/fills in one SQLite transaction. Shanghai currently has 11 latest decisions and 0 eligible strategies, honestly shown as blocked.
@@ -42,12 +43,14 @@
 - WU/HKO truth coverage and resolved paper outcomes are insufficient for profitability claims.
 - China Live has no retrospective weather.com.cn minute archive; points before collector activation remain honestly absent.
 - Layer 7/8 still require operator visual acceptance before starting the 14-30 day cohort; the paper execution path is connected, but the current Shanghai batch has no strategy that passes all paper gates.
+- Paper sizing is not yet cohort-correct: changing the simulated bankroll constrains cash but does not recompute each decision's Kelly amount from that bankroll. The global `MAX_BET` can also cap a higher cohort per-trade setting.
+- Strategy thresholds remain code constants without an immutable strategy-profile revision, so parameter experiments are not yet fully auditable.
 - The marker computation contract now matches PolyWX, but persisted revision density does not: sampled archive peaks were Shanghai `13:00` vs `14:00`, Tokyo `15:00` vs `16:00`, and Chicago `18:00/86F` vs `17:00/87F`. Do not cosmetically override these values.
 - Live dry-run/canary gates remain unaccepted and intentionally locked.
-- Starting all scheduler pollers immediately after a backend restart reproduced a material runtime regression: the worker reached about 1.6GB RSS and stopped listening. The backend is currently healthy with the scheduler stopped; this must be fixed before automatic paper validation can run unattended.
+- Scheduler cold-start memory regression is fixed, but `asyncio.to_thread` work cannot be force-cancelled after an outer timeout. Keep the scheduler controlled until collector-level HTTP timeouts and residual-worker reporting are audited.
 
 ## Next Step
-- Repair scheduler cold-start fan-out/resource growth, then verify one-click paper validation with a controlled fresh-decision cycle. Do not enable information-edge exits until SELL fills and historical orderbook replay are implemented and tested.
+- Make paper sizing cohort-correct: recompute Kelly from the operator bankroll, resolve the double max-per-trade cap, and persist an immutable strategy-profile revision on decisions/orders before the first 14-30 day cohort. Do not enable information-edge exits until SELL fills and historical orderbook replay are implemented and tested.
 - Run a controlled admission batch for Manila and Guangzhou: AWC METAR, Weather.com forecast, WU Historical availability, then Gamma settlement-market probe. Keep both collector-disabled until the evidence report passes.
 - Benchmark the local Singapore `weather_focus` card against the PolyWX public card over several refreshes, then tune the documented near-peak threshold only from observed evidence.
 - Close Tokyo's missing past-hour forecast archive and source-freshness gaps, then repeat the three-city benchmark with the scheduler explicitly controlled.

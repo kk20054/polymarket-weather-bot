@@ -1,5 +1,14 @@
 # WeatherBot 项目进度台账
 
+### 2026-07-12: 调度器冷启动资源回归修复
+
+- 改动：为所有重型 poller 增加全局单槽限流和每次启动错峰；collector 批次不再逐城市执行全库 readiness；保留结果改为有界摘要；长任务错过周期后合并 tick，不再每秒追赶。`build_data_readiness()` 改为只查询资格审计所需列，订单簿深度在 SQL 中计算，不再把 raw/orderbook JSON 装入 Python；readiness 历史限制为最近 200 条，derive 热路径改为显式审计模式。
+- 验证：修复前实机 RSS 在约 80MB 至 2.6GB 间波动；修复后真实跑完 METAR 14/14、China Live 2/2、Weather.com Forecast 14/14，19 个样本 RSS 为 80.6-87.3MB，scheduler status 最大延迟 59ms，随后已停止。真实 5.6GB 数据库 readiness 耗时约 10.5s、峰值 109.6MB，审计历史由 11,594 条收敛到 200 条。
+- 测试：`tests.test_v3_core` 215/215；`tests.test_polywx_contract + tests.test_scheduler` 41/41；`git diff --check` 通过。后端已重启加载新代码，scheduler stopped、paper validation inactive、`LIVE_TRADING=false`。
+- 结论：此前“启动调度器后后端失联”的主回归已关闭，自动模拟所依赖的数据采集不再因 readiness 全库装载立即耗尽内存。剩余风险是 `asyncio.to_thread` 外层超时不能杀死底层线程，后续需审计 collector 自身 HTTP timeout 和残留 worker 报告。
+- 下一步：修复 Layer 8 模拟本金与 Kelly 的口径闭环，消除 cohort `max_per_trade` 与全局 `MAX_BET` 双重上限，并把策略阈值固化为不可变 strategy-profile revision；之后才启动第一轮 14-30 天模拟 cohort。
+- 相关提交：`1d63438`。
+
 ### 2026-07-12: Layer 1/7 城市目录扩容与推荐契约拆分
 
 - 目标：在不扩大调度器配额、不放宽 paper/live 闸门的前提下，对齐 PolyWX 城市观察目录，并把公开的“推荐关注”卡片与 WeatherBot 的交易候选彻底分开。
