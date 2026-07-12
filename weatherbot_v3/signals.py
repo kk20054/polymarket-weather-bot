@@ -162,12 +162,28 @@ def signal_decisions_summary(
     path: Path | None = None,
 ) -> dict[str, Any]:
     rows = list_signal_decisions(city_key=city_key, target_date=target_date, limit=limit, path=path)
+    bucket_keys = [str(row.get("bucket_key") or "") for row in rows if row.get("bucket_key")]
+    event_url_by_bucket: dict[str, str] = {}
+    if bucket_keys:
+        placeholders = ",".join("?" for _ in bucket_keys)
+        with connect(path) as conn:
+            event_url_by_bucket = {
+                str(row["bucket_key"]): str(row["event_url"] or "")
+                for row in conn.execute(
+                    f"SELECT bucket_key, event_url FROM market_buckets WHERE bucket_key IN ({placeholders})",
+                    bucket_keys,
+                ).fetchall()
+            }
     status_counts: dict[str, int] = {}
     paper_counts: dict[str, int] = {}
     live_counts: dict[str, int] = {}
     strategy_counts: dict[str, int] = {}
     reason_counts: dict[str, int] = {}
     for row in rows:
+        evidence_links = dict(row.get("evidence_links") or {})
+        if not evidence_links.get("event_url"):
+            evidence_links["event_url"] = event_url_by_bucket.get(str(row.get("bucket_key") or ""), "")
+        row["evidence_links"] = evidence_links
         status_counts[str(row.get("gate_status") or "")] = status_counts.get(str(row.get("gate_status") or ""), 0) + 1
         paper_counts[str(row.get("paper_decision") or "")] = paper_counts.get(str(row.get("paper_decision") or ""), 0) + 1
         live_counts[str(row.get("live_decision") or "")] = live_counts.get(str(row.get("live_decision") or ""), 0) + 1
@@ -295,6 +311,7 @@ def _evidence_links(
             ).fetchall()
         ]
     return {
+        "event_url": next((str(row.get("event_url") or "") for row in buckets if row.get("event_url")), ""),
         "daily_max_prediction_id": prediction.get("id"),
         "source_run_ids": prediction.get("source_run_ids") or [],
         "hourly_consensus_ids": hourly_ids,

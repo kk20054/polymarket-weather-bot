@@ -532,3 +532,11 @@
 - 执行安全：\`paper_orders\` 持久化 \`strategy_name/ladder_group_id\`；ladder 三腿必须全部满足深度与风控，三条订单和 fills 在同一个 SQLite 事务中落库，任一腿不可完整成交时整组零写入。实盘按钮与调用未进入新工作台。
 - 验证：\`tests.test_execution_workbench_contract + tests.test_v3_core + tests.test_polywx_contract\` 共 230 tests 全部通过；\`npm run build\` 通过；浏览器上海页面显示最新批次 11 条策略、0 条可模拟、0 订单，阻塞策略按钮不可点击，订单页诚实空态，console error/warn 为 0。调度器保持 stopped，paper cohort inactive。
 - 结论：右侧“看起来模拟但只改标签”的断链已关闭。当前上海没有通过 paper gate 的策略，因此没有制造演示订单；下一步应审计多城市 blocked reason 分布并做证据驱动的阈值评估，随后由操作员决定是否启动 14-30 天 cohort。
+
+### 2026-07-12：Layer 8 操作员模拟控制与市场链接恢复
+
+- 改动：右侧交易台恢复可见的模拟本金、单笔上限、入场策略组合与“一键模拟/停止”入口；该入口创建真实 `paper_validation_runs`，后续由 scheduler tick 按 Kelly 建议、日额度和持仓上限自动执行，并由既有 paper settlement poller 读取 Polymarket Gamma 结果结算。支持 `single_bucket_ev / ladder_grid / tail_buying` 组合；退出方式当前只开放 `hold_to_settlement`，信息差退出因尚无 SELL 成交与历史盘口回放而诚实锁定。
+- 链路：`/api/paper-validation/start|stop|tick` 已接入；手动批量模拟会按选定策略过滤；`signal_decisions` 对旧记录动态补齐 `market_buckets.event_url`，Atlanta 抽样 120/120 条决策均有 Polymarket 事件链接。
+- 图表：Atlanta 预报为本地整点，METAR/WU 为实际 `:52` 分钟；温度曲线改为逐点 `linear` 连接，避免 `monotone` 插值造成视觉时间偏移，Cloud 继续独立使用 0-100% 右轴。
+- 验证：`tests.test_paper_validation + tests.test_polywx_contract` 19/19、`tests.test_v3_core` 214/214、前端 production build、`git diff --check` 全部通过。浏览器确认 40 美元/2 美元设置、三策略选择、实盘锁定、无横向溢出；展开 Atlanta 决策得到正确 Polymarket URL。
+- 阻塞：重启后同时启动全部 poller 时复现约 1.6GB RSS 并失去 8765 监听的运行态回归；为避免掩盖问题，当前后端已稳定重启且 scheduler 保持 stopped，paper cohort inactive，`LIVE_TRADING=false`。下一步先修 scheduler 冷启动 fan-out，再做自动模拟闭环验收。

@@ -56,7 +56,12 @@ from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.notifier import FeishuNotifier
 from weatherbot_v3.paper import execute_paper_decision, execute_paper_decisions
-from weatherbot_v3.paper_validation import paper_validation_status
+from weatherbot_v3.paper_validation import (
+    paper_validation_status,
+    run_paper_validation_tick,
+    start_paper_validation_run,
+    stop_paper_validation_run,
+)
 from weatherbot_v3.polymarket import PolymarketDataClient
 from weatherbot_v3.production_actions import list_production_actions, run_production_action
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
@@ -195,8 +200,21 @@ class PaperExecutionRequest(BaseModel):
     city: str = ""
     target_date: str = ""
     amount: float | None = None
+    strategies: list[str] | None = None
     limit: int = 20
     dry_run: bool = True
+
+
+class PaperValidationStartRequest(BaseModel):
+    bankroll_usd: float = 40.0
+    duration_days: int = 14
+    max_per_trade_usd: float = 2.0
+    daily_max_usd: float = 10.0
+    max_open_positions: int = 5
+    max_orders_per_day: int = 5
+    decision_max_age_minutes: float = 30.0
+    cities: list[str] | None = None
+    strategies: list[str] | None = None
 
 
 class LiveOrderUpdate(BaseModel):
@@ -4458,6 +4476,39 @@ async def paper_validation_status_api():
     return await asyncio.to_thread(paper_validation_status)
 
 
+@app.post("/api/paper-validation/start")
+async def paper_validation_start_api(request: PaperValidationStartRequest):
+    allowed_strategies = {"single_bucket_ev", "ladder_grid", "tail_buying"}
+    strategies = list(dict.fromkeys(request.strategies or ["single_bucket_ev"]))
+    unknown = [strategy for strategy in strategies if strategy not in allowed_strategies]
+    if unknown:
+        raise HTTPException(status_code=400, detail={"reason": "unsupported_paper_strategy", "strategies": unknown})
+    result = await asyncio.to_thread(
+        start_paper_validation_run,
+        duration_days=request.duration_days,
+        bankroll_usd=request.bankroll_usd,
+        max_per_trade_usd=request.max_per_trade_usd,
+        daily_max_usd=request.daily_max_usd,
+        max_open_positions=request.max_open_positions,
+        max_orders_per_day=request.max_orders_per_day,
+        decision_max_age_minutes=request.decision_max_age_minutes,
+        cities=request.cities,
+        strategies=strategies,
+        notes="dashboard controlled paper validation",
+    )
+    return result.get("run") if result.get("ok") and result.get("run") else result
+
+
+@app.post("/api/paper-validation/stop")
+async def paper_validation_stop_api():
+    return await asyncio.to_thread(stop_paper_validation_run)
+
+
+@app.post("/api/paper-validation/tick")
+async def paper_validation_tick_api():
+    return await asyncio.to_thread(run_paper_validation_tick, apply=True)
+
+
 @app.get("/api/source-health")
 async def source_health():
     matrix = await asyncio.to_thread(build_source_health_matrix)
@@ -4652,6 +4703,7 @@ async def paper_orders_execute(request: PaperExecutionRequest):
         target_date=request.target_date,
         limit=request.limit,
         amount=request.amount,
+        strategies=request.strategies,
         dry_run=request.dry_run,
     )
 

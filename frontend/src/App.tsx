@@ -1642,6 +1642,7 @@ function App() {
             decisions={signalDecisionsQuery.data}
             validation={paperValidationStatusQuery.data}
             liveAvailable={liveAvailable}
+            schedulerRunning={schedulerRunning}
           />
           {false && <>
           <div className="shrink-0 border-b border-neutral-800 bg-black/95 px-3 py-2">
@@ -1749,7 +1750,7 @@ function App() {
             onToggle={event => setAdvancedDiagnosticsOpen(event.currentTarget.open)}
           >
             <summary className="cursor-pointer select-none px-3 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
-              高级诊断与风控
+              系统诊断（维护用）
             </summary>
             <div className="max-h-[48vh] space-y-3 overflow-y-auto border-t border-neutral-800 p-3">
               <div className="grid grid-cols-2 gap-2 text-[11px]">

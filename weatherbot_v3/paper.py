@@ -172,12 +172,16 @@ def execute_paper_decisions(
     target_date: str | None = None,
     limit: int = 20,
     amount: float | None = None,
+    strategies: list[str] | None = None,
     dry_run: bool = True,
     path: Path | None = None,
 ) -> dict[str, Any]:
+    allowed_strategies = set(strategies or [])
     selected: list[dict[str, Any]] = []
     seen_ladder_groups: set[str] = set()
     for row in list_signal_decisions(city_key=city_key, target_date=target_date, limit=limit, path=path):
+        if allowed_strategies and str(row.get("strategy_name") or "single_bucket_ev") not in allowed_strategies:
+            continue
         if not bool(row.get("paper_allowed")) or str(row.get("paper_decision") or "") != "buy":
             continue
         ladder_group_id = str(row.get("ladder_group_id") or "")

@@ -213,6 +213,7 @@ class StrategyBase:
             },
             "evidence_links": {
                 **evidence,
+                "event_url": bucket.get("event_url") or evidence.get("event_url") or "",
                 "market_bucket_id": bucket.get("id"),
                 "daily_max_prediction_id": prediction.get("id"),
             },

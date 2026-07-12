@@ -25,7 +25,9 @@ class ExecutionWorkbenchContractTests(unittest.TestCase):
         self.assertIn("实盘锁定", component)
         self.assertIn("latestIssuedAt", component)
         self.assertIn("ladderGroupId", component)
-        self.assertIn("模拟全部可用策略", component)
+        self.assertIn("模拟当前可用策略", component)
+        self.assertIn("一键模拟", component)
+        self.assertIn("startPaperValidation", component)
         self.assertIn("暂无模拟订单", component)
 
 

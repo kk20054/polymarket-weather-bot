@@ -1164,6 +1164,24 @@ export interface PaperValidationStatus {
   brier_score?: number | null
   spent_today_usd?: number
   cash_available_usd?: number
+  max_per_trade_usd?: number
+  daily_max_usd?: number
+  max_open_positions?: number
+  max_orders_per_day?: number
+  strategies?: string[]
+  cities?: string[]
+}
+
+export interface PaperValidationStartOptions {
+  bankroll_usd: number
+  duration_days?: number
+  max_per_trade_usd?: number
+  daily_max_usd?: number
+  max_open_positions?: number
+  max_orders_per_day?: number
+  decision_max_age_minutes?: number
+  cities?: string[]
+  strategies: string[]
 }
 
 export interface CityEvidenceModule {

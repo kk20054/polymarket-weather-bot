@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, ExternalLink, FlaskConical, ListChecks, ShieldAlert } from 'lucide-react'
-import { executePaperOrders, fetchPaperOrders } from '../api'
+import { ChevronDown, ExternalLink, FlaskConical, Info, ListChecks, Play, Settings2, ShieldAlert, Square } from 'lucide-react'
+import { executePaperOrders, fetchPaperOrders, runPaperValidationTick, startPaperValidation, stopPaperValidation } from '../api'
 import type {
   PaperExecutionResult,
   PaperOrderRecord,
@@ -16,6 +16,7 @@ interface Props {
   decisions?: SignalDecisionSummary | null
   validation?: PaperValidationStatus | null
   liveAvailable: boolean
+  schedulerRunning: boolean
 }
 
 type QueueItem = {
@@ -24,6 +25,12 @@ type QueueItem = {
   ladderGroupId?: string
   decisions: SignalDecisionRecord[]
 }
+
+const STRATEGY_OPTIONS = [
+  { key: 'single_bucket_ev', label: '单桶最高温', help: '只买模型优势最大的单个温度桶，持有至结算。' },
+  { key: 'ladder_grid', label: '相邻三桶阶梯', help: '中心桶与左右相邻桶作为原子组合，整组买入或整组跳过。' },
+  { key: 'tail_buying', label: '低价尾部', help: '仅观察/买入价格较低且概率差足够大的尾部桶。' },
+] as const
 
 const REASON_LABELS: Record<string, string> = {
   paper_gate_not_passed: '模拟闸门未通过',
@@ -256,18 +263,30 @@ function OrderRow({ order }: { order: PaperOrderRecord }) {
   )
 }
 
-export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation, liveAvailable }: Props) {
+export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation, liveAvailable, schedulerRunning }: Props) {
   const queryClient = useQueryClient()
   const [view, setView] = useState<'queue' | 'orders'>('queue')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [bankroll, setBankroll] = useState('40')
+  const [maxPerTrade, setMaxPerTrade] = useState('2')
+  const [selectedStrategies, setSelectedStrategies] = useState<string[]>(['single_bucket_ev'])
   const [lastResult, setLastResult] = useState<PaperExecutionResult | null>(null)
+  const validationActive = validation?.status === 'active'
+  useEffect(() => {
+    if (!validationActive) return
+    setBankroll(String(validation?.bankroll_usd ?? 40))
+    setMaxPerTrade(String(validation?.max_per_trade_usd ?? 2))
+    if (validation?.strategies?.length) setSelectedStrategies(validation.strategies)
+  }, [validationActive, validation?.bankroll_usd, validation?.max_per_trade_usd, validation?.strategies])
   const queue = useMemo(() => {
     const rows = decisions?.decisions ?? []
     const latestIssuedAt = rows.reduce(
       (latest, row) => String(row.issued_at ?? '') > latest ? String(row.issued_at ?? '') : latest,
       '',
     )
-    return groupDecisions(latestIssuedAt ? rows.filter(row => row.issued_at === latestIssuedAt) : rows)
-  }, [decisions])
+    const latestRows = latestIssuedAt ? rows.filter(row => row.issued_at === latestIssuedAt) : rows
+    return groupDecisions(latestRows.filter(row => selectedStrategies.includes(row.strategy_name ?? 'single_bucket_ev')))
+  }, [decisions, selectedStrategies])
   const eligibleCount = queue.filter(item => item.decisions.length === (item.ladderGroupId ? 3 : 1)
     && item.decisions.every(row => row.paper_allowed && row.paper_decision === 'buy')).length
   const ordersQuery = useQuery({
@@ -284,6 +303,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
       amount: payload.amount,
       limit: 100,
       dryRun: payload.dryRun,
+      strategies: selectedStrategies,
     }),
     onSuccess: result => {
       setLastResult(result)
@@ -292,7 +312,36 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
     },
     onError: error => setLastResult({ ok: false, reason: error instanceof Error ? error.message : 'request_failed' }),
   })
+  const validationMutation = useMutation({
+    mutationFn: async (action: 'start' | 'stop') => {
+      if (action === 'stop') return stopPaperValidation()
+      const started = await startPaperValidation({
+        bankroll_usd: Math.max(1, Number(bankroll) || 40),
+        max_per_trade_usd: Math.max(0.1, Number(maxPerTrade) || 2),
+        duration_days: 14,
+        daily_max_usd: Math.max(1, Math.min(Number(bankroll) || 40, 10)),
+        max_open_positions: 5,
+        max_orders_per_day: 5,
+        decision_max_age_minutes: 30,
+        strategies: selectedStrategies,
+      })
+      await runPaperValidationTick()
+      return started
+    },
+    onSuccess: () => {
+      setLastResult(null)
+      queryClient.invalidateQueries({ queryKey: ['paper-validation-status'] })
+      queryClient.invalidateQueries({ queryKey: ['paper-orders'] })
+    },
+    onError: error => setLastResult({ ok: false, reason: error instanceof Error ? error.message : 'paper_validation_request_failed' }),
+  })
   const summary = ordersQuery.data
+  const toggleStrategy = (strategy: string) => {
+    if (validationActive) return
+    setSelectedStrategies(current => current.includes(strategy)
+      ? (current.length > 1 ? current.filter(item => item !== strategy) : current)
+      : [...current, strategy])
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -300,7 +349,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
         <div className="flex items-start justify-between gap-2">
           <div>
             <div className="text-sm font-medium text-neutral-100">模拟交易台</div>
-            <div className="mt-0.5 text-[10px] text-neutral-600">策略决策 → 成交检查 → 订单与结算</div>
+            <div className="mt-0.5 text-[10px] text-neutral-600">Kelly 分配 → 盘口成交 → Polymarket 结算</div>
           </div>
           <span className={`border px-1.5 py-0.5 text-[9px] ${liveAvailable ? 'border-green-500/30 text-green-300' : 'border-amber-500/30 text-amber-300'}`}>
             {liveAvailable ? '实盘待验收' : '实盘锁定'}
@@ -310,8 +359,44 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
           <div className="border border-neutral-800 p-2"><div className="text-neutral-600">可模拟策略</div><div className="mt-1 tabular-nums text-neutral-200">{eligibleCount} / {queue.length}</div></div>
           <div className="border border-neutral-800 p-2"><div className="text-neutral-600">订单 / 已结算</div><div className="mt-1 tabular-nums text-neutral-200">{summary?.count ?? 0} / {summary?.resolved_orders ?? 0}</div></div>
           <div className="border border-neutral-800 p-2"><div className="text-neutral-600">浮动盈亏</div><div className={`mt-1 tabular-nums ${Number(summary?.unrealized_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>{money(summary?.unrealized_pnl)}</div></div>
-          <div className="border border-neutral-800 p-2"><div className="text-neutral-600">内测状态</div><div className="mt-1 text-neutral-200">{validation?.status === 'active' ? '运行中' : '未启动'}</div></div>
+          <div className="border border-neutral-800 p-2"><div className="text-neutral-600">本金 / 可用</div><div className="mt-1 tabular-nums text-neutral-200">{money(validation?.bankroll_usd ?? Number(bankroll))} / {money(validation?.cash_available_usd ?? Number(bankroll))}</div></div>
         </div>
+        <button type="button" onClick={() => setSettingsOpen(value => !value)} className="mt-2 inline-flex min-h-8 w-full items-center justify-between border border-neutral-800 px-2 text-[10px] text-neutral-400 hover:bg-neutral-950">
+          <span className="inline-flex items-center gap-1"><Settings2 className="h-3.5 w-3.5" /> 自动模拟设置</span>
+          <ChevronDown className={`h-3.5 w-3.5 transition ${settingsOpen ? 'rotate-180' : ''}`} />
+        </button>
+        {settingsOpen && (
+          <div className="mt-2 space-y-2 border border-neutral-800 bg-neutral-950/60 p-2">
+            <div className="grid grid-cols-2 gap-2">
+              <label className="text-[9px] text-neutral-500">模拟本金（USD）<input disabled={validationActive} type="number" min="1" step="1" value={bankroll} onChange={event => setBankroll(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
+              <label className="text-[9px] text-neutral-500">单笔上限（USD）<input disabled={validationActive} type="number" min="0.1" step="0.1" value={maxPerTrade} onChange={event => setMaxPerTrade(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
+            </div>
+            <fieldset disabled={validationActive} className="space-y-1">
+              <legend className="mb-1 text-[9px] text-neutral-500">入场策略（可组合）</legend>
+              {STRATEGY_OPTIONS.map(option => (
+                <label key={option.key} title={option.help} className="flex min-h-7 items-center gap-2 border border-neutral-800 px-2 text-[10px] text-neutral-300">
+                  <input type="checkbox" checked={selectedStrategies.includes(option.key)} onChange={() => toggleStrategy(option.key)} />
+                  <span>{option.label}</span><Info className="ml-auto h-3 w-3 text-neutral-600" />
+                </label>
+              ))}
+            </fieldset>
+            <label className="block text-[9px] text-neutral-500">退出方式
+              <select className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-[10px] text-neutral-200" value="hold_to_settlement" disabled>
+                <option value="hold_to_settlement">持有至 Polymarket 结算（当前可用）</option>
+              </select>
+            </label>
+            <div className="text-[9px] leading-relaxed text-neutral-600">信息差止盈需要可靠的历史盘口回放和 SELL 成交模拟，尚未通过验证，因此不伪装成可用选项。</div>
+            {!schedulerRunning && <div className="border border-amber-500/20 bg-amber-500/5 px-2 py-1.5 text-[9px] text-amber-300">请先启动顶部调度器；自动模拟和结算由后端定时任务驱动。</div>}
+            <button
+              type="button"
+              disabled={validationMutation.isPending || (!validationActive && (!schedulerRunning || selectedStrategies.length === 0))}
+              onClick={() => validationMutation.mutate(validationActive ? 'stop' : 'start')}
+              className={`inline-flex min-h-9 w-full items-center justify-center gap-1 border text-[10px] disabled:opacity-30 ${validationActive ? 'border-red-500/30 text-red-300 hover:bg-red-500/10' : 'border-green-500/30 bg-green-500/10 text-green-200 hover:bg-green-500/15'}`}
+            >
+              {validationActive ? <><Square className="h-3 w-3" /> 停止自动模拟</> : <><Play className="h-3.5 w-3.5" /> 一键模拟</>}
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="grid shrink-0 grid-cols-2 border-b border-neutral-800" role="tablist" aria-label="模拟策略与订单">
@@ -339,7 +424,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
               onClick={() => executeMutation.mutate({ dryRun: false })}
               className="border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-30"
             >
-              模拟全部可用策略
+              模拟当前可用策略
             </button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">

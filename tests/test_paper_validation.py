@@ -9,6 +9,7 @@ from weatherbot_v3.paper_validation import (
     start_paper_validation_run,
     stop_paper_validation_run,
 )
+from weatherbot_v3.paper import execute_paper_decisions
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,8 +77,50 @@ class PaperValidationTests(unittest.TestCase):
         self.assertEqual(stopped["status"], "stopped")
         self.assertEqual(inactive["status"], "inactive")
 
+    def test_validation_run_persists_operator_strategy_combination_and_bankroll(self):
+        path = test_db_path("paper_validation_strategy_combination")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        init_v3_db(path)
+        started = start_paper_validation_run(
+            bankroll_usd=40,
+            max_per_trade_usd=2,
+            cities=["chicago", "atlanta"],
+            strategies=["single_bucket_ev", "ladder_grid", "tail_buying"],
+            path=path,
+        )
 
-def _decision(decision_id: str, issued_at: datetime, token: str, *, edge: float) -> dict:
+        self.assertTrue(started["ok"])
+        self.assertEqual(started["run"]["bankroll_usd"], 40)
+        self.assertEqual(started["run"]["max_per_trade_usd"], 2)
+        self.assertEqual(
+            started["run"]["strategies"],
+            ["single_bucket_ev", "ladder_grid", "tail_buying"],
+        )
+
+    def test_manual_batch_execution_respects_selected_strategies(self):
+        path = test_db_path("paper_execution_strategy_filter")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        init_v3_db(path)
+        now = datetime.now(timezone.utc)
+        upsert_signal_decision_record(_decision("single", now, "yes-single", edge=0.12), path=path)
+        upsert_signal_decision_record(
+            _decision("tail", now + timedelta(seconds=1), "yes-tail", edge=0.2, strategy="tail_buying"),
+            path=path,
+        )
+
+        result = execute_paper_decisions(
+            city_key="chicago",
+            target_date=now.date().isoformat(),
+            strategies=["tail_buying"],
+            dry_run=True,
+            path=path,
+        )
+
+        self.assertEqual(result["requested"], 1)
+        self.assertEqual(result["results"][0]["decision_id"], "tail")
+
+
+def _decision(decision_id: str, issued_at: datetime, token: str, *, edge: float, strategy: str = "single_bucket_ev") -> dict:
     return {
         "decision_id": decision_id,
         "bucket_key": f"bucket-{decision_id}",
@@ -94,7 +137,7 @@ def _decision(decision_id: str, issued_at: datetime, token: str, *, edge: float)
         "market_bid": 0.19,
         "market_implied_probability": 0.2,
         "edge": edge,
-        "strategy_name": "single_bucket_ev",
+        "strategy_name": strategy,
         "kelly_fraction": 0.1,
         "position_size_usd": 2.0,
         "tick_size": 0.01,
