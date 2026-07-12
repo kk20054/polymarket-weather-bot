@@ -1,5 +1,15 @@
 # WeatherBot 项目进度台账
 
+### 2026-07-12: Layer 1/7 城市目录扩容与推荐契约拆分
+
+- 目标：在不扩大调度器配额、不放宽 paper/live 闸门的前提下，对齐 PolyWX 城市观察目录，并把公开的“推荐关注”卡片与 WeatherBot 的交易候选彻底分开。
+- 取证：Firecrawl 渲染 `https://www.polywx.xyz/?city=singapore-wsss&date=2026-07-12`，页面列出 50 个 city/station；公开推荐卡只暴露城市、日期、当前温度和预计最高温，没有 edge、买卖方向、合约或选择理由。渲染 scrape id `019f5546-c5ef-70ec-ae2b-3205ed24a878`，interaction session `019f5547-5f74-70dd-ac9c-848d1cecc4ae`；直接访问 recommendations/cities API 均为 HTTP 403（ids `019f5548-a9a2-73f9-bc9a-546c4ad9842b`、`019f5548-b83c-7360-93f4-eb4a687034c1`）。完整记录在本地 `audits/polywx-city-recommendation-2026-07-12/`，不提交。
+- 改动：注册表补 25 个 PolyWX 城市，结合原 26 城形成 51 城目录；新增 `stations.display_enabled` 与 `city_scope`，保留 `stations.enabled` 专门控制 collector。新增城市全部 `observation_only`、display=true、enabled=false。左栏显示完整目录并诚实标记“待接入/未采集”。推荐 API 升级为 `recommendations-v2-separated-contracts`：`focus_items` 只用新鲜观测与 D+0 DEB 生成 near-peak 天气关注，`items` 继续保留 Layer 6 trade candidates；前端顶部只消费 focus cards，右侧交易台仍消费策略决策。
+- 真实结果：数据库 51 城全部可显示、collector-enabled 仍为 14；Manila 为 RPLL/display=true/enabled=false/observation_only。当前 focus set 为 Beijing、Singapore、Shanghai、Tokyo；Singapore 为 `29.0C -> 29.9C`，与本轮 PolyWX 可见推荐城市重合。浏览器验证 51 城、搜索 Guangzhou、Manila 空态、Singapore focus tooltip，无 console error；独立 QA 后端 scheduler=false。
+- 验证：临时 SQLite 下 `python -m unittest tests.test_v3_core` 通过 214 tests；定向 PolyWX/watchlist/focus tests 通过 19 tests；`npm run build` 通过；`git diff --check` 仅既有 CRLF warning。真实 5.4GB DB 上全套测试受运行中调度器锁/I/O 影响在 5 分钟超时，因此改用隔离 DB 完成确定性验证。
+- 结论/阻塞：城市目录与采集 watchlist 已解耦，新增城市不会自动抓取或获得交易资格。PolyWX 私有推荐策略仍不可从公开字段证明，当前只复现公开关注卡片的产品层；下一步应对 Manila/Guangzhou 做显式数据源与 Gamma 结算准入，再决定是否启用 collector。
+- 相关提交：`ac968a2`。
+
 ### 2026-07-11: PolyWX leakage-safe replay and observed-floor source contract
 
 - 目标：用本地保存的 PolyWX Chicago 2026-07-02/07-04 与 Shanghai 2026-07-06 证据重建 Forecast/Cloud/DEB/peak 对标，同时禁止目标日及之后 truth、晚于 capture 的 forecast snapshot 污染历史 replay。
