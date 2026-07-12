@@ -1,59 +1,33 @@
 # WeatherBot Current State
 
 ## Current Phase And Usability
-- Date: 2026-07-12. Phase 2/3 data-source alignment and Layer 7 operator review are active.
-- The display catalog now contains 51 city/station profiles: 50 PolyWX-aligned observation cities plus WeatherBot's existing Shenzhen profile. Only 14 remain collector-enabled.
-- Dashboard recommendations now separate `weather_focus` cards from Layer 6 `trade_candidate` decisions; Singapore is present in the current local focus set.
-- Weather.com v3 now drives the dashboard Forecast/Cloud series; Open-Meteo models remain separate DEB inputs.
-- Shanghai China Live uses Pudong station `101020600`; WU same-day Historical is incrementally collectable.
-- Scheduler cold-start fan-out is fixed and the backend has loaded commit `1d63438`. A controlled METAR + China Live + Weather.com cycle completed with 80.6-87.3MB RSS and <=59ms status latency; the scheduler is stopped after the test. Paper validation remains inactive.
-- `LIVE_TRADING=false`; the system is research/paper infrastructure, not a proven profitable production bot.
-- The Layer 8 workbench exposes operator-controlled bankroll, per-trade cap, entry-strategy combinations, one-click paper cohort start/stop, market links and authoritative Polymarket settlement. Its Kelly suggestion is still computed when the signal is built from the global bankroll, not recomputed from the operator's cohort bankroll; this is the next correctness task. Only `hold_to_settlement` is enabled.
+- Date: 2026-07-13. Phase 2/3 data-source alignment, Layer 7 operator review and Layer 8 paper validation are active.
+- The dashboard has 51 display profiles; 14 collector-enabled cities retain independent Forecast, METAR, WU Historical, China Live and optional PWS roles.
+- Paper simulation now uses the operator cohort bankroll for Kelly sizing, one explicit cap chain, current stored orderbook freshness and authoritative Polymarket settlement.
+- Every new decision, paper cohort and paper order is bound to an immutable strategy revision; the active conservative profile is revision 2.
+- `/developer` owns strategy thresholds and read-only system status. The normal dashboard only shows bankroll, strategy selection, orders, market links and the active revision.
+- Scheduler is stopped and paper validation is inactive after verification. `LIVE_TRADING=false`; profitability is not proven.
 
 ## Latest Ledger Summaries
-- 2026-07-12 / Scheduler cold-start containment: serialized heavy pollers, reapplied restart staggering, compacted retained payloads, disabled per-city readiness scans, made readiness metadata-only, bounded audit history to 200 rows, and coalesced missed ticks. Real readiness peak fell to 109.6MB; three live collector cycles stayed below 87.3MB. Commit `1d63438`.
-- 2026-07-12 / Layer 8 operator controls: restored visible `$40` bankroll and one-click automatic paper controls over the existing paper-validation cohort; operators can combine single-bucket, atomic three-bucket ladder and low-price-tail entries. All 120 sampled Atlanta decisions now resolve to a Polymarket event URL. Temperature series use exact local-minute linear joins; cloud remains on its independent 0-100% axis.
-- 2026-07-12 / Layer 1 catalog and recommendation contracts: added 25 PolyWX station profiles as display-visible, collector-disabled `observation_only` cities; `stations.enabled` remains the scheduler watchlist. Added a separate near-peak `weather_focus` payload and kept Layer 6 trade candidates independent. Browser QA showed 51 cities, honest Manila/Guangzhou empty states, and Singapore focus with no console errors. Commit `ac968a2`.
-- 2026-07-12 / Layer 8 paper workbench closure: the right workbench now reads the latest Layer 6 strategy batch and writes real \`paper_orders/fills/settlements\` through \`/api/paper-orders/execute\`; legacy signal-status marking is no longer the visible simulation path. Ladder orders require full depth on all three legs and persist all orders/fills in one SQLite transaction. Shanghai currently has 11 latest decisions and 0 eligible strategies, honestly shown as blocked.
-- 2026-07-12 / Forecast revision peak and API performance: PolyWX's marker was reverse-engineered as the maximum across the latest 72 hours of forecast revisions with the latest local hour winning ties. WeatherBot now exposes that marker separately from DEB trading semantics; Weather.com ingestion preserves 1 F precision and normalizes wind/pressure/precipitation at the boundary. Forecast lookup indexes reduced sampled hourly API latency from 3.7-4.4s to 1.7-2.5s.
-- 2026-07-12 / Layer 7 hierarchy and honest freshness: the left city index and recommendation strip were compacted to the PolyWX hierarchy; the middle panel now owns one native source-status row, date controls and five tabs. Tooltip time is a forced `date + HH:mm`, the adaptive Y axis is verified, source ages come from source rows rather than fetch logs, and advanced diagnostics are lazy-loaded.
-- 2026-07-12 / Active-market refresh cadence: Forecast and WU Historical now run on a fixed 10-minute start-to-start cadence for active markets; non-active enabled cities retain a 30-minute baseline. A controlled WU cycle completed 14/14 cities in 61.4 seconds with no failures; continuous scheduler remains stopped.
-- 2026-07-12 / Forecast-DEB field closure: Weather.com condition, precipitation probability, revision count and retrieval time now survive Layer 4 into the dashboard. Shanghai DEB includes v3/GFS/JMA/ECMWF/ICON/GEM and benchmarks at `30.10+/-1.51C` versus PolyWX `29.88+/-1.62C` at the sampled time.
-- 2026-07-12 / Three-city live benchmark: Shanghai and Chicago Forecast/Cloud are close to PolyWX, Tokyo past-hour Forecast is about 2C low while METAR/Historical agree. Chart hover labels now show `YYYY/MM/DD HH:mm` instead of raw minute indexes.
-- 2026-07-12 / Tokyo station-location repair: RJTT coordinates were corrected from the Narita-area `35.7647,140.3864` to AWC RJTT/HND `35.553,139.781`. Wrong-location forecast snapshots and bias rows are now excluded; Tokyo DEB moved to `28.97+/-1.39C` versus PolyWX `28.90+/-1.37C`.
-- 2026-07-12 / Honest evidence badges: city-page Forecast/METAR/Historical status reads native source series rather than stale aggregate cards. DEB observed floor now displays the actual METAR high and METAR sample count.
-- 2026-07-11 / Source-role repair (`84ab4f0`): split Weather.com, NWP, WU Historical, METAR, China Live and PWS pollers. PWS now requires an independent WU key and no longer floods 401 with the forecast key.
-- 2026-07-11 / Native-series dashboard: `/api/hourly-consensus` exposes native-frequency source series. Shanghai smoke returned Forecast 24, METAR 36, WU Historical 36, and Pudong China Live rows.
-- 2026-07-11 / Nonblocking scheduler (`446cc22`, `a4b8385`, `f7de6c1`): source-health, registry reads and fetch-log writes run off the event loop; the erroneous 40-second v3 timeout was removed.
-- 2026-07-11 / Derived batch repair (`1fe8a79`): readiness is refreshed once per 14-city batch instead of once per stage/date/city. A real D+0/D+1 batch completed 14/14 in 324.5 seconds with no timeout.
-- 2026-07-11 / DEB v3 repair: default mode is `polywx_aligned`; latest Shanghai build includes v3 and five available families, with traceable weights and truth basis.
-- 2026-07-11 / Layer 7 cleanup: the Hourly chart labels and provenance are explicit; Forecast cloud comes only from the same Weather.com v3 snapshot.
-- 2026-07-11 / Historical workbench repair: all 14 enabled cities now have a WU Historical display path; Shanghai has 44 rows, Chicago 9, and Hong Kong 46 VHHH display-only rows. METAR and WU tables consume native-frequency rows.
-- 2026-07-11 / Time-axis and diff repair: the main chart uses local minutes 0-1439 instead of a categorical axis, and Diff Stats now renders residual bars plus cumulative mean for METAR or Historical.
-- 2026-07-11 / Prior foundation: settlement verification, source-health-v2, paper cohort controls and authoritative Gamma settlement remain intact.
+- 2026-07-13 / Layer 8 sizing and strategy audit: cohort bankroll now recomputes Kelly; global `MAX_BET` no longer silently truncates a higher cohort limit; ladder groups reserve three order/position slots.
+- 2026-07-13 / Immutable strategy profiles: append-only revisions and activation events bind signal generation and paper defaults; decisions/orders persist parameter and sizing snapshots.
+- 2026-07-13 / Developer boundary: `/developer` publishes confirmed local revisions and shows read-only system state; normal UI hides maintenance diagnostics and exposes no secret/live toggle.
+- 2026-07-12 / Scheduler containment: heavy pollers are serialized/staggered; controlled collector cycles stayed below 87.3MB RSS and scheduler remains stopped after the test (`1d63438`).
+- 2026-07-12 / City and recommendation contracts: 51-city display catalog is separate from the 14-city collector watchlist; weather focus cards remain separate from auditable trade candidates (`ac968a2`).
 
 ## Production Blockers
-- The 25 newly added PolyWX observation cities are catalog entries only. Each still needs an explicit source smoke test and settlement-contract probe before collector or paper admission.
-- PolyWX's public recommendation payload exposes city/current/max fields but not a trade edge, side, contract, or selection rationale. Exact private-strategy parity remains unproven; local `weather_focus` is an explicit auditable approximation, not a copied buy signal.
-- Independent WU PWS entitlement is missing; PWS series and peak-lock are unavailable.
-- Two-hour/six-hour scheduler validation is intentionally deferred until operator UI and numeric benchmark acceptance.
-- Shanghai same-date Forecast/Cloud/DEB benchmark is within the current target tolerance; Chicago still needs same-local-day Historical and final numeric comparison after its local day begins.
-- Tokyo pre-fix past-hour forecasts remain intentionally blank because their archived snapshots used the wrong location; correct history will accumulate from the repair onward.
-- The 10-minute Forecast/WU cadence has unit and single-cycle evidence but still needs operator-controlled runtime observation after the dashboard is accepted.
+- Twenty-five display-only cities still need source smoke tests and settlement-contract probes before collector or paper admission.
+- Exact PolyWX private recommendation logic is not public; local weather focus is an auditable approximation, not a copied buy signal.
+- Independent WU PWS entitlement is missing; PWS series and peak-lock remain unavailable.
 - WU/HKO truth coverage and resolved paper outcomes are insufficient for profitability claims.
-- China Live has no retrospective weather.com.cn minute archive; points before collector activation remain honestly absent.
-- Layer 7/8 still require operator visual acceptance before starting the 14-30 day cohort; the paper execution path is connected, but the current Shanghai batch has no strategy that passes all paper gates.
-- Paper sizing is not yet cohort-correct: changing the simulated bankroll constrains cash but does not recompute each decision's Kelly amount from that bankroll. The global `MAX_BET` can also cap a higher cohort per-trade setting.
-- Strategy thresholds remain code constants without an immutable strategy-profile revision, so parameter experiments are not yet fully auditable.
-- The marker computation contract now matches PolyWX, but persisted revision density does not: sampled archive peaks were Shanghai `13:00` vs `14:00`, Tokyo `15:00` vs `16:00`, and Chicago `18:00/86F` vs `17:00/87F`. Do not cosmetically override these values.
+- Current Shanghai revision-2 decisions are all paper-blocked by actual gates; do not relax gates merely to manufacture orders.
+- Information-edge exits remain disabled until SELL fills and historical orderbook replay are implemented.
+- Correct-location Tokyo forecast history and same-local-day Chicago Historical benchmark still need additional archive density.
+- Collector-level timeout/residual-worker reporting and a controlled runtime observation remain before unattended scheduling.
 - Live dry-run/canary gates remain unaccepted and intentionally locked.
-- Scheduler cold-start memory regression is fixed, but `asyncio.to_thread` work cannot be force-cancelled after an outer timeout. Keep the scheduler controlled until collector-level HTTP timeouts and residual-worker reporting are audited.
 
 ## Next Step
-- Make paper sizing cohort-correct: recompute Kelly from the operator bankroll, resolve the double max-per-trade cap, and persist an immutable strategy-profile revision on decisions/orders before the first 14-30 day cohort. Do not enable information-edge exits until SELL fills and historical orderbook replay are implemented and tested.
-- Run a controlled admission batch for Manila and Guangzhou: AWC METAR, Weather.com forecast, WU Historical availability, then Gamma settlement-market probe. Keep both collector-disabled until the evidence report passes.
-- Benchmark the local Singapore `weather_focus` card against the PolyWX public card over several refreshes, then tune the documented near-peak threshold only from observed evidence.
-- Close Tokyo's missing past-hour forecast archive and source-freshness gaps, then repeat the three-city benchmark with the scheduler explicitly controlled.
-- Inspect blocked reasons across current cities, then decide whether any gate needs evidence-based calibration before starting the cohort; do not relax gates merely to create demo orders.
-- Obtain an entitled WU PWS key or keep PWS explicitly disabled.
-- After operator acceptance, start the explicit 14-30 day paper cohort; keep live locked.
+- Rebuild revision-2 signal decisions across all 14 enabled cities and publish a blocked-reason/candidate report.
+- Run a browser/operator acceptance pass on normal and `/developer` pages, then start the explicit 14-30 day paper cohort only if accepted.
+- Admit new cities one at a time through source and settlement probes; keep catalog-only cities disabled meanwhile.
+- Continue PolyWX numeric benchmarks and obtain an entitled PWS key or keep PWS explicitly disabled.

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ExternalLink, FlaskConical, Info, ListChecks, Play, Settings2, ShieldAlert, Square } from 'lucide-react'
-import { executePaperOrders, fetchPaperOrders, runPaperValidationTick, startPaperValidation, stopPaperValidation } from '../api'
+import { executePaperOrders, fetchPaperOrders, fetchStrategyProfiles, runPaperValidationTick, startPaperValidation, stopPaperValidation } from '../api'
 import type {
   PaperExecutionResult,
   PaperOrderRecord,
@@ -272,6 +272,13 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
   const [selectedStrategies, setSelectedStrategies] = useState<string[]>(['single_bucket_ev'])
   const [lastResult, setLastResult] = useState<PaperExecutionResult | null>(null)
   const validationActive = validation?.status === 'active'
+  const profilesQuery = useQuery({
+    queryKey: ['strategy-profiles'],
+    queryFn: fetchStrategyProfiles,
+    staleTime: 30000,
+  })
+  const activePaperProfile = profilesQuery.data?.profiles.find(profile => profile.active_scopes.includes('paper_default'))
+  const selectedRevisionId = validation?.strategy_revision_id ?? activePaperProfile?.revision_id ?? ''
   useEffect(() => {
     if (!validationActive) return
     setBankroll(String(validation?.bankroll_usd ?? 40))
@@ -285,8 +292,11 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
       '',
     )
     const latestRows = latestIssuedAt ? rows.filter(row => row.issued_at === latestIssuedAt) : rows
-    return groupDecisions(latestRows.filter(row => selectedStrategies.includes(row.strategy_name ?? 'single_bucket_ev')))
-  }, [decisions, selectedStrategies])
+    const revisionRows = selectedRevisionId
+      ? latestRows.filter(row => row.strategy_revision_id === selectedRevisionId)
+      : []
+    return groupDecisions(revisionRows.filter(row => selectedStrategies.includes(row.strategy_name ?? 'single_bucket_ev')))
+  }, [decisions, selectedRevisionId, selectedStrategies])
   const eligibleCount = queue.filter(item => item.decisions.length === (item.ladderGroupId ? 3 : 1)
     && item.decisions.every(row => row.paper_allowed && row.paper_decision === 'buy')).length
   const ordersQuery = useQuery({
@@ -324,6 +334,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
         max_orders_per_day: 5,
         decision_max_age_minutes: 30,
         strategies: selectedStrategies,
+        strategy_revision_id: selectedRevisionId,
       })
       await runPaperValidationTick()
       return started
@@ -354,6 +365,10 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
           <span className={`border px-1.5 py-0.5 text-[9px] ${liveAvailable ? 'border-green-500/30 text-green-300' : 'border-amber-500/30 text-amber-300'}`}>
             {liveAvailable ? '实盘待验收' : '实盘锁定'}
           </span>
+        </div>
+        <div className="mt-1 flex items-center justify-between gap-2 text-[9px] text-neutral-600">
+          <span title={selectedRevisionId || '未加载'}>策略版本 {selectedRevisionId ? selectedRevisionId.slice(0, 12) : '--'}</span>
+          <a href="/developer" className="text-cyan-500 hover:text-cyan-300">开发者模式</a>
         </div>
         <div className="mt-2 grid grid-cols-2 gap-1 text-[10px]">
           <div className="border border-neutral-800 p-2"><div className="text-neutral-600">可模拟策略</div><div className="mt-1 tabular-nums text-neutral-200">{eligibleCount} / {queue.length}</div></div>

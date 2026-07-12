@@ -1,5 +1,13 @@
 # WeatherBot 项目进度台账
 
+### 2026-07-13: Layer 8 cohort Kelly、不可变策略版本与开发者模式
+
+- 改动：新增 append-only `strategy_profile_revisions` 与激活事件；`signal-decision-v3`、`paper-validation-v2`、`paper-execution-v2` 从信号到 cohort 到订单统一钉住 revision/hash/参数快照。模拟 tick 按 cohort 当前可用资金重算 Kelly，单笔本金比例、cohort 单笔、策略、日额度和现金只走一次显式 cap 链；ladder 预留 3 个订单/持仓槽位。executor 使用最新本地 orderbook 快照并动态计算 age，不再信任信号生成时冻结的 age；毫秒 epoch 时间戳已支持。
+- UI：普通右栏保留 `$40` 本金、策略组合、一键模拟、订单、结算和 Polymarket 链接，只读显示策略 revision；维护诊断从普通页隐藏。新增 `/developer` 策略实验室，可在本机确认后创建不可变 revision，并分别激活到信号生成与 paper 默认；不暴露密钥、私钥、webhook 或 live 开关。
+- 验证：`tests.test_v3_core` 215/215；`tests.test_polywx_contract` 15/15；Layer 8/策略 profile 定向测试 22/22；`npm run build` 通过。浏览器普通页无系统诊断/横向溢出，开发者页可见 revision、阈值和只读系统状态，console error/warn=0。真实库已激活保守 revision 2，并重建上海 11 条 revision-2 decisions；它们均被真实 spread/bias 等 gate 阻塞，没有制造模拟订单。
+- 结论：用户输入模拟本金现在真正决定 Kelly 金额；全局 `$2` 二次截断和参数不可追溯两项 P0 已关闭。策略组合仍只定义入场，退出继续限定 `hold_to_settlement`；信息差退出在 SELL fill 与历史盘口回放完成前保持禁用。scheduler stopped、paper cohort inactive、`LIVE_TRADING=false`。
+- 下一步：按 revision 2 重建 14 个 enabled 城市的最新决策并汇总 blocked reason；经操作员 UI 验收后启动首轮 14-30 天 paper cohort，不放宽 gate，不开启 live。
+
 ### 2026-07-12: 调度器冷启动资源回归修复
 
 - 改动：为所有重型 poller 增加全局单槽限流和每次启动错峰；collector 批次不再逐城市执行全库 readiness；保留结果改为有界摘要；长任务错过周期后合并 tick，不再每秒追赶。`build_data_readiness()` 改为只查询资格审计所需列，订单簿深度在 SQL 中计算，不再把 raw/orderbook JSON 装入 Python；readiness 历史限制为最近 200 条，derive 热路径改为显式审计模式。

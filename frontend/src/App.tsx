@@ -662,7 +662,7 @@ function PaperValidationCard({ status }: { status?: PaperValidationStatus | null
           <Wallet className="h-4 w-4 text-cyan-300" />
           <div>
             <div className="text-sm font-medium text-neutral-100">模拟内测</div>
-            <div className="mt-0.5 text-[9px] text-neutral-600">paper-validation-v1 · 权威结算后计分</div>
+            <div className="mt-0.5 text-[9px] text-neutral-600">paper-validation-v2 · 权威结算后计分</div>
           </div>
         </div>
         <span className={`shrink-0 border px-1.5 py-0.5 text-[9px] ${
@@ -1746,7 +1746,7 @@ function App() {
           </>}
 
           <details
-            className="shrink-0 border-t border-neutral-800 bg-black"
+            className="hidden"
             onToggle={event => setAdvancedDiagnosticsOpen(event.currentTarget.open)}
           >
             <summary className="cursor-pointer select-none px-3 py-2 text-xs text-neutral-300 hover:bg-neutral-950">

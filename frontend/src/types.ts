@@ -552,6 +552,8 @@ export interface SignalDecisionRecord {
   kelly_fraction?: number | null
   position_size_usd?: number | null
   ladder_group_id?: string | null
+  strategy_revision_id?: string | null
+  strategy_params_hash?: string | null
   blocked_reason_primary?: string | null
   reasons?: string[]
   cautions?: string[]
@@ -619,6 +621,10 @@ export interface PaperOrderRecord {
   bucket_key?: string
   strategy_name?: string
   ladder_group_id?: string
+  strategy_revision_id?: string
+  sizing_snapshot?: Record<string, unknown>
+  execution_quote?: Record<string, unknown>
+  cap_reasons?: string[]
   city_key?: string
   target_date?: string
   event_url?: string
@@ -1170,6 +1176,10 @@ export interface PaperValidationStatus {
   max_orders_per_day?: number
   strategies?: string[]
   cities?: string[]
+  strategy_revision_id?: string
+  strategy_profile_snapshot?: StrategyProfileSnapshot
+  kelly_multiplier?: number
+  bankroll_fraction_cap?: number
 }
 
 export interface PaperValidationStartOptions {
@@ -1182,6 +1192,53 @@ export interface PaperValidationStartOptions {
   decision_max_age_minutes?: number
   cities?: string[]
   strategies: string[]
+  strategy_revision_id?: string
+}
+
+export interface StrategyProfileSnapshot {
+  revision_id?: string
+  profile_key?: string
+  revision_no?: number
+  schema_version?: number
+  engine_version?: string
+  content_sha256?: string
+  parameters?: StrategyProfileParameters
+}
+
+export interface StrategyProfileParameters {
+  schema_version: number
+  decision_policy: {
+    max_spread_bps: number
+    stale_book_seconds: number
+    min_bias_sample_days: number
+    low_price_tail_ask: number
+  }
+  sizing: {
+    kelly_multiplier: number
+    max_bankroll_fraction_per_trade: number
+  }
+  strategies: Record<string, Record<string, boolean | number>>
+  exit_policy: { mode: string }
+}
+
+export interface StrategyProfileRevision extends StrategyProfileSnapshot {
+  revision_id: string
+  profile_key: string
+  revision_no: number
+  engine_version: string
+  content_sha256: string
+  parameters: StrategyProfileParameters
+  active_scopes: string[]
+  created_by?: string
+  change_note?: string
+  created_at?: string
+}
+
+export interface StrategyProfilesResponse {
+  ok: boolean
+  profiles: StrategyProfileRevision[]
+  allowed_scopes: string[]
+  live_trading: boolean
 }
 
 export interface CityEvidenceModule {
