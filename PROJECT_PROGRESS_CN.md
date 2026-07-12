@@ -482,3 +482,12 @@
 - 结论：上海和 Chicago 的 Forecast/Cloud 与 PolyWX 接近；东京过去小时 Forecast 仍比 PolyWX 低约 2C，但 METAR/Historical 抽样一致，因此数值口径尚未完全闭环。WeatherBot Forecast/Historical 默认 30 分钟，PolyWX 抽样约 10-13 分钟，刷新速度尚未等价。
 - 阻塞：需追踪东京 forecast archive 选取逻辑；PWS entitlement 仍缺；活动城市是否改为分层 10 分钟轮询需先评估 API 配额与写放大。scheduler 保持停止，paper cohort inactive，`LIVE_TRADING=false`。
 - 下一步：先修东京过去小时 Forecast 快照选择，再决定只对活跃市场城市缩短 Forecast/WU Historical 周期，避免 14 城无差别高频写入。
+
+### 2026-07-12：Tokyo/RJTT 坐标、预测位置契约与 DEB 冷启动修复
+
+- 改动：依据 AWC stationinfo 将 Tokyo/RJTT 从错误坐标 `35.7647,140.3864` 修正为羽田 `35.553,139.781`；注册表新增 `location_version`。Hourly、ensemble DEB 与 bias 训练会排除 `source_url` 明示 geocode/latitude/longitude 与当前结算站不一致的 forecast run。
+- 数据安全：旧 Tokyo 预测行保留审计但不再进入展示/DEB；旧 bias 表属于 location v1，不再应用到 location v2。成熟残差暂缺时 σ 使用 `1.2C` 保守冷启动误差并记录 `uncalibrated_sigma_default`，避免样本不足时虚假收窄。
+- 验证：重新抓取羽田坐标 Weather.com v3 与六个 Open-Meteo 模型。修复后 Tokyo DEB `28.97+/-1.39C`，同时间 PolyWX `28.90+/-1.37C`；μ 差 `0.07C`、σ 差 `0.02C`。错误地点的过去小时不再显示为 24C，而是诚实留空。
+- 结论：Tokyo 的 2C 分裂根因是 station ID 正确但坐标错误，并叠加旧坐标 bias。该 P0 已闭环；从修复时点起正确 forecast archive 会逐小时积累。
+- 验收：全套 `270/270` Python tests、前端 production build 与 `git diff --check` 通过；新后端加载后，浏览器确认 Tokyo 错误 24C 过去时段消失、正确序列从 09:00 `27.8C` 开始、DEB `28.97+/-1.39C`，console 无 error。
+- 下一步：评估仅对活跃市场城市启用 10 分钟 Forecast/WU Historical 调度，继续保持 scheduler 停止、paper cohort inactive、live 锁定。

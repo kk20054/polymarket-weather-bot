@@ -88,6 +88,9 @@ class EnsembleProbabilityTests(unittest.TestCase):
         self.assertGreaterEqual(prediction["member_count"], 5)
         self.assertGreater(prediction["mu"], 33.5)
         self.assertLess(prediction["mu"], 34.5)
+        self.assertEqual(prediction["sigma_from_history"], 1.2)
+        self.assertGreaterEqual(prediction["sigma"], 1.2)
+        self.assertIn("uncalibrated_sigma_default", prediction["build_warnings"])
 
     def test_ensemble_prediction_reports_weighted_runtime_bias(self):
         db_path = test_db_path("ensemble_weighted_bias")

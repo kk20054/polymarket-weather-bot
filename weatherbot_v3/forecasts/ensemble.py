@@ -11,7 +11,7 @@ from ..config import DATA_DIR
 from ..db import connect, init_v3_db, upsert_model_reprice_event, utc_now
 from ..deb import bucket_bounds_in_prediction_unit, sigma_with_floor
 from ..env_utils import env_value
-from ..registry import CitySettlementProfile, get_city_profile
+from ..registry import CitySettlementProfile, forecast_source_matches_profile_location, get_city_profile
 
 
 ALGO = "ensemble_v1"
@@ -20,6 +20,7 @@ BIAS_TABLE_PATH = DATA_DIR / "bias_table.json"
 MIN_FAMILIES_FOR_ENSEMBLE = 2
 MIN_MEMBER_COUNT_FOR_SINGLE_FAMILY = 5
 SIGMA_FLOOR_C = 0.5
+UNCALIBRATED_SIGMA_C = 1.2
 BIAS_MIN_SAMPLE_COUNT = 20
 
 REGION_MODEL_WEIGHTS = {
@@ -218,7 +219,7 @@ def build_ensemble_prediction(
     residual_weight = sum(weight for _value, weight in residual_terms)
     sigma_from_history_c = math.sqrt(
         sum((value ** 2) * weight for value, weight in residual_terms) / residual_weight
-    ) if residual_weight > 0 else 0.0
+    ) if residual_weight > 0 else UNCALIBRATED_SIGMA_C
     # Independent model spread and recent forecast error are orthogonal
     # uncertainty terms. Combining them prevents deterministic source means
     # from producing unrealistically narrow one-degree market distributions.
@@ -275,7 +276,10 @@ def build_ensemble_prediction(
         "peak_source": "ensemble_weighted",
         "ensemble_samples": samples_unit,
         "ensemble_sample_weights": [row["weight"] for row in samples_unit],
-        "build_warnings": _source_warnings(usable, algo),
+        "build_warnings": sorted(set([
+            *_source_warnings(usable, algo),
+            *([] if residual_weight > 0 else ["uncalibrated_sigma_default"]),
+        ])),
     }
 
 
@@ -601,7 +605,7 @@ def _latest_forecast_members(
                 """
                 SELECT fr.id AS run_id, fr.city, fr.target_date, fr.source, fr.provider,
                        fr.model, fr.run_at, fr.retrieved_at, fr.valid_at, fr.unit, fr.mean_high,
-                       fr.std_high, fr.member_count, fm.member_id, fm.high_temp,
+                       fr.std_high, fr.member_count, fr.source_url, fm.member_id, fm.high_temp,
                        fm.hourly_json
                 FROM forecast_runs fr
                 JOIN forecast_members fm ON fm.run_id = fr.id
@@ -623,6 +627,11 @@ def _latest_forecast_members(
             if snapshot_at is not None and snapshot_at <= cutoff:
                 eligible_rows.append(row)
         rows = eligible_rows
+    rows = [
+        row
+        for row in rows
+        if forecast_source_matches_profile_location(row.get("source_url"), profile)
+    ]
     latest_by_source: dict[str, int] = {}
     for row in rows:
         source = str(row.get("source") or "")
@@ -652,7 +661,7 @@ def _components_from_rows(
             continue
         first = best_source[0]
         unit = str(first.get("unit") or profile.unit or "C").upper()
-        bias_c, sample_count = _bias_for(bias_table, profile.station_id, family)
+        bias_c, sample_count = _bias_for(bias_table, profile.station_id, family, profile=profile)
         bias_unit = convert_temperature_delta(bias_c, "C", unit)
         highs_unit = [_first_number(row.get("high_temp")) for row in best_source]
         highs_c = [
@@ -684,7 +693,7 @@ def _components_from_rows(
             "model_daily_high_c": round(sum(adjusted_c) / len(adjusted_c), 4),
             "bias_correction_c": round(bias_c, 4),
             "bias_sample_count": int(sample_count),
-            "mae_7d": _mae_for(bias_table, profile.station_id, family),
+            "mae_7d": _mae_for(bias_table, profile.station_id, family, profile=profile),
             "truth_basis": _truth_basis(profile, target_date, path),
             "retrieved_at": str(first.get("retrieved_at") or ""),
             "peak_hour": peak_hour.get("peak_hour") or "",
@@ -758,11 +767,19 @@ def _peak_hour_from_members(rows: list[dict[str, Any]], unit: str, bias_unit: fl
     return best
 
 
-def _bias_for(bias_table: list[dict[str, Any]], station_id: str, family: str) -> tuple[float, int]:
+def _bias_for(
+    bias_table: list[dict[str, Any]],
+    station_id: str,
+    family: str,
+    *,
+    profile: CitySettlementProfile | None = None,
+) -> tuple[float, int]:
     station = str(station_id or "").upper()
     fam = str(family or "").lower()
     for row in bias_table:
         if str(row.get("icao") or row.get("station_id") or "").upper() == station and str(row.get("model") or "").lower() == fam:
+            if profile is not None and int(row.get("location_version") or 1) != int(profile.location_version):
+                continue
             sample_count = int(row.get("sample_count") or 0)
             if sample_count < BIAS_MIN_SAMPLE_COUNT:
                 return 0.0, sample_count
@@ -783,13 +800,21 @@ def _component_role(family: str) -> str:
     return "forecast"
 
 
-def _mae_for(bias_table: list[dict[str, Any]], station_id: str, family: str) -> float | None:
+def _mae_for(
+    bias_table: list[dict[str, Any]],
+    station_id: str,
+    family: str,
+    *,
+    profile: CitySettlementProfile | None = None,
+) -> float | None:
     station = str(station_id or "").upper()
     fam = str(family or "").lower()
     for row in bias_table:
         if str(row.get("icao") or row.get("station_id") or "").upper() != station:
             continue
         if str(row.get("model") or "").lower() != fam:
+            continue
+        if profile is not None and int(row.get("location_version") or 1) != int(profile.location_version):
             continue
         if int(row.get("sample_count") or 0) < BIAS_MIN_SAMPLE_COUNT:
             return None

@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from .config import DATA_DIR
 from .db import connect, init_v3_db
 from .forecasts.ensemble import BIAS_MIN_SAMPLE_COUNT, model_family
-from .registry import SETTLEMENT_REGISTRY
+from .registry import SETTLEMENT_REGISTRY, forecast_source_matches_profile_location
 
 
 DEFAULT_BIAS_TABLE = DATA_DIR / "bias_table.json"
@@ -84,6 +84,9 @@ def train_bias_table(
             rows.append({
                 "city": city,
                 "icao": profile.station_id,
+                "location_version": profile.location_version,
+                "latitude": profile.latitude,
+                "longitude": profile.longitude,
                 "model": family,
                 "additive_bias_c": round(float(additive_bias), 4),
                 "raw_mae_c": _round_metric(_mae(residuals)),
@@ -223,7 +226,7 @@ def _residual_records_for_family(
             dict(row)
             for row in conn.execute(
                 """
-                SELECT id, target_date, source, model, unit, mean_high,
+                SELECT id, target_date, source, model, unit, mean_high, source_url,
                        run_at, retrieved_at, lead_hours, horizon
                 FROM forecast_runs
                 WHERE city = ?
@@ -240,10 +243,15 @@ def _residual_records_for_family(
     family_rows = 0
     leakage_excluded = 0
     invalid_as_of = 0
+    location_mismatch_excluded = 0
     for row in rows:
         if model_family(row.get("source") or row.get("model") or "") != family:
             continue
         family_rows += 1
+        profile = SETTLEMENT_REGISTRY.get(city)
+        if not forecast_source_matches_profile_location(row.get("source_url"), profile):
+            location_mismatch_excluded += 1
+            continue
         target_date = str(row.get("target_date") or "")
         as_of = _forecast_as_of(row)
         cutoff = _target_local_start_utc(target_date, timezone_name)
@@ -277,6 +285,7 @@ def _residual_records_for_family(
         })
     return records, {
         "candidate_rows": family_rows,
+        "location_mismatch_excluded_rows": location_mismatch_excluded,
         "leakage_excluded_rows": leakage_excluded,
         "invalid_as_of_rows": invalid_as_of,
         "duplicate_rows": max(0, family_rows - leakage_excluded - invalid_as_of - len(records)),

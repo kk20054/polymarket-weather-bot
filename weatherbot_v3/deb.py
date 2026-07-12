@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover - Python always provides zoneinfo in suppo
 
 from .db import connect, init_v3_db, list_daily_max_predictions, list_market_buckets, upsert_daily_max_prediction
 from .env_utils import env_value
-from .registry import get_city_profile
+from .registry import forecast_source_matches_profile_location, get_city_profile
 
 
 METHOD = "weatherbot-deb-v2"
@@ -526,6 +526,16 @@ def _forecast_components(
         ).fetchall():
             members_by_run.setdefault(int(row["run_id"]), []).append(dict(row))
 
+    location_mismatch = any(
+        not forecast_source_matches_profile_location(run.get("source_url"), profile)
+        for run in runs
+    )
+    runs = [
+        run
+        for run in runs
+        if forecast_source_matches_profile_location(run.get("source_url"), profile)
+    ]
+    warnings: list[str] = ["forecast_location_mismatch_excluded"] if location_mismatch else []
     latest_by_source: dict[str, dict[str, Any]] = {}
     for run in runs:
         if str(run.get("parse_status") or "parsed") != "parsed":
@@ -542,7 +552,6 @@ def _forecast_components(
         if source not in latest_by_source:
             latest_by_source[source] = run
 
-    warnings: list[str] = []
     if not latest_by_source:
         for run in runs:
             source = str(run.get("source") or run.get("provider") or run.get("model") or "unknown")

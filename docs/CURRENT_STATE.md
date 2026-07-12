@@ -10,6 +10,7 @@
 ## Latest Ledger Summaries
 - 2026-07-12 / Forecast-DEB field closure: Weather.com condition, precipitation probability, revision count and retrieval time now survive Layer 4 into the dashboard. Shanghai DEB includes v3/GFS/JMA/ECMWF/ICON/GEM and benchmarks at `30.10+/-1.51C` versus PolyWX `29.88+/-1.62C` at the sampled time.
 - 2026-07-12 / Three-city live benchmark: Shanghai and Chicago Forecast/Cloud are close to PolyWX, Tokyo past-hour Forecast is about 2C low while METAR/Historical agree. Chart hover labels now show `YYYY/MM/DD HH:mm` instead of raw minute indexes.
+- 2026-07-12 / Tokyo station-location repair: RJTT coordinates were corrected from the Narita-area `35.7647,140.3864` to AWC RJTT/HND `35.553,139.781`. Wrong-location forecast snapshots and bias rows are now excluded; Tokyo DEB moved to `28.97+/-1.39C` versus PolyWX `28.90+/-1.37C`.
 - 2026-07-12 / Honest evidence badges: city-page Forecast/METAR/Historical status reads native source series rather than stale aggregate cards. DEB observed floor now displays the actual METAR high and METAR sample count.
 - 2026-07-11 / Source-role repair (`84ab4f0`): split Weather.com, NWP, WU Historical, METAR, China Live and PWS pollers. PWS now requires an independent WU key and no longer floods 401 with the forecast key.
 - 2026-07-11 / Native-series dashboard: `/api/hourly-consensus` exposes native-frequency source series. Shanghai smoke returned Forecast 24, METAR 36, WU Historical 36, and Pudong China Live rows.
@@ -25,7 +26,7 @@
 - Independent WU PWS entitlement is missing; PWS series and peak-lock are unavailable.
 - Two-hour/six-hour scheduler validation is intentionally deferred until operator UI and numeric benchmark acceptance.
 - Shanghai same-date Forecast/Cloud/DEB benchmark is within the current target tolerance; Chicago still needs same-local-day Historical and final numeric comparison after its local day begins.
-- Tokyo archived Forecast snapshot selection differs materially from PolyWX and must be traced before operator acceptance.
+- Tokyo pre-fix past-hour forecasts remain intentionally blank because their archived snapshots used the wrong location; correct history will accumulate from the repair onward.
 - Forecast and WU Historical default to 30-minute polling versus PolyWX's sampled 10-13 minute freshness; cadence is not yet equivalent.
 - WU/HKO truth coverage and resolved paper outcomes are insufficient for profitability claims.
 - China Live has no retrospective weather.com.cn minute archive; points before collector activation remain honestly absent.

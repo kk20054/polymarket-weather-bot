@@ -30,7 +30,7 @@ from weatherbot_v3.openmeteo import fetch_openmeteo_forecasts, model_allowlist_f
 from weatherbot_v3.mesonet import ingest_mesonet_observations, mesonet_observation_from_pws_row
 from weatherbot_v3.pws import aggregate_pws_observations, fetch_wunderground_pws_city, parse_pws_current_payload
 from weatherbot_v3.qualification import build_data_readiness
-from weatherbot_v3.registry import SETTLEMENT_REGISTRY
+from weatherbot_v3.registry import SETTLEMENT_REGISTRY, forecast_source_matches_profile_location
 from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summary
 from weatherbot_v3.source_health import build_source_health_matrix
 from weatherbot_v3.stations import apply_market_probe_result, list_stations, reconcile_station_verification_status, station_row_from_profile, sync_station_registry
@@ -1729,6 +1729,31 @@ class V3CoreTests(unittest.TestCase):
             self.assertTrue(profile.station_id)
             self.assertNotEqual(profile.timezone, "UTC")
             self.assertIn(profile.unit, {"F", "C"})
+
+        tokyo = SETTLEMENT_REGISTRY["tokyo"]
+        self.assertEqual(tokyo.station_id, "RJTT")
+        self.assertAlmostEqual(tokyo.latitude, 35.553, places=3)
+        self.assertAlmostEqual(tokyo.longitude, 139.781, places=3)
+        self.assertEqual(tokyo.location_version, 2)
+
+    def test_weathercom_geocode_must_match_settlement_station(self):
+        tokyo = SETTLEMENT_REGISTRY["tokyo"]
+        self.assertTrue(forecast_source_matches_profile_location(
+            "https://api.weather.com/v3/wx/forecast/hourly/15day?geocode=35.553%2C139.781",
+            tokyo,
+        ))
+        self.assertFalse(forecast_source_matches_profile_location(
+            "https://api.weather.com/v3/wx/forecast/hourly/15day?geocode=35.7647%2C140.3864",
+            tokyo,
+        ))
+        self.assertTrue(forecast_source_matches_profile_location(
+            "https://api.open-meteo.com/v1/forecast?latitude=35.553&longitude=139.781",
+            tokyo,
+        ))
+        self.assertFalse(forecast_source_matches_profile_location(
+            "https://api.open-meteo.com/v1/forecast?latitude=35.7647&longitude=140.3864",
+            tokyo,
+        ))
 
     def test_station_registry_sync_persists_layer1_station_rows(self):
         db_path = test_db_path("stations_registry")
@@ -4918,6 +4943,34 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(point["forecast_cloud_cover"], 100)
         self.assertEqual(point["retrieved_at"], "2026-07-05T12:00:00+00:00")
 
+    def test_weathercom_forecast_excludes_explicit_wrong_station_geocode(self):
+        db_path = test_db_path("weathercom_station_geocode")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        profile = SETTLEMENT_REGISTRY["tokyo"]
+        valid_time = int(datetime(2026, 7, 12, 0, tzinfo=ZoneInfo("Asia/Tokyo")).timestamp())
+        correct_runs, correct_members = weathercom_runs_from_response(
+            profile,
+            {"validTimeUtc": [valid_time], "temperature": [26.0], "cloudCover": [75]},
+            source_url="https://api.weather.com/v3/wx/forecast/hourly/15day?geocode=35.553%2C139.781",
+            retrieved_at="2026-07-11T12:00:00+00:00",
+            forecast_days=2,
+        )
+        wrong_runs, wrong_members = weathercom_runs_from_response(
+            profile,
+            {"validTimeUtc": [valid_time], "temperature": [24.0], "cloudCover": [33]},
+            source_url="https://api.weather.com/v3/wx/forecast/hourly/15day?geocode=35.7647%2C140.3864",
+            retrieved_at="2026-07-11T13:00:00+00:00",
+            forecast_days=2,
+        )
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            for run, members in zip([*correct_runs, *wrong_runs], [*correct_members, *wrong_members]):
+                insert_forecast_run(run, members)
+            points = forecast_hourly_points({"tokyo": {"2026-07-12"}}, db_path=db_path)["tokyo"]
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["best"], 26.0)
+        self.assertEqual(points[0]["cloud_cover"], 75.0)
+
     def test_deb_records_missing_weathercom_warning_in_polywx_mode(self):
         db_path = test_db_path("polywx_missing_weathercom")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -6434,16 +6487,20 @@ class V3CoreTests(unittest.TestCase):
 
         self.assertEqual(row["sample_dates"], ["2026-06-30"])
         self.assertAlmostEqual(row["additive_bias_c"], 1.0)
+        self.assertEqual(row["location_version"], 1)
+        self.assertEqual(row["location_mismatch_excluded_rows"], 0)
         self.assertEqual(payload["training_policy"]["as_of_date_exclusive"], "2026-07-01")
 
     def test_low_sample_bias_mae_cannot_change_runtime_weights(self):
-        from weatherbot_v3.forecasts.ensemble import _mae_for
+        from weatherbot_v3.forecasts.ensemble import _bias_for, _mae_for
 
         low_sample = [{"icao": "KORD", "model": "ecmwf", "sample_count": 7, "mae_7d_c": 0.2}]
         mature = [{"icao": "KORD", "model": "ecmwf", "sample_count": 20, "mae_7d_c": 0.4}]
 
         self.assertIsNone(_mae_for(low_sample, "KORD", "ecmwf"))
         self.assertAlmostEqual(_mae_for(mature, "KORD", "ecmwf"), 0.4)
+        stale_tokyo = [{"icao": "RJTT", "model": "ecmwf", "sample_count": 30, "additive_bias_c": -1.5}]
+        self.assertEqual(_bias_for(stale_tokyo, "RJTT", "ecmwf", profile=SETTLEMENT_REGISTRY["tokyo"]), (0.0, 0))
 
     def test_truth_hko_daily_extract_parser_handles_hko_json_payload(self):
         from weatherbot_v3.truth.hko import parse_hko_daily_extract, persist_hko_daily

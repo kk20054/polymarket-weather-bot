@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from .db import connect, init_v3_db, upsert_hourly_consensus, upsert_hourly_consensus_rows
 from .forecast_archive import TEMPERATURE_KEYS
+from .registry import forecast_source_matches_profile_location
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 
 FIELD_KEYS = {
@@ -878,8 +879,17 @@ def forecast_hourly_points(
 def _select_forecast_runs_for_target(city: str, runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     profile = SETTLEMENT_REGISTRY.get(str(city or "").strip().lower())
     primary_sources = set(_primary_sources_for_profile(profile))
-    eligible = [run for run in runs if _is_training_eligible(run)]
-    weathercom = [run for run in eligible if _source_label(run) == WEATHERCOM_SOURCE]
+    eligible = [
+        run
+        for run in runs
+        if _is_training_eligible(run)
+        and forecast_source_matches_profile_location(run.get("source_url"), profile)
+    ]
+    weathercom = [
+        run
+        for run in eligible
+        if _source_label(run) == WEATHERCOM_SOURCE
+    ]
     if weathercom:
         supplemental = [
             run for run in eligible
