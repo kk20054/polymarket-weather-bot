@@ -13,6 +13,16 @@ class TailBuyingStrategy(StrategyBase):
     max_order_usd = 50.0
     daily_candidate_cap = 5
 
+    def __init__(self, parameters: dict[str, Any] | None = None):
+        self.parameters = dict(parameters or {})
+        self.min_edge = float(self.parameters.get("min_edge", self.min_edge))
+        self.max_ask = float(self.parameters.get("max_ask", self.max_ask))
+        self.min_independent_settlement_days = int(
+            self.parameters.get("min_settlement_days", self.min_independent_settlement_days)
+        )
+        self.max_order_usd = float(self.parameters.get("max_order_usd", self.max_order_usd))
+        self.daily_candidate_cap = int(self.parameters.get("daily_candidate_cap", self.daily_candidate_cap))
+
     def evaluate(
         self,
         bucket: dict[str, Any],

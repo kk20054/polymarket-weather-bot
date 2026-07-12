@@ -2470,7 +2470,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(mid["blocked_reason_primary"], "insufficient_bias_samples")
         self.assertGreater(mid["model_probability"], mid["market_implied_probability"])
         self.assertGreater(mid["edge"], 0.03)
-        self.assertEqual(mid["decision_version"], "signal-decision-v1")
+        self.assertEqual(mid["decision_version"], "signal-decision-v3")
+        self.assertTrue(mid["strategy_revision_id"].startswith("spr_"))
         self.assertIn("daily_max_prediction_id", mid["evidence_links"])
 
     def test_signal_decisions_are_idempotent_by_decision_id(self):
@@ -2858,7 +2859,13 @@ class V3CoreTests(unittest.TestCase):
                     "live_decision": "blocked",
                     "gate_status": "paper_allowed",
                     "gate_reasons": ["live_trading_disabled"],
-                    "orderbook_snapshot": {"best_ask": 0.2, "best_bid": 0.195, "spread": 0.005, "ask_depth": 100},
+                    "orderbook_snapshot": {
+                        "best_ask": 0.2,
+                        "best_bid": 0.195,
+                        "spread": 0.005,
+                        "ask_depth": 100,
+                        "quote_timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
                 }, path=db_path)
 
             result = execute_paper_decision("ladder-mid", path=db_path)

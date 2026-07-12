@@ -9,10 +9,16 @@ from typing import Any
 from .config import ASIAN_CITY_PRIORITY
 from .db import connect, init_v3_db, list_signal_decisions, utc_now
 from .paper import PAPER_EXECUTION_VERSION, execute_paper_decision_record
+from .sizing import size_for_cohort
 from .stations import enabled_station_rows
+from .strategy_profiles import (
+    ensure_default_strategy_profile,
+    get_strategy_profile_revision,
+    profile_snapshot,
+)
 
 
-PAPER_VALIDATION_VERSION = "paper-validation-v1"
+PAPER_VALIDATION_VERSION = "paper-validation-v2"
 
 
 def start_paper_validation_run(
@@ -26,6 +32,7 @@ def start_paper_validation_run(
     decision_max_age_minutes: float = 30.0,
     cities: list[str] | None = None,
     strategies: list[str] | None = None,
+    strategy_revision_id: str = "",
     notes: str = "",
     path: Path | None = None,
 ) -> dict[str, Any]:
@@ -36,6 +43,22 @@ def start_paper_validation_run(
     now = datetime.now(timezone.utc)
     clean_cities = _default_cities(path=path) if cities is None else _unique(cities)
     clean_strategies = _unique(strategies or ["single_bucket_ev"])
+    profile = (
+        get_strategy_profile_revision(strategy_revision_id, path=path)
+        if strategy_revision_id
+        else ensure_default_strategy_profile("paper_default", path=path)
+    )
+    if not profile:
+        return {"ok": False, "status": "blocked", "reason": "strategy_profile_revision_not_found"}
+    profile_parameters = profile["parameters"]
+    enabled_strategies = {
+        name for name, parameters in profile_parameters["strategies"].items()
+        if parameters.get("enabled", True)
+    }
+    unsupported = [name for name in clean_strategies if name not in enabled_strategies]
+    if unsupported:
+        return {"ok": False, "status": "blocked", "reason": "strategy_disabled_in_profile", "strategies": unsupported}
+    sizing_policy = profile_parameters["sizing"]
     run = {
         "run_id": f"paper-{now:%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}",
         "status": "active",
@@ -50,6 +73,10 @@ def start_paper_validation_run(
         "decision_max_age_minutes": max(1.0, float(decision_max_age_minutes)),
         "cities": clean_cities,
         "strategies": clean_strategies,
+        "strategy_revision_id": profile["revision_id"],
+        "strategy_profile_snapshot": profile_snapshot(profile),
+        "kelly_multiplier": float(sizing_policy["kelly_multiplier"]),
+        "bankroll_fraction_cap": float(sizing_policy["max_bankroll_fraction_per_trade"]),
         "execution_version": PAPER_EXECUTION_VERSION,
         "notes": str(notes or ""),
         "version": PAPER_VALIDATION_VERSION,
@@ -62,8 +89,9 @@ def start_paper_validation_run(
                 max_per_trade_usd, daily_max_usd, max_open_positions,
                 max_orders_per_day, decision_max_age_minutes, cities_json,
                 strategies_json, execution_version, notes, raw_json, created_at,
-                updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                updated_at, strategy_revision_id, strategy_profile_snapshot_json,
+                kelly_multiplier, bankroll_fraction_cap
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run["run_id"], run["status"], run["started_at"], run["ends_at"], "",
@@ -72,7 +100,9 @@ def start_paper_validation_run(
                 run["decision_max_age_minutes"], json.dumps(clean_cities),
                 json.dumps(clean_strategies), run["execution_version"], run["notes"],
                 json.dumps(run, ensure_ascii=False, sort_keys=True), run["started_at"],
-                run["started_at"],
+                run["started_at"], run["strategy_revision_id"],
+                json.dumps(run["strategy_profile_snapshot"], ensure_ascii=False, sort_keys=True),
+                run["kelly_multiplier"], run["bankroll_fraction_cap"],
             ),
         )
     return {"ok": True, "status": "active", "run": paper_validation_status(run_id=run["run_id"], path=path)}
@@ -138,20 +168,53 @@ def run_paper_validation_tick(*, apply: bool = True, path: Path | None = None) -
     candidates = _fresh_candidates(run, path=path)
     results: list[dict[str, Any]] = []
     for decision in candidates:
-        if len(results) >= capacity or remaining_daily < 0.01 or cash_available < 0.01:
+        group_rows = _candidate_group_rows(decision, path=path)
+        leg_count = len(group_rows) if decision.get("ladder_group_id") else 1
+        if leg_count <= 0 or leg_count > remaining_open or leg_count > remaining_orders:
+            continue
+        if remaining_daily < 0.01 or cash_available < 0.01:
             break
-        amount = min(
-            float(run["max_per_trade_usd"]),
-            float(decision.get("position_size_usd") or run["max_per_trade_usd"]),
-            remaining_daily,
-            cash_available,
+        sizing_decision = max(
+            group_rows or [decision],
+            key=lambda row: float(row.get("model_probability") or 0.0),
         )
+        strategy_parameters = (run.get("strategy_profile_snapshot") or {}).get("parameters", {}).get("strategies", {})
+        strategy_config = strategy_parameters.get(str(decision.get("strategy_name") or "single_bucket_ev"), {})
+        strategy_cap = strategy_config.get("max_order_usd") if decision.get("strategy_name") == "tail_buying" else None
+        exposure_multiplier = (
+            float(strategy_config.get("group_exposure_multiplier", 0.60))
+            if decision.get("ladder_group_id") else 1.0
+        )
+        sizing = size_for_cohort(
+            sizing_decision.get("model_probability"),
+            sizing_decision.get("market_ask"),
+            bankroll=cash_available,
+            max_per_trade_usd=float(run["max_per_trade_usd"]),
+            kelly_multiplier=float(run.get("kelly_multiplier") or 0.15),
+            bankroll_fraction_cap=float(run.get("bankroll_fraction_cap") or 0.05),
+            strategy_cap_usd=strategy_cap,
+            remaining_daily_usd=remaining_daily,
+            cash_available_usd=cash_available,
+            exposure_multiplier=exposure_multiplier,
+        )
+        amount = sizing.capped_position_size_usd
+        if amount < 0.01:
+            continue
+        sizing_snapshot = {
+            **sizing.snapshot(),
+            "cohort_run_id": run["run_id"],
+            "strategy_name": decision.get("strategy_name"),
+            "strategy_revision_id": run.get("strategy_revision_id"),
+            "ladder_leg_count": leg_count,
+        }
         preflight = execute_paper_decision_record(
             decision,
             amount=amount,
             dry_run=True,
             path=path,
             cohort_run_id=run["run_id"],
+            max_per_trade_usd=float(run["max_per_trade_usd"]),
+            sizing_snapshot=sizing_snapshot,
         )
         if not preflight.get("ok"):
             continue
@@ -163,12 +226,16 @@ def run_paper_validation_tick(*, apply: bool = True, path: Path | None = None) -
                 dry_run=False,
                 path=path,
                 cohort_run_id=run["run_id"],
+                max_per_trade_usd=float(run["max_per_trade_usd"]),
+                sizing_snapshot=sizing_snapshot,
             )
         results.append(result)
         if result.get("ok") and result.get("status") != "duplicate":
-            filled = float((result.get("order") or {}).get("filled_amount") or amount)
+            filled = _result_filled_amount(result, amount)
             remaining_daily = max(0.0, remaining_daily - filled)
             cash_available = max(0.0, cash_available - filled)
+            remaining_open = max(0, remaining_open - leg_count)
+            remaining_orders = max(0, remaining_orders - leg_count)
     return {
         "ok": all(row.get("ok") or row.get("status") == "duplicate" for row in results),
         "status": "executed" if results else "no_fresh_candidates",
@@ -199,11 +266,13 @@ def _fresh_candidates(run: dict[str, Any], *, path: Path | None) -> list[dict[st
     seen: set[str] = set()
     for row in rows:
         issued = _parse_time(str(row.get("issued_at") or row.get("updated_at") or ""))
-        if issued < cutoff or issued < _parse_time(run["started_at"]):
+        if issued < cutoff:
             continue
         city = str(row.get("city_key") or "")
         strategy = str(row.get("strategy_name") or "single_bucket_ev")
         if city not in allowed_cities or strategy not in allowed_strategies:
+            continue
+        if str(row.get("strategy_revision_id") or "") != str(run.get("strategy_revision_id") or ""):
             continue
         if not bool(row.get("paper_allowed")) or str(row.get("paper_decision") or "") != "buy":
             continue
@@ -271,7 +340,33 @@ def _decode_run(row: dict[str, Any]) -> dict[str, Any]:
     row["cities"] = _json_list(row.pop("cities_json", "[]"))
     row["strategies"] = _json_list(row.pop("strategies_json", "[]"))
     row["raw"] = _json_obj(row.pop("raw_json", "{}"))
+    row["strategy_profile_snapshot"] = _json_obj(row.pop("strategy_profile_snapshot_json", "{}"))
     return row
+
+
+def _candidate_group_rows(decision: dict[str, Any], *, path: Path | None) -> list[dict[str, Any]]:
+    group_id = str(decision.get("ladder_group_id") or "")
+    if not group_id:
+        return [decision]
+    return [
+        row for row in list_signal_decisions(
+            city_key=str(decision.get("city_key") or ""),
+            target_date=str(decision.get("target_date") or ""),
+            limit=1000,
+            path=path,
+        )
+        if str(row.get("ladder_group_id") or "") == group_id
+        and str(row.get("strategy_revision_id") or "") == str(decision.get("strategy_revision_id") or "")
+    ]
+
+
+def _result_filled_amount(result: dict[str, Any], fallback: float) -> float:
+    if result.get("results"):
+        return sum(
+            float((item.get("order") or {}).get("filled_amount") or 0.0)
+            for item in result["results"]
+        )
+    return float((result.get("order") or {}).get("filled_amount") or fallback)
 
 
 def _default_cities(*, path: Path | None = None) -> list[str]:

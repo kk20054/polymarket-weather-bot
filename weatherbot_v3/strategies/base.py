@@ -135,6 +135,7 @@ class StrategyBase:
             bankroll=float(context.get("bankroll") or 0.0),
             max_per_trade_usd=float(context.get("max_per_trade_usd") or 0.0),
             kelly_multiplier=float(context.get("kelly_multiplier") or 0.15),
+            bankroll_fraction_cap=float(context.get("bankroll_fraction_cap") or 0.05),
         )
         kelly_fraction = sizing.kelly_fraction if kelly_fraction_override is None else round(max(0.0, float(kelly_fraction_override)), 8)
         position_size = sizing.capped_position_size_usd if position_size_override is None else round(max(0.0, float(position_size_override)), 4)
@@ -168,6 +169,14 @@ class StrategyBase:
             "kelly_fraction": kelly_fraction,
             "position_size_usd": position_size,
             "ladder_group_id": ladder_group_id,
+            "strategy_revision_id": str(context.get("strategy_revision_id") or ""),
+            "strategy_params_hash": str(context.get("strategy_params_hash") or ""),
+            "strategy_params_snapshot": context.get("strategy_params_snapshot") or {},
+            "sizing_bankroll_usd": float(context.get("bankroll") or 0.0),
+            "sizing_max_per_trade_usd": float(context.get("max_per_trade_usd") or 0.0),
+            "kelly_multiplier": float(context.get("kelly_multiplier") or 0.15),
+            "bankroll_fraction_cap": float(context.get("bankroll_fraction_cap") or 0.05),
+            "sizing_snapshot": sizing.snapshot(),
             "orderbook_snapshot": {
                 "best_bid": market_bid,
                 "best_ask": market_ask,
@@ -229,9 +238,9 @@ def decision_id(bucket: dict[str, Any], prediction: dict[str, Any], strategy_nam
         str(bucket.get("yes_token_id") or bucket.get("token_id") or ""),
         hour_key(prediction.get("issued_at")),
         str(id_version or "signal-decision-v1"),
+        strategy_name,
+        str(context.get("strategy_revision_id") or "legacy_unversioned"),
     ]
-    if strategy_name != "single_bucket_ev":
-        parts.append(strategy_name)
     key = "|".join(parts)
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
 
@@ -313,6 +322,15 @@ def parse_datetime(value: Any) -> datetime | None:
     text = str(value or "").strip()
     if not text:
         return None
+    try:
+        numeric = float(text)
+        if math.isfinite(numeric) and numeric > 0:
+            if numeric >= 1_000_000_000_000:
+                numeric /= 1000.0
+            if numeric >= 1_000_000_000:
+                return datetime.fromtimestamp(numeric, tz=timezone.utc)
+    except Exception:
+        pass
     if text.endswith("Z"):
         text = f"{text[:-1]}+00:00"
     try:

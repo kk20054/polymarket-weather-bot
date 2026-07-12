@@ -185,6 +185,36 @@ def init_v3_db(path: Path | None = None) -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS strategy_profile_revisions (
+                revision_id TEXT PRIMARY KEY,
+                profile_key TEXT NOT NULL,
+                revision_no INTEGER NOT NULL,
+                parent_revision_id TEXT,
+                schema_version INTEGER NOT NULL,
+                engine_version TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                parameters_json TEXT NOT NULL,
+                strategy_names_json TEXT NOT NULL,
+                validation_status TEXT NOT NULL,
+                validation_report_json TEXT NOT NULL,
+                code_commit_sha TEXT,
+                created_by TEXT NOT NULL,
+                change_note TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(profile_key, revision_no),
+                UNIQUE(profile_key, content_sha256)
+            );
+
+            CREATE TABLE IF NOT EXISTS strategy_profile_activation_events (
+                activation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL,
+                revision_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS paper_orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 decision_id TEXT,
@@ -195,6 +225,12 @@ def init_v3_db(path: Path | None = None) -> None:
                 bucket_key TEXT,
                 strategy_name TEXT,
                 ladder_group_id TEXT,
+                strategy_revision_id TEXT,
+                strategy_params_hash TEXT,
+                strategy_params_snapshot_json TEXT,
+                sizing_snapshot_json TEXT,
+                execution_quote_json TEXT,
+                cap_reasons_json TEXT,
                 city_key TEXT,
                 target_date TEXT,
                 event_url TEXT,
@@ -244,6 +280,10 @@ def init_v3_db(path: Path | None = None) -> None:
                 decision_max_age_minutes REAL NOT NULL,
                 cities_json TEXT,
                 strategies_json TEXT,
+                strategy_revision_id TEXT,
+                strategy_profile_snapshot_json TEXT,
+                kelly_multiplier REAL,
+                bankroll_fraction_cap REAL,
                 execution_version TEXT NOT NULL,
                 notes TEXT,
                 raw_json TEXT,
@@ -875,6 +915,13 @@ def init_v3_db(path: Path | None = None) -> None:
                 kelly_fraction REAL,
                 position_size_usd REAL,
                 ladder_group_id TEXT,
+                strategy_revision_id TEXT,
+                strategy_params_hash TEXT,
+                strategy_params_snapshot_json TEXT,
+                sizing_bankroll_usd REAL,
+                sizing_max_per_trade_usd REAL,
+                kelly_multiplier REAL,
+                bankroll_fraction_cap REAL,
                 orderbook_snapshot_json TEXT,
                 tick_size REAL,
                 order_min_size REAL,
@@ -1146,6 +1193,13 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "kelly_fraction": "REAL",
             "position_size_usd": "REAL",
             "ladder_group_id": "TEXT",
+            "strategy_revision_id": "TEXT",
+            "strategy_params_hash": "TEXT",
+            "strategy_params_snapshot_json": "TEXT",
+            "sizing_bankroll_usd": "REAL",
+            "sizing_max_per_trade_usd": "REAL",
+            "kelly_multiplier": "REAL",
+            "bankroll_fraction_cap": "REAL",
             "orderbook_snapshot_json": "TEXT",
             "tick_size": "REAL",
             "order_min_size": "REAL",
@@ -1169,6 +1223,12 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "bucket_key": "TEXT",
             "strategy_name": "TEXT",
             "ladder_group_id": "TEXT",
+            "strategy_revision_id": "TEXT",
+            "strategy_params_hash": "TEXT",
+            "strategy_params_snapshot_json": "TEXT",
+            "sizing_snapshot_json": "TEXT",
+            "execution_quote_json": "TEXT",
+            "cap_reasons_json": "TEXT",
             "city_key": "TEXT",
             "target_date": "TEXT",
             "event_url": "TEXT",
@@ -1193,6 +1253,12 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "opened_at": "TEXT",
             "closed_at": "TEXT",
             "cohort_run_id": "TEXT",
+        },
+        "paper_validation_runs": {
+            "strategy_revision_id": "TEXT",
+            "strategy_profile_snapshot_json": "TEXT",
+            "kelly_multiplier": "REAL",
+            "bankroll_fraction_cap": "REAL",
         },
         "fills": {
             "idempotency_key": "TEXT",
@@ -1318,6 +1384,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_bucket ON signal_decisions(bucket_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_strategy ON signal_decisions(strategy_name)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_ladder_group ON signal_decisions(ladder_group_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_strategy_revision ON signal_decisions(strategy_revision_id)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_model_reprice_event_key ON model_reprice_events(event_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_model_reprice_city_date ON model_reprice_events(city_key, target_date)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_orders_idempotency ON paper_orders(idempotency_key)")
@@ -1326,14 +1393,40 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_token_status ON paper_orders(yes_token_id, lifecycle_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_cohort ON paper_orders(cohort_run_id, opened_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_validation_status ON paper_validation_runs(status, started_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_profile_revision_no ON strategy_profile_revisions(profile_key, revision_no DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_profile_activation_scope ON strategy_profile_activation_events(scope, activation_id DESC)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_idempotency ON fills(idempotency_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_type, order_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_created ON data_fetch_logs(created_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_source_status ON data_fetch_logs(source, status)")
+    conn.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS strategy_profile_revisions_no_update
+        BEFORE UPDATE ON strategy_profile_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_profile_revisions_are_immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS strategy_profile_revisions_no_delete
+        BEFORE DELETE ON strategy_profile_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_profile_revisions_are_immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS strategy_profile_activation_no_update
+        BEFORE UPDATE ON strategy_profile_activation_events
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_profile_activation_events_are_immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS strategy_profile_activation_no_delete
+        BEFORE DELETE ON strategy_profile_activation_events
+        BEGIN
+            SELECT RAISE(ABORT, 'strategy_profile_activation_events_are_immutable');
+        END;
+        """
+    )
 
 
 def dump_json(payload: Any) -> str:
-    return json.dumps(_json_safe(payload or {}), ensure_ascii=False, sort_keys=True, allow_nan=False)
+    return json.dumps(_json_safe({} if payload is None else payload), ensure_ascii=False, sort_keys=True, allow_nan=False)
 
 
 def _json_safe(value: Any) -> Any:
@@ -3373,6 +3466,13 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
         "kelly_fraction": _nullable_num(decision.get("kelly_fraction")),
         "position_size_usd": _nullable_num(decision.get("position_size_usd")),
         "ladder_group_id": str(decision.get("ladder_group_id") or ""),
+        "strategy_revision_id": str(decision.get("strategy_revision_id") or ""),
+        "strategy_params_hash": str(decision.get("strategy_params_hash") or ""),
+        "strategy_params_snapshot_json": dump_json(decision.get("strategy_params_snapshot", {})),
+        "sizing_bankroll_usd": _nullable_num(decision.get("sizing_bankroll_usd")),
+        "sizing_max_per_trade_usd": _nullable_num(decision.get("sizing_max_per_trade_usd")),
+        "kelly_multiplier": _nullable_num(decision.get("kelly_multiplier")),
+        "bankroll_fraction_cap": _nullable_num(decision.get("bankroll_fraction_cap")),
         "orderbook_snapshot_json": dump_json(decision.get("orderbook_snapshot", decision.get("orderbook_snapshot_json", {}))),
         "tick_size": _nullable_num(decision.get("tick_size")),
         "order_min_size": _nullable_num(decision.get("order_min_size")),
@@ -3384,7 +3484,7 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
         "live_decision": str(decision.get("live_decision") or ""),
         "blocked_reason_primary": str(decision.get("blocked_reason_primary") or ""),
         "evidence_links_json": dump_json(decision.get("evidence_links", decision.get("evidence_links_json", {}))),
-        "decision_version": str(decision.get("decision_version") or "signal-decision-v1"),
+        "decision_version": str(decision.get("decision_version") or "signal-decision-v3"),
         "action": str(decision.get("action") or "observe"),
         "live_allowed": 1 if decision.get("live_allowed") else 0,
         "paper_allowed": 1 if decision.get("paper_allowed") else 0,
@@ -3408,6 +3508,9 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
                 model_probability, market_ask, market_bid, market_mid,
                 market_implied_probability, edge, edge_percent, strategy_name,
                 kelly_fraction, position_size_usd, ladder_group_id, orderbook_snapshot_json,
+                strategy_revision_id, strategy_params_hash, strategy_params_snapshot_json,
+                sizing_bankroll_usd, sizing_max_per_trade_usd, kelly_multiplier,
+                bankroll_fraction_cap,
                 tick_size, order_min_size, neg_risk, book_age_seconds, spread_bps,
                 gate_status, paper_decision, live_decision, blocked_reason_primary,
                 evidence_links_json, decision_version, action, live_allowed, paper_allowed,
@@ -3421,6 +3524,9 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
                 :model_probability, :market_ask, :market_bid, :market_mid,
                 :market_implied_probability, :edge, :edge_percent, :strategy_name,
                 :kelly_fraction, :position_size_usd, :ladder_group_id, :orderbook_snapshot_json,
+                :strategy_revision_id, :strategy_params_hash, :strategy_params_snapshot_json,
+                :sizing_bankroll_usd, :sizing_max_per_trade_usd, :kelly_multiplier,
+                :bankroll_fraction_cap,
                 :tick_size, :order_min_size, :neg_risk, :book_age_seconds, :spread_bps,
                 :gate_status, :paper_decision, :live_decision, :blocked_reason_primary,
                 :evidence_links_json, :decision_version, :action, :live_allowed, :paper_allowed,
@@ -3456,6 +3562,13 @@ def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = 
                 kelly_fraction=excluded.kelly_fraction,
                 position_size_usd=excluded.position_size_usd,
                 ladder_group_id=excluded.ladder_group_id,
+                strategy_revision_id=excluded.strategy_revision_id,
+                strategy_params_hash=excluded.strategy_params_hash,
+                strategy_params_snapshot_json=excluded.strategy_params_snapshot_json,
+                sizing_bankroll_usd=excluded.sizing_bankroll_usd,
+                sizing_max_per_trade_usd=excluded.sizing_max_per_trade_usd,
+                kelly_multiplier=excluded.kelly_multiplier,
+                bankroll_fraction_cap=excluded.bankroll_fraction_cap,
                 orderbook_snapshot_json=excluded.orderbook_snapshot_json,
                 tick_size=excluded.tick_size,
                 order_min_size=excluded.order_min_size,
@@ -3529,6 +3642,8 @@ def list_signal_decisions(
         row["strategy_name"] = row.get("strategy_name") or "single_bucket_ev"
         row["forecast_algo"] = row.get("forecast_algo") or row.get("deb_version") or ""
         row["ladder_group_id"] = row.get("ladder_group_id") or ""
+        row["strategy_revision_id"] = row.get("strategy_revision_id") or ""
+        row["strategy_params_snapshot"] = _loads_obj(row.get("strategy_params_snapshot_json"))
         row["reasons"] = _loads_list(row.get("reasons"))
         row["cautions"] = _loads_list(row.get("cautions"))
         row["gate_reasons"] = _loads_list(row.get("gate_reasons_json"))
@@ -3917,6 +4032,12 @@ def _paper_order_row(order: dict[str, Any], now: str) -> dict[str, Any]:
         "bucket_key": str(order.get("bucket_key") or ""),
         "strategy_name": str(order.get("strategy_name") or ""),
         "ladder_group_id": str(order.get("ladder_group_id") or ""),
+        "strategy_revision_id": str(order.get("strategy_revision_id") or ""),
+        "strategy_params_hash": str(order.get("strategy_params_hash") or ""),
+        "strategy_params_snapshot_json": dump_json(order.get("strategy_params_snapshot", {})),
+        "sizing_snapshot_json": dump_json(order.get("sizing_snapshot", {})),
+        "execution_quote_json": dump_json(order.get("execution_quote", {})),
+        "cap_reasons_json": dump_json(order.get("cap_reasons", [])),
         "city_key": str(order.get("city_key") or order.get("city") or ""),
         "target_date": str(order.get("target_date") or ""),
         "event_url": str(order.get("event_url") or ""),
@@ -3958,7 +4079,9 @@ def _upsert_paper_order_conn(conn: sqlite3.Connection, row: dict[str, Any]) -> i
         """
             INSERT INTO paper_orders (
                 decision_id, signal_id, idempotency_key, market_id, yes_token_id,
-                bucket_key, strategy_name, ladder_group_id, city_key, target_date,
+                bucket_key, strategy_name, ladder_group_id, strategy_revision_id,
+                strategy_params_hash, strategy_params_snapshot_json, sizing_snapshot_json,
+                execution_quote_json, cap_reasons_json, city_key, target_date,
                 event_url, side, limit_price,
                 requested_amount, amount, shares, filled_amount, filled_shares,
                 unfilled_amount, average_fill_price, mark_price, unrealized_pnl,
@@ -3969,7 +4092,9 @@ def _upsert_paper_order_conn(conn: sqlite3.Connection, row: dict[str, Any]) -> i
                 updated_at
             ) VALUES (
                 :decision_id, :signal_id, :idempotency_key, :market_id, :yes_token_id,
-                :bucket_key, :strategy_name, :ladder_group_id, :city_key, :target_date,
+                :bucket_key, :strategy_name, :ladder_group_id, :strategy_revision_id,
+                :strategy_params_hash, :strategy_params_snapshot_json, :sizing_snapshot_json,
+                :execution_quote_json, :cap_reasons_json, :city_key, :target_date,
                 :event_url, :side, :limit_price,
                 :requested_amount, :amount, :shares, :filled_amount, :filled_shares,
                 :unfilled_amount, :average_fill_price, :mark_price, :unrealized_pnl,
@@ -4183,7 +4308,7 @@ def paper_execution_summary(
     ]
     return {
         "ok": True,
-        "execution_version": "paper-execution-v1",
+        "execution_version": "paper-execution-v2",
         "city_key": city_key or "",
         "target_date": target_date or "",
         "count": len(orders),
@@ -4351,6 +4476,10 @@ def _decode_paper_order(row: dict[str, Any]) -> dict[str, Any]:
     row["risk_reasons"] = _loads_list(row.get("risk_reasons_json"))
     row["orderbook_snapshot"] = _loads_obj(row.get("orderbook_snapshot_json"))
     row["evidence_links"] = _loads_obj(row.get("evidence_links_json"))
+    row["strategy_params_snapshot"] = _loads_obj(row.get("strategy_params_snapshot_json"))
+    row["sizing_snapshot"] = _loads_obj(row.get("sizing_snapshot_json"))
+    row["execution_quote"] = _loads_obj(row.get("execution_quote_json"))
+    row["cap_reasons"] = _loads_list(row.get("cap_reasons_json"))
     row["raw"] = _loads_obj(row.get("raw_json"))
     return row
 

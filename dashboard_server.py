@@ -16,11 +16,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from dashboard_db import (
     DB_PATH,
@@ -75,6 +75,13 @@ from weatherbot_v3.truth import infer_settlement_rule, settlement_contract_from_
 from weatherbot_v3.cli import run_market_buckets_sync, run_production_refresh
 from weatherbot_v3.config import asian_city_priority_config
 from weatherbot_v3.validation import build_production_validation_report
+from weatherbot_v3.strategy_profiles import (
+    ALLOWED_SCOPES,
+    activate_strategy_profile,
+    create_strategy_profile_revision,
+    ensure_default_strategy_profile,
+    list_strategy_profile_revisions,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -206,15 +213,38 @@ class PaperExecutionRequest(BaseModel):
 
 
 class PaperValidationStartRequest(BaseModel):
-    bankroll_usd: float = 40.0
-    duration_days: int = 14
-    max_per_trade_usd: float = 2.0
-    daily_max_usd: float = 10.0
-    max_open_positions: int = 5
-    max_orders_per_day: int = 5
-    decision_max_age_minutes: float = 30.0
+    bankroll_usd: float = Field(default=40.0, ge=1.0, le=1_000_000.0)
+    duration_days: int = Field(default=14, ge=1, le=30)
+    max_per_trade_usd: float = Field(default=2.0, ge=0.1, le=10_000.0)
+    daily_max_usd: float = Field(default=10.0, ge=0.1, le=100_000.0)
+    max_open_positions: int = Field(default=5, ge=1, le=1000)
+    max_orders_per_day: int = Field(default=5, ge=1, le=1000)
+    decision_max_age_minutes: float = Field(default=30.0, ge=1.0, le=1440.0)
     cities: list[str] | None = None
     strategies: list[str] | None = None
+    strategy_revision_id: str = ""
+
+
+class StrategyProfileCreateRequest(BaseModel):
+    profile_key: str = "weatherbot_conservative"
+    parameters: dict
+    change_note: str = ""
+    activate_scopes: list[str] = Field(default_factory=list)
+    confirm: bool = False
+
+
+class StrategyProfileActivateRequest(BaseModel):
+    scope: str = "paper_default"
+    reason: str = ""
+    confirm: bool = False
+
+
+def _require_local_developer_request(request: Request, confirmed: bool) -> None:
+    client_host = str(request.client.host if request.client else "")
+    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        raise HTTPException(status_code=403, detail={"reason": "developer_write_requires_loopback"})
+    if not confirmed:
+        raise HTTPException(status_code=409, detail={"reason": "developer_write_requires_confirmation"})
 
 
 class LiveOrderUpdate(BaseModel):
@@ -4494,9 +4524,69 @@ async def paper_validation_start_api(request: PaperValidationStartRequest):
         decision_max_age_minutes=request.decision_max_age_minutes,
         cities=request.cities,
         strategies=strategies,
+        strategy_revision_id=request.strategy_revision_id,
         notes="dashboard controlled paper validation",
     )
     return result.get("run") if result.get("ok") and result.get("run") else result
+
+
+@app.get("/api/developer/strategy-profiles")
+async def strategy_profiles_api():
+    await asyncio.to_thread(ensure_default_strategy_profile, "signal_generation")
+    await asyncio.to_thread(ensure_default_strategy_profile, "paper_default")
+    profiles = await asyncio.to_thread(list_strategy_profile_revisions)
+    return {
+        "ok": True,
+        "profiles": profiles,
+        "allowed_scopes": sorted(ALLOWED_SCOPES),
+        "live_trading": bool(load_v3_config().live_trading),
+    }
+
+
+@app.post("/api/developer/strategy-profiles")
+async def strategy_profile_create_api(payload: StrategyProfileCreateRequest, request: Request):
+    _require_local_developer_request(request, payload.confirm)
+    unknown_scopes = [scope for scope in payload.activate_scopes if scope not in ALLOWED_SCOPES]
+    if unknown_scopes:
+        raise HTTPException(status_code=400, detail={"reason": "unsupported_strategy_profile_scope", "scopes": unknown_scopes})
+    try:
+        revision = await asyncio.to_thread(
+            create_strategy_profile_revision,
+            payload.parameters,
+            profile_key=payload.profile_key,
+            created_by="local_dashboard",
+            change_note=payload.change_note,
+        )
+        for scope in payload.activate_scopes:
+            await asyncio.to_thread(
+                activate_strategy_profile,
+                revision["revision_id"],
+                scope=scope,
+                actor="local_dashboard",
+                reason=payload.change_note or "developer profile publish",
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"reason": str(exc)}) from exc
+    return revision
+
+
+@app.post("/api/developer/strategy-profiles/{revision_id}/activate")
+async def strategy_profile_activate_api(
+    revision_id: str,
+    payload: StrategyProfileActivateRequest,
+    request: Request,
+):
+    _require_local_developer_request(request, payload.confirm)
+    try:
+        return await asyncio.to_thread(
+            activate_strategy_profile,
+            revision_id,
+            scope=payload.scope,
+            actor="local_dashboard",
+            reason=payload.reason or "developer profile activation",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"reason": str(exc)}) from exc
 
 
 @app.post("/api/paper-validation/stop")

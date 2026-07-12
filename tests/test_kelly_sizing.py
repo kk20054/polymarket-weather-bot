@@ -20,6 +20,19 @@ class KellySizingTests(unittest.TestCase):
         self.assertEqual(result.hard_cap_usd, 20.0)
         self.assertEqual(result.capped_position_size_usd, 20.0)
 
+    def test_bankroll_fraction_cap_is_configurable_and_auditable(self):
+        result = size_position(
+            0.8,
+            0.4,
+            bankroll=100.0,
+            max_per_trade_usd=20.0,
+            kelly_multiplier=0.15,
+            bankroll_fraction_cap=0.02,
+        )
+        self.assertEqual(result.hard_cap_usd, 2.0)
+        self.assertEqual(result.cap_reasons, ("bankroll_fraction_cap_usd",))
+        self.assertEqual(result.snapshot()["final_position_size_usd"], 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

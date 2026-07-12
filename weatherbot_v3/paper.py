@@ -8,6 +8,7 @@ from typing import Any
 
 from .config import load_config
 from .db import (
+    connect,
     get_paper_order_by_idempotency_key,
     insert_fill_record,
     list_paper_orders,
@@ -21,7 +22,7 @@ from .db import (
 from .polymarket import price_matches_tick
 
 
-PAPER_EXECUTION_VERSION = "paper-execution-v1"
+PAPER_EXECUTION_VERSION = "paper-execution-v2"
 
 
 def execute_paper_decision(
@@ -52,6 +53,8 @@ def execute_paper_decision_record(
     dry_run: bool = False,
     path: Path | None = None,
     cohort_run_id: str = "",
+    max_per_trade_usd: float | None = None,
+    sizing_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ladder_group_id = str(decision.get("ladder_group_id") or "").strip()
     if ladder_group_id:
@@ -62,6 +65,8 @@ def execute_paper_decision_record(
             path=path,
             seed_decision=decision,
             cohort_run_id=cohort_run_id,
+            max_per_trade_usd=max_per_trade_usd,
+            sizing_snapshot=sizing_snapshot,
         )
     return _execute_single_paper_decision_record(
         decision,
@@ -69,6 +74,8 @@ def execute_paper_decision_record(
         dry_run=dry_run,
         path=path,
         cohort_run_id=cohort_run_id,
+        max_per_trade_usd=max_per_trade_usd,
+        sizing_snapshot=sizing_snapshot,
     )
 
 
@@ -79,10 +86,20 @@ def _execute_single_paper_decision_record(
     dry_run: bool = False,
     path: Path | None = None,
     cohort_run_id: str = "",
+    max_per_trade_usd: float | None = None,
+    sizing_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cfg = load_config()
     now = datetime.now(timezone.utc).isoformat()
-    order = _base_order(decision, amount, now, cohort_run_id=cohort_run_id)
+    execution_decision = _decision_with_latest_quote(decision, path=path, now=now)
+    order = _base_order(
+        execution_decision,
+        amount,
+        now,
+        cohort_run_id=cohort_run_id,
+        max_per_trade_usd=max_per_trade_usd,
+        sizing_snapshot=sizing_snapshot,
+    )
     existing = get_paper_order_by_idempotency_key(order["idempotency_key"], path=path)
     if existing:
         return {
@@ -95,7 +112,7 @@ def _execute_single_paper_decision_record(
             "order": existing,
         }
 
-    risk_reasons = _risk_reasons(decision, order, cfg, path=path)
+    risk_reasons = _risk_reasons(execution_decision, order, cfg, path=path)
     if risk_reasons:
         order.update({
             "status": "rejected",
@@ -126,7 +143,7 @@ def _execute_single_paper_decision_record(
             "order": stored[0] if stored else order,
         }
 
-    filled = _simulate_fill(decision, order)
+    filled = _simulate_fill(execution_decision, order)
     order.update(filled)
     if dry_run:
         return {
@@ -216,6 +233,8 @@ def execute_paper_ladder_group(
     path: Path | None = None,
     seed_decision: dict[str, Any] | None = None,
     cohort_run_id: str = "",
+    max_per_trade_usd: float | None = None,
+    sizing_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     group_id = str(ladder_group_id or "").strip()
     if not group_id:
@@ -240,6 +259,7 @@ def execute_paper_ladder_group(
 
     cfg = load_config()
     now = datetime.now(timezone.utc).isoformat()
+    rows = [_decision_with_latest_quote(row, path=path, now=now) for row in rows]
     allocations = _ladder_allocations(rows, amount)
     orders = [
         _base_order(
@@ -247,6 +267,8 @@ def execute_paper_ladder_group(
             allocations.get(str(row.get("decision_id") or ""), None),
             now,
             cohort_run_id=cohort_run_id,
+            max_per_trade_usd=max_per_trade_usd,
+            sizing_snapshot=sizing_snapshot,
         )
         for row in rows
     ]
@@ -358,6 +380,8 @@ def _base_order(
     opened_at: str,
     *,
     cohort_run_id: str = "",
+    max_per_trade_usd: float | None = None,
+    sizing_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cfg = load_config()
     market_ask = _num(decision.get("market_ask"))
@@ -365,19 +389,39 @@ def _base_order(
     tick_size = _num(decision.get("tick_size"))
     order_min_size = _num(decision.get("order_min_size"))
     default_amount = decision.get("position_size_usd") if amount is None else amount
-    requested_amount = _requested_amount(default_amount, cfg.max_bet)
+    explicit_cap = float(max_per_trade_usd) if max_per_trade_usd is not None else float(cfg.max_per_trade_usd)
+    requested_amount, cap_reasons = _requested_amount(default_amount, explicit_cap)
+    effective_sizing_snapshot = sizing_snapshot or {
+        "mode": "manual_override" if amount is not None else "decision_suggestion",
+        "strategy_revision_id": decision.get("strategy_revision_id") or "legacy_unversioned",
+        "requested_before_cap_usd": _num(default_amount, 0.0) or 0.0,
+        "explicit_max_per_trade_usd": explicit_cap,
+        "final_position_size_usd": requested_amount,
+        "cap_reasons": cap_reasons,
+    }
     limit_price = market_ask if market_ask is not None else 0.0
     shares = requested_amount / limit_price if limit_price > 0 else 0.0
     decision_id = str(decision.get("decision_id") or "")
     return {
         "decision_id": decision_id,
         "signal_id": decision.get("signal_id"),
-        "idempotency_key": _idempotency_key(decision, requested_amount, limit_price),
+        "idempotency_key": _idempotency_key(
+            decision,
+            requested_amount,
+            limit_price,
+            cohort_run_id=cohort_run_id,
+        ),
         "market_id": str(decision.get("market_id") or ""),
         "yes_token_id": str(decision.get("yes_token_id") or decision.get("token_id") or ""),
         "bucket_key": str(decision.get("bucket_key") or ""),
         "strategy_name": str(decision.get("strategy_name") or "single_bucket_ev"),
         "ladder_group_id": str(decision.get("ladder_group_id") or ""),
+        "strategy_revision_id": str(decision.get("strategy_revision_id") or ""),
+        "strategy_params_hash": str(decision.get("strategy_params_hash") or ""),
+        "strategy_params_snapshot": decision.get("strategy_params_snapshot") or {},
+        "sizing_snapshot": effective_sizing_snapshot,
+        "execution_quote": decision.get("execution_quote") or {},
+        "cap_reasons": cap_reasons or list((sizing_snapshot or {}).get("cap_reasons") or []),
         "city_key": str(decision.get("city_key") or ""),
         "target_date": str(decision.get("target_date") or ""),
         "event_url": str((decision.get("evidence_links") or {}).get("event_url") or ""),
@@ -418,6 +462,103 @@ def _base_order(
     }
 
 
+def _decision_with_latest_quote(
+    decision: dict[str, Any],
+    *,
+    path: Path | None,
+    now: str,
+) -> dict[str, Any]:
+    result = dict(decision)
+    token = str(decision.get("yes_token_id") or decision.get("token_id") or "")
+    market_id = str(decision.get("market_id") or "")
+    latest = None
+    if token or market_id:
+        with connect(path) as conn:
+            latest = conn.execute(
+                """
+                SELECT *
+                FROM orderbooks
+                WHERE (yes_token_id=? AND ? != '') OR (market_id=? AND ? != '')
+                ORDER BY COALESCE(NULLIF(quote_timestamp, ''), created_at) DESC, id DESC
+                LIMIT 1
+                """,
+                (token, token, market_id, market_id),
+            ).fetchone()
+    original_snapshot = dict(decision.get("orderbook_snapshot") or {})
+    if latest:
+        row = dict(latest)
+        snapshot = {
+            **original_snapshot,
+            "snapshot_key": row.get("snapshot_key"),
+            "best_bid": row.get("best_bid"),
+            "best_ask": row.get("best_ask"),
+            "spread": row.get("spread"),
+            "bid_depth": row.get("bid_depth"),
+            "ask_depth": row.get("ask_depth"),
+            "quote_timestamp": row.get("quote_timestamp") or row.get("created_at"),
+            "source": row.get("snapshot_type") or "stored_orderbook",
+        }
+        result["market_bid"] = row.get("best_bid")
+        result["market_ask"] = row.get("best_ask")
+        result["market_mid"] = (
+            (float(row["best_bid"]) + float(row["best_ask"])) / 2.0
+            if row.get("best_bid") is not None and row.get("best_ask") is not None
+            else result.get("market_mid")
+        )
+        result["tick_size"] = row.get("tick_size") or result.get("tick_size")
+        result["order_min_size"] = row.get("order_min_size") or result.get("order_min_size")
+    else:
+        snapshot = original_snapshot
+    quote_timestamp = str(
+        snapshot.get("quote_timestamp")
+        or decision.get("quote_timestamp")
+        or decision.get("issued_at")
+        or ""
+    )
+    age_seconds = _age_seconds(quote_timestamp, now)
+    result["book_age_seconds"] = age_seconds
+    result["orderbook_snapshot"] = snapshot
+    result["execution_quote"] = {
+        "snapshot_key": snapshot.get("snapshot_key"),
+        "quote_timestamp": quote_timestamp,
+        "age_seconds": age_seconds,
+        "best_bid": result.get("market_bid"),
+        "best_ask": result.get("market_ask"),
+        "spread": snapshot.get("spread"),
+        "bid_depth": snapshot.get("bid_depth"),
+        "ask_depth": snapshot.get("ask_depth"),
+        "source": snapshot.get("source") or "signal_snapshot_fallback",
+        "fallback": not bool(latest),
+    }
+    return result
+
+
+def _age_seconds(value: str, now: str) -> float | None:
+    try:
+        text = str(value or "").strip()
+        numeric = float(text)
+        if math.isfinite(numeric) and numeric > 0:
+            if numeric >= 1_000_000_000_000:
+                numeric /= 1000.0
+            parsed = datetime.fromtimestamp(numeric, tz=timezone.utc)
+        else:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except Exception:
+            return None
+    try:
+        current = datetime.fromisoformat(str(now).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        return max(0.0, (current - parsed).total_seconds())
+    except Exception:
+        return None
+
+
 def _risk_reasons(decision: dict[str, Any], order: dict[str, Any], cfg: Any, *, path: Path | None) -> list[str]:
     reasons: list[str] = []
     if not bool(decision.get("paper_allowed")) or str(decision.get("paper_decision") or "") != "buy":
@@ -434,7 +575,7 @@ def _risk_reasons(decision: dict[str, Any], order: dict[str, Any], cfg: Any, *, 
     order_min_size = _num(decision.get("order_min_size"))
     ask_depth = _num((decision.get("orderbook_snapshot") or {}).get("ask_depth"))
     spread = _num((decision.get("orderbook_snapshot") or {}).get("spread"))
-    book_age_seconds = _num(decision.get("book_age_seconds"))
+    book_age_seconds = _num((order.get("execution_quote") or {}).get("age_seconds"), _num(decision.get("book_age_seconds")))
     if market_ask is None or market_ask <= 0 or market_ask >= 1:
         reasons.append("best_ask_missing_or_invalid")
     if market_bid is None or market_bid < 0:
@@ -510,22 +651,32 @@ def _simulate_fill(decision: dict[str, Any], order: dict[str, Any]) -> dict[str,
     }
 
 
-def _requested_amount(amount: float | None, max_bet: float) -> float:
+def _requested_amount(amount: float | None, max_per_trade_usd: float) -> tuple[float, list[str]]:
     if amount is None:
-        return round(max(0.0, float(max_bet)), 2)
+        return round(max(0.0, float(max_per_trade_usd)), 2), []
     try:
-        return round(max(0.0, min(float(amount), float(max_bet))), 2)
+        clean = max(0.0, float(amount))
+        cap = max(0.0, float(max_per_trade_usd))
+        return round(min(clean, cap), 2), (["explicit_max_per_trade_usd"] if clean > cap else [])
     except Exception:
-        return round(max(0.0, float(max_bet)), 2)
+        return round(max(0.0, float(max_per_trade_usd)), 2), ["invalid_requested_amount"]
 
 
-def _idempotency_key(decision: dict[str, Any], amount: float, limit_price: float) -> str:
+def _idempotency_key(
+    decision: dict[str, Any],
+    amount: float,
+    limit_price: float,
+    *,
+    cohort_run_id: str = "",
+) -> str:
     raw = "|".join([
         PAPER_EXECUTION_VERSION,
         str(decision.get("decision_id") or ""),
         str(decision.get("yes_token_id") or decision.get("token_id") or ""),
         f"{amount:.2f}",
         f"{limit_price:.6f}",
+        str(cohort_run_id or "manual"),
+        str(decision.get("strategy_revision_id") or "legacy_unversioned"),
     ])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
 

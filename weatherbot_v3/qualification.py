@@ -141,7 +141,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                        CASE WHEN model_bucket_probs_json IS NULL OR model_bucket_probs_json = '' THEN 0 ELSE 1 END
                            AS has_model_bucket_probs
                 FROM signal_decisions
-                WHERE decision_version = 'signal-decision-v1'
+                WHERE decision_version = 'signal-decision-v3'
+                  AND COALESCE(strategy_revision_id, '') <> ''
                 """
             ).fetchall()
         ]
@@ -152,7 +153,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 """
                 SELECT id, decision_id, status, lifecycle_status
                 FROM paper_orders
-                WHERE order_version = 'paper-execution-v1'
+                WHERE order_version = 'paper-execution-v2'
+                  AND COALESCE(strategy_revision_id, '') <> ''
                 """
             ).fetchall()
         ]
@@ -162,7 +164,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 """
                 SELECT order_id
                 FROM fills
-                WHERE order_type = 'paper' AND source = 'paper-execution-v1'
+                WHERE order_type = 'paper' AND source = 'paper-execution-v2'
                 """
             ).fetchall()
         ]
@@ -688,7 +690,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 "rejected": len(paper_rejected),
                 "status_counts": dict(paper_order_counts),
                 "legacy_paper_orders_excluded": legacy_paper_orders,
-                "execution_version": "paper-execution-v1",
+                "execution_version": "paper-execution-v2",
                 "parser_contract": "signal_decision -> idempotent BUY YES paper order -> fill row -> mark-to-bid PnL",
             },
         ),

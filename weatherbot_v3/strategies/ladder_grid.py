@@ -11,6 +11,11 @@ class LadderGridStrategy(StrategyBase):
     strategy_name = "ladder_grid"
     min_edge = 0.03
 
+    def __init__(self, parameters: dict[str, Any] | None = None):
+        self.parameters = dict(parameters or {})
+        self.min_edge = float(self.parameters.get("min_edge", self.min_edge))
+        self.group_exposure_multiplier = float(self.parameters.get("group_exposure_multiplier", 0.60))
+
     def evaluate(
         self,
         bucket: dict[str, Any],
@@ -49,8 +54,9 @@ class LadderGridStrategy(StrategyBase):
             bankroll=float(context.get("bankroll") or 0.0),
             max_per_trade_usd=float(context.get("max_per_trade_usd") or 0.0),
             kelly_multiplier=float(context.get("kelly_multiplier") or 0.15),
+            bankroll_fraction_cap=float(context.get("bankroll_fraction_cap") or 0.05),
         )
-        total_size = round(center_size.capped_position_size_usd * 0.6, 4)
+        total_size = round(center_size.capped_position_size_usd * self.group_exposure_multiplier, 4)
         if total_size <= 0:
             return []
         total_probability = sum(item[2] for item in enriched)
@@ -109,5 +115,6 @@ class LadderGridStrategy(StrategyBase):
             str(prediction.get("issued_at") or ""),
             ",".join(str(item[0].get("bucket_key") or "") for item in enriched),
             str(context.get("decision_version") or "signal-decision-v2"),
+            str(context.get("strategy_revision_id") or "legacy_unversioned"),
         ])
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]

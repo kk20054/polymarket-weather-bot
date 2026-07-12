@@ -19,10 +19,11 @@ from .deb import bucket_probabilities
 from .forecasts.ensemble import distribution_for_prediction as ensemble_distribution_for_prediction
 from .stations import get_station
 from .strategies import LadderGridStrategy, SingleBucketEVStrategy, TailBuyingStrategy
+from .strategy_profiles import ensure_default_strategy_profile, profile_snapshot
 
 
-DECISION_VERSION = "signal-decision-v1"
-SINGLE_BUCKET_ID_VERSION = "signal-decision-v1"
+DECISION_VERSION = "signal-decision-v3"
+SINGLE_BUCKET_ID_VERSION = "signal-decision-v3"
 MIN_EDGE = 0.05
 MAX_SPREAD_BPS = 500.0
 STALE_BOOK_SECONDS = 300.0
@@ -78,6 +79,11 @@ def build_signal_decisions(
     evidence = _evidence_links(city, date, prediction, buckets, path)
     station_live_reasons = _station_live_gate_reasons(city, path)
     cfg = load_config()
+    profile = ensure_default_strategy_profile("signal_generation", path=path)
+    profile_parameters = profile["parameters"]
+    decision_policy = profile_parameters["decision_policy"]
+    sizing_policy = profile_parameters["sizing"]
+    strategy_parameters = profile_parameters["strategies"]
     context = {
         "decision_version": DECISION_VERSION,
         "single_bucket_id_version": SINGLE_BUCKET_ID_VERSION,
@@ -85,15 +91,28 @@ def build_signal_decisions(
         "evidence": evidence,
         "station_live_reasons": station_live_reasons,
         "forecast_algo": prediction.get("forecast_algo") or prediction.get("method") or prediction.get("deb_version"),
-        "max_spread_bps": MAX_SPREAD_BPS,
-        "stale_book_seconds": STALE_BOOK_SECONDS,
-        "min_bias_sample_days": MIN_BIAS_SAMPLE_DAYS,
+        "max_spread_bps": decision_policy.get("max_spread_bps", MAX_SPREAD_BPS),
+        "stale_book_seconds": decision_policy.get("stale_book_seconds", STALE_BOOK_SECONDS),
+        "min_bias_sample_days": decision_policy.get("min_bias_sample_days", MIN_BIAS_SAMPLE_DAYS),
         "bankroll": getattr(cfg, "bankroll_usd", getattr(cfg, "max_bet", 0.0)),
-        "kelly_multiplier": getattr(cfg, "kelly_multiplier", 0.15),
+        "kelly_multiplier": sizing_policy.get("kelly_multiplier", getattr(cfg, "kelly_multiplier", 0.15)),
+        "bankroll_fraction_cap": sizing_policy.get("max_bankroll_fraction_per_trade", 0.05),
         "max_per_trade_usd": getattr(cfg, "max_per_trade_usd", getattr(cfg, "max_bet", 0.0)),
         "independent_settlement_days": _independent_settlement_days(city, path, prediction),
+        "strategy_revision_id": profile["revision_id"],
+        "strategy_params_hash": profile["content_sha256"],
+        "strategy_params_snapshot": profile_snapshot(profile),
     }
-    strategies = [SingleBucketEVStrategy(), LadderGridStrategy(), TailBuyingStrategy()]
+    strategy_builders = (
+        ("single_bucket_ev", SingleBucketEVStrategy),
+        ("ladder_grid", LadderGridStrategy),
+        ("tail_buying", TailBuyingStrategy),
+    )
+    strategies = [
+        builder(strategy_parameters[name])
+        for name, builder in strategy_builders
+        if strategy_parameters.get(name, {}).get("enabled", True)
+    ]
     decisions: list[dict[str, Any]] = []
     for strategy in strategies:
         decisions.extend(strategy.evaluate_many(buckets, probabilities, prediction, context))
@@ -127,6 +146,8 @@ def build_signal_decisions(
         "paper_counts": paper_counts,
         "live_counts": live_counts,
         "strategy_counts": strategy_counts,
+        "strategy_revision_id": profile["revision_id"],
+        "strategy_params_hash": profile["content_sha256"],
         "model_distribution": _distribution_summary(distribution),
         "decisions": decisions,
     }

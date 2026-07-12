@@ -42,10 +42,11 @@ class PaperValidationTests(unittest.TestCase):
         )
         self.assertTrue(started["ok"])
         run_id = started["run"]["run_id"]
+        revision_id = started["run"]["strategy_revision_id"]
         now = datetime.now(timezone.utc)
-        upsert_signal_decision_record(_decision("stale", now - timedelta(hours=2), "yes-stale", edge=0.9), path=path)
-        upsert_signal_decision_record(_decision("fresh-low", now + timedelta(seconds=1), "yes-low", edge=0.08), path=path)
-        upsert_signal_decision_record(_decision("fresh-high", now + timedelta(seconds=2), "yes-high", edge=0.12), path=path)
+        upsert_signal_decision_record(_decision("stale", now - timedelta(hours=2), "yes-stale", edge=0.9, revision_id=revision_id), path=path)
+        upsert_signal_decision_record(_decision("fresh-low", now + timedelta(seconds=1), "yes-low", edge=0.08, revision_id=revision_id), path=path)
+        upsert_signal_decision_record(_decision("fresh-high", now + timedelta(seconds=2), "yes-high", edge=0.12, revision_id=revision_id), path=path)
 
         dry = run_paper_validation_tick(apply=False, path=path)
         applied = run_paper_validation_tick(apply=True, path=path)
@@ -61,6 +62,9 @@ class PaperValidationTests(unittest.TestCase):
         self.assertEqual(orders[0]["cohort_run_id"], run_id)
         self.assertEqual(applied["metrics"]["open_positions"], 1)
         self.assertLessEqual(applied["metrics"]["spent_today_usd"], 2.0)
+        self.assertAlmostEqual(orders[0]["filled_amount"], 1.5, places=2)
+        self.assertEqual(orders[0]["strategy_revision_id"], revision_id)
+        self.assertEqual(orders[0]["sizing_snapshot"]["bankroll_usd"], 40.0)
 
     def test_start_stop_are_explicit_and_single_active_run(self):
         path = test_db_path("paper_validation_lifecycle")
@@ -96,6 +100,63 @@ class PaperValidationTests(unittest.TestCase):
             started["run"]["strategies"],
             ["single_bucket_ev", "ladder_grid", "tail_buying"],
         )
+        self.assertTrue(started["run"]["strategy_revision_id"].startswith("spr_"))
+
+    def test_cohort_cap_is_not_silently_replaced_by_global_max_bet(self):
+        path = test_db_path("paper_validation_no_double_cap")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        started = start_paper_validation_run(
+            bankroll_usd=100,
+            max_per_trade_usd=8,
+            daily_max_usd=20,
+            cities=["chicago"],
+            strategies=["single_bucket_ev"],
+            path=path,
+        )
+        revision_id = started["run"]["strategy_revision_id"]
+        now = datetime.now(timezone.utc)
+        decision = _decision("cohort-five", now, "yes-five", edge=0.4, revision_id=revision_id)
+        decision.update({"model_probability": 0.8, "market_ask": 0.4, "market_bid": 0.39})
+        decision["orderbook_snapshot"].update({"best_ask": 0.4, "best_bid": 0.39, "spread": 0.01})
+        upsert_signal_decision_record(decision, path=path)
+
+        result = run_paper_validation_tick(apply=True, path=path)
+        order = list_paper_orders(path=path)[0]
+
+        self.assertEqual(result["executed"], 1)
+        self.assertAlmostEqual(order["filled_amount"], 5.0, places=2)
+        self.assertEqual(order["sizing_snapshot"]["caps"]["cohort_max_per_trade_usd"], 8.0)
+        self.assertEqual(order["sizing_snapshot"]["caps"]["bankroll_fraction_cap_usd"], 5.0)
+
+    def test_ladder_reserves_three_order_and_position_slots(self):
+        path = test_db_path("paper_validation_ladder_capacity")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        started = start_paper_validation_run(
+            bankroll_usd=40,
+            max_open_positions=2,
+            max_orders_per_day=2,
+            cities=["chicago"],
+            strategies=["ladder_grid"],
+            path=path,
+        )
+        revision_id = started["run"]["strategy_revision_id"]
+        now = datetime.now(timezone.utc)
+        for index in range(3):
+            row = _decision(
+                f"ladder-{index}",
+                now + timedelta(seconds=index),
+                f"yes-ladder-{index}",
+                edge=0.2,
+                strategy="ladder_grid",
+                revision_id=revision_id,
+            )
+            row["ladder_group_id"] = "ladder-group"
+            upsert_signal_decision_record(row, path=path)
+
+        result = run_paper_validation_tick(apply=True, path=path)
+
+        self.assertEqual(result["executed"], 0)
+        self.assertEqual(list_paper_orders(path=path), [])
 
     def test_manual_batch_execution_respects_selected_strategies(self):
         path = test_db_path("paper_execution_strategy_filter")
@@ -120,7 +181,15 @@ class PaperValidationTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["decision_id"], "tail")
 
 
-def _decision(decision_id: str, issued_at: datetime, token: str, *, edge: float, strategy: str = "single_bucket_ev") -> dict:
+def _decision(
+    decision_id: str,
+    issued_at: datetime,
+    token: str,
+    *,
+    edge: float,
+    strategy: str = "single_bucket_ev",
+    revision_id: str = "",
+) -> dict:
     return {
         "decision_id": decision_id,
         "bucket_key": f"bucket-{decision_id}",
@@ -138,6 +207,7 @@ def _decision(decision_id: str, issued_at: datetime, token: str, *, edge: float,
         "market_implied_probability": 0.2,
         "edge": edge,
         "strategy_name": strategy,
+        "strategy_revision_id": revision_id,
         "kelly_fraction": 0.1,
         "position_size_usd": 2.0,
         "tick_size": 0.01,
