@@ -3,12 +3,19 @@ import os
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from weatherbot_v3.db import connect, init_v3_db, list_data_fetch_logs
 from weatherbot_v3.metar import fetch_recent_hours
-from weatherbot_v3.scheduler import WeatherBotScheduler
+from weatherbot_v3.scheduler import (
+    FORECAST_INTERVAL_SECONDS,
+    HISTORICAL_INTERVAL_SECONDS,
+    WeatherBotScheduler,
+    _remaining_cycle_delay,
+    _tiered_refresh_rows,
+)
 from weatherbot_v3.stations import list_stations, set_station_enabled, sync_station_registry
 
 
@@ -31,6 +38,84 @@ def configure_enabled_cities(cities: list[str]) -> None:
 
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_forecast_and_historical_default_to_ten_minute_cadence(self):
+        self.assertEqual(FORECAST_INTERVAL_SECONDS, 600)
+        self.assertEqual(HISTORICAL_INTERVAL_SECONDS, 600)
+
+    async def test_cycle_delay_is_start_to_start(self):
+        self.assertEqual(_remaining_cycle_delay(600, 277), 323)
+        self.assertEqual(_remaining_cycle_delay(60, 92), 1)
+
+    async def test_poll_loop_reports_fixed_cadence_next_run(self):
+        scheduler = WeatherBotScheduler(city_concurrency=1)
+        state = scheduler.pollers["forecast_poller"]
+        state.interval_seconds = 10
+
+        async def fake_run_once(_poller_key: str):
+            await asyncio.sleep(0.02)
+            scheduler.stop_event.set()
+            return {"ok": True}
+
+        scheduler.run_once = fake_run_once  # type: ignore[method-assign]
+        await scheduler._poll_loop("forecast_poller")
+
+        next_run = state.next_run_at
+        self.assertIsNotNone(next_run)
+        scheduled = datetime.fromisoformat(str(next_run))
+        remaining = (scheduled - datetime.now(timezone.utc)).total_seconds()
+        self.assertGreater(remaining, 8.5)
+        self.assertLessEqual(remaining, 10.0)
+
+    async def test_tiered_refresh_keeps_active_markets_on_fast_cycle(self):
+        rows = [
+            {
+                "city_key": "chicago",
+                "raw_json": {"latest_market_probe": {"status": "active_market"}},
+            },
+            {
+                "city_key": "ankara",
+                "raw_json": {"latest_market_probe": {"status": "no_active_market"}},
+            },
+            {"city_key": "london", "raw_json": "{}"},
+        ]
+
+        full_rows, full_meta = _tiered_refresh_rows(rows, run_count=0, baseline_multiplier=3)
+        fast_rows, fast_meta = _tiered_refresh_rows(rows, run_count=1, baseline_multiplier=3)
+
+        self.assertEqual(len(full_rows), 3)
+        self.assertEqual(full_meta["refresh_scope"], "full_watchlist")
+        self.assertEqual([row["city_key"] for row in fast_rows], ["chicago"])
+        self.assertEqual(fast_meta["refresh_scope"], "active_markets")
+        self.assertEqual(fast_meta["deferred_cities"], ["ankara", "london"])
+
+    async def test_forecast_poller_exposes_auditable_refresh_scope(self):
+        rows = [
+            {
+                "city_key": "chicago",
+                "station_id": "KORD",
+                "raw_json": {"latest_market_probe": {"active_market": True}},
+            },
+            {
+                "city_key": "ankara",
+                "station_id": "LTAC",
+                "raw_json": {"latest_market_probe": {"active_market": False}},
+            },
+        ]
+        scheduler = WeatherBotScheduler(city_concurrency=1)
+        scheduler.pollers["forecast_poller"].run_count = 1
+        with patch("weatherbot_v3.scheduler._enabled_rows", return_value=rows), patch(
+            "weatherbot_v3.scheduler.run_weathercom_fetch",
+            return_value={"ok": True, "rows_upserted": 24},
+        ) as fetch:
+            result = await scheduler.run_once("forecast_poller")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(result["refresh_scope"], "active_markets")
+        self.assertEqual(result["deferred_cities"], ["ankara"])
+        status = scheduler.status()["pollers"]["forecast_poller"]
+        self.assertEqual(status["last_result"]["refresh_scope"], "active_markets")
+
     async def test_historical_poller_keeps_hong_kong_as_display_evidence(self):
         rows = [
             {"city_key": "shanghai", "station_id": "ZSPD", "timezone": "Asia/Shanghai"},

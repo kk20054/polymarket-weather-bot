@@ -491,3 +491,11 @@
 - 结论：Tokyo 的 2C 分裂根因是 station ID 正确但坐标错误，并叠加旧坐标 bias。该 P0 已闭环；从修复时点起正确 forecast archive 会逐小时积累。
 - 验收：全套 `270/270` Python tests、前端 production build 与 `git diff --check` 通过；新后端加载后，浏览器确认 Tokyo 错误 24C 过去时段消失、正确序列从 09:00 `27.8C` 开始、DEB `28.97+/-1.39C`，console 无 error。
 - 下一步：评估仅对活跃市场城市启用 10 分钟 Forecast/WU Historical 调度，继续保持 scheduler 停止、paper cohort inactive、live 锁定。
+
+### 2026-07-12：活跃市场 10 分钟固定周期刷新
+
+- 改动：Forecast 与 WU Historical 默认周期由 30 分钟收敛为 10 分钟，并从“任务完成后再等待一个周期”改为固定 start-to-start 周期，避免 14 城 Forecast 的 4 分钟级执行耗时被重复叠加。新增分层刷新：有活跃市场的启用城市每轮刷新，其他启用城市每 3 轮刷新一次；每轮结果和 scheduler status 持久化 `refresh_scope`、活跃城市数、延后城市与 baseline 周期。
+- 验证：新增周期、选城和状态时间测试；`tests.test_scheduler` 21/21 通过。真实受控 WU Historical 单轮完成 14/14 城、0 失败、耗时 `61.364s`，本轮 14 城均有 active market，因此无延后城市。全套 Python tests `275/275`、前端 production build 与 `git diff --check` 通过。
+- 结论：Forecast/WU Historical 的调度目标已与 PolyWX 抽样观察到的约 10-13 分钟新鲜度对齐，且 future observation-only 城市不会被无差别高频抓取。常驻 scheduler 仍保持停止；本轮仅执行一次独立 Historical run，没有启动长跑。
+- 阻塞：PWS entitlement 仍缺；正确地点的 Tokyo forecast archive 需从修复时点继续积累；Layer 7 仍需操作员 UI 验收和剩余数据字段对照；14-30 天 paper cohort 尚未启动，live 保持锁定。
+- 下一步：重启后端加载新 scheduler 代码，在操作员确认看板后做短时受控运行观察；随后继续完成左/中 PolyWX 工作台细节和右侧策略模拟闭环。

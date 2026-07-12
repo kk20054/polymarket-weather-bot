@@ -8,6 +8,7 @@
 - `LIVE_TRADING=false`; the system is research/paper infrastructure, not a proven profitable production bot.
 
 ## Latest Ledger Summaries
+- 2026-07-12 / Active-market refresh cadence: Forecast and WU Historical now run on a fixed 10-minute start-to-start cadence for active markets; non-active enabled cities retain a 30-minute baseline. A controlled WU cycle completed 14/14 cities in 61.4 seconds with no failures; continuous scheduler remains stopped.
 - 2026-07-12 / Forecast-DEB field closure: Weather.com condition, precipitation probability, revision count and retrieval time now survive Layer 4 into the dashboard. Shanghai DEB includes v3/GFS/JMA/ECMWF/ICON/GEM and benchmarks at `30.10+/-1.51C` versus PolyWX `29.88+/-1.62C` at the sampled time.
 - 2026-07-12 / Three-city live benchmark: Shanghai and Chicago Forecast/Cloud are close to PolyWX, Tokyo past-hour Forecast is about 2C low while METAR/Historical agree. Chart hover labels now show `YYYY/MM/DD HH:mm` instead of raw minute indexes.
 - 2026-07-12 / Tokyo station-location repair: RJTT coordinates were corrected from the Narita-area `35.7647,140.3864` to AWC RJTT/HND `35.553,139.781`. Wrong-location forecast snapshots and bias rows are now excluded; Tokyo DEB moved to `28.97+/-1.39C` versus PolyWX `28.90+/-1.37C`.
@@ -27,7 +28,7 @@
 - Two-hour/six-hour scheduler validation is intentionally deferred until operator UI and numeric benchmark acceptance.
 - Shanghai same-date Forecast/Cloud/DEB benchmark is within the current target tolerance; Chicago still needs same-local-day Historical and final numeric comparison after its local day begins.
 - Tokyo pre-fix past-hour forecasts remain intentionally blank because their archived snapshots used the wrong location; correct history will accumulate from the repair onward.
-- Forecast and WU Historical default to 30-minute polling versus PolyWX's sampled 10-13 minute freshness; cadence is not yet equivalent.
+- The 10-minute Forecast/WU cadence has unit and single-cycle evidence but still needs operator-controlled runtime observation after the dashboard is accepted.
 - WU/HKO truth coverage and resolved paper outcomes are insufficient for profitability claims.
 - China Live has no retrospective weather.com.cn minute archive; points before collector activation remain honestly absent.
 - Layer 7 still requires operator visual acceptance before starting the 14-30 day cohort.

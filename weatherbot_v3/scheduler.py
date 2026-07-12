@@ -22,9 +22,10 @@ from .stations import enabled_station_rows, sync_station_registry
 
 MAX_CITY_CONCURRENCY = int(os.getenv("WEATHERBOT_SCHEDULER_CITY_CONCURRENCY", "2") or "2")
 METAR_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_METAR_SECONDS", "300") or "300")
-FORECAST_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_SECONDS", "1800") or "1800")
+FORECAST_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_SECONDS", "600") or "600")
 NWP_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_NWP_SECONDS", "3600") or "3600")
-HISTORICAL_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_HISTORICAL_SECONDS", "1800") or "1800")
+HISTORICAL_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_HISTORICAL_SECONDS", "600") or "600")
+BASELINE_REFRESH_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_BASELINE_MULTIPLIER", "3") or "3")
 PWS_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PWS_SECONDS", "600") or "600")
 DERIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_DERIVE_SECONDS", "900") or "900")
 CHINA_LIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_CHINA_LIVE_SECONDS", "60") or "60")
@@ -264,8 +265,12 @@ class WeatherBotScheduler:
             except asyncio.TimeoutError:
                 pass
         while not self.stop_event.is_set():
+            cycle_started = time.monotonic()
             await self.run_once(poller_key)
-            delay = state.next_delay()
+            delay = _remaining_cycle_delay(state.next_delay(), time.monotonic() - cycle_started)
+            state.next_run_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=delay)
+            ).isoformat()
             try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=delay)
             except asyncio.TimeoutError:
@@ -304,7 +309,11 @@ class WeatherBotScheduler:
         )
 
     async def _run_forecast_poller(self) -> dict[str, Any]:
-        rows = await asyncio.to_thread(_enabled_rows)
+        all_rows = await asyncio.to_thread(_enabled_rows)
+        rows, cadence = _tiered_refresh_rows(
+            all_rows,
+            run_count=self.pollers["forecast_poller"].run_count,
+        )
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
@@ -322,13 +331,14 @@ class WeatherBotScheduler:
                 "weathercom": weathercom,
             }
 
-        return await _run_city_batch(
+        result = await _run_city_batch(
             rows,
             self.city_concurrency,
             run_city,
             poller_key="forecast_poller",
             timeout_seconds=FORECAST_CITY_TIMEOUT_SECONDS,
         )
+        return {**result, **cadence}
 
     async def _run_nwp_poller(self) -> dict[str, Any]:
         rows = await asyncio.to_thread(_enabled_rows)
@@ -363,7 +373,11 @@ class WeatherBotScheduler:
     async def _run_historical_poller(self) -> dict[str, Any]:
         # Hong Kong keeps HKO as settlement truth, but VHHH WU history remains
         # useful display evidence and must not disappear from the operator UI.
-        rows = list(await asyncio.to_thread(_enabled_rows))
+        all_rows = list(await asyncio.to_thread(_enabled_rows))
+        rows, cadence = _tiered_refresh_rows(
+            all_rows,
+            run_count=self.pollers["historical_poller"].run_count,
+        )
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
@@ -383,13 +397,14 @@ class WeatherBotScheduler:
                 "historical": payload,
             }
 
-        return await _run_city_batch(
+        result = await _run_city_batch(
             rows,
             self.city_concurrency,
             run_city,
             poller_key="historical_poller",
             timeout_seconds=FORECAST_CITY_TIMEOUT_SECONDS,
         )
+        return {**result, **cadence}
 
     async def _run_pws_poller(self) -> dict[str, Any]:
         rows = await asyncio.to_thread(_enabled_rows)
@@ -713,6 +728,55 @@ def _enabled_rows() -> list[dict[str, Any]]:
     return rows
 
 
+def _remaining_cycle_delay(interval_seconds: int | float, elapsed_seconds: int | float) -> float:
+    """Keep poller cadence start-to-start without permitting overlapping runs."""
+    return max(1.0, float(interval_seconds) - max(0.0, float(elapsed_seconds)))
+
+
+def _tiered_refresh_rows(
+    rows: list[dict[str, Any]],
+    *,
+    run_count: int,
+    baseline_multiplier: int = BASELINE_REFRESH_MULTIPLIER,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Refresh active markets every cycle and the full watchlist every N cycles."""
+    multiplier = max(1, int(baseline_multiplier or 1))
+    full_refresh = int(run_count or 0) % multiplier == 0
+    active_rows = [row for row in rows if _station_has_active_market(row)]
+    selected = list(rows) if full_refresh else active_rows
+    selected_keys = {
+        str(row.get("city_key") or row.get("city") or "")
+        for row in selected
+    }
+    deferred = [
+        str(row.get("city_key") or row.get("city") or "")
+        for row in rows
+        if str(row.get("city_key") or row.get("city") or "") not in selected_keys
+    ]
+    return selected, {
+        "refresh_scope": "full_watchlist" if full_refresh else "active_markets",
+        "enabled_cities": len(rows),
+        "active_market_cities": len(active_rows),
+        "deferred_cities": deferred,
+        "baseline_every_cycles": multiplier,
+    }
+
+
+def _station_has_active_market(row: dict[str, Any]) -> bool:
+    raw = row.get("raw_json")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            raw = {}
+    if not isinstance(raw, dict):
+        return False
+    probe = raw.get("latest_market_probe")
+    if not isinstance(probe, dict):
+        return False
+    return bool(probe.get("active_market")) or str(probe.get("status") or "") == "active_market"
+
+
 def _target_dates_for_station(row: dict[str, Any]) -> list[str]:
     timezone_name = str(row.get("timezone") or "UTC")
     try:
@@ -774,7 +838,7 @@ def _compact_result(payload: dict[str, Any]) -> dict[str, Any]:
             "rows_upserted": payload_result.get("rows_upserted"),
             "failed": payload_result.get("failed") or payload_result.get("failed_cities"),
         })
-    return {
+    compact = {
         "ok": bool(payload.get("ok")),
         "cities": int(payload.get("cities") or len(results) or 0),
         "ok_cities": int(payload.get("ok_cities") or 0),
@@ -782,6 +846,16 @@ def _compact_result(payload: dict[str, Any]) -> dict[str, Any]:
         "result_count": len(results),
         "city_results": city_results,
     }
+    for key in (
+        "refresh_scope",
+        "enabled_cities",
+        "active_market_cities",
+        "deferred_cities",
+        "baseline_every_cycles",
+    ):
+        if key in payload:
+            compact[key] = payload[key]
+    return compact
 
 
 def _poller_message(poller_key: str, result: dict[str, Any]) -> str:
