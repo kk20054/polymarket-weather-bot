@@ -126,7 +126,9 @@ function resolveCityTradingStatus(
   cityKey?: string,
   verificationStatus?: string,
   statusMap?: Record<string, CityStatusConfig>,
+  cityScope?: string,
 ): CityTradingStatus {
+  if (cityScope === 'observation_only') return 'observation_only'
   const key = cityKey || ''
   const configured = (statusMap?.[key]?.status || ROUND5_STATUS_FALLBACK[key]?.status || '') as CityTradingStatus | ''
   if (configured === 'fully_active' || configured === 'paper_only' || configured === 'monitor_only' || configured === 'observation_only') return configured
@@ -220,6 +222,7 @@ function RecommendationCard({
   selected: boolean
   onSelect: () => void
 }) {
+  const isWeatherFocus = item.type === 'weather_focus'
   const isObservationOnly = item.type === 'observation_only'
   const age = ageSecondsLabel(item.metar_age_seconds)
   const verified = item.verification_status || (item.settlement_rule_verified_at ? 'verified' : 'unverified')
@@ -229,12 +232,20 @@ function RecommendationCard({
     : isObservationOnly
       ? 'border-neutral-700 bg-neutral-900/50 text-neutral-200 hover:border-neutral-500'
       : 'border-amber-500/35 bg-amber-500/10 text-neutral-100 hover:border-amber-400/70'
-  const title = [
-    `METAR age ${age}`,
-    `verified ${verified}`,
-    item.blocked_reasons?.length ? item.blocked_reasons.map(reasonLabel).join(', ') : blocker,
-    item.polymarket_url || '',
-  ].filter(Boolean).join('\n')
+  const title = isWeatherFocus
+    ? [
+        '天气关注，不代表交易建议',
+        `${item.observation_source || 'observation'} age ${age}`,
+        item.remaining_to_max === null || item.remaining_to_max === undefined
+          ? ''
+          : `距离预计最高 ${Number(item.remaining_to_max).toFixed(1)}°${item.deb_unit || ''}`,
+      ].filter(Boolean).join('\n')
+    : [
+        `METAR age ${age}`,
+        `verified ${verified}`,
+        item.blocked_reasons?.length ? item.blocked_reasons.map(reasonLabel).join(', ') : blocker,
+        item.polymarket_url || '',
+      ].filter(Boolean).join('\n')
 
   return (
     <div
@@ -1034,6 +1045,8 @@ function App() {
       signals: number
       actionable: number
       enabled: boolean
+      displayEnabled: boolean
+      cityScope: string
       tier: number
       lastRefreshedAt?: string | null
     }>()
@@ -1062,6 +1075,8 @@ function App() {
         signals: 0,
         actionable: 0,
         enabled: Boolean(row.enabled),
+        displayEnabled: row.display_enabled !== false,
+        cityScope: row.city_scope || 'market_candidate',
         tier: row.tier ?? 9,
         lastRefreshedAt: row.last_refreshed_at ?? row.latest_timestamp ?? null,
       })
@@ -1092,6 +1107,8 @@ function App() {
           signals: 0,
           actionable: 0,
           enabled: false,
+          displayEnabled: true,
+          cityScope: 'research',
           tier: 9,
           lastRefreshedAt: null,
         })
@@ -1122,6 +1139,8 @@ function App() {
         signals: 0,
         actionable: 0,
         enabled: false,
+        displayEnabled: true,
+        cityScope: 'research',
         tier: 9,
         lastRefreshedAt: null,
       }
@@ -1149,10 +1168,10 @@ function App() {
   const selectedCityMeta = cityOptions.find(city => city.key === selectedCity)
   const selectedCityEvidence = cityEvidence.find(city => city.city_key === selectedCity)
   const selectedDateEvidence = selectedCityEvidence?.dates.find(item => item.target_date === selectedDate) ?? selectedCityEvidence?.dates[0]
-  const selectedTradingStatus = resolveCityTradingStatus(selectedCityMeta?.key, selectedCityMeta?.verificationStatus, cityStatusMap)
+  const selectedTradingStatus = resolveCityTradingStatus(selectedCityMeta?.key, selectedCityMeta?.verificationStatus, cityStatusMap, selectedCityMeta?.cityScope)
   const selectedStatusConfig = selectedCityMeta?.key ? (cityStatusMap[selectedCityMeta.key] ?? ROUND5_STATUS_FALLBACK[selectedCityMeta.key]) : undefined
   const recommendations = data?.recommendations ?? null
-  const recommendedItems = recommendations?.items ?? []
+  const recommendedItems = recommendations?.focus_items ?? []
   useEffect(() => {
     const pollers = schedulerStatus?.pollers ?? {}
     let shouldRefreshDashboard = false
@@ -1200,7 +1219,7 @@ function App() {
 
   const filteredCityOptions = cityOptions.filter(city => {
     const query = citySearch.trim().toLowerCase()
-    if (!city.enabled && city.key !== selectedCity) return false
+    if (!city.displayEnabled && city.key !== selectedCity) return false
     if (!query) return true
     return `${city.name} ${city.station ?? ''} ${city.key} ${city.continent}`.toLowerCase().includes(query)
   })
@@ -1450,9 +1469,9 @@ function App() {
             <input
               value={citySearch}
               onChange={event => setCitySearch(event.target.value)}
-              placeholder="搜索已启用城市或机场"
+              placeholder="搜索城市或机场"
               className="mb-2 w-full border border-neutral-800 bg-black px-2 py-1.5 text-[11px]"
-              aria-label="搜索已启用城市或机场"
+              aria-label="搜索城市或机场"
             />
             <div className="space-y-1">
               {cityOptions.length === 0 && (
@@ -1468,7 +1487,7 @@ function App() {
               {filteredCityOptions.map(city => (
                 <div
                   key={city.key}
-                  title={`预报 ${city.forecastCount} · METAR ${city.latestMetar !== null && city.latestMetar !== undefined ? Number(city.latestMetar).toFixed(1) + '°' + city.unit : '--'} · 历史 ${city.historyCount} · 湿度 ${city.humidityStatus === 'available' ? '可用' : '缺失'} · 信号 ${city.actionable}/${city.signals}`}
+                  title={`${city.enabled ? '采集已启用' : '未加入采集'} · ${city.cityScope === 'observation_only' ? '观察目录' : '市场候选'} · 预报 ${city.forecastCount} · METAR ${city.latestMetar !== null && city.latestMetar !== undefined ? Number(city.latestMetar).toFixed(1) + '°' + city.unit : '--'} · 历史 ${city.historyCount} · 信号 ${city.actionable}/${city.signals}`}
                   className={`flex min-h-[40px] w-full items-stretch gap-2 border-x-0 border-b border-t-0 px-2 py-1.5 text-left transition ${
                     selectedCity === city.key
                       ? 'border-blue-500/40 bg-blue-500/10 text-blue-100'
@@ -1485,7 +1504,7 @@ function App() {
                   >
                     <div className="flex items-center justify-between gap-2">
                     <div className="flex min-w-0 items-center gap-2">
-                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${city.actionable > 0 ? 'bg-green-400' : city.forecastCount > 0 ? 'bg-blue-400' : 'bg-neutral-700'}`} />
+                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${city.actionable > 0 ? 'bg-green-400' : city.forecastCount > 0 ? 'bg-blue-400' : city.enabled ? 'bg-amber-400' : 'bg-neutral-700'}`} />
                       <div className="min-w-0">
                         <div className="truncate text-xs font-medium leading-tight">{city.name}</div>
                         <div className="mt-0.5 truncate text-[9px] leading-tight text-neutral-600">
@@ -1495,9 +1514,9 @@ function App() {
                     </div>
                     <div className="shrink-0 text-right">
                       <div className="tabular-nums text-[11px] leading-tight text-neutral-200">
-                        {city.latest === null || city.latest === undefined ? '--' : `${Number(city.latest).toFixed(1)}°${city.unit}`}
+                        {city.latest === null || city.latest === undefined ? (city.enabled ? '--' : '待接入') : `${Number(city.latest).toFixed(1)}°${city.unit}`}
                       </div>
-                      <div className="mt-0.5 text-[9px] tabular-nums text-neutral-600">{relativeTime(city.lastRefreshedAt)}</div>
+                      <div className="mt-0.5 text-[9px] tabular-nums text-neutral-600">{city.enabled ? relativeTime(city.lastRefreshedAt) : '未采集'}</div>
                     </div>
                     </div>
                   </a>

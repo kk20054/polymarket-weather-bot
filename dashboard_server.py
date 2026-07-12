@@ -676,8 +676,23 @@ def _recommendation_query_cutoff(stations: dict[str, dict], now: datetime) -> st
     return min(local_dates) if local_dates else _today_str()
 
 
+def _freshest_focus_observation(city: str, metars: dict[str, dict], china_live: dict[str, dict]) -> tuple[dict, str]:
+    candidates = [
+        (china_live.get(city) or {}, "china_live", "observed_at"),
+        (metars.get(city) or {}, "metar", "report_time"),
+    ]
+    available = [item for item in candidates if item[0].get(item[2])]
+    if not available:
+        return {}, ""
+    row, source, _ = max(
+        available,
+        key=lambda item: _parse_iso(item[0].get(item[2])) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    return row, source
+
+
 def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = None, path: Path | None = None) -> dict:
-    """Return PolyWX-style watch cards from persisted Layer 6 decisions only."""
+    """Return separate weather-focus cards and Layer 6 trade candidates."""
     init_v3_db(path)
     now = datetime.now(timezone.utc)
     items: list[dict] = []
@@ -768,10 +783,63 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         ]
 
     latest_prediction_by_city: dict[str, dict] = {}
+    latest_prediction_by_city_date: dict[tuple[str, str], dict] = {}
     for row in predictions:
         city = str(row.get("city_key") or "").strip().lower()
+        target_date = str(row.get("target_date") or "")
+        if city and target_date:
+            latest_prediction_by_city_date.setdefault((city, target_date), row)
         if city and city not in latest_prediction_by_city:
             latest_prediction_by_city[city] = row
+
+    focus_items: list[dict] = []
+    for city, station in stations.items():
+        if not bool(station.get("enabled")):
+            continue
+        target_date = _station_local_today(station, now)
+        prediction = latest_prediction_by_city_date.get((city, target_date)) or {}
+        live_row, observation_source = _freshest_focus_observation(city, metars, china_live)
+        observed_time = live_row.get("observed_at") or live_row.get("report_time")
+        observation_age = _age_seconds(observed_time, now=now)
+        if observation_age is None or observation_age >= 30 * 60:
+            skipped["focus_observation_stale_or_missing"] += 1
+            continue
+        unit = str(station.get("settlement_unit") or station.get("unit") or "C").upper()
+        current_temp = _temperature_in_unit(live_row.get("temperature"), unit)
+        predicted_max = _temperature_in_unit(prediction.get("mu"), unit)
+        if current_temp is None or predicted_max is None:
+            skipped["focus_prediction_or_temperature_missing"] += 1
+            continue
+        remaining = float(predicted_max) - float(current_temp)
+        near_peak_threshold = 3.6 if unit == "F" else 2.0
+        if abs(remaining) > near_peak_threshold:
+            skipped["focus_not_near_predicted_max"] += 1
+            continue
+        focus_items.append({
+            "type": "weather_focus",
+            "city_key": city,
+            "city_name": station.get("city_name") or city,
+            "station_id": station.get("station_id") or "",
+            "target_date": target_date,
+            "current_temp": current_temp,
+            "current_temp_unit": unit,
+            "deb_mu": predicted_max,
+            "deb_sigma": prediction.get("sigma"),
+            "deb_unit": unit,
+            "metar_age_seconds": observation_age,
+            "metar_report_time": observed_time,
+            "observation_source": observation_source,
+            "prediction_issued_at": prediction.get("issued_at"),
+            "remaining_to_max": round(remaining, 1),
+            "focus_reason": "near_predicted_daily_max",
+            "badge": "天气关注",
+        })
+    focus_items.sort(key=lambda item: (
+        abs(float(item.get("remaining_to_max") or 0.0)),
+        float(item.get("metar_age_seconds") or 0.0),
+        str(item.get("city_name") or ""),
+    ))
+    focus_items = focus_items[: min(max(1, int(limit)), 4)]
 
     latest_forecast_by_city_date: dict[tuple[str, str], dict] = {}
     for row in forecast_runs:
@@ -954,10 +1022,16 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         empty_reason = "scheduler_stopped" if not scheduler_running else "no_recommendations_after_gates"
     return {
         "ok": True,
-        "recommendation_version": "recommendations-v1",
+        "recommendation_version": "recommendations-v2-separated-contracts",
         "generated_at": now.isoformat(),
         "scheduler_running": scheduler_running,
         "filters": {
+            "weather_focus": {
+                "observation_max_age_seconds": 30 * 60,
+                "near_predicted_max_c": 2.0,
+                "near_predicted_max_f": 3.6,
+                "trade_claim": False,
+            },
             "today_observation_metar_max_age_seconds": 30 * 60,
             "forecast_lead_forecast_max_age_seconds": 90 * 60,
             "settlement_rule_verified_required": True,
@@ -968,6 +1042,8 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         "count": len(items),
         "trade_candidate_count": sum(1 for item in items if item.get("type") == "trade_candidate"),
         "observation_only_count": sum(1 for item in items if item.get("type") == "observation_only"),
+        "weather_focus_count": len(focus_items),
+        "focus_items": focus_items,
         "empty_reason": empty_reason,
         "items": items,
     }
@@ -2735,6 +2811,9 @@ def _registry_city_series(targets: dict[str, set[str]] | None = None):
             "station_id": profile.station_id,
             "station_name": profile.station_name,
             "unit": profile.unit,
+            "region": station_row.get("region") or profile.region,
+            "display_enabled": bool(station_row.get("display_enabled", True)),
+            "city_scope": station_row.get("city_scope") or profile.city_scope,
             "enabled": bool(station_row.get("enabled")),
             "tier": int(station_row.get("tier") or 9),
             "settlement_station_id": station_row.get("settlement_station_id") or profile.station_id,

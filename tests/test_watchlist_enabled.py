@@ -26,11 +26,15 @@ class WatchlistEnabledTests(unittest.IsolatedAsyncioTestCase):
             sync_station_registry()
             rows = list_stations()
             all_keys = {str(row["city_key"]) for row in rows}
+            displayed_keys = {str(row["city_key"]) for row in rows if row["display_enabled"]}
             enabled_keys = {str(row["city_key"]) for row in enabled_station_rows()}
             expected = DEFAULT_ENABLED_CITY_KEYS & all_keys
 
+        self.assertEqual(len(all_keys), 51)
+        self.assertEqual(displayed_keys, all_keys)
         self.assertEqual(enabled_keys, expected)
         self.assertLessEqual(len(enabled_keys), len(DEFAULT_ENABLED_CITY_KEYS))
+        self.assertNotIn("manila", enabled_keys)
 
     async def test_station_enable_disable_cli_helper_updates_flags(self):
         db_path = test_db_path("watchlist_toggle")

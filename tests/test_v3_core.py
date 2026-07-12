@@ -1762,8 +1762,9 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(evidence["latest_hourly_consensus"][0]["observed_temp"], 87.08, places=2)
 
     def test_settlement_registry_has_station_and_timezone_for_all_cities(self):
-        self.assertGreaterEqual(len(SETTLEMENT_REGISTRY), 20)
+        self.assertEqual(len(SETTLEMENT_REGISTRY), 51)
         self.assertIn("hong-kong", SETTLEMENT_REGISTRY)
+        self.assertEqual(len({profile.station_id for profile in SETTLEMENT_REGISTRY.values()}), 51)
         for city, profile in SETTLEMENT_REGISTRY.items():
             self.assertEqual(city, profile.city)
             self.assertTrue(profile.station_id)
@@ -1775,6 +1776,17 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(tokyo.latitude, 35.553, places=3)
         self.assertAlmostEqual(tokyo.longitude, 139.781, places=3)
         self.assertEqual(tokyo.location_version, 2)
+
+        for city, station in {
+            "manila": "RPLL",
+            "guangzhou": "ZGGG",
+            "busan": "RKPK",
+            "los-angeles": "KLAX",
+            "cape-town": "FACT",
+        }.items():
+            profile = SETTLEMENT_REGISTRY[city]
+            self.assertEqual(profile.station_id, station)
+            self.assertEqual(profile.city_scope, "observation_only")
 
     def test_weathercom_geocode_must_match_settlement_station(self):
         tokyo = SETTLEMENT_REGISTRY["tokyo"]
@@ -1815,6 +1827,13 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(chicago["provider_station_ids"]["aviationweather"], "KORD")
         self.assertIn("METAR", chicago["nearby_observation_networks"])
         self.assertIn("requires rule/source verification", chicago["settlement_rule_text"])
+        self.assertTrue(chicago["display_enabled"])
+        self.assertEqual(chicago["city_scope"], "market_candidate")
+
+        manila = next(row for row in rows if row["city_key"] == "manila")
+        self.assertTrue(manila["display_enabled"])
+        self.assertFalse(manila["enabled"])
+        self.assertEqual(manila["city_scope"], "observation_only")
 
     def test_station_sync_reconciles_verified_timestamp_before_registry_upsert(self):
         db_path = test_db_path("stations_verification_reconcile")
@@ -2691,6 +2710,44 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(item["verification_status"], "no_active_market")
         self.assertNotIn("polymarket_url", item)
         self.assertEqual(item["china_live_temp"], 34.6)
+
+    def test_dashboard_weather_focus_is_separate_from_trade_candidates(self):
+        db_path = test_db_path("dashboard_weather_focus")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        target = datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            sync_station_registry(path=db_path)
+            upsert_daily_max_prediction({
+                "city_key": "chicago",
+                "target_date": target,
+                "issued_at": datetime.now(timezone.utc).isoformat(),
+                "mu": 30.0,
+                "sigma": 1.0,
+                "unit": "C",
+                "method": "weatherbot-deb-v2",
+                "deb_version": "weatherbot-deb-v2",
+                "sigma_floor": 0.5,
+            }, path=db_path)
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": datetime.now(timezone.utc).isoformat(),
+                "raw_text": "KORD fixture METAR",
+                "temperature": 29.5,
+                "parser_version": "fixture",
+            })
+            payload = _recommendations_payload(scheduler_status={"running": True}, path=db_path)
+
+        self.assertEqual(payload["weather_focus_count"], 1)
+        self.assertEqual(payload["trade_candidate_count"], 0)
+        focus = payload["focus_items"][0]
+        self.assertEqual(focus["type"], "weather_focus")
+        self.assertEqual(focus["city_key"], "chicago")
+        self.assertEqual(focus["focus_reason"], "near_predicted_daily_max")
+        self.assertNotIn("market_id", focus)
+        self.assertFalse(payload["filters"]["weather_focus"]["trade_claim"])
 
     def test_layer8_paper_execution_fills_decision_and_marks_spread_pnl(self):
         db_path = test_db_path("paper_execution_fill")

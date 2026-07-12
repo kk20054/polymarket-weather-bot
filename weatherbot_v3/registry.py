@@ -22,6 +22,7 @@ class CitySettlementProfile:
     expected_metric: str = "highest_temperature"
     expected_resolution_provider: str = "polymarket_rule"
     verification_status: str = "provisional"
+    city_scope: str = "market_candidate"
     registry_version: str = REGISTRY_VERSION
     location_version: int = 1
 
@@ -56,6 +57,34 @@ _PROFILES = (
     CitySettlementProfile("sao-paulo", "Sao Paulo", "SBGR", "Sao Paulo Guarulhos International Airport", "America/Sao_Paulo", "C", -23.4356, -46.4731, "sa"),
     CitySettlementProfile("buenos-aires", "Buenos Aires", "SAEZ", "Ezeiza International Airport", "America/Argentina/Buenos_Aires", "C", -34.8222, -58.5358, "sa"),
     CitySettlementProfile("wellington", "Wellington", "NZWN", "Wellington International Airport", "Pacific/Auckland", "C", -41.3272, 174.8052, "oc"),
+    # PolyWX observation catalog parity. These profiles are display-visible but
+    # remain collector-disabled and trading-ineligible until their own source
+    # smoke tests and settlement contracts are verified.
+    CitySettlementProfile("austin", "Austin", "KAUS", "Austin-Bergstrom International Airport", "America/Chicago", "F", 30.1831, -97.6806, "us", city_scope="observation_only"),
+    CitySettlementProfile("denver", "Denver", "KDEN", "Denver International Airport", "America/Denver", "F", 39.8466, -104.6562, "us", city_scope="observation_only"),
+    CitySettlementProfile("houston", "Houston", "KHOU", "William P. Hobby Airport", "America/Chicago", "F", 29.6458, -95.2821, "us", city_scope="observation_only"),
+    CitySettlementProfile("los-angeles", "Los Angeles", "KLAX", "Los Angeles International Airport", "America/Los_Angeles", "F", 33.9382, -118.3866, "us", city_scope="observation_only"),
+    CitySettlementProfile("san-francisco", "San Francisco", "KSFO", "San Francisco International Airport", "America/Los_Angeles", "F", 37.6196, -122.3656, "us", city_scope="observation_only"),
+    CitySettlementProfile("chongqing", "Chongqing", "ZUCK", "Chongqing Jiangbei International Airport", "Asia/Shanghai", "C", 29.7180, 106.6390, "asia", city_scope="observation_only"),
+    CitySettlementProfile("chengdu", "Chengdu", "ZUUU", "Chengdu Shuangliu International Airport", "Asia/Shanghai", "C", 30.5760, 103.9500, "asia", city_scope="observation_only"),
+    CitySettlementProfile("guangzhou", "Guangzhou", "ZGGG", "Guangzhou Baiyun International Airport", "Asia/Shanghai", "C", 23.3920, 113.3070, "asia", city_scope="observation_only"),
+    CitySettlementProfile("jakarta", "Jakarta", "WIHH", "Halim Perdanakusuma International Airport", "Asia/Jakarta", "C", -6.2670, 106.8910, "asia", city_scope="observation_only"),
+    CitySettlementProfile("jeddah", "Jeddah", "OEJN", "King Abdulaziz International Airport", "Asia/Riyadh", "C", 21.6850, 39.1660, "asia", city_scope="observation_only"),
+    CitySettlementProfile("karachi", "Karachi", "OPKC", "Jinnah International Airport", "Asia/Karachi", "C", 24.9020, 67.1390, "asia", city_scope="observation_only"),
+    CitySettlementProfile("busan", "Busan", "RKPK", "Gimhae International Airport", "Asia/Seoul", "C", 35.1790, 128.9380, "asia", city_scope="observation_only"),
+    CitySettlementProfile("kuala-lumpur", "Kuala Lumpur", "WMKK", "Kuala Lumpur International Airport", "Asia/Kuala_Lumpur", "C", 2.7470, 101.7140, "asia", city_scope="observation_only"),
+    CitySettlementProfile("manila", "Manila", "RPLL", "Ninoy Aquino International Airport", "Asia/Manila", "C", 14.5070, 121.0040, "asia", city_scope="observation_only"),
+    CitySettlementProfile("amsterdam", "Amsterdam", "EHAM", "Amsterdam Airport Schiphol", "Europe/Amsterdam", "C", 52.3150, 4.7900, "eu", city_scope="observation_only"),
+    CitySettlementProfile("helsinki", "Helsinki", "EFHK", "Helsinki-Vantaa Airport", "Europe/Helsinki", "C", 60.3270, 24.9570, "eu", city_scope="observation_only"),
+    CitySettlementProfile("istanbul", "Istanbul", "LTFM", "Istanbul Airport", "Europe/Istanbul", "C", 41.2620, 28.7400, "eu", city_scope="observation_only"),
+    CitySettlementProfile("madrid", "Madrid", "LEMD", "Adolfo Suarez Madrid-Barajas Airport", "Europe/Madrid", "C", 40.4660, -3.5550, "eu", city_scope="observation_only"),
+    CitySettlementProfile("milan", "Milan", "LIMC", "Milan Malpensa Airport", "Europe/Rome", "C", 45.6310, 8.7280, "eu", city_scope="observation_only"),
+    CitySettlementProfile("moscow", "Moscow", "UUWW", "Vnukovo International Airport", "Europe/Moscow", "C", 55.5920, 37.2610, "eu", city_scope="observation_only"),
+    CitySettlementProfile("warsaw", "Warsaw", "EPWA", "Warsaw Chopin Airport", "Europe/Warsaw", "C", 52.1630, 20.9610, "eu", city_scope="observation_only"),
+    CitySettlementProfile("cape-town", "Cape Town", "FACT", "Cape Town International Airport", "Africa/Johannesburg", "C", -33.9650, 18.6020, "africa", city_scope="observation_only"),
+    CitySettlementProfile("lagos", "Lagos", "DNMM", "Murtala Muhammed International Airport", "Africa/Lagos", "C", 6.5770, 3.3210, "africa", city_scope="observation_only"),
+    CitySettlementProfile("mexico-city", "Mexico City", "MMMX", "Mexico City International Airport", "America/Mexico_City", "C", 19.4360, -99.0720, "na", city_scope="observation_only"),
+    CitySettlementProfile("panama-city", "Panama City", "MPMG", "Albrook Marcos A. Gelabert Airport", "America/Panama", "C", 8.9670, -79.5550, "na", city_scope="observation_only"),
 )
 
 SETTLEMENT_REGISTRY = {profile.city: profile for profile in _PROFILES}

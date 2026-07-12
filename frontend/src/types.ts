@@ -699,7 +699,7 @@ export interface PaperExecutionResult {
 }
 
 export interface DashboardRecommendationItem {
-  type: 'trade_candidate' | 'observation_only' | string
+  type: 'weather_focus' | 'trade_candidate' | 'observation_only' | string
   city_key: string
   city_name: string
   station_id?: string
@@ -730,6 +730,10 @@ export interface DashboardRecommendationItem {
   china_live_temp?: number | null
   china_live_observed_at?: string | null
   badge?: string
+  observation_source?: string
+  prediction_issued_at?: string | null
+  remaining_to_max?: number | null
+  focus_reason?: string
 }
 
 export interface DashboardRecommendations {
@@ -740,10 +744,12 @@ export interface DashboardRecommendations {
   count: number
   trade_candidate_count?: number
   observation_only_count?: number
+  weather_focus_count?: number
   empty_reason?: 'scheduler_stopped' | 'no_recommendations_after_gates' | string
   filters?: Record<string, unknown>
   skipped?: Record<string, number>
   items: DashboardRecommendationItem[]
+  focus_items?: DashboardRecommendationItem[]
 }
 
 export interface EventDistribution {
@@ -1073,6 +1079,9 @@ export interface WeatherCitySeries {
   primary_settlement_source?: string
   verification_status?: string
   unit: string
+  region?: string
+  display_enabled?: boolean
+  city_scope?: 'market_candidate' | 'observation_only' | string
   enabled?: boolean
   tier?: number
   last_refreshed_at?: string | null

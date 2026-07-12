@@ -87,6 +87,8 @@ def station_row_from_profile(profile: CitySettlementProfile) -> dict[str, Any]:
         "nearby_observation_networks_json": dump_json(networks),
         "confidence": confidence,
         "verification_status": profile.verification_status,
+        "display_enabled": 1,
+        "city_scope": profile.city_scope,
         "enabled": 1 if profile.city in DEFAULT_ENABLED_CITY_KEYS else 0,
         "tier": 1 if profile.city in DEFAULT_ENABLED_CITY_KEYS else 9,
         "registry_version": profile.registry_version or REGISTRY_VERSION,
@@ -116,7 +118,8 @@ def sync_station_registry(
                 settlement_timezone, settlement_unit, settlement_time_basis,
                 settlement_rule_verified_at, primary_settlement_source,
                 nearby_observation_networks_json, confidence,
-                verification_status, enabled, tier, registry_version, raw_json, updated_at
+                verification_status, display_enabled, city_scope, enabled, tier,
+                registry_version, raw_json, updated_at
             ) VALUES (
                 :city_key, :city_name, :station_id, :icao_id, :wmo_id,
                 :provider_station_ids_json, :station_name, :timezone, :unit,
@@ -125,7 +128,8 @@ def sync_station_registry(
                 :settlement_timezone, :settlement_unit, :settlement_time_basis,
                 :settlement_rule_verified_at, :primary_settlement_source,
                 :nearby_observation_networks_json, :confidence,
-                :verification_status, :enabled, :tier, :registry_version, :raw_json, :updated_at
+                :verification_status, :display_enabled, :city_scope, :enabled, :tier,
+                :registry_version, :raw_json, :updated_at
             )
             ON CONFLICT(city_key) DO UPDATE SET
                 city_name=excluded.city_name,
@@ -183,6 +187,8 @@ def sync_station_registry(
                       OR COALESCE(stations.settlement_rule_verified_at, '') != '' THEN stations.verification_status
                     ELSE excluded.verification_status
                 END,
+                display_enabled=excluded.display_enabled,
+                city_scope=excluded.city_scope,
                 enabled=COALESCE(stations.enabled, excluded.enabled),
                 tier=COALESCE(stations.tier, excluded.tier),
                 registry_version=excluded.registry_version,
@@ -638,6 +644,8 @@ def _decode_station_row(row: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             row[target_key] = [] if target_key.endswith("networks") else {}
     row["city"] = row.get("city_key")
+    row["display_enabled"] = bool(row.get("display_enabled", 1))
+    row["city_scope"] = str(row.get("city_scope") or "market_candidate")
     row["enabled"] = bool(row.get("enabled"))
     try:
         row["tier"] = int(row.get("tier") or 9)

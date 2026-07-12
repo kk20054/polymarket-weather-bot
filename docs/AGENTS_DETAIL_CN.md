@@ -39,7 +39,7 @@ Use external repositories as design inputs, not code to copy blindly. Every borr
 
 ## Target Data Foundation
 
-- `stations`: city key, display name, ICAO/WMO/provider station ids, timezone, settlement rule text, primary settlement source, nearby observation networks, and confidence.
+- `stations`: city key, display name, ICAO/WMO/provider station ids, timezone, settlement rule text, primary settlement source, nearby observation networks, confidence, `display_enabled`, collector `enabled`, and `city_scope`. Display visibility never grants collector or trading permission.
 - `metar_reports`: raw METAR/SPECI text, decoded fields, parser version, report time, station id, source URL, fetch time, parse status, and parse warnings.
 - `mesonet_observations`: non-METAR official/local networks such as JMA AMeDAS, HKO, CWA, AMOS, NWS/NOAA, airport runway sensors, and other rule-relevant station feeds. Label as observation evidence, not settlement truth by default.
 - `forecast_runs` and `forecast_members`: ECMWF/GFS/HRRR/Open-Meteo/DEB inputs with run time, valid time, horizon, member values, and source quality.
@@ -57,7 +57,7 @@ Use external repositories as design inputs, not code to copy blindly. Every borr
 - The Historical tab must distinguish settlement truth, METAR history, official nearby-network history, and Open-Meteo fallback. Fallback rows must not unlock live gates.
 - The Diff Stats tab must compute observed minus forecast, MAE/bias/Pearson R, overlap count, source coverage, and whether the sample is independent by settlement day.
 - The Fetch Log tab must use structured backend rows: source, stage, status, duration, message, and details.
-- Recommendation/focus areas should highlight cities with fresh observations, market liquidity, clean bucket matching, high evidence coverage, and actionable but gated paper signals.
+- Keep two recommendation contracts separate. `weather_focus` mirrors the public PolyWX card shape (city, local date, current temperature, predicted maximum) and is never a trade claim. `trade_candidate` comes only from Layer 6 market buckets, model probability, edge, and explicit paper/live gates.
 
 ## Technology Stack
 
