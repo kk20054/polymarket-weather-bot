@@ -15,12 +15,12 @@ from .env_utils import env_value
 from .metar import fetch_recent_hours
 from .paper_settlement import settle_open_paper_orders
 from .paper_validation import run_paper_validation_tick
-from .qualification import build_data_readiness, persist_data_readiness
 from .source_health import compact_source_health
 from .stations import enabled_station_rows, sync_station_registry
 
 
 MAX_CITY_CONCURRENCY = int(os.getenv("WEATHERBOT_SCHEDULER_CITY_CONCURRENCY", "2") or "2")
+MAX_POLLER_CONCURRENCY = int(os.getenv("WEATHERBOT_SCHEDULER_POLLER_CONCURRENCY", "1") or "1")
 METAR_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_METAR_SECONDS", "300") or "300")
 FORECAST_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_SECONDS", "600") or "600")
 NWP_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_NWP_SECONDS", "3600") or "3600")
@@ -51,12 +51,15 @@ class PollerState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     task: asyncio.Task | None = None
     running: bool = False
+    waiting_for_slot: bool = False
     last_run_at: str | None = None
     last_started_at: str | None = None
     last_duration_ms: float | None = None
+    last_queue_wait_ms: float | None = None
     next_run_at: str | None = None
     last_status: str = "idle"
     last_message: str = ""
+    last_log_error: str = ""
     last_result: dict[str, Any] = field(default_factory=dict)
     run_count: int = 0
     consecutive_failures: int = 0
@@ -85,14 +88,17 @@ class PollerState:
             "interval_seconds": self.interval_seconds,
             "initial_delay_seconds": self.initial_delay_seconds,
             "running": self.running or self.lock.locked(),
+            "waiting_for_slot": self.waiting_for_slot,
             "last_run_at": self.last_run_at,
             "last_started_at": self.last_started_at,
             "age_seconds": age_seconds,
             "last_duration_ms": self.last_duration_ms,
+            "last_queue_wait_ms": self.last_queue_wait_ms,
             "fails_last_hour": self.fails_last_hour(now),
             "next_run_at": self.next_run_at,
             "last_status": self.last_status,
             "last_message": self.last_message,
+            "last_log_error": self.last_log_error,
             "last_result": self.last_result,
             "run_count": self.run_count,
             "consecutive_failures": self.consecutive_failures,
@@ -100,8 +106,16 @@ class PollerState:
 
 
 class WeatherBotScheduler:
-    def __init__(self, *, city_concurrency: int = MAX_CITY_CONCURRENCY):
+    def __init__(
+        self,
+        *,
+        city_concurrency: int = MAX_CITY_CONCURRENCY,
+        poller_concurrency: int = MAX_POLLER_CONCURRENCY,
+    ):
         self.city_concurrency = max(1, int(city_concurrency or 2))
+        self.poller_concurrency = max(1, int(poller_concurrency or 1))
+        self._poller_slots = asyncio.Semaphore(self.poller_concurrency)
+        self._active_pollers: set[str] = set()
         self.started_at: str | None = None
         self.stop_event = asyncio.Event()
         self._pws_auth_disabled_until = 0.0
@@ -140,6 +154,7 @@ class WeatherBotScheduler:
         for state in self.pollers.values():
             state.task = None
             state.running = False
+            state.waiting_for_slot = False
             state.next_run_at = None
         return self.status(message="scheduler stopped")
 
@@ -161,9 +176,23 @@ class WeatherBotScheduler:
                 "poller": poller_key,
             }
         async with state.lock:
-            state.running = True
-            state.last_started_at = utc_now()
-            started_perf = time.perf_counter()
+            queued_perf = time.perf_counter()
+            state.waiting_for_slot = True
+            try:
+                async with self._poller_slots:
+                    state.waiting_for_slot = False
+                    state.last_queue_wait_ms = round((time.perf_counter() - queued_perf) * 1000)
+                    self._active_pollers.add(poller_key)
+                    return await self._run_once_in_slot(poller_key, state)
+            finally:
+                state.waiting_for_slot = False
+                self._active_pollers.discard(poller_key)
+
+    async def _run_once_in_slot(self, poller_key: str, state: PollerState) -> dict[str, Any]:
+        state.running = True
+        state.last_started_at = utc_now()
+        started_perf = time.perf_counter()
+        try:
             try:
                 if poller_key == "metar_poller":
                     result = await self._run_metar_poller()
@@ -194,7 +223,6 @@ class WeatherBotScheduler:
             duration_ms = round((time.perf_counter() - started_perf) * 1000)
             ok = bool(result.get("ok"))
             now = datetime.now(timezone.utc)
-            state.running = False
             state.last_run_at = now.isoformat()
             state.last_duration_ms = duration_ms
             state.last_status = "OK" if ok else "WARN"
@@ -208,8 +236,8 @@ class WeatherBotScheduler:
                 state.failure_times.append(now)
             delay = state.next_delay()
             state.next_run_at = (now + timedelta(seconds=delay)).isoformat()
-            await asyncio.to_thread(
-                log_data_fetch,
+            state.last_log_error = await asyncio.to_thread(
+                _safe_log_data_fetch,
                 source="scheduler",
                 stage=poller_key,
                 status="OK" if ok else "WARN",
@@ -218,6 +246,7 @@ class WeatherBotScheduler:
                 details={
                     "poller": poller_key,
                     "interval_seconds": state.interval_seconds,
+                    "queue_wait_ms": state.last_queue_wait_ms,
                     "next_run_at": state.next_run_at,
                     **_compact_result(result),
                 },
@@ -228,8 +257,11 @@ class WeatherBotScheduler:
                 **result,
                 "poller": poller_key,
                 "duration_ms": duration_ms,
+                "queue_wait_ms": state.last_queue_wait_ms,
                 "next_run_at": state.next_run_at,
             }
+        finally:
+            state.running = False
 
     def status(self, *, message: str = "") -> dict[str, Any]:
         payload = {
@@ -239,6 +271,9 @@ class WeatherBotScheduler:
             "started_at": self.started_at,
             "message": message,
             "city_concurrency": self.city_concurrency,
+            "poller_concurrency": self.poller_concurrency,
+            "active_pollers": sorted(self._active_pollers),
+            "waiting_pollers": sorted(key for key, state in self.pollers.items() if state.waiting_for_slot),
             "pollers": {key: state.status() for key, state in self.pollers.items()},
         }
         # Status is called on the FastAPI event loop and must remain an
@@ -252,7 +287,7 @@ class WeatherBotScheduler:
 
     async def _poll_loop(self, poller_key: str) -> None:
         state = self.pollers[poller_key]
-        if state.run_count == 0 and state.initial_delay_seconds > 0:
+        if state.initial_delay_seconds > 0:
             state.next_run_at = (
                 datetime.now(timezone.utc) + timedelta(seconds=state.initial_delay_seconds)
             ).isoformat()
@@ -323,6 +358,7 @@ class WeatherBotScheduler:
                 dry_run=False,
                 limit_cities=1,
                 forecast_days=3,
+                refresh_readiness=False,
             )
             return {
                 "ok": _payload_ok(weathercom),
@@ -352,6 +388,7 @@ class WeatherBotScheduler:
                     ensemble=False,
                     limit_cities=1,
                     forecast_days=7,
+                    refresh_readiness=False,
                 ),
                 timeout=FORECAST_CITY_TIMEOUT_SECONDS,
             )
@@ -451,6 +488,7 @@ class WeatherBotScheduler:
                     all_cities=False,
                     limit_cities=1,
                     station_limit=5,
+                    refresh_readiness=False,
                 ),
                 timeout=PWS_OPTIONAL_TIMEOUT_SECONDS,
             )
@@ -530,9 +568,12 @@ class WeatherBotScheduler:
             poller_key="derive_poller",
             timeout_seconds=DERIVE_CITY_TIMEOUT_SECONDS,
         )
-        readiness = await asyncio.to_thread(build_data_readiness)
-        await asyncio.to_thread(persist_data_readiness, readiness)
-        result["readiness_refreshed"] = True
+        # A full production-readiness audit is intentionally operator-driven.
+        # It scans cross-layer history and must not run every 15 minutes on the
+        # collector hot path. Source and decision gates are persisted by their
+        # own builders; `data-readiness` remains available as an explicit CLI.
+        result["readiness_refreshed"] = False
+        result["readiness_reason"] = "explicit_audit_only"
         return result
 
     async def _run_china_live_poller(self) -> dict[str, Any]:
@@ -546,6 +587,7 @@ class WeatherBotScheduler:
             lambda row: asyncio.to_thread(
                 run_china_weather_fetch,
                 str(row.get("city_key") or row.get("city")),
+                refresh_readiness=False,
             ),
             poller_key="china_live_poller",
             timeout_seconds=CHINA_LIVE_CITY_TIMEOUT_SECONDS,
@@ -575,6 +617,7 @@ class WeatherBotScheduler:
                 active_weather=True,
                 limit_cities=len(target_cities),
                 fetch_orderbooks=True,
+                refresh_readiness=False,
             )
             active_batches.append({
                 "ok": _payload_ok(payload),
@@ -657,9 +700,10 @@ async def _run_city_batch(
                 )
                 ok = _payload_ok(payload)
                 finished = utc_now()
-                details = {**payload, "poller": poller_key}
-                await asyncio.to_thread(
-                    log_data_fetch,
+                compact_payload = _compact_city_payload(payload)
+                details = {**compact_payload, "poller": poller_key}
+                log_error = await asyncio.to_thread(
+                    _safe_log_data_fetch,
                     source="scheduler",
                     stage="city_refresh",
                     status="OK" if ok else "WARN",
@@ -670,7 +714,7 @@ async def _run_city_batch(
                     started_at=started,
                     finished_at=finished,
                 )
-                return {"city": city, "ok": ok, "payload": payload}
+                return {"city": city, "ok": ok, "payload": compact_payload, "log_error": log_error}
             except asyncio.TimeoutError:
                 finished = utc_now()
                 error = {
@@ -679,8 +723,8 @@ async def _run_city_batch(
                     "poller": poller_key,
                     "error": f"city_timeout_{int(timeout_seconds)}s",
                 }
-                await asyncio.to_thread(
-                    log_data_fetch,
+                log_error = await asyncio.to_thread(
+                    _safe_log_data_fetch,
                     source="scheduler",
                     stage="city_refresh",
                     status="ERROR",
@@ -691,12 +735,12 @@ async def _run_city_batch(
                     started_at=started,
                     finished_at=finished,
                 )
-                return error
+                return {**error, "log_error": log_error}
             except Exception as exc:
                 finished = utc_now()
                 error = {"city": city, "ok": False, "poller": poller_key, "error": str(exc)}
-                await asyncio.to_thread(
-                    log_data_fetch,
+                log_error = await asyncio.to_thread(
+                    _safe_log_data_fetch,
                     source="scheduler",
                     stage="city_refresh",
                     status="ERROR",
@@ -707,7 +751,7 @@ async def _run_city_batch(
                     started_at=started,
                     finished_at=finished,
                 )
-                return error
+                return {**error, "log_error": log_error}
 
     results = await asyncio.gather(*(guarded(row) for row in rows), return_exceptions=False)
     failures = [row for row in results if not row.get("ok")]
@@ -728,9 +772,20 @@ def _enabled_rows() -> list[dict[str, Any]]:
     return rows
 
 
+def _safe_log_data_fetch(**kwargs: Any) -> str:
+    """Audit logging must never turn a completed collector run into a crash."""
+    try:
+        log_data_fetch(**kwargs)
+        return ""
+    except Exception as exc:
+        return str(exc)
+
+
 def _remaining_cycle_delay(interval_seconds: int | float, elapsed_seconds: int | float) -> float:
-    """Keep poller cadence start-to-start without permitting overlapping runs."""
-    return max(1.0, float(interval_seconds) - max(0.0, float(elapsed_seconds)))
+    """Coalesce missed ticks instead of immediately chasing an overdue cycle."""
+    interval = max(1.0, float(interval_seconds))
+    elapsed = max(0.0, float(elapsed_seconds))
+    return interval - elapsed if elapsed < interval else interval
 
 
 def _tiered_refresh_rows(
@@ -804,6 +859,70 @@ def _payload_ok(payload: Any) -> bool:
         return False
     failures = payload.get("failures")
     return not failures
+
+
+def _compact_city_payload(payload: Any) -> dict[str, Any]:
+    """Keep scheduler state/logs bounded; full collector payloads already live in SQLite."""
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "collector_payload_not_object"}
+    compact: dict[str, Any] = {}
+    nested = next(
+        (
+            payload[key]
+            for key in ("metar", "weathercom", "openmeteo", "historical", "pws")
+            if isinstance(payload.get(key), dict)
+        ),
+        {},
+    )
+    for key in (
+        "ok",
+        "city",
+        "station_id",
+        "target_date",
+        "status",
+        "skipped",
+        "reason",
+        "error",
+        "reports_fetched",
+        "reports_upserted",
+        "rows_fetched",
+        "rows_upserted",
+        "rows_built",
+        "stored",
+        "stored_count",
+        "failed",
+        "failed_cities",
+        "events_stored",
+        "markets_stored",
+        "orderbooks_stored",
+    ):
+        if key in payload:
+            compact[key] = payload[key]
+        elif key in nested:
+            compact[key] = nested[key]
+    stations = payload.get("stations")
+    if isinstance(stations, list):
+        compact["stations"] = [str(value) for value in stations[:5]]
+    results = payload.get("results")
+    if isinstance(results, list):
+        compact["result_count"] = len(results)
+        compact["result_errors"] = [
+            str(row.get("error") or row.get("reason") or "")
+            for row in results
+            if isinstance(row, dict) and (row.get("error") or row.get("reason"))
+        ][:5]
+    dates = payload.get("dates")
+    if isinstance(dates, list):
+        compact["dates"] = [
+            {
+                key: row.get(key)
+                for key in ("target_date", "ok", "hourly_rows", "daily_stored", "market_buckets", "signal_decisions")
+                if key in row
+            }
+            for row in dates[:3]
+            if isinstance(row, dict)
+        ]
+    return compact
 
 
 def _pws_auth_failure(payload: Any) -> bool:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter, defaultdict
 from datetime import datetime, time, timezone
 from pathlib import Path
@@ -14,6 +15,10 @@ from .stations import list_stations, sync_station_registry
 
 
 AUDIT_VERSION = "data-readiness-v1"
+AUDIT_HISTORY_RETENTION = max(
+    10,
+    int(os.getenv("WEATHERBOT_READINESS_HISTORY_RETENTION", "200") or "200"),
+)
 LIVE_TRUTH_PROVIDERS = {
     "polymarket_resolved",
     "nws_station",
@@ -30,21 +35,42 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     station_rows = list_stations(path)
     conn = connect(path)
     try:
-        rules = [dict(row) for row in conn.execute("SELECT * FROM market_rules").fetchall()]
-        contracts = [dict(row) for row in conn.execute("SELECT * FROM settlement_contracts").fetchall()]
-        truths = [dict(row) for row in conn.execute("SELECT * FROM truth_observations").fetchall()]
+        # Readiness is a metadata audit. Never materialize large raw payloads,
+        # forecast arrays, or order-book levels into Python just to count them.
+        rules = [dict(row) for row in conn.execute("SELECT city FROM market_rules").fetchall()]
+        contracts = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT contract_id, event_slug, city, city_name, target_local_date,
+                       station_id, timezone, resolution_source_text, source_url,
+                       parse_confidence, auto_verified_at, manual_verified_at
+                FROM settlement_contracts
+                """
+            ).fetchall()
+        ]
+        truths = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT city, target_date, actual_temp, provider, calibration_eligible
+                FROM truth_observations
+                """
+            ).fetchall()
+        ]
         forecast_runs = [
             dict(row)
             for row in conn.execute(
-                "SELECT * FROM forecast_runs WHERE COALESCE(run_type, 'forecast') = 'forecast'"
+                """
+                SELECT city, target_date, source, training_eligible, retrieved_at, created_at
+                FROM forecast_runs
+                WHERE COALESCE(run_type, 'forecast') = 'forecast'
+                """
             ).fetchall()
         ]
-        observation_runs = [
-            dict(row)
-            for row in conn.execute(
-                "SELECT * FROM forecast_runs WHERE run_type = 'observation'"
-            ).fetchall()
-        ]
+        observation_run_count = int(
+            conn.execute("SELECT COUNT(*) FROM forecast_runs WHERE run_type = 'observation'").fetchone()[0]
+        )
         forecast_member_count = int(
             conn.execute(
                 """
@@ -55,25 +81,89 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 """
             ).fetchone()[0]
         )
-        orderbooks = [dict(row) for row in conn.execute("SELECT * FROM orderbooks").fetchall()]
-        metar_reports = [dict(row) for row in conn.execute("SELECT * FROM metar_reports").fetchall()]
-        mesonet_observations = [dict(row) for row in conn.execute("SELECT * FROM mesonet_observations").fetchall()]
-        hourly_consensus = [dict(row) for row in conn.execute("SELECT * FROM hourly_consensus").fetchall()]
-        market_buckets = [dict(row) for row in conn.execute("SELECT * FROM market_buckets").fetchall()]
-        raw_signal_decisions = [dict(row) for row in conn.execute("SELECT * FROM signal_decisions").fetchall()]
-        signal_decisions = [
-            row for row in raw_signal_decisions
-            if str(row.get("decision_version") or "") == "signal-decision-v1"
+        orderbooks = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT quote_timestamp, created_at, snapshot_type,
+                       CASE
+                           WHEN json_valid(bids_json) = 1
+                            AND json_type(bids_json) = 'array'
+                            AND json_array_length(bids_json) > 0
+                            AND json_valid(asks_json) = 1
+                            AND json_type(asks_json) = 'array'
+                            AND json_array_length(asks_json) > 0
+                           THEN 1 ELSE 0
+                       END AS has_two_sided_depth
+                FROM orderbooks
+                """
+            ).fetchall()
         ]
-        raw_paper_orders = [dict(row) for row in conn.execute("SELECT * FROM paper_orders").fetchall()]
+        metar_reports = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT city, station_id, parse_status, parse_warnings FROM metar_reports"
+            ).fetchall()
+        ]
+        mesonet_observations = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT city, parse_warnings FROM mesonet_observations"
+            ).fetchall()
+        ]
+        hourly_consensus = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT city, target_date, forecast_temp, observed_temp, residual, build_status
+                FROM hourly_consensus
+                """
+            ).fetchall()
+        ]
+        market_buckets = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT city, target_date, strict_match_status, yes_token_id, tick_size,
+                       order_min_size, enable_order_book, bucket_low, bucket_high, market_id
+                FROM market_buckets
+                """
+            ).fetchall()
+        ]
+        signal_decisions = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT city_key, target_date, gate_status, paper_decision, live_decision,
+                       gate_reasons_json, updated_at, edge,
+                       CASE WHEN model_distribution_json IS NULL OR model_distribution_json = '' THEN 0 ELSE 1 END
+                           AS has_model_distribution,
+                       CASE WHEN model_bucket_probs_json IS NULL OR model_bucket_probs_json = '' THEN 0 ELSE 1 END
+                           AS has_model_bucket_probs
+                FROM signal_decisions
+                WHERE decision_version = 'signal-decision-v1'
+                """
+            ).fetchall()
+        ]
+        raw_paper_order_count = int(conn.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0])
         paper_orders = [
-            row for row in raw_paper_orders
-            if str(row.get("order_version") or "") == "paper-execution-v1"
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT id, decision_id, status, lifecycle_status
+                FROM paper_orders
+                WHERE order_version = 'paper-execution-v1'
+                """
+            ).fetchall()
         ]
         paper_fills = [
             dict(row)
             for row in conn.execute(
-                "SELECT * FROM fills WHERE order_type = 'paper' AND source = 'paper-execution-v1'"
+                """
+                SELECT order_id
+                FROM fills
+                WHERE order_type = 'paper' AND source = 'paper-execution-v1'
+                """
             ).fetchall()
         ]
     finally:
@@ -260,7 +350,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
     signal_decision_city_gap = max(0, signal_decision_required_cities - len(signal_decision_cities))
     signal_decision_missing_distribution = sum(
         1 for row in signal_decisions
-        if not row.get("model_distribution_json") or not row.get("model_bucket_probs_json")
+        if not row.get("has_model_distribution") or not row.get("has_model_bucket_probs")
     )
     signal_decision_missing_edge = sum(1 for row in signal_decisions if row.get("edge") is None)
     signal_decision_live_bias_blocked = sum(
@@ -269,7 +359,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         and "insufficient_bias_samples" in _json_list(row.get("gate_reasons_json"))
     )
     paper_order_counts = Counter(str(row.get("status") or "unknown") for row in paper_orders)
-    legacy_paper_orders = max(0, len(raw_paper_orders) - len(paper_orders))
+    legacy_paper_orders = max(0, raw_paper_order_count - len(paper_orders))
     paper_open_orders = [
         row for row in paper_orders
         if str(row.get("lifecycle_status") or row.get("status") or "") in {"open", "paper_filled", "paper_partial"}
@@ -477,7 +567,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 "fresh_training_cities": len(fresh_training_cities),
                 "max_age_minutes": cfg.forecast_max_age_minutes,
                 "sources": dict(forecast_source_counts),
-                "observation_runs": len(observation_runs),
+                "observation_runs": observation_run_count,
                 "training_eligible_runs": len(training_eligible_runs),
             },
         ),
@@ -665,6 +755,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
 
 
 def _orderbook_has_two_sided_depth(row: dict[str, Any]) -> bool:
+    if "has_two_sided_depth" in row:
+        return bool(row.get("has_two_sided_depth"))
     return bool(_orderbook_levels(row.get("bids_json")) and _orderbook_levels(row.get("asks_json")))
 
 
@@ -1058,6 +1150,18 @@ def persist_data_readiness(payload: dict[str, Any], path: Path | None = None) ->
                 json.dumps(payload, ensure_ascii=False, sort_keys=True),
                 payload.get("generated_at") or datetime.now(timezone.utc).isoformat(),
             ),
+        )
+        conn.execute(
+            """
+            DELETE FROM data_qualification_audits
+            WHERE id NOT IN (
+                SELECT id
+                FROM data_qualification_audits
+                ORDER BY id DESC
+                LIMIT ?
+            )
+            """,
+            (AUDIT_HISTORY_RETENTION,),
         )
 
 

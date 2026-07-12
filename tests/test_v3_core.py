@@ -29,7 +29,7 @@ from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement
 from weatherbot_v3.openmeteo import fetch_openmeteo_forecasts, model_allowlist_for_city, openmeteo_runs_from_response
 from weatherbot_v3.mesonet import ingest_mesonet_observations, mesonet_observation_from_pws_row
 from weatherbot_v3.pws import aggregate_pws_observations, fetch_wunderground_pws_city, parse_pws_current_payload
-from weatherbot_v3.qualification import build_data_readiness
+from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY, forecast_source_matches_profile_location
 from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summary
 from weatherbot_v3.source_health import build_source_health_matrix
@@ -2309,6 +2309,29 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("metar_reports_missing", blocker_codes)
         self.assertIn("settlement_rule_not_manually_verified", blocker_codes)
         self.assertIn("versioned_forecast_runs_missing", blocker_codes)
+
+    def test_data_readiness_history_is_bounded(self):
+        db_path = test_db_path("data_readiness_retention")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch("weatherbot_v3.qualification.AUDIT_HISTORY_RETENTION", 3):
+            for index in range(5):
+                persist_data_readiness(
+                    {
+                        "audit_version": "test-readiness-v1",
+                        "status": "blocked",
+                        "score": 0.1,
+                        "live_allowed": False,
+                        "generated_at": f"2026-07-12T00:00:0{index}+00:00",
+                    },
+                    db_path,
+                )
+        with connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT created_at FROM data_qualification_audits ORDER BY id"
+            ).fetchall()
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]["created_at"], "2026-07-12T00:00:02+00:00")
 
     def test_data_readiness_exposes_market_bucket_stage(self):
         db_path = test_db_path("data_readiness_market_buckets")

@@ -272,6 +272,7 @@ def run_openmeteo_fetch(
     all_cities: bool = False,
     limit_cities: int = 5,
     forecast_days: int = 7,
+    refresh_readiness: bool = True,
 ) -> dict:
     from .openmeteo import fetch_openmeteo_forecasts
 
@@ -286,7 +287,7 @@ def run_openmeteo_fetch(
         limit_cities=limit_cities,
         forecast_days=forecast_days,
     )
-    if not dry_run and payload.get("runs_upserted", 0) > 0:
+    if refresh_readiness and not dry_run and payload.get("runs_upserted", 0) > 0:
         readiness = build_data_readiness()
         persist_data_readiness(readiness)
         payload["forecast_stage"] = readiness_stage(readiness, "forecast_runs")
@@ -300,6 +301,7 @@ def run_weathercom_fetch(
     all_cities: bool = False,
     limit_cities: int = 5,
     forecast_days: int = 3,
+    refresh_readiness: bool = True,
 ) -> dict:
     from .weathercom import fetch_weathercom_forecasts
 
@@ -313,7 +315,7 @@ def run_weathercom_fetch(
         limit_cities=limit_cities,
         forecast_days=forecast_days,
     )
-    if not dry_run and payload.get("runs_upserted", 0) > 0:
+    if refresh_readiness and not dry_run and payload.get("runs_upserted", 0) > 0:
         readiness = build_data_readiness()
         persist_data_readiness(readiness)
         payload["forecast_stage"] = readiness_stage(readiness, "forecast_runs")
@@ -370,12 +372,13 @@ def run_china_weather_fetch(
     cities_arg: str = "",
     *,
     dry_run: bool = False,
+    refresh_readiness: bool = True,
 ) -> dict:
     from .china_weather import fetch_china_weather
 
     cities = _cities_from_arg(cities_arg)
     payload = fetch_china_weather(cities or None, dry_run=dry_run)
-    if payload.get("ok") and not dry_run:
+    if refresh_readiness and payload.get("ok") and not dry_run:
         readiness = build_data_readiness()
         persist_data_readiness(readiness)
         payload["observations_stage"] = readiness_stage(readiness, "observations")
@@ -389,6 +392,7 @@ def run_pws_fetch(
     all_cities: bool = False,
     limit_cities: int = 5,
     station_limit: int = 5,
+    refresh_readiness: bool = True,
 ) -> dict:
     from .pws import fetch_wunderground_pws
 
@@ -402,7 +406,7 @@ def run_pws_fetch(
         limit_cities=limit_cities,
         station_limit=station_limit,
     )
-    if payload.get("ok") and not dry_run:
+    if refresh_readiness and payload.get("ok") and not dry_run:
         readiness = build_data_readiness()
         persist_data_readiness(readiness)
         payload["observations_stage"] = readiness_stage(readiness, "observations")
@@ -515,6 +519,7 @@ def run_market_buckets_sync(
     dry_run: bool = False,
     limit_cities: int = 5,
     fetch_orderbooks: bool = True,
+    refresh_readiness: bool = True,
 ) -> dict:
     if active_weather:
         from .market_buckets import sync_active_weather_market_buckets
@@ -530,9 +535,10 @@ def run_market_buckets_sync(
             dry_run=dry_run,
             fetch_orderbooks=fetch_orderbooks,
         )
-        readiness = build_data_readiness()
-        persist_data_readiness(readiness)
-        result["market_buckets_stage"] = readiness_stage(readiness, "market_buckets")
+        if refresh_readiness:
+            readiness = build_data_readiness()
+            persist_data_readiness(readiness)
+            result["market_buckets_stage"] = readiness_stage(readiness, "market_buckets")
         return result
 
     from .market_buckets import ingest_market_buckets
@@ -571,9 +577,10 @@ def run_market_buckets_sync(
                 if market_payload:
                     payloads.append(market_payload)
     result = ingest_market_buckets(payloads[:limit])
-    readiness = build_data_readiness()
-    persist_data_readiness(readiness)
-    result["market_buckets_stage"] = readiness_stage(readiness, "market_buckets")
+    if refresh_readiness:
+        readiness = build_data_readiness()
+        persist_data_readiness(readiness)
+        result["market_buckets_stage"] = readiness_stage(readiness, "market_buckets")
     return result
 
 

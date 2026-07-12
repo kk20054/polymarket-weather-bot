@@ -13,6 +13,7 @@ from weatherbot_v3.scheduler import (
     FORECAST_INTERVAL_SECONDS,
     HISTORICAL_INTERVAL_SECONDS,
     WeatherBotScheduler,
+    _compact_city_payload,
     _remaining_cycle_delay,
     _tiered_refresh_rows,
 )
@@ -44,12 +45,13 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cycle_delay_is_start_to_start(self):
         self.assertEqual(_remaining_cycle_delay(600, 277), 323)
-        self.assertEqual(_remaining_cycle_delay(60, 92), 1)
+        self.assertEqual(_remaining_cycle_delay(60, 92), 60)
 
     async def test_poll_loop_reports_fixed_cadence_next_run(self):
         scheduler = WeatherBotScheduler(city_concurrency=1)
         state = scheduler.pollers["forecast_poller"]
         state.interval_seconds = 10
+        state.initial_delay_seconds = 0
 
         async def fake_run_once(_poller_key: str):
             await asyncio.sleep(0.02)
@@ -65,6 +67,70 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         remaining = (scheduled - datetime.now(timezone.utc)).total_seconds()
         self.assertGreater(remaining, 8.5)
         self.assertLessEqual(remaining, 10.0)
+
+    async def test_global_poller_slot_serializes_heavy_collectors(self):
+        scheduler = WeatherBotScheduler(city_concurrency=2, poller_concurrency=1)
+        active = 0
+        max_active = 0
+
+        async def fake_run():
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.04)
+            active -= 1
+            return {"ok": True, "cities": 0, "results": []}
+
+        scheduler._run_metar_poller = fake_run  # type: ignore[method-assign]
+        scheduler._run_forecast_poller = fake_run  # type: ignore[method-assign]
+        with patch("weatherbot_v3.scheduler.log_data_fetch"):
+            await asyncio.gather(
+                scheduler.run_once("metar_poller"),
+                scheduler.run_once("forecast_poller"),
+            )
+
+        self.assertEqual(max_active, 1)
+        status = scheduler.status()
+        self.assertEqual(status["poller_concurrency"], 1)
+        self.assertEqual(status["active_pollers"], [])
+        waits = [
+            status["pollers"][key]["last_queue_wait_ms"]
+            for key in ("metar_poller", "forecast_poller")
+        ]
+        self.assertTrue(any(float(value or 0) >= 30 for value in waits))
+
+    async def test_restart_reapplies_each_pollers_initial_delay(self):
+        scheduler = WeatherBotScheduler(city_concurrency=1)
+        state = scheduler.pollers["forecast_poller"]
+        state.initial_delay_seconds = 0.04
+        state.run_count = 3
+
+        async def fake_run_once(_poller_key: str):
+            scheduler.stop_event.set()
+            return {"ok": True}
+
+        scheduler.run_once = fake_run_once  # type: ignore[method-assign]
+        started = time.perf_counter()
+        await scheduler._poll_loop("forecast_poller")
+
+        self.assertGreaterEqual(time.perf_counter() - started, 0.03)
+
+    async def test_scheduler_compacts_collector_payload_before_retention(self):
+        compact = _compact_city_payload({
+            "ok": True,
+            "city": "atlanta",
+            "weathercom": {
+                "ok": True,
+                "rows_upserted": 24,
+                "raw_response": "x" * 1_000_000,
+                "results": [{"hourly": list(range(1000))}],
+            },
+        })
+
+        self.assertEqual(compact["city"], "atlanta")
+        self.assertEqual(compact["rows_upserted"], 24)
+        self.assertNotIn("raw_response", compact)
+        self.assertLess(len(str(compact)), 1000)
 
     async def test_tiered_refresh_keeps_active_markets_on_fast_cycle(self):
         rows = [
@@ -111,10 +177,37 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(fetch.call_count, 1)
+        self.assertFalse(fetch.call_args.kwargs["refresh_readiness"])
         self.assertEqual(result["refresh_scope"], "active_markets")
         self.assertEqual(result["deferred_cities"], ["ankara"])
         status = scheduler.status()["pollers"]["forecast_poller"]
         self.assertEqual(status["last_result"]["refresh_scope"], "active_markets")
+
+    async def test_nwp_poller_skips_per_city_readiness_refresh(self):
+        rows = [{"city_key": "chicago", "station_id": "KORD"}]
+        with patch("weatherbot_v3.scheduler._enabled_rows", return_value=rows), patch(
+            "weatherbot_v3.scheduler.run_openmeteo_fetch",
+            return_value={"ok": True, "runs_upserted": 6},
+        ) as fetch:
+            result = await WeatherBotScheduler(city_concurrency=1)._run_nwp_poller()
+
+        self.assertTrue(result["ok"])
+        fetch.assert_called_once()
+        self.assertFalse(fetch.call_args.kwargs["refresh_readiness"])
+
+    async def test_pws_poller_skips_per_city_readiness_refresh(self):
+        rows = [{"city_key": "chicago", "station_id": "KORD"}]
+        with patch.dict(os.environ, {"WUNDERGROUND_API_KEY": "test-pws-key"}, clear=False), patch(
+            "weatherbot_v3.scheduler._enabled_rows", return_value=rows
+        ), patch(
+            "weatherbot_v3.scheduler.run_pws_fetch",
+            return_value={"ok": True, "rows_upserted": 1},
+        ) as fetch:
+            result = await WeatherBotScheduler(city_concurrency=1)._run_pws_poller()
+
+        self.assertTrue(result["ok"])
+        fetch.assert_called_once()
+        self.assertFalse(fetch.call_args.kwargs["refresh_readiness"])
 
     async def test_historical_poller_keeps_hong_kong_as_display_evidence(self):
         rows = [
@@ -323,6 +416,9 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(key, payload["pollers"])
             for field in ("last_run_at", "age_seconds", "last_duration_ms", "fails_last_hour", "next_run_at", "initial_delay_seconds"):
                 self.assertIn(field, payload["pollers"][key])
+        self.assertEqual(payload["poller_concurrency"], 1)
+        self.assertIn("active_pollers", payload)
+        self.assertIn("waiting_pollers", payload)
 
     async def test_scheduler_status_is_memory_only(self):
         scheduler = WeatherBotScheduler(city_concurrency=1)
@@ -389,19 +485,14 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "weatherbot_v3.scheduler.run_signal_decisions_build",
             return_value={"ok": True, "stored": 11, "results": [{"bucket_count": 11}]},
-        ) as decisions, patch(
-            "weatherbot_v3.scheduler.build_data_readiness", return_value={"stages": []}
-        ) as readiness, patch(
-            "weatherbot_v3.scheduler.persist_data_readiness"
-        ) as persist_readiness:
+        ) as decisions:
             result = await WeatherBotScheduler(city_concurrency=2)._run_derive_poller()
 
         self.assertTrue(result["ok"])
         market_sync.assert_not_called()
         self.assertEqual(result["ok_cities"], 2)
-        self.assertTrue(result["readiness_refreshed"])
-        self.assertEqual(readiness.call_count, 1)
-        persist_readiness.assert_called_once_with({"stages": []})
+        self.assertFalse(result["readiness_refreshed"])
+        self.assertEqual(result["readiness_reason"], "explicit_audit_only")
         self.assertEqual(decisions.call_count, 4)
         for call in decisions.call_args_list:
             self.assertFalse(call.kwargs["refresh_readiness"])
@@ -439,6 +530,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(market_sync.call_count, 2)
+        self.assertTrue(all(call.kwargs["refresh_readiness"] is False for call in market_sync.call_args_list))
         self.assertEqual(result["market_buckets_stored"], 44)
         self.assertEqual(result["active_orderbooks"], 44)
 
@@ -464,8 +556,9 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         seen: list[str] = []
 
-        def fake_china(cities_arg: str, *, dry_run: bool = False):
+        def fake_china(cities_arg: str, *, dry_run: bool = False, refresh_readiness: bool = True):
             seen.append(cities_arg)
+            self.assertFalse(refresh_readiness)
             return {
                 "ok": True,
                 "city": cities_arg,
