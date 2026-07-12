@@ -7,8 +7,8 @@ const api = axios.create({
   baseURL: `${API_BASE}/api`,
 })
 
-export async function fetchDashboard(): Promise<DashboardData> {
-  const { data } = await api.get<DashboardData>('/dashboard')
+export async function fetchDashboard(city = ''): Promise<DashboardData> {
+  const { data } = await api.get<DashboardData>('/dashboard', { params: city ? { city } : undefined })
   return data
 }
 

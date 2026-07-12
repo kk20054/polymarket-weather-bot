@@ -57,6 +57,50 @@ function formatTooltipTime(dateLabel: string, value: number | string) {
   return `${dateLabel} ${formatMinute(Number(value))}`
 }
 
+type TooltipItem = {
+  dataKey?: string | number
+  name?: string
+  value?: number | string | null
+  color?: string
+}
+
+function HourlyTooltip({
+  active,
+  label,
+  payload,
+  dateLabel,
+  unit,
+}: {
+  active?: boolean
+  label?: number | string
+  payload?: TooltipItem[]
+  dateLabel: string
+  unit: string
+}) {
+  if (!active || label === undefined || !payload?.length) return null
+  return (
+    <div className="min-w-[180px] border border-[#2C3445] bg-[#1B212C] px-2.5 py-2 text-[11px] text-[#CBD2DC] shadow-xl">
+      <div className="mb-1.5 font-semibold text-white">{formatTooltipTime(dateLabel, label)}</div>
+      <div className="space-y-1">
+        {payload.map(item => {
+          const numeric = Number(item.value)
+          if (!Number.isFinite(numeric)) return null
+          const cloud = item.dataKey === 'cloud_pct'
+          return (
+            <div key={String(item.dataKey)} className="flex items-center justify-between gap-4 tabular-nums">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-2 w-2" style={{ backgroundColor: item.color || '#94A3B8' }} />
+                {item.name || item.dataKey}
+              </span>
+              <strong>{cloud ? `${numeric.toFixed(0)}%` : formatTemp(numeric, unit)}</strong>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 type DotProps = { cx?: number; cy?: number; value?: number | null; active?: boolean }
 
 function SquareDot({ cx, cy, value, active = false }: DotProps) {
@@ -188,11 +232,7 @@ export function HourlyTemperatureChart({
               <XAxis type="number" dataKey="time_minute" domain={[0, 1380]} ticks={HOUR_TICKS} interval={0} tickFormatter={formatMinute} stroke="#7D8694" fontSize={8} tickLine={false} axisLine={false} minTickGap={0} angle={-45} textAnchor="end" height={52} />
               <YAxis yAxisId="temp" domain={temperatureDomain} allowDataOverflow stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°${unit}`} />
               <YAxis yAxisId="percent" orientation="right" domain={[0, 100]} stroke="#475569" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}%`} />
-              <Tooltip
-                contentStyle={{ background: '#1B212C', border: '1px solid #2C3445', color: '#CBD2DC', fontSize: 11 }}
-                labelFormatter={value => formatTooltipTime(dateLabel, value)}
-                formatter={(value: unknown, name: string) => name === '云量 %' ? [`${Number(value).toFixed(0)}%`, name] : [formatTemp(Number(value), unit), name]}
-              />
+              <Tooltip content={<HourlyTooltip dateLabel={dateLabel} unit={unit} />} />
               {visibleSeries.cloud && <Area yAxisId="percent" type="monotone" dataKey="cloud_pct" name="云量 %" stroke="#94A3B8" fill="#94A3B8" fillOpacity={0.25} strokeOpacity={0.65} connectNulls />}
               {visibleSeries.metar && <Line yAxisId="temp" type="monotone" dataKey="metar_value" name="METAR" stroke="#F97316" dot={{ r: 3, fill: '#F97316', stroke: '#F97316', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls />}
               {visibleSeries.historical && <Line yAxisId="temp" type="monotone" dataKey="historical_value" name="历史观测" stroke="#22C55E" dot={{ r: 3, fill: '#22C55E', stroke: '#22C55E', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls />}

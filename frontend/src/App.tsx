@@ -41,7 +41,7 @@ import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
 import { useT, type I18nLanguage } from './i18n/useT'
-import type { BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommendationItem, DataReadiness, PaperValidationStatus, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerPollerStatus, SchedulerStatus } from './types'
+import type { BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommendationItem, DataReadiness, PaperValidationStatus, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerStatus } from './types'
 
 type TradeMode = 'paper' | 'live'
 type UiLanguage = 'zh' | 'en'
@@ -192,15 +192,6 @@ function relativeTime(value?: string | null) {
   return `${(seconds / 86400).toFixed(1)} 天前`
 }
 
-function pollerAgeLabel(poller?: SchedulerPollerStatus | null) {
-  const age = poller?.age_seconds
-  if (age === null || age === undefined || !Number.isFinite(Number(age))) return '未运行'
-  if (Number(age) < 60) return `${Math.round(Number(age))}秒前`
-  if (Number(age) < 3600) return `${Math.round(Number(age) / 60)}分钟前`
-  if (Number(age) < 86400) return `${(Number(age) / 3600).toFixed(1)}小时前`
-  return `${(Number(age) / 86400).toFixed(1)}天前`
-}
-
 function durationLabel(ms?: number | null) {
   if (ms === null || ms === undefined || !Number.isFinite(Number(ms))) return '--ms'
   if (Number(ms) < 1000) return `${Math.round(Number(ms))}ms`
@@ -217,37 +208,6 @@ function ageSecondsLabel(seconds?: number | null) {
 function tempLabel(value?: number | null, unit = '') {
   if (value === null || value === undefined || !Number.isFinite(Number(value))) return '--'
   return `${Number(value).toFixed(1)}°${unit || ''}`
-}
-
-function pollerTone(poller?: SchedulerPollerStatus | null) {
-  const fails = Number(poller?.fails_last_hour ?? 0)
-  if (fails > 0) return 'border-red-500/35 bg-red-500/5 text-red-300'
-  if (poller?.running) return 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200'
-  const age = poller?.age_seconds
-  if (age === null || age === undefined || !Number.isFinite(Number(age))) return 'border-neutral-800 text-neutral-500'
-  if (Number(age) < 600) return 'border-green-500/30 text-green-300'
-  if (Number(age) < 3600) return 'border-amber-500/30 text-amber-300'
-  return 'border-red-500/30 text-red-300'
-}
-
-function SchedulerBadge({ poller, label, extraTitle }: { poller?: SchedulerPollerStatus | null; label: string; extraTitle?: string }) {
-  const fails = Number(poller?.fails_last_hour ?? 0)
-  const title = [
-    `${label} 下次：${poller?.next_run_at ? timeText(poller.next_run_at) : '--'}`,
-    `耗时：${durationLabel(poller?.last_duration_ms)}`,
-    fails > 0 ? `近 1 小时失败：${fails}` : '',
-    poller?.last_message ? `最近消息：${poller.last_message}` : '',
-    extraTitle || '',
-  ].filter(Boolean).join('\n')
-  return (
-    <span
-      className={`shrink-0 border px-2 py-1 tabular-nums ${pollerTone(poller)}`}
-      data-extra-title={extraTitle || undefined}
-      title={title}
-    >
-      {label} {pollerAgeLabel(poller)} ({durationLabel(poller?.last_duration_ms)})
-    </span>
-  )
 }
 
 function RecommendationCard({
@@ -286,11 +246,11 @@ function RecommendationCard({
           onSelect()
         }
       }}
-      className={`min-w-0 cursor-pointer border p-2 text-left transition ${cardTone}`}
+      className={`w-[190px] shrink-0 cursor-pointer border px-3 py-1.5 text-left transition ${cardTone}`}
       title={title}
     >
       <div className="truncate text-[12px] font-semibold">{item.city_name}</div>
-      <div className="mt-1 flex items-center gap-3 text-[10px] tabular-nums">
+      <div className="mt-0.5 flex items-center gap-3 text-[10px] tabular-nums">
         <span className="text-amber-200">现在 {tempLabel(item.current_temp, item.current_temp_unit)}</span>
         <span className="text-amber-200">预计最高 {tempLabel(item.deb_mu, item.deb_unit)}</span>
       </div>
@@ -755,6 +715,7 @@ function App() {
   })
   const [productionActionResult, setProductionActionResult] = useState<ProductionActionRunResult | null>(null)
   const [refreshNotices, setRefreshNotices] = useState<RefreshNotice[]>([])
+  const [advancedDiagnosticsOpen, setAdvancedDiagnosticsOpen] = useState(false)
   const seenSchedulerRunsRef = useRef<Record<string, string>>({})
   const copy = UI_COPY[uiLanguage]
   const i18nLanguage: I18nLanguage = uiLanguage === 'zh' ? 'zh-CN' : 'en'
@@ -769,9 +730,9 @@ function App() {
     }
   }
 
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['dashboard'],
-    queryFn: fetchDashboard,
+  const { data, isLoading, error, refetch, dataUpdatedAt } = useQuery({
+    queryKey: ['dashboard', selectedCity],
+    queryFn: () => fetchDashboard(selectedCity),
     refetchInterval: 10000,
     retry: 1,
   })
@@ -780,18 +741,21 @@ function App() {
     queryKey: ['settlement-contracts', contractStatus],
     queryFn: () => fetchSettlementContracts(contractStatus, 12),
     refetchInterval: 120000,
+    enabled: advancedDiagnosticsOpen,
   })
 
   const forecastArchiveManifestQuery = useQuery({
     queryKey: ['forecast-archive-manifest'],
     queryFn: fetchForecastArchiveManifest,
     refetchInterval: 120000,
+    enabled: advancedDiagnosticsOpen,
   })
 
   const productionValidationQuery = useQuery({
     queryKey: ['production-validation'],
     queryFn: fetchProductionValidation,
     refetchInterval: 120000,
+    enabled: advancedDiagnosticsOpen,
   })
 
   const productionRefreshStatusQuery = useQuery({
@@ -817,10 +781,20 @@ function App() {
 
   const selectedEvidenceReadyForLayer7 = Boolean(selectedCity && selectedDate)
 
+  const hourlyConsensusQuery = useQuery({
+    queryKey: ['hourly-consensus', selectedCity, selectedDate],
+    queryFn: () => fetchHourlyConsensus(selectedCity, selectedDate),
+    enabled: selectedEvidenceReadyForLayer7,
+    refetchInterval: 30000,
+    retry: 1,
+  })
+
+  const hourlyEvidenceSettled = hourlyConsensusQuery.isSuccess || hourlyConsensusQuery.isError
+
   const marketBucketsQuery = useQuery({
     queryKey: ['market-buckets', selectedCity, selectedDate],
     queryFn: () => fetchMarketBuckets(selectedCity, selectedDate, 120),
-    enabled: selectedEvidenceReadyForLayer7,
+    enabled: selectedEvidenceReadyForLayer7 && hourlyEvidenceSettled,
     refetchInterval: 30000,
     retry: 1,
   })
@@ -828,7 +802,7 @@ function App() {
   const signalDecisionsQuery = useQuery({
     queryKey: ['signal-decisions', selectedCity, selectedDate],
     queryFn: () => fetchSignalDecisions(selectedCity, selectedDate, 120),
-    enabled: selectedEvidenceReadyForLayer7,
+    enabled: selectedEvidenceReadyForLayer7 && hourlyEvidenceSettled,
     refetchInterval: 30000,
     retry: 1,
   })
@@ -836,7 +810,7 @@ function App() {
   const dailyMaxPredictionQuery = useQuery({
     queryKey: ['daily-max-predictions', selectedCity, selectedDate],
     queryFn: () => fetchDailyMaxPredictions(selectedCity, selectedDate),
-    enabled: selectedEvidenceReadyForLayer7,
+    enabled: selectedEvidenceReadyForLayer7 && hourlyEvidenceSettled,
     refetchInterval: 60000,
     retry: 1,
   })
@@ -844,7 +818,7 @@ function App() {
   const modelRepriceEventsQuery = useQuery({
     queryKey: ['model-reprice-events', selectedCity, selectedDate],
     queryFn: () => fetchModelRepriceEvents(selectedCity || '', selectedDate || '', true, 200),
-    enabled: selectedEvidenceReadyForLayer7,
+    enabled: selectedEvidenceReadyForLayer7 && hourlyEvidenceSettled,
     refetchInterval: 30000,
     retry: 1,
   })
@@ -1034,8 +1008,6 @@ function App() {
   const dataReadiness = data?.data_readiness ?? null
   const productionRefresh = productionRefreshStatusQuery.data ?? productionRefreshMutation.data ?? data?.production_refresh ?? null
   const productionRefreshRunning = Boolean(productionRefreshMutation.isPending || productionRefresh?.running)
-  const productionRefreshStages = productionRefresh?.stages ?? []
-  const productionRefreshDone = productionRefreshStages.filter(stage => stage.ok && !stage.running).length
   const schedulerStatus: SchedulerStatus | null = schedulerStatusQuery.data ?? data?.scheduler_status ?? null
   const schedulerRunning = Boolean(schedulerStatus?.running || schedulerStartMutation.isPending)
   const productionValidation = productionValidationQuery.data ?? null
@@ -1043,8 +1015,6 @@ function App() {
   const forecastArchiveManifest = forecastArchiveManifestQuery.data ?? null
   const actionable = signals.filter(signal => signal.actionable).length
   const liveAvailable = Boolean(stats.strategy_live_ready && data?.v3?.config?.live_trading)
-  const debugMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1'
-  const needsManualRefresh = data?._meta?.reason === 'manual_refresh_required'
   const runValidationActionDryRun = (action: ProductionValidationAction) => {
     if (!action.key) return
     productionActionMutation.mutate({ action, apply: false })
@@ -1205,7 +1175,6 @@ function App() {
   const selectedStatusConfig = selectedCityMeta?.key ? (cityStatusMap[selectedCityMeta.key] ?? ROUND5_STATUS_FALLBACK[selectedCityMeta.key]) : undefined
   const recommendations = data?.recommendations ?? null
   const recommendedItems = recommendations?.items ?? []
-  const actionableCityCount = recommendations?.trade_candidate_count ?? cityOptions.filter(city => city.actionable > 0).length
   useEffect(() => {
     const pollers = schedulerStatus?.pollers ?? {}
     let shouldRefreshDashboard = false
@@ -1258,13 +1227,6 @@ function App() {
     return `${city.name} ${city.station ?? ''} ${city.key} ${city.continent}`.toLowerCase().includes(query)
   })
 
-  const hourlyConsensusQuery = useQuery({
-    queryKey: ['hourly-consensus', selectedCity, selectedDate],
-    queryFn: () => fetchHourlyConsensus(selectedCity, selectedDate),
-    enabled: selectedEvidenceReadyForLayer7,
-    refetchInterval: 30000,
-    retry: 1,
-  })
   const cityHref = (city: { key: string; station?: string }) => {
     const params = new URLSearchParams()
     params.set('city', cityPageSlug(city))
@@ -1335,7 +1297,7 @@ function App() {
 
   return (
     <div className={`${themeMode === 'dark' ? 'polywx-dark bg-[#161A22] text-[#CBD2DC]' : 'polywx-light bg-white text-gray-900'} flex min-h-screen flex-col xl:h-screen xl:overflow-hidden`}>
-      <header className="flex shrink-0 flex-wrap items-start gap-2 border-b border-neutral-800 px-3 py-2">
+      <header className="flex shrink-0 items-center gap-2 border-b border-neutral-800 px-3 py-1.5">
         <div className="min-w-0 flex-1 basis-[130px]">
           <div className="flex items-baseline gap-2">
             <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot</h1>
@@ -1343,37 +1305,9 @@ function App() {
           </div>
           <div className="text-[11px] text-neutral-600">{t('app.subtitle')}</div>
         </div>
-        <div className="order-last flex min-w-0 basis-full flex-nowrap items-center gap-1.5 overflow-x-auto text-[10px] xl:overflow-visible">
-          <SchedulerBadge poller={schedulerStatus?.pollers?.forecast_poller} label="预报" />
-          <SchedulerBadge
-            poller={schedulerStatus?.pollers?.metar_poller}
-            label="METAR"
-          />
-          <SchedulerBadge poller={schedulerStatus?.pollers?.historical_poller} label="历史观测" />
-          <SchedulerBadge
-            poller={schedulerStatus?.pollers?.china_live_poller}
-            label="中国天气实况"
-            extraTitle="当前为本系统中国实况源，用于展示对照；未确认与 PolyWX 同源，不能解锁结算 truth 或实盘。"
-          />
-          <span className="shrink-0 border border-neutral-800 px-2 py-1 text-neutral-400">
-            已刷新 {dataAge(stats.data_age_minutes)}
-          </span>
-          {debugMode && (
-            <span
-              className={`shrink-0 border px-2 py-1 ${
-                productionRefreshRunning
-                  ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
-                  : productionRefresh?.ok
-                    ? 'border-green-500/30 text-green-300'
-                    : productionRefresh
-                      ? 'border-amber-500/30 text-amber-300'
-                      : 'border-neutral-800 text-neutral-500'
-              }`}
-            >
-              {productionRefreshRunning ? `refresh ${productionRefreshDone}/${productionRefreshStages.length || 11}` : productionRefresh?.requested_at ? 'refresh done' : 'refresh idle'}
-            </span>
-          )}
-        </div>
+        <span className="hidden shrink-0 text-[10px] text-neutral-500 md:inline">
+          已刷新 {dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--'}
+        </span>
         <label className="inline-flex items-center gap-1 border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400" aria-label={t('language.label')}>
           <span>{t('language.label')}</span>
           <select
@@ -1508,15 +1442,13 @@ function App() {
         </div>
       )}
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[260px_minmax(560px,1fr)_340px] xl:overflow-hidden">
+      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[220px_minmax(600px,1fr)_340px] xl:overflow-hidden">
         <aside className="order-2 border-b border-neutral-800 bg-neutral-950/40 xl:order-1 xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
-          <div className="p-3">
+          <div className="p-2">
             <div className="mb-2 flex items-center justify-between">
               <div>
                 <div className="text-sm font-medium text-neutral-100">城市</div>
-                <div className="text-[10px] text-neutral-600">
-                  {actionableCityCount > 0 ? `${actionableCityCount} 个城市有可执行信号` : '无信号时按城市浏览证据'}
-                </div>
+                <div className="text-[10px] text-neutral-600">按站点浏览</div>
               </div>
               <span className="border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">{filteredCityOptions.length}</span>
             </div>
@@ -1542,10 +1474,10 @@ function App() {
                 <div
                   key={city.key}
                   title={`预报 ${city.forecastCount} · METAR ${city.latestMetar !== null && city.latestMetar !== undefined ? Number(city.latestMetar).toFixed(1) + '°' + city.unit : '--'} · 历史 ${city.historyCount} · 湿度 ${city.humidityStatus === 'available' ? '可用' : '缺失'} · 信号 ${city.actionable}/${city.signals}`}
-                  className={`flex min-h-[58px] w-full items-stretch gap-2 border px-2 py-2 text-left transition ${
+                  className={`flex min-h-[40px] w-full items-stretch gap-2 border-x-0 border-b border-t-0 px-2 py-1.5 text-left transition ${
                     selectedCity === city.key
-                      ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
-                      : 'border-neutral-800 bg-black/40 text-neutral-300 hover:border-neutral-700'
+                      ? 'border-blue-500/40 bg-blue-500/10 text-blue-100'
+                      : 'border-neutral-800 bg-transparent text-neutral-300 hover:bg-neutral-900/60'
                   }`}
                 >
                   <a
@@ -1558,11 +1490,11 @@ function App() {
                   >
                     <div className="flex items-center justify-between gap-2">
                     <div className="flex min-w-0 items-center gap-2">
-                      <span className={`h-2 w-2 shrink-0 rounded-full ${city.enabled ? 'bg-amber-300' : city.actionable > 0 ? 'bg-green-300' : city.forecastCount > 0 ? 'bg-cyan-300' : 'bg-neutral-700'}`} />
+                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${city.actionable > 0 ? 'bg-green-400' : city.forecastCount > 0 ? 'bg-blue-400' : 'bg-neutral-700'}`} />
                       <div className="min-w-0">
                         <div className="truncate text-xs font-medium leading-tight">{city.name}</div>
-                        <div className="mt-1 truncate text-[10px] leading-tight text-neutral-600">
-                          {city.station || 'station 未映射'} · {relativeTime(city.lastRefreshedAt)}
+                        <div className="mt-0.5 truncate text-[9px] leading-tight text-neutral-600">
+                          {city.station || 'station 未映射'}
                         </div>
                       </div>
                     </div>
@@ -1570,7 +1502,7 @@ function App() {
                       <div className="tabular-nums text-[11px] leading-tight text-neutral-200">
                         {city.latest === null || city.latest === undefined ? '--' : `${Number(city.latest).toFixed(1)}°${city.unit}`}
                       </div>
-                      <div className="mt-1 text-[9px] tabular-nums text-neutral-600">{city.actionable > 0 ? `${city.actionable} 信号` : ''}</div>
+                      <div className="mt-0.5 text-[9px] tabular-nums text-neutral-600">{relativeTime(city.lastRefreshedAt)}</div>
                     </div>
                     </div>
                   </a>
@@ -1582,12 +1514,12 @@ function App() {
         </aside>
 
         <section className="order-1 min-h-[720px] overflow-hidden xl:order-2 xl:flex xl:min-h-0 xl:flex-col">
-          <div className="shrink-0 border-b border-amber-500/20 bg-amber-500/10 px-3 py-2">
+          <div className="shrink-0 border-b border-amber-500/20 bg-amber-500/10 px-3 py-1.5">
             <div className="flex flex-wrap items-center gap-3">
               <div className="shrink-0 text-[11px] font-semibold text-amber-300">推荐关注</div>
               {recommendedItems.length > 0 ? (
-                <div className="grid min-w-0 flex-1 gap-1 md:grid-cols-2 2xl:grid-cols-4">
-                  {recommendedItems.map(item => (
+                <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto">
+                  {recommendedItems.slice(0, 4).map(item => (
                     <RecommendationCard
                       key={`${item.type}-${item.city_key}-${item.target_date}-${item.bucket_key ?? item.metar_report_time ?? 'latest'}`}
                       item={item}
@@ -1604,16 +1536,10 @@ function App() {
               )}
             </div>
           </div>
-          <div className="z-20 shrink-0 flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 bg-black/95 px-3 py-2">
+          <div className="z-20 shrink-0 flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 bg-black/95 px-3 py-1.5">
             <div className="min-w-0">
               <div className="truncate text-sm font-medium text-neutral-100">
                 {selectedCityMeta?.name ?? '城市天气证据'} · {selectedCityMeta?.station || 'station 未映射'}
-              </div>
-              <div className="mt-0.5 flex flex-wrap gap-1.5 text-[10px]">
-                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">{selectedDate || '日期待定'}</span>
-                <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-500">
-                  {selectedCityMeta?.latest === null || selectedCityMeta?.latest === undefined ? '预测 --' : `预测 ${Number(selectedCityMeta.latest).toFixed(1)}°${selectedCityMeta.unit}`}
-                </span>
               </div>
               <details className="mt-1 text-[9px] text-neutral-500">
                 <summary className="w-fit cursor-pointer select-none hover:text-neutral-300">市场规则</summary>
@@ -1635,13 +1561,10 @@ function App() {
                 </div>
               </details>
             </div>
-            <div className="flex flex-wrap gap-1.5 text-[10px]">
-              {needsManualRefresh && (
-                <span className="border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-cyan-200">
-                  等待自动抓取
-                </span>
-              )}
-              <span className="border border-neutral-800 px-1.5 py-0.5 text-neutral-400">数据 {dataAge(stats.data_age_minutes)}</span>
+            <div className="flex flex-wrap gap-1.5 text-[10px] text-neutral-500">
+              <span>{selectedDate || '日期待定'}</span>
+              <span>·</span>
+              <span>{selectedCityMeta?.latest === null || selectedCityMeta?.latest === undefined ? '预报 --' : `预报 ${Number(selectedCityMeta.latest).toFixed(1)}°${selectedCityMeta.unit}`}</span>
             </div>
           </div>
 
@@ -1797,7 +1720,10 @@ function App() {
             </div>
           )}
 
-          <details className="shrink-0 border-t border-neutral-800 bg-black">
+          <details
+            className="shrink-0 border-t border-neutral-800 bg-black"
+            onToggle={event => setAdvancedDiagnosticsOpen(event.currentTarget.open)}
+          >
             <summary className="cursor-pointer select-none px-3 py-2 text-xs text-neutral-300 hover:bg-neutral-950">
               高级诊断与风控
             </summary>

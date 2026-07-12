@@ -4320,14 +4320,27 @@ async def index():
 
 
 @app.get("/api/dashboard")
-async def dashboard():
+async def dashboard(city: str = ""):
     if DASHBOARD_AUTO_BUILD:
         _ensure_dashboard_refresh()
     if dashboard_payload_cache is not None:
         payload = dict(dashboard_payload_cache)
     else:
         payload = _minimal_dashboard_payload()
-    latest_refresh = _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None))
+    payload["weather_city_series"] = [
+        row if city and _city_evidence_matches(row, city) else {**row, "hourly_points": []}
+        for row in (payload.get("weather_city_series") or [])
+    ]
+    if city:
+        payload["city_evidence"] = [
+            row for row in (payload.get("city_evidence") or [])
+            if _city_evidence_matches(row, city)
+        ]
+    else:
+        payload["city_evidence"] = []
+    latest_refresh = await asyncio.to_thread(
+        lambda: _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None))
+    )
     if latest_refresh is not None:
         payload["production_refresh"] = latest_refresh
     scheduler_payload = get_scheduler().status()
@@ -4338,12 +4351,14 @@ async def dashboard():
         "observation_only_count": 0,
         "message": "recommendation_cache_warming",
     })
-    return _json_safe(payload)
+    return await asyncio.to_thread(_json_safe, payload)
 
 
 @app.get("/api/production-refresh/status")
 async def production_refresh_status():
-    state = _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None))
+    state = await asyncio.to_thread(
+        lambda: _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None))
+    )
     return state or {
         "refresh_version": "production-refresh-v2",
         "ok": None,
@@ -4361,7 +4376,7 @@ async def scheduler_status():
 
 @app.get("/api/paper-validation/status")
 async def paper_validation_status_api():
-    return paper_validation_status()
+    return await asyncio.to_thread(paper_validation_status)
 
 
 @app.get("/api/source-health")
@@ -4436,22 +4451,27 @@ async def model_dataset_audit():
 @app.get("/api/forecast-archive/manifest")
 async def forecast_archive_manifest(limit: int = 200, sources: str = "ecmwf,gfs_ensemble", include_jsonl: bool = False):
     source_list = [source.strip() for source in sources.split(",") if source.strip()]
-    return _forecast_archive_manifest_payload(limit=limit, sources=source_list, include_jsonl=include_jsonl)
+    return await asyncio.to_thread(
+        _forecast_archive_manifest_payload,
+        limit=limit,
+        sources=source_list,
+        include_jsonl=include_jsonl,
+    )
 
 
 @app.get("/api/forecasts")
 async def forecasts(city: str = "", target_date: str = ""):
-    return forecast_summary(city or None, target_date or None)
+    return await asyncio.to_thread(forecast_summary, city or None, target_date or None)
 
 
 @app.get("/api/hourly-consensus")
 async def hourly_consensus(city: str = "", target_date: str = ""):
-    return hourly_consensus_summary(city or None, target_date or None)
+    return await asyncio.to_thread(hourly_consensus_summary, city or None, target_date or None)
 
 
 @app.get("/api/market-buckets")
 async def market_buckets(city: str = "", target_date: str = "", limit: int = 200):
-    payload = market_bucket_summary(city or None, target_date or None)
+    payload = await asyncio.to_thread(market_bucket_summary, city or None, target_date or None)
     payload["limit"] = max(1, min(int(limit or 200), 1000))
     payload["latest"] = payload.get("latest", [])[:payload["limit"]]
     return payload
@@ -4473,7 +4493,7 @@ async def market_buckets_sync_active(request: MarketBucketsSyncRequest):
 
 @app.get("/api/daily-max-predictions")
 async def daily_max_predictions(city: str = "", target_date: str = ""):
-    return daily_max_prediction_summary(city or None, target_date or None)
+    return await asyncio.to_thread(daily_max_prediction_summary, city or None, target_date or None)
 
 
 @app.post("/api/daily-max-predictions/build")
@@ -4494,17 +4514,23 @@ async def bucket_probabilities_api(city: str = "", target_date: str = ""):
 
 @app.get("/api/signal-decisions")
 async def signal_decisions(city: str = "", target_date: str = "", limit: int = 100):
-    return signal_decisions_summary(city or None, target_date or None, limit=limit)
+    return await asyncio.to_thread(
+        signal_decisions_summary,
+        city or None,
+        target_date or None,
+        limit=limit,
+    )
 
 
 @app.get("/api/truth-delta-audit")
 async def truth_delta_audit(city: str = "", limit: int = 500):
-    return truth_delta_audit_summary(city or None, limit=limit)
+    return await asyncio.to_thread(truth_delta_audit_summary, city or None, limit=limit)
 
 
 @app.get("/api/model-reprice-events")
 async def model_reprice_events(city: str = "", target_date: str = "", alpha_only: bool = False, limit: int = 200):
-    return model_reprice_event_summary(
+    return await asyncio.to_thread(
+        model_reprice_event_summary,
         city or None,
         target_date or None,
         alpha_only=alpha_only,
@@ -4768,7 +4794,13 @@ async def production_refresh(request: ProductionRefreshRequest):
 
 @app.get("/api/contracts")
 async def contracts(status: str = "unverified", city: str = "", limit: int = 25, offset: int = 0):
-    return list_settlement_contracts(status=status, city=city, limit=limit, offset=offset)
+    return await asyncio.to_thread(
+        list_settlement_contracts,
+        status=status,
+        city=city,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @app.post("/api/contracts/{contract_id}/verification")
@@ -5168,6 +5200,7 @@ async def auto_simulation_status():
 
 @app.post("/api/simulation/auto")
 async def update_auto_simulation(update: AutoSimulationUpdate):
+    global dashboard_payload_cache
     interval = max(60, min(int(update.interval_seconds or 300), 3600))
     state = _save_auto_simulation_state(
         enabled=bool(update.enabled),
@@ -5181,7 +5214,10 @@ async def update_auto_simulation(update: AutoSimulationUpdate):
         await _stop_auto_simulation_task()
         log_event("warning", "自动模拟已停止")
     _clear_production_validation_cache()
-    await _refresh_dashboard_cache_once()
+    if dashboard_payload_cache is not None:
+        payload = dict(dashboard_payload_cache)
+        payload["stats"] = {**(payload.get("stats") or {}), "auto_simulation": dict(state)}
+        dashboard_payload_cache = payload
     return {"ok": True, **state}
 
 

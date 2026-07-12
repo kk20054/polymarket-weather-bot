@@ -499,3 +499,11 @@
 - 结论：Forecast/WU Historical 的调度目标已与 PolyWX 抽样观察到的约 10-13 分钟新鲜度对齐，且 future observation-only 城市不会被无差别高频抓取。常驻 scheduler 仍保持停止；本轮仅执行一次独立 Historical run，没有启动长跑。
 - 阻塞：PWS entitlement 仍缺；正确地点的 Tokyo forecast archive 需从修复时点继续积累；Layer 7 仍需操作员 UI 验收和剩余数据字段对照；14-30 天 paper cohort 尚未启动，live 保持锁定。
 - 下一步：重启后端加载新 scheduler 代码，在操作员确认看板后做短时受控运行观察；随后继续完成左/中 PolyWX 工作台细节和右侧策略模拟闭环。
+
+### 2026-07-12：Layer 7 PolyWX 层级、悬浮时间与诚实新鲜度
+
+- 改动：左侧城市列表压缩为站点索引，推荐关注改为横向紧凑卡；中间工作台收敛为单一数据源状态行、日期和五个 Tab，删除重复 scheduler 徽章、旧手动抓取提示和中间交易 gate。逐小时图 tooltip 使用专用组件强制显示 `日期 + HH:mm`，温度轴继续按有效温度自适应；高级诊断只在展开后请求。`/api/dashboard?city=` 只保留选中城市重证据，其他城市仅返回摘要。
+- 性能：dashboard payload 由约 1.78MB 降到约 0.61MB；逐小时证据优先加载，DEB/桶/决策在 Hourly 完成后再加载。修复模拟开关同步等待完整 dashboard 重建导致测试和操作卡死的问题，改为原子更新缓存状态。
+- 验证：全套 Python `280/280` 通过；前端 production build 通过；上海 1440x900 截图无横向溢出，中国实况按本地分钟落位，Y 轴为约 `25-31C`。上海本地 DEB `30.03+/-1.47C` 对 PolyWX `29.71+/-1.58C`；数据新鲜度因 scheduler 停止仍明显落后，UI 已如实显示 1.9-2.9 小时而非伪装成数分钟前。截图与字段表见 `audits/ui-qa-2026-07-12/three-city-benchmark.md`。
+- 结论：本轮闭合了用户指出的内部分钟标签、纵轴挤压、China Live 横轴和错误新鲜度文案。上海 peak hour 本地 `16:00`、PolyWX 样本 `14:00` 仍不一致，需下一轮审计峰值计算；PWS entitlement 仍缺。scheduler 保持停止，paper cohort inactive，`LIVE_TRADING=false`。
+- 下一步：先审计 peak-hour 的 forecast/observed blending 与 PolyWX 差异，再完成右侧策略模拟工作台的订单生命周期可视化；运营者验收后才启动短时调度和 14-30 天 cohort。

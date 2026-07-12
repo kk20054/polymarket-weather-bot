@@ -387,6 +387,7 @@ class V3CoreTests(unittest.TestCase):
         with (
             patch("dashboard_server.AUTO_SIMULATION_PATH", state_path),
             patch("dashboard_server._ensure_auto_simulation_task") as ensure_task,
+            patch("dashboard_server._refresh_dashboard_cache_once") as refresh_cache,
             patch("dashboard_server.log_event"),
         ):
             result = asyncio.run(update_auto_simulation(
@@ -396,6 +397,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertTrue(result["enabled"])
         self.assertEqual(result["interval_seconds"], 300)
         ensure_task.assert_called_once()
+        refresh_cache.assert_not_called()
 
     def test_quote_uses_best_bid_ask_and_constraints(self):
         quote = quote_from_market_payload({

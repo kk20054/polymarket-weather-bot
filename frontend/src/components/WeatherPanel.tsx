@@ -355,41 +355,6 @@ function eventStage(event: DashboardEvent) {
   return event.type || '事件'
 }
 
-function fmtBucketLabel(raw?: string | null, fallback?: number | null, unit = 'F') {
-  const fallbackNative =
-    fallback === null || fallback === undefined || Number.isNaN(Number(fallback))
-      ? null
-      : unit === 'C'
-        ? (Number(fallback) - 32) * 5 / 9
-        : Number(fallback)
-  if (!raw) return fmtTemp(fallbackNative, unit)
-  const normalized = String(raw).trim()
-  const tailMatch = normalized.match(/^\s*(-?\d+(?:\.\d+)?)\s*°?\s*([CF])?\s+or\s+(below|above)\s*$/i)
-  if (tailMatch) {
-    const value = Number(tailMatch[1])
-    const labelUnit = (tailMatch[2] || unit).toUpperCase()
-    return `${fmtBucketTemp(value, labelUnit)} or ${tailMatch[3].toLowerCase()}`
-  }
-  const match = normalized.match(/^\s*(-?\d+(?:\.\d+)?)\s*°?\s*([CF])?\s*[-–—]\s*(-?\d+(?:\.\d+)?)\s*°?\s*([CF])?\s*$/i)
-  if (!match) return normalized.replace(/掳/g, '°')
-  const low = Number(match[1])
-  const high = Number(match[3])
-  const labelUnit = (match[4] || match[2] || unit).toUpperCase()
-  if (low <= -900) return `${fmtBucketTemp(high, labelUnit)} or below`
-  if (high >= 900) return `${fmtBucketTemp(low, labelUnit)} or above`
-  return `${fmtBucketTemp(low, labelUnit)}–${fmtBucketTemp(high, labelUnit)}`
-}
-
-function signalBucketLabel(signal: WeatherSignal | undefined, unit = 'F') {
-  if (!signal) return '--'
-  return fmtBucketLabel(signal.bucket_label, signal.threshold_f, unit)
-}
-
-function isOpenTailBucket(signal?: WeatherSignal) {
-  if (!signal?.bucket_label) return false
-  return /(?:^|-)999(?:\.0+)?[CF]?$/i.test(signal.bucket_label) || /^-999(?:\.0+)?-/i.test(signal.bucket_label)
-}
-
 function shortDate(value?: string | null) {
   if (!value) return '--'
   try {
@@ -531,13 +496,13 @@ function fetchLogMatches(row: FetchLogRow, patterns: string[]) {
   return patterns.some(pattern => text.includes(pattern))
 }
 
-function fetchPulseDetail(fetchLog: FetchLogRow[], patterns: string[], fallback: string) {
+function fetchPulseDetail(fetchLog: FetchLogRow[], patterns: string[], sourceTime?: string | null) {
   const rows = fetchLog
     .filter(row => fetchLogMatches(row, patterns))
     .sort((a, b) => String(b.time ?? '').localeCompare(String(a.time ?? '')))
   const latest = rows[0]
-  if (!latest) return fallback
-  const age = latest.time ? freshnessLabel(latest.time) : fallback
+  const age = freshnessLabel(sourceTime)
+  if (!latest) return age
   const duration = visibleElapsedLabel(latest.duration)
   return [age, duration ? `(${duration})` : ''].filter(Boolean).join(' ')
 }
@@ -695,25 +660,6 @@ function decisionBucket(decision?: SignalDecisionRecord) {
   return decision?.model_bucket_probs ?? {}
 }
 
-function decisionPrice(decision?: SignalDecisionRecord) {
-  return asNumber(decision?.market_ask)
-    ?? asNumber(decision?.model_bucket_probs?.best_ask)
-    ?? asNumber(decision?.model_bucket_probs?.price)
-    ?? asNumber(decision?.market_implied_probability)
-    ?? asNumber(decision?.market_probability)
-}
-
-function decisionBid(decision?: SignalDecisionRecord) {
-  return asNumber(decision?.market_bid) ?? asNumber(decision?.model_bucket_probs?.best_bid)
-}
-
-function decisionSpread(decision?: SignalDecisionRecord) {
-  const ask = decisionPrice(decision)
-  const bid = decisionBid(decision)
-  if (ask === null || bid === null) return null
-  return Math.max(0, ask - bid)
-}
-
 function layerDecisionRank(decision: SignalDecisionRecord) {
   const paper = decision.paper_allowed ? 1000 : 0
   const edge = asNumber(decision.edge) ?? asNumber(decision.model_bucket_probs?.edge) ?? -999
@@ -731,15 +677,6 @@ function latestDecisionBatch(decisions: SignalDecisionRecord[]) {
 
 function bestLayerDecision(summary?: SignalDecisionSummary | null) {
   return latestDecisionBatch(summary?.decisions ?? []).sort((a, b) => layerDecisionRank(b) - layerDecisionRank(a))[0]
-}
-
-function findBucketForDecision(decision: SignalDecisionRecord | undefined, buckets?: MarketBucketSummary | null) {
-  if (!decision) return undefined
-  return (buckets?.latest ?? []).find(bucket => {
-    if (decision.market_id && bucket.market_id === decision.market_id) return true
-    if (decision.model_bucket_probs?.bucket_key && bucket.bucket_key === decision.model_bucket_probs.bucket_key) return true
-    return false
-  })
 }
 
 function buildLayerDistributionItems(buckets?: MarketBucketSummary | null, decisions?: SignalDecisionSummary | null): LayerDistributionItem[] {
@@ -1097,8 +1034,6 @@ export function WeatherPanel({
       .slice(0, 18)
   }, [distributionSignal])
   const layerDecision = useMemo(() => bestLayerDecision(signalDecisions), [signalDecisions])
-  const layerDecisionBucket = decisionBucket(layerDecision)
-  const layerDecisionMarketBucket = useMemo(() => findBucketForDecision(layerDecision, marketBuckets), [layerDecision, marketBuckets])
   const layerDistributionItems = useMemo(() => buildLayerDistributionItems(marketBuckets, signalDecisions), [marketBuckets, signalDecisions])
   const probabilityItems = layerDistributionItems.length > 0 ? layerDistributionItems : distributionChartItems
   const latestHistory = latestBy<HistoricalWeatherPoint>(
@@ -1118,7 +1053,7 @@ export function WeatherPanel({
   )
   const latestForecastSource = latestBy<HourlySourcePoint>(
     hourlySourceSeries?.forecast ?? [],
-    point => point.temperature !== null && point.temperature !== undefined,
+    point => asNumber(point.temperature ?? point.ensemble_mean ?? point.best) !== null,
     point => point.retrieved_at ?? point.timestamp,
   )
   const latestMetarSource = latestBy<HourlySourcePoint>(
@@ -1128,6 +1063,11 @@ export function WeatherPanel({
   )
   const latestHistoricalSource = latestBy<HourlySourcePoint>(
     hourlySourceSeries?.historical ?? [],
+    point => point.temperature !== null && point.temperature !== undefined,
+    point => point.retrieved_at ?? point.timestamp,
+  )
+  const latestChinaLiveSource = latestBy<HourlySourcePoint>(
+    hourlySourceSeries?.china_live ?? [],
     point => point.temperature !== null && point.temperature !== undefined,
     point => point.retrieved_at ?? point.timestamp,
   )
@@ -1149,12 +1089,18 @@ export function WeatherPanel({
     return [...new Set(chartData.map(row => String(row.date)).filter(Boolean))]
       .sort((a, b) => a.localeCompare(b))
   }, [chartData])
-  const forecastStatus = evidenceStatus(latestForecastSource?.retrieved_at ?? latestForecast?.timestamp)
-  const metarStatus = evidenceStatus(latestMetarSource?.timestamp ?? latestMetar?.timestamp, 45)
-  const historyStatus = latestHistoricalSource || latestHistory ? 'fresh' : 'missing'
-  const forecastPulseDetail = fetchPulseDetail(fetchLog, ['forecast', 'openmeteo', 'daily_max', 'predictor'], freshnessLabel(latestForecastSource?.retrieved_at ?? latestForecast?.timestamp))
-  const metarPulseDetail = fetchPulseDetail(fetchLog, ['metar', 'asos'], freshnessLabel(latestMetarSource?.timestamp ?? latestMetar?.timestamp))
-  const historyPulseDetail = fetchPulseDetail(fetchLog, ['historical', 'history', 'truth', 'actual'], latestHistoricalSource ? freshnessLabel(latestHistoricalSource.retrieved_at ?? latestHistoricalSource.timestamp) : latestHistory ? freshnessLabel(latestHistory.fetched_at ?? latestHistory.target_date) : '无数据')
+  const forecastSourceTime = latestForecastSource?.retrieved_at ?? latestForecast?.timestamp
+  const metarSourceTime = latestMetarSource?.retrieved_at ?? latestMetarSource?.timestamp ?? latestMetar?.timestamp
+  const historySourceTime = latestHistoricalSource?.retrieved_at ?? latestHistoricalSource?.timestamp ?? latestHistory?.fetched_at
+  const chinaLiveSourceTime = latestChinaLiveSource?.retrieved_at ?? latestChinaLiveSource?.timestamp
+  const forecastStatus = evidenceStatus(forecastSourceTime, 60)
+  const metarStatus = evidenceStatus(metarSourceTime, 45)
+  const historyStatus = evidenceStatus(historySourceTime, 60)
+  const chinaLiveStatus = evidenceStatus(chinaLiveSourceTime, 30)
+  const forecastPulseDetail = fetchPulseDetail(fetchLog, ['forecast', 'openmeteo', 'daily_max', 'predictor'], forecastSourceTime)
+  const metarPulseDetail = fetchPulseDetail(fetchLog, ['metar', 'asos'], metarSourceTime)
+  const historyPulseDetail = fetchPulseDetail(fetchLog, ['historical', 'history', 'truth', 'actual'], historySourceTime)
+  const chinaLivePulseDetail = fetchPulseDetail(fetchLog, ['china_live', 'china weather', 'weather.com.cn'], chinaLiveSourceTime)
   const truthTier = latestHistory?.calibration_tier === 'live_truth'
     ? '实盘 truth'
     : latestHistory?.calibration_tier === 'research_truth'
@@ -1170,33 +1116,6 @@ export function WeatherPanel({
 
   const selectedDateRow = chartData.find(row => row.date === selectedDate)
     ?? (selectedDate ? { date: selectedDate, label: shortDate(selectedDate) } : chartData[chartData.length - 1])
-  const hasLayerDecision = Boolean(layerDecision)
-  const layerPrice = decisionPrice(layerDecision)
-  const layerSpread = decisionSpread(layerDecision)
-  const layerProbability = asNumber(layerDecision?.model_probability) ?? asNumber(layerDecisionBucket.probability)
-  const layerEdge = asNumber(layerDecision?.edge) ?? asNumber(layerDecisionBucket.edge)
-  const layerBucketLabel = layerDecisionBucket.bucket_label ?? layerDecisionMarketBucket?.bucket_label
-  const layerEventUrl = layerDecisionMarketBucket?.event_url
-  const decisionLabel = hasLayerDecision
-    ? layerDecision?.paper_allowed
-      ? 'Paper ok'
-      : '观察 / 跳过'
-    : bestSignal?.actionable
-      ? 'BUY YES'
-      : bestSignal
-        ? '观察'
-        : '等待信号'
-  const decisionTone = hasLayerDecision
-    ? layerDecision?.paper_allowed ? 'green' : 'amber'
-    : bestSignal?.actionable ? 'green' : bestSignal ? 'amber' : 'neutral'
-  const decisionReason = hasLayerDecision
-    ? (layerDecision?.gate_reasons?.[0] ?? layerDecision?.blocked_reason_primary ?? layerDecision?.gate_status ?? 'gate recorded')
-    : bestSignal?.decision?.reasons?.[0] ?? bestSignal?.status ?? (bestSignal ? '未通过执行闸门' : '抓取后生成')
-  const selectedForecast = dailyMaxPrediction?.latest?.mu ?? selectedDateRow?.forecast_high ?? latestForecast?.best ?? latestForecast?.ensemble_mean ?? forecastFallback?.mean_high
-  const selectedMetar = selectedDateRow?.metar ?? latestMetar?.metar
-  const metarGap = selectedForecast !== null && selectedForecast !== undefined && selectedMetar !== null && selectedMetar !== undefined
-    ? Number(selectedForecast) - Number(selectedMetar)
-    : null
   const forecastRows = [...(series?.forecast_points ?? series?.points ?? [])]
     .filter(point => !selectedDate || point.target_date === selectedDate)
     .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
@@ -1292,6 +1211,15 @@ export function WeatherPanel({
 
   return (
     <div className="min-h-full space-y-2 bg-transparent p-3 text-[11px] text-[#CBD2DC]">
+      <div className="flex flex-wrap items-center gap-2">
+        <EvidenceBadge label="预报" status={forecastStatus} detail={forecastPulseDetail} />
+        <EvidenceBadge label="METAR" status={metarStatus} detail={metarPulseDetail} />
+        <EvidenceBadge label="历史观测" status={historyStatus} detail={historyPulseDetail} />
+        {(hourlySourceSeries?.china_live?.length ?? 0) > 0 && (
+          <EvidenceBadge label="中国天气实况" status={chinaLiveStatus} detail={chinaLivePulseDetail} />
+        )}
+      </div>
+
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="inline-flex shrink-0 items-center border border-neutral-800">
           <button
@@ -1330,56 +1258,9 @@ export function WeatherPanel({
         )}
       </div>
 
-      {(hasLayerDecision || bestSignal) && (
-      <details className={`border px-2 py-1.5 text-[10px] ${decisionTone === 'green' ? 'border-green-500/30 bg-green-500/5' : decisionTone === 'amber' ? 'border-amber-500/30 bg-amber-500/5' : 'border-neutral-800 bg-black'}`}>
-        <summary className="flex cursor-pointer select-none items-center justify-between gap-3 text-neutral-300 hover:text-neutral-100">
-          <span className="min-w-0 truncate">
-            市场判断：<span className={decisionTone === 'green' ? 'text-green-300' : decisionTone === 'amber' ? 'text-amber-300' : 'text-neutral-200'}>{decisionLabel}</span>
-          </span>
-          <span className="shrink-0 tabular-nums text-neutral-500">{hasLayerDecision ? fmtSignedPct(layerEdge) : bestSignal ? fmtSignedPct(bestSignal.probability_edge ?? bestSignal.edge) : '--'}</span>
-        </summary>
-        <div className="mt-2 grid gap-2 md:grid-cols-[1.2fr_repeat(4,minmax(0,1fr))_auto]">
-          <div className="min-w-0">
-            <div className="text-[10px] text-neutral-500">原因链</div>
-            <div className="truncate text-[10px] text-neutral-600" title={decisionReason}>{decisionReason}</div>
-          </div>
-          <DecisionMetric
-            label="推荐合约"
-            value={hasLayerDecision ? fmtBucketLabel(layerBucketLabel, layerDecision?.bucket_lower, unit) : signalBucketLabel(bestSignal, unit)}
-            sub={hasLayerDecision ? `${layerDecision?.gate_status ?? 'gate'} · ${longDate(layerDecision?.target_date ?? selectedDate)}` : bestSignal ? (isOpenTailBucket(bestSignal) ? '开放尾桶，需严控' : longDate(bestSignal.target_date)) : longDate(selectedDate)}
-          />
-          <DecisionMetric
-            label="盘口"
-            value={hasLayerDecision ? fmtPrice(layerPrice) : bestSignal?.limit_price !== undefined && bestSignal?.limit_price !== null ? fmtPrice(bestSignal.limit_price) : '--'}
-            sub={hasLayerDecision ? `spread ${fmtPrice(layerSpread)} · min ${layerDecision?.order_min_size ?? '--'}` : bestSignal?.spread !== undefined && bestSignal?.spread !== null ? `spread ${fmtPrice(bestSignal.spread)}` : '等待盘口'}
-          />
-          <DecisionMetric
-            label="模型 / Edge"
-            value={hasLayerDecision ? fmtProb(layerProbability) : bestSignal ? fmtProb(bestSignal.calibrated_probability ?? bestSignal.model_probability) : '--'}
-            sub={hasLayerDecision ? fmtSignedPct(layerEdge) : bestSignal ? fmtSignedPct(bestSignal.probability_edge ?? bestSignal.edge) : '无概率'}
-          />
-          <DecisionMetric label="预测-METAR" value={metarGap === null ? '--' : fmtTemp(metarGap, unit)} sub={`预测 ${fmtTemp(selectedForecast, unit)}`} />
-          {(layerEventUrl || bestSignal?.event_url) ? (
-            <a href={layerEventUrl || bestSignal?.event_url || undefined} target="_blank" rel="noreferrer" className="inline-flex min-h-9 items-center justify-center gap-1 border border-cyan-500/30 px-2 text-[10px] text-cyan-300 hover:bg-cyan-500/10">
-              Polymarket <ExternalLink className="h-3 w-3" />
-            </a>
-          ) : (
-            <span className="inline-flex min-h-9 items-center justify-center border border-neutral-800 px-2 text-[10px] text-neutral-600">无链接</span>
-          )}
-        </div>
-      </details>
-      )}
-
       <section className="border border-[#2C3445] bg-[#1B212C]">
         <div className="border-b border-[#2C3445]">
-          <div className="flex flex-wrap items-center justify-between gap-2 px-2 py-1.5">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <EvidenceBadge label="预报" status={forecastStatus} detail={forecastPulseDetail} />
-              <EvidenceBadge label="METAR" status={metarStatus} detail={metarPulseDetail} />
-              <EvidenceBadge label="历史观测" status={historyStatus} detail={historyPulseDetail} />
-            </div>
-          </div>
-          <div className="flex gap-1 overflow-x-auto px-2 pb-2">
+          <div className="flex gap-1 overflow-x-auto px-2 py-2">
             {WORKBENCH_TABS.map(tab => (
               <WorkbenchTabButton
                 key={tab.id}

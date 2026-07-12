@@ -8,6 +8,7 @@
 - `LIVE_TRADING=false`; the system is research/paper infrastructure, not a proven profitable production bot.
 
 ## Latest Ledger Summaries
+- 2026-07-12 / Layer 7 hierarchy and honest freshness: the left city index and recommendation strip were compacted to the PolyWX hierarchy; the middle panel now owns one native source-status row, date controls and five tabs. Tooltip time is a forced `date + HH:mm`, the adaptive Y axis is verified, source ages come from source rows rather than fetch logs, and advanced diagnostics are lazy-loaded.
 - 2026-07-12 / Active-market refresh cadence: Forecast and WU Historical now run on a fixed 10-minute start-to-start cadence for active markets; non-active enabled cities retain a 30-minute baseline. A controlled WU cycle completed 14/14 cities in 61.4 seconds with no failures; continuous scheduler remains stopped.
 - 2026-07-12 / Forecast-DEB field closure: Weather.com condition, precipitation probability, revision count and retrieval time now survive Layer 4 into the dashboard. Shanghai DEB includes v3/GFS/JMA/ECMWF/ICON/GEM and benchmarks at `30.10+/-1.51C` versus PolyWX `29.88+/-1.62C` at the sampled time.
 - 2026-07-12 / Three-city live benchmark: Shanghai and Chicago Forecast/Cloud are close to PolyWX, Tokyo past-hour Forecast is about 2C low while METAR/Historical agree. Chart hover labels now show `YYYY/MM/DD HH:mm` instead of raw minute indexes.
@@ -32,6 +33,7 @@
 - WU/HKO truth coverage and resolved paper outcomes are insufficient for profitability claims.
 - China Live has no retrospective weather.com.cn minute archive; points before collector activation remain honestly absent.
 - Layer 7 still requires operator visual acceptance before starting the 14-30 day cohort.
+- The live PolyWX sample and local benchmark still disagree on Shanghai peak hour (`14:00` vs `16:00`); this needs a computation/source audit, not a cosmetic override.
 - Live dry-run/canary gates remain unaccepted and intentionally locked.
 
 ## Next Step
