@@ -607,7 +607,8 @@ class RecentMetarTests(unittest.TestCase):
         self.assertTrue(second["ok"])
         self.assertEqual(first["recent_hours"], 6.0)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["report_key"], "awc:KORD:2026-07-04T10:51:00+00:00")
+        self.assertEqual(len(rows[0]["report_key"]), 32)
+        self.assertNotIn(":", rows[0]["report_key"])
         self.assertIn("METAR KORD", rows[0]["raw_text"])
 
 

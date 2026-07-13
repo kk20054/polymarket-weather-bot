@@ -10,6 +10,7 @@
 - A read-only five-agent verifier now reports separate `observation / paper / paper_evidence / live_canary` readiness and exits nonzero when the requested stage is blocked. The quick gate is `python -m weatherbot_v3.cli project-verify --verification-mode observation`; `--deep-verification` adds full SQLite integrity scanning.
 - The canary endpoint now forces dry-run regardless of environment flags. Bulk paper execution requires the exact strategy revision and decision `issued_at` batch shown in the workbench; out-of-range Kelly probabilities return zero sizing.
 - Layer 6 batch rebuilding now selects all enabled stations and the newest overlapping prediction/market dates; dry-run no longer writes readiness state.
+- Versioned migration `20260713_01_canonical_weather_keys` now enforces METAR `(station_id, report_time)` and consensus `(city, target_date, local_hour)` identities. The production migration removed 40/2 duplicate rows; both duplicate-group counts are now zero and `storage_integrity` passes.
 - Scheduler is stopped and paper validation is inactive after verification. `LIVE_TRADING=false`; profitability is not proven.
 
 ## Latest Ledger Summaries
@@ -29,7 +30,10 @@
 - WU/HKO truth coverage and resolved paper outcomes are insufficient for profitability claims.
 - Current Shanghai revision-2 decisions are all paper-blocked by actual gates; do not relax gates merely to manufacture orders.
 - Revision 2 currently covers only the last Shanghai build; weather, orderbook and derived sources are stale while the scheduler is stopped, so a fresh 14-city rebuild has intentionally not been run yet.
-- The verifier found 40 duplicate historical METAR keys, 2 duplicate hourly-consensus keys, 3,285 training runs failing lead-time/no-leak checks, and 959 DEB rows with invalid source timing/identity. These must be repaired before evidence can train production probabilities.
+- The verifier still finds 3,285 training runs with negative lead and 959 DEB predictions whose sources were not available by `issued_at`; the affected historical predictions must be quarantined/rebuilt before training or paper evidence.
+- Targeted execution audit found the legacy live route submits before durable idempotency reservation and is not revision-bound; live canary remains blocked until this path is removed or rewritten.
+- Targeted paper audit found evidence aggregation is not yet restricted to independent, revision-bound cohort settlements; Layer 9 profitability evidence is therefore not authoritative yet.
+- Targeted UI audit found stale quotes can still look like signals, missing probabilities can render as 0%, and `today` uses the browser rather than settlement timezone. These are the next Layer 7 correctness fixes.
 - All 176 current/future `matched` bucket rows fail fresh executable-book checks; no paper execution may use them until CLOB refresh and revalidation.
 - Live executor remains explicitly `live-execution-v1-legacy`: aggregate risk budgets, revision-bound live routing and pre-submit idempotency reservation are not implemented, so live canary stays blocked even after paper evidence improves.
 - Information-edge exits remain disabled until SELL fills and historical orderbook replay are implemented.
@@ -38,7 +42,7 @@
 - Live dry-run/canary gates remain unaccepted and intentionally locked.
 
 ## Next Step
-- First repair temporal leakage/duplicate storage keys and add migration regression tests; do not train or build evidence from contaminated history.
+- First add a single forecast availability validator and immutable snapshots, quarantine negative-lead runs, then rebuild affected DEB rows; do not train or build evidence from contaminated history.
 - Then run a controlled upstream refresh, rebuild revision-2 decisions across all 14 enabled cities and rerun the observation/paper verifier before starting a cohort.
 - Run a browser/operator acceptance pass on normal and `/developer` pages, then start the explicit 14-30 day paper cohort only if accepted.
 - Admit new cities one at a time through source and settlement probes; keep catalog-only cities disabled meanwhile.

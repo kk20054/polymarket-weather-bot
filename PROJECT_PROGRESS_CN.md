@@ -599,3 +599,12 @@
 - 验证：`tests.test_polywx_contract tests.test_v3_core tests.test_api_settings tests.test_execution_workbench_contract` 共 243 项通过；前端 production build 通过；浏览器浅色主题下无 console error/warn。使用本机已保存且未回传明文的 Weather.com key，真实连接验证成功并读取逐小时预报，耗时约 1622ms。
 - 结论：普通用户不再需要理解环境变量名或打开 `.env`，所有已支持 API 均可在同一页配置和验证；密钥明文仍只保存在本机。Polymarket 钱包私钥继续不进入浏览器，`LIVE_TRADING=false` 与 paper 状态未改变。
 - 下一步：由操作员在“设置 -> 连接服务”补入具备 PWS 产品权限的独立 Wunderground key 并点击“验证连接”；通过后再恢复受控数据刷新与 14-30 日模拟验证。
+
+### 2026-07-13：四路定向代理验证与天气自然键迁移
+
+- Layer：Layer 2 METAR、Layer 4 hourly consensus 及其只读跨层验证；未启动 scheduler、paper 或 live。
+- 验证代理：分别审计数据时序、Layer 5-10 执行、Layer 7 PolyWX 契约和架构边界。报告固化于 `audits/targeted-agent-verification-2026-07-13/README.md`；共同确认重复键为当前最先可闭环的 P0，并识别 forecast 时序泄漏、legacy live 提交、paper 证据口径和 UI fail-open 为后续 P0。
+- 改动：新增版本化迁移 `20260713_01_canonical_weather_keys`；METAR 强制 `(station_id, report_time)`，consensus 强制 `(city, target_date, local_hour)`；调用方自定义 key 被 canonical key 替代，身份不完整时拒绝写入。迁移按解析质量、更新时间、ID 选择胜出行并记录删除计数。
+- 真实数据：迁移前备份 `data/weatherbot_v3.db.bak-canonical-keys-20260713-213347`；生产库删除 40 条重复 METAR 和 2 条重复 consensus，迁移后两类重复组均为 0，唯一索引存在，verifier `storage_integrity=pass`。
+- 验证：4 项定向迁移/幂等测试通过；完整 `python -m unittest discover tests` 共 327 项全部通过；系统仍为 `code_only`，`LIVE_TRADING=false`、dry-run 开启、scheduler 停止、paper validation inactive。
+- 下一步：建立统一 forecast availability/as-of validator 与不可变 snapshot key，隔离 3,285 个负 lead run，并重建 1,130 个受影响 DEB；随后才修 Layer 7 fail-open 表达和 Layer 8/10 证据/实盘安全边界。

@@ -1238,6 +1238,125 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertTrue(all(str(row["raw_text"]).endswith(" COR") for row in rows))
 
+    def test_metar_natural_key_replaces_source_specific_report_key(self):
+        db_path = test_db_path("metar_natural_key")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        base = {
+            "city": "chicago",
+            "station_id": "KORD",
+            "report_time": "2026-07-13T12:51:00+00:00",
+            "temperature": 25.0,
+            "parse_status": "parsed",
+        }
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            first_id = upsert_metar_report(
+                dict(base, report_key="awc:KORD:20260713T1251Z", raw_text="METAR KORD 131251Z 25010KT")
+            )
+            second_id = upsert_metar_report(
+                dict(base, report_key="iem_asos:KORD:20260713T1251Z", raw_text="METAR KORD 131251Z 25010KT COR")
+            )
+            with connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT id, raw_text FROM metar_reports WHERE station_id = ? AND report_time = ?",
+                    ("KORD", base["report_time"]),
+                ).fetchall()
+
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(str(rows[0]["raw_text"]).endswith(" COR"))
+
+    def test_weather_natural_keys_reject_incomplete_identity(self):
+        db_path = test_db_path("weather_natural_key_validation")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            with self.assertRaisesRegex(ValueError, "station_id and report_time"):
+                upsert_metar_report({"station_id": "KORD", "raw_text": "INVALID"})
+            with self.assertRaisesRegex(ValueError, "city, target_date and local_hour"):
+                upsert_hourly_consensus({"city": "chicago", "target_date": "2026-07-13"})
+
+    def test_hourly_consensus_natural_key_replaces_legacy_source_key(self):
+        db_path = test_db_path("hourly_consensus_natural_key")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        base = {
+            "city": "chicago",
+            "target_date": "2026-07-13",
+            "local_hour": "08:00",
+            "valid_time": "2026-07-13T08:00:00-05:00",
+            "forecast_temp": 24.0,
+        }
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            first_id = upsert_hourly_consensus(
+                dict(base, consensus_key="metar:KORD:2026-07-13:08:00", observed_temp=23.0)
+            )
+            second_id = upsert_hourly_consensus(
+                dict(base, consensus_key="hourly:chicago:2026-07-13:08:00", observed_temp=24.5)
+            )
+            with connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT id, observed_temp FROM hourly_consensus WHERE city = ? AND target_date = ? AND local_hour = ?",
+                    ("chicago", "2026-07-13", "08:00"),
+                ).fetchall()
+
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(float(rows[0]["observed_temp"]), 24.5)
+
+    def test_canonical_weather_key_migration_deduplicates_legacy_rows(self):
+        db_path = test_db_path("canonical_weather_key_migration")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db(db_path)
+            with connect(db_path) as conn:
+                conn.execute("DROP INDEX idx_metar_reports_station_report_time_unique")
+                conn.execute("DROP INDEX idx_hourly_consensus_city_date_hour_unique")
+                conn.execute(
+                    "DELETE FROM schema_migrations WHERE migration_id = '20260713_01_canonical_weather_keys'"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO metar_reports (
+                        report_key, station_id, report_time, raw_text, parse_status, created_at, updated_at
+                    ) VALUES
+                        ('legacy-awc', 'KORD', '2026-07-13T12:51:00+00:00', 'OLD', 'partial', '2026-07-13T13:00:00+00:00', '2026-07-13T13:00:00+00:00'),
+                        ('legacy-iem', 'KORD', '2026-07-13T12:51:00+00:00', 'CORRECTED', 'parsed', '2026-07-13T13:05:00+00:00', '2026-07-13T13:05:00+00:00')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO hourly_consensus (
+                        consensus_key, city, target_date, local_hour, observed_temp, created_at, updated_at
+                    ) VALUES
+                        ('legacy-met', 'chicago', '2026-07-13', '08:00', 23.0, '2026-07-13T13:00:00+00:00', '2026-07-13T13:00:00+00:00'),
+                        ('legacy-hourly', 'chicago', '2026-07-13', '08:00', 24.5, '2026-07-13T13:05:00+00:00', '2026-07-13T13:05:00+00:00')
+                    """
+                )
+
+            init_v3_db(db_path)
+            with connect(db_path) as conn:
+                metar = conn.execute(
+                    "SELECT raw_text FROM metar_reports WHERE station_id = 'KORD' AND report_time = '2026-07-13T12:51:00+00:00'"
+                ).fetchall()
+                consensus = conn.execute(
+                    "SELECT observed_temp FROM hourly_consensus WHERE city = 'chicago' AND target_date = '2026-07-13' AND local_hour = '08:00'"
+                ).fetchall()
+                migration = conn.execute(
+                    "SELECT details_json FROM schema_migrations WHERE migration_id = '20260713_01_canonical_weather_keys'"
+                ).fetchone()
+
+            init_v3_db(db_path)
+            with connect(db_path) as conn:
+                migration_count = conn.execute(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE migration_id = '20260713_01_canonical_weather_keys'"
+                ).fetchone()[0]
+
+        self.assertEqual([row["raw_text"] for row in metar], ["CORRECTED"])
+        self.assertEqual([float(row["observed_temp"]) for row in consensus], [24.5])
+        self.assertIsNotNone(migration)
+        details = json.loads(str(migration["details_json"]))
+        self.assertEqual(details["metar_rows_deleted"], 1)
+        self.assertEqual(details["hourly_consensus_rows_deleted"], 1)
+        self.assertEqual(migration_count, 1)
+
     def test_forecast_bulk_insert_is_idempotent_in_one_transaction(self):
         db_path = test_db_path("forecast_bulk_insert")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -3436,7 +3555,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(first["reports_upserted"], 1)
         self.assertEqual(second["reports_upserted"], 1)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["report_key"], "iem_asos:KORD:2026-06-01T00:51:00+00:00")
+        self.assertEqual(len(rows[0]["report_key"]), 32)
+        self.assertNotIn(":", rows[0]["report_key"])
         self.assertIn("COR", rows[0]["raw_text"])
         self.assertAlmostEqual(rows[0]["temperature"], 26.0, places=1)
 

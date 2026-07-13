@@ -1341,6 +1341,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         for name, ddl in columns.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+    from .migrations import run_schema_migrations
+
+    run_schema_migrations(conn)
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_runs_run_key ON forecast_runs(run_key)")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_forecast_runs_city_date_source_retrieved "
@@ -2788,11 +2791,10 @@ def upsert_metar_report(
     now = utc_now()
     station_id = str(report.get("station_id") or report.get("station") or "").upper()
     report_time = str(report.get("report_time") or report.get("observed_at") or report.get("time") or "")
+    if not station_id or not report_time:
+        raise ValueError("METAR requires station_id and report_time")
     raw_text = str(report.get("raw_text") or report.get("raw") or report.get("metar") or "")
-    report_key = str(
-        report.get("report_key")
-        or _stable_key("metar", station_id, report_time)
-    )
+    report_key = _stable_key("metar", station_id, report_time)
     connection_context = connect(path) if _connection is None else nullcontext(_connection)
     with connection_context as conn:
         conn.execute(
@@ -2807,7 +2809,7 @@ def upsert_metar_report(
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
-            ON CONFLICT(report_key) DO UPDATE SET
+            ON CONFLICT(station_id, report_time) DO UPDATE SET
                 city=excluded.city,
                 city_name=excluded.city_name,
                 station_id=excluded.station_id,
@@ -2862,7 +2864,10 @@ def upsert_metar_report(
                 now,
             ),
         )
-        row = conn.execute("SELECT id FROM metar_reports WHERE report_key = ?", (report_key,)).fetchone()
+        row = conn.execute(
+            "SELECT id FROM metar_reports WHERE station_id = ? AND report_time = ?",
+            (station_id, report_time),
+        ).fetchone()
         return int(row["id"]) if row else 0
 
 
@@ -2972,7 +2977,7 @@ HOURLY_CONSENSUS_UPSERT_SQL = """
         source_mix_json, consensus_version, build_status, build_warnings,
         peak_marker, taf_marker, raw_json, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(consensus_key) DO UPDATE SET
+    ON CONFLICT(city, target_date, local_hour) DO UPDATE SET
         city=excluded.city,
         city_name=excluded.city_name,
         target_date=excluded.target_date,
@@ -3014,10 +3019,9 @@ def _hourly_consensus_values(row: dict[str, Any], now: str) -> tuple[Any, ...]:
     target_date = str(row.get("target_date") or "")
     local_hour = str(row.get("local_hour") or row.get("hour") or "")
     valid_time = str(row.get("valid_time") or row.get("time") or "")
-    consensus_key = str(
-        row.get("consensus_key")
-        or _stable_key("hourly_consensus", city, target_date, local_hour, valid_time)
-    )
+    if not city or not target_date or not local_hour:
+        raise ValueError("hourly consensus requires city, target_date and local_hour")
+    consensus_key = _stable_key("hourly_consensus", city, target_date, local_hour)
     forecast_temp = _nullable_num(row.get("forecast_temp"))
     observed_temp = _nullable_num(row.get("observed_temp"))
     residual = row.get("residual")
@@ -3066,10 +3070,12 @@ def upsert_hourly_consensus(row: dict[str, Any], path: Path | None = None) -> in
     init_v3_db(path)
     now = utc_now()
     values = _hourly_consensus_values(row, now)
-    consensus_key = str(values[0])
     with connect(path) as conn:
         conn.execute(HOURLY_CONSENSUS_UPSERT_SQL, values)
-        found = conn.execute("SELECT id FROM hourly_consensus WHERE consensus_key = ?", (consensus_key,)).fetchone()
+        found = conn.execute(
+            "SELECT id FROM hourly_consensus WHERE city = ? AND target_date = ? AND local_hour = ?",
+            (str(values[1]), str(values[3]), str(values[4])),
+        ).fetchone()
         return int(found["id"]) if found else 0
 
 
