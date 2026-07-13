@@ -5,15 +5,15 @@
 - The dashboard has 51 display profiles; 14 collector-enabled cities retain independent Forecast, METAR, WU Historical, China Live and optional PWS roles.
 - Paper simulation now uses the operator cohort bankroll for Kelly sizing, one explicit cap chain, current stored orderbook freshness and authoritative Polymarket settlement.
 - Every new decision, paper cohort and paper order is bound to an immutable strategy revision; the active conservative profile is revision 2.
-- `/developer` owns strategy thresholds and read-only system status. The normal dashboard only shows bankroll, strategy selection, orders, market links and the active revision.
+- The normal dashboard now opens developer settings as a right-side drawer with the same PolyWX light/dark theme. The drawer groups overview, strategy/risk, immutable revisions and read-only system status; `/developer` remains a deep-link fallback.
 - Scheduler is stopped and paper validation is inactive after verification. `LIVE_TRADING=false`; profitability is not proven.
 
 ## Latest Ledger Summaries
+- 2026-07-13 / Layer 7/8 settings UX: replaced the isolated developer form with a themed settings drawer; publishing and activation are separate, activation requires confirmation, and live remains read-only locked.
 - 2026-07-13 / Layer 8 sizing and strategy audit: cohort bankroll now recomputes Kelly; global `MAX_BET` no longer silently truncates a higher cohort limit; ladder groups reserve three order/position slots.
 - 2026-07-13 / Immutable strategy profiles: append-only revisions and activation events bind signal generation and paper defaults; decisions/orders persist parameter and sizing snapshots.
 - 2026-07-13 / Developer boundary: `/developer` publishes confirmed local revisions and shows read-only system state; normal UI hides maintenance diagnostics and exposes no secret/live toggle.
 - 2026-07-12 / Scheduler containment: heavy pollers are serialized/staggered; controlled collector cycles stayed below 87.3MB RSS and scheduler remains stopped after the test (`1d63438`).
-- 2026-07-12 / City and recommendation contracts: 51-city display catalog is separate from the 14-city collector watchlist; weather focus cards remain separate from auditable trade candidates (`ac968a2`).
 
 ## Production Blockers
 - Twenty-five display-only cities still need source smoke tests and settlement-contract probes before collector or paper admission.

@@ -1,5 +1,13 @@
 # WeatherBot 项目进度台账
 
+### 2026-07-13: Layer 7/8 开发者设置抽屉与主看板统一
+- 改动：将孤立、平铺的 `/developer` 表单重构为主看板右侧设置抽屉，并保留 `/developer` 深链接。入口同时位于顶栏设置图标与模拟交易台；设置按“概览 / 策略与风控 / 版本与审计 / 系统状态”分组，继承 PolyWX 风格浅色/深色主题。
+- 安全：创建参数版本与激活作用域彻底分离；新版本默认 `activate_scopes=[]`，切换信号生成或模拟默认前必须二次确认。实盘状态只读锁定，不提供密钥、live 或 webhook 开关。
+- 参考：采用 ClawX 成熟设置模式中的左侧分组、右侧 Sheet、显式保存/激活分离、危险操作确认；未复制其品牌或业务结构。
+- 验证：`npm run build` 通过；`tests.test_execution_workbench_contract` 3/3；`tests.test_polywx_contract tests.test_v3_core` 230/230；浏览器验证深/浅主题、390px 响应式、`/developer` 深链接、版本确认取消、console error/warn=0、无横向溢出。
+- 结论：开发者参数不再挤占日常交易工作台；普通操作员保留上下文，开发者可在受控抽屉中调整草稿并审计不可变版本。scheduler stopped、paper cohort inactive、`LIVE_TRADING=false`。
+- 下一步：在启动 14-30 天 paper cohort 前完成右侧交易台与设置抽屉的人工验收；不因 UI 改造放宽任何 gate。
+
 ### 2026-07-13: Layer 8 cohort Kelly、不可变策略版本与开发者模式
 
 - 改动：新增 append-only `strategy_profile_revisions` 与激活事件；`signal-decision-v3`、`paper-validation-v2`、`paper-execution-v2` 从信号到 cohort 到订单统一钉住 revision/hash/参数快照。模拟 tick 按 cohort 当前可用资金重算 Kelly，单笔本金比例、cohort 单笔、策略、日额度和现金只走一次显式 cap 链；ladder 预留 3 个订单/持仓槽位。executor 使用最新本地 orderbook 快照并动态计算 age，不再信任信号生成时冻结的 age；毫秒 epoch 时间戳已支持。

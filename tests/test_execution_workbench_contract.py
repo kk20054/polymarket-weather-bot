@@ -36,12 +36,18 @@ class ExecutionWorkbenchContractTests(unittest.TestCase):
         main = (ROOT / "frontend" / "src" / "main.tsx").read_text(encoding="utf-8")
         app = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
         developer = (ROOT / "frontend" / "src" / "pages" / "DeveloperPage.tsx").read_text(encoding="utf-8")
+        drawer = (ROOT / "frontend" / "src" / "components" / "DeveloperSettingsDrawer.tsx").read_text(encoding="utf-8")
         component = (ROOT / "frontend" / "src" / "components" / "ExecutionWorkbench.tsx").read_text(encoding="utf-8")
 
         self.assertIn("/developer", main)
         self.assertIn("策略版本", component)
-        self.assertIn("不可变参数版本", developer)
-        self.assertIn("实盘保持锁定", developer)
+        self.assertIn("DeveloperSettingsPanel", developer)
+        self.assertIn("DeveloperSettingsDrawer", app)
+        self.assertIn("开发者设置", component)
+        self.assertIn("不可变参数版本", drawer)
+        self.assertIn("实盘保持锁定", drawer)
+        self.assertIn("创建新版本", drawer)
+        self.assertIn("activate_scopes: []", drawer)
         self.assertIn('className="hidden"', app)
 
 

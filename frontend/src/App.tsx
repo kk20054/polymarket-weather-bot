@@ -7,6 +7,7 @@ import {
   ListChecks,
   PauseCircle,
   RefreshCw,
+  Settings2,
   ShieldAlert,
   Wallet,
 } from 'lucide-react'
@@ -35,6 +36,7 @@ import {
   verifySettlementContractsBulk,
 } from './api'
 import { DataReadinessPanel } from './components/DataReadinessPanel'
+import { DeveloperSettingsDrawer } from './components/DeveloperSettingsDrawer'
 import { ExecutionWorkbench } from './components/ExecutionWorkbench'
 import { ModelDatasetPanel } from './components/ModelDatasetPanel'
 import { SignalsTable } from './components/SignalsTable'
@@ -755,6 +757,7 @@ function App() {
     refetchInterval: 120000,
     enabled: advancedDiagnosticsOpen,
   })
+  const [developerSettingsOpen, setDeveloperSettingsOpen] = useState(false)
 
   const forecastArchiveManifestQuery = useQuery({
     queryKey: ['forecast-archive-manifest'],
@@ -1350,6 +1353,15 @@ function App() {
           </button>
         </div>
         <button
+          type="button"
+          onClick={() => setDeveloperSettingsOpen(true)}
+          className="inline-flex h-[30px] w-[30px] items-center justify-center border border-neutral-700 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-100"
+          aria-label="打开设置"
+          title="设置与开发者模式"
+        >
+          <Settings2 className="h-3.5 w-3.5" />
+        </button>
+        <button
           onClick={() => {
             if (schedulerRunning) schedulerStopMutation.mutate()
             else schedulerStartMutation.mutate()
@@ -1643,6 +1655,7 @@ function App() {
             validation={paperValidationStatusQuery.data}
             liveAvailable={liveAvailable}
             schedulerRunning={schedulerRunning}
+            onOpenDeveloperSettings={() => setDeveloperSettingsOpen(true)}
           />
           {false && <>
           <div className="shrink-0 border-b border-neutral-800 bg-black/95 px-3 py-2">
@@ -1808,6 +1821,11 @@ function App() {
           </details>
         </aside>
       </main>
+      <DeveloperSettingsDrawer
+        open={developerSettingsOpen}
+        onClose={() => setDeveloperSettingsOpen(false)}
+        themeMode={themeMode}
+      />
     </div>
   )
 }

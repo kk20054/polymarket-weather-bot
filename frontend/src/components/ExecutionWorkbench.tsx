@@ -17,6 +17,7 @@ interface Props {
   validation?: PaperValidationStatus | null
   liveAvailable: boolean
   schedulerRunning: boolean
+  onOpenDeveloperSettings: () => void
 }
 
 type QueueItem = {
@@ -263,7 +264,7 @@ function OrderRow({ order }: { order: PaperOrderRecord }) {
   )
 }
 
-export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation, liveAvailable, schedulerRunning }: Props) {
+export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation, liveAvailable, schedulerRunning, onOpenDeveloperSettings }: Props) {
   const queryClient = useQueryClient()
   const [view, setView] = useState<'queue' | 'orders'>('queue')
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -368,7 +369,9 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
         </div>
         <div className="mt-1 flex items-center justify-between gap-2 text-[9px] text-neutral-600">
           <span title={selectedRevisionId || '未加载'}>策略版本 {selectedRevisionId ? selectedRevisionId.slice(0, 12) : '--'}</span>
-          <a href="/developer" className="text-cyan-500 hover:text-cyan-300">开发者模式</a>
+          <button type="button" onClick={onOpenDeveloperSettings} className="inline-flex items-center gap-1 text-cyan-500 hover:text-cyan-300">
+            <Settings2 className="h-3 w-3" /> 开发者设置
+          </button>
         </div>
         <div className="mt-2 grid grid-cols-2 gap-1 text-[10px]">
           <div className="border border-neutral-800 p-2"><div className="text-neutral-600">可模拟策略</div><div className="mt-1 tabular-nums text-neutral-200">{eligibleCount} / {queue.length}</div></div>
