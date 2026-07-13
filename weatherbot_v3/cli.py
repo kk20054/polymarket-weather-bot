@@ -597,14 +597,14 @@ def run_signal_decisions_build(
     from .signals import build_signal_decisions_for_targets
 
     cities = _cities_from_arg(cities_arg)
-    if not cities and limit_cities:
-        cities = _default_layer_city_keys(limit_cities)
+    if not cities:
+        cities = _enabled_layer_city_keys()
     if target_date:
         targets = [(city, target_date) for city in cities]
     else:
         targets = _signal_decision_targets_from_db(cities, days_arg or 7)
     payload = build_signal_decisions_for_targets(targets, dry_run=dry_run, limit=limit)
-    if refresh_readiness:
+    if refresh_readiness and not dry_run:
         readiness = build_data_readiness()
         persist_data_readiness(readiness)
         payload["signal_decisions_stage"] = readiness_stage(readiness, "signal_decisions")
@@ -719,6 +719,19 @@ def _default_layer_city_keys(limit_cities: int = 5) -> list[str]:
     return preferred[:limit]
 
 
+def _enabled_layer_city_keys() -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT city_key
+            FROM stations
+            WHERE COALESCE(enabled, 0) = 1
+            ORDER BY tier ASC, city_key ASC
+            """
+        ).fetchall()
+    return [str(row["city_key"]) for row in rows if row["city_key"]]
+
+
 def _target_dates_from_db(cities: list[str], days: int, *, forecast_only: bool = False) -> list[tuple[str, str]]:
     selected_cities = cities or _default_layer_city_keys(5)
     per_city_limit = max(1, int(days or 1))
@@ -764,7 +777,7 @@ def _target_dates_from_db(cities: list[str], days: int, *, forecast_only: bool =
 
 
 def _signal_decision_targets_from_db(cities: list[str], days: int) -> list[tuple[str, str]]:
-    selected_cities = cities or _default_layer_city_keys(5)
+    selected_cities = cities or _enabled_layer_city_keys()
     per_city_limit = max(1, int(days or 1))
     targets: list[tuple[str, str]] = []
     with connect() as conn:
@@ -779,7 +792,7 @@ def _signal_decision_targets_from_db(cities: list[str], days: int) -> list[tuple
                 WHERE d.city_key = ?
                   AND d.target_date IS NOT NULL
                   AND d.target_date != ''
-                ORDER BY d.target_date ASC
+                ORDER BY d.target_date DESC
                 LIMIT ?
                 """,
                 (city, per_city_limit),

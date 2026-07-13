@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 from .config import load_config
 from .db import connect, utc_now
+from .env_utils import env_value
 
 
 SOURCE_HEALTH_VERSION = "source-health-v2"
@@ -223,7 +224,9 @@ def build_source_health_matrix(
         "config": {
             "deb_weight_mode": cfg.deb_weight_mode,
             "weather_com_forecast_enabled": cfg.weather_com_forecast_enabled,
+            "weather_com_configured": bool(env_value("WEATHER_COM_API_KEY") or env_value("WUNDERGROUND_API_KEY")),
             "pws_peak_lock_enabled": cfg.pws_peak_lock_enabled,
+            "wunderground_pws_configured": bool(env_value("WUNDERGROUND_API_KEY")),
             "live_trading": cfg.live_trading,
         },
         "enabled_cities": enabled,

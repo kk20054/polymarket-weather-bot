@@ -1991,6 +1991,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("truth_wunderground_daily", matrix["required_blockers"])
         self.assertEqual(matrix["overall_status"], "blocked")
         self.assertEqual(matrix["version"], "source-health-v2")
+        self.assertIn("weather_com_configured", matrix["config"])
+        self.assertIn("wunderground_pws_configured", matrix["config"])
         chicago = next(row for row in matrix["city_matrix"] if row["city_key"] == "chicago")
         self.assertEqual(chicago["sources"]["metar"]["status"], "healthy")
         self.assertEqual(chicago["sources"]["forecast_openmeteo"]["status"], "healthy")
@@ -3053,6 +3055,55 @@ class V3CoreTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["signal_decisions_stage"]["status"], "ready")
 
+    def test_signal_decisions_dry_run_does_not_persist_readiness(self):
+        with patch("weatherbot_v3.cli.build_data_readiness") as readiness, \
+             patch("weatherbot_v3.cli.persist_data_readiness") as persist, \
+             patch("weatherbot_v3.cli._signal_decision_targets_from_db", return_value=[("chicago", "2026-07-13")]), \
+             patch("weatherbot_v3.signals.build_signal_decisions_for_targets", return_value={
+                 "ok": True,
+                 "requested": 1,
+                 "decision_count": 3,
+                 "stored": 0,
+                 "results": [],
+             }):
+            payload = run_signal_decisions_build("chicago", days_arg=1, dry_run=True)
+
+        self.assertTrue(payload["ok"])
+        self.assertNotIn("signal_decisions_stage", payload)
+        readiness.assert_not_called()
+        persist.assert_not_called()
+
+    def test_signal_decisions_default_to_all_enabled_stations(self):
+        db_path = test_db_path("signal_decision_enabled_cities")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db(db_path)
+            with connect(db_path) as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO stations (
+                        city_key, city_name, station_id, station_name, timezone, unit,
+                        enabled, tier, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        ("chicago", "Chicago", "KORD", "O'Hare", "America/Chicago", "F", 1, 1, "2026-07-13T00:00:00+00:00"),
+                        ("shanghai", "Shanghai", "ZSPD", "Pudong", "Asia/Shanghai", "C", 1, 1, "2026-07-13T00:00:00+00:00"),
+                        ("disabled", "Disabled", "TEST", "Disabled", "UTC", "C", 0, 1, "2026-07-13T00:00:00+00:00"),
+                    ],
+                )
+                conn.commit()
+            with patch("weatherbot_v3.cli._signal_decision_targets_from_db", return_value=[]) as targets, \
+                 patch("weatherbot_v3.signals.build_signal_decisions_for_targets", return_value={
+                     "ok": True,
+                     "requested": 0,
+                     "decision_count": 0,
+                     "stored": 0,
+                     "results": [],
+                 }):
+                run_signal_decisions_build("", days_arg=1, dry_run=True)
+
+        targets.assert_called_once_with(["chicago", "shanghai"], 1)
+
     def test_signal_decisions_targets_prefer_daily_max_market_bucket_overlap(self):
         from weatherbot_v3.cli import _signal_decision_targets_from_db
 
@@ -3101,6 +3152,46 @@ class V3CoreTests(unittest.TestCase):
             targets = _signal_decision_targets_from_db(["chicago"], 2)
 
         self.assertEqual(targets, [("chicago", "2026-07-02")])
+
+    def test_signal_decision_targets_use_latest_dates_first(self):
+        from weatherbot_v3.cli import _signal_decision_targets_from_db
+
+        db_path = test_db_path("signal_decision_latest_targets")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db(db_path)
+            for target_date in ("2026-07-02", "2026-07-08", "2026-07-13"):
+                upsert_daily_max_prediction({
+                    "city_key": "chicago",
+                    "target_date": target_date,
+                    "issued_at": f"{target_date}T05:00:00+00:00",
+                    "mu": 90.0,
+                    "sigma": 2.0,
+                    "unit": "F",
+                    "method": "weatherbot-deb-v2",
+                    "deb_version": "weatherbot-deb-v2",
+                })
+                upsert_market_bucket({
+                    "market_id": f"market-{target_date}",
+                    "city": "chicago",
+                    "city_name": "Chicago",
+                    "target_date": target_date,
+                    "unit": "F",
+                    "bucket_label": "90F",
+                    "bucket_direction": "exact",
+                    "bucket_low": 90,
+                    "bucket_high": 90,
+                    "yes_token_id": f"yes-{target_date}",
+                    "order_min_size": 5,
+                    "tick_size": 0.001,
+                    "enable_order_book": True,
+                    "price": 0.2,
+                    "best_ask": 0.2,
+                    "strict_match_status": "matched",
+                    "strict_match_reasons": [],
+                })
+            targets = _signal_decision_targets_from_db(["chicago"], 2)
+
+        self.assertEqual(targets, [("chicago", "2026-07-13"), ("chicago", "2026-07-08")])
 
     def test_production_validation_report_keeps_live_locked_until_all_layers_pass(self):
         db_path = test_db_path("production_validation")

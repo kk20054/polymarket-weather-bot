@@ -1151,6 +1151,52 @@ export interface SchedulerStatus {
   pollers: Record<string, SchedulerPollerStatus>
 }
 
+export interface SourceHealthSource {
+  key: string
+  label: string
+  role: string
+  required: boolean
+  status: 'healthy' | 'degraded' | 'stale' | 'missing' | 'not_applicable' | string
+  reasons?: string[]
+  latest_at?: string | null
+  age_seconds?: number | null
+  sample_count?: number
+  coverage_pct?: number
+  expected_interval_seconds?: number
+  covered_cities?: string[]
+  missing_cities?: string[]
+  stale_cities?: string[]
+  errors_last_hour?: number
+}
+
+export interface SourceHealthMatrix {
+  ok: boolean
+  version: string
+  generated_at: string
+  overall_status: string
+  config: {
+    deb_weight_mode: string
+    weather_com_forecast_enabled: boolean
+    weather_com_configured: boolean
+    pws_peak_lock_enabled: boolean
+    wunderground_pws_configured: boolean
+    live_trading: boolean
+  }
+  enabled_cities: string[]
+  source_keys: string[]
+  sources: SourceHealthSource[]
+  required_blockers: string[]
+  summary: {
+    sources: number
+    healthy: number
+    degraded: number
+    stale: number
+    missing: number
+    required_blockers: number
+    optional_gaps: number
+  }
+}
+
 export interface PaperValidationStatus {
   ok: boolean
   status: 'inactive' | 'active' | 'stopped' | 'completed' | string

@@ -565,3 +565,11 @@
 - 图表：Atlanta 预报为本地整点，METAR/WU 为实际 `:52` 分钟；温度曲线改为逐点 `linear` 连接，避免 `monotone` 插值造成视觉时间偏移，Cloud 继续独立使用 0-100% 右轴。
 - 验证：`tests.test_paper_validation + tests.test_polywx_contract` 19/19、`tests.test_v3_core` 214/214、前端 production build、`git diff --check` 全部通过。浏览器确认 40 美元/2 美元设置、三策略选择、实盘锁定、无横向溢出；展开 Atlanta 决策得到正确 Polymarket URL。
 - 阻塞：重启后同时启动全部 poller 时复现约 1.6GB RSS 并失去 8765 监听的运行态回归；为避免掩盖问题，当前后端已稳定重启且 scheduler 保持 stopped，paper cohort inactive，`LIVE_TRADING=false`。下一步先修 scheduler 冷启动 fan-out，再做自动模拟闭环验收。
+
+### 2026-07-13：Layer 6 批量目标修复与开发者数据源面板
+
+- 改动：修复 `signal-decisions-build` 批量日期按升序选择旧日期的问题，改为优先最新预测/市场交集；未指定城市时按 `stations.enabled=1` 读取全部 14 城，不再静默退回旧 5 城；`--dry-run` 不再写 readiness。开发者设置新增只读“数据源”页，展示 source-health-v2 的 13 类来源、14 城覆盖、新鲜度和必需阻塞，并只返回 Weather.com/WU PWS 凭据是否配置的布尔值。
+- 验证：新增 4 项 Layer 6 回归；`tests.test_v3_core tests.test_polywx_contract` 233/233 通过，前端 `npm run build` 通过，`git diff --check` 通过。浏览器确认 Weather.com 已配置、PWS 功能允许但凭据未配置、13 类链路可滚动查看，无密钥内容进入前端。
+- 结论：revision 2 只覆盖上海 11 条的主要工程原因已定位并修复；当前 500 条 gate 样本主要为 `insufficient_bias_samples`，上海 3 个正 edge 候选又被真实 spread gate 阻塞。批量重建现在具备正确目标选择，但调度器停止后天气、盘口和派生数据约 12 小时过期，因此本轮没有用旧输入制造新决策。
+- 阻塞：独立 PWS entitlement 仍未配置；revision 2 尚未在新鲜输入上覆盖 14 城；独立结算样本不足、价差过宽和 live 锁定仍是事实闸门。
+- 下一步：先受控刷新上游，再按最新 D+0/D+1 交集重建 14 城 revision-2 决策并输出候选/gate 报告；操作员验收后才启动 14-30 天 paper cohort。

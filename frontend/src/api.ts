@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary, SchedulerStatus, PaperValidationStatus, PaperValidationStartOptions, PaperExecutionSummary, PaperExecutionResult, WeatherCitySeries, TruthDeltaAuditSummary, ModelRepriceEventSummary, HourlyConsensusSummary, StrategyProfileParameters, StrategyProfileRevision, StrategyProfilesResponse } from './types'
+import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary, SchedulerStatus, SourceHealthMatrix, PaperValidationStatus, PaperValidationStartOptions, PaperExecutionSummary, PaperExecutionResult, WeatherCitySeries, TruthDeltaAuditSummary, ModelRepriceEventSummary, HourlyConsensusSummary, StrategyProfileParameters, StrategyProfileRevision, StrategyProfilesResponse } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -125,6 +125,11 @@ export async function fetchProductionRefreshStatus(): Promise<ProductionRefreshR
 
 export async function fetchSchedulerStatus(): Promise<SchedulerStatus> {
   const { data } = await api.get<SchedulerStatus>('/scheduler/status')
+  return data
+}
+
+export async function fetchSourceHealth(): Promise<SourceHealthMatrix> {
+  const { data } = await api.get<SourceHealthMatrix>('/source-health')
   return data
 }
 

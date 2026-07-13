@@ -4,6 +4,7 @@ import {
   Activity,
   Check,
   ChevronRight,
+  Database,
   Gauge,
   History,
   LockKeyhole,
@@ -19,11 +20,12 @@ import {
   createStrategyProfile,
   fetchProductionValidation,
   fetchSchedulerStatus,
+  fetchSourceHealth,
   fetchStrategyProfiles,
 } from '../api'
 import type { StrategyProfileParameters, StrategyProfileRevision } from '../types'
 
-type SettingsSection = 'overview' | 'strategy' | 'versions' | 'system'
+type SettingsSection = 'overview' | 'strategy' | 'sources' | 'versions' | 'system'
 type ThemeMode = 'light' | 'dark'
 
 interface DrawerProps {
@@ -41,6 +43,7 @@ interface PanelProps {
 const NAV_ITEMS: Array<{ key: SettingsSection; label: string; hint: string; icon: typeof Settings2 }> = [
   { key: 'overview', label: '概览', hint: '当前状态与生效版本', icon: Gauge },
   { key: 'strategy', label: '策略与风控', hint: '仓位、闸门与入场策略', icon: SlidersHorizontal },
+  { key: 'sources', label: '数据源', hint: '覆盖、新鲜度与授权状态', icon: Database },
   { key: 'versions', label: '版本与审计', hint: '发布、激活与历史记录', icon: History },
   { key: 'system', label: '系统状态', hint: '调度器与生产阻塞', icon: Activity },
 ]
@@ -70,6 +73,40 @@ function shortRevision(value?: string) {
 
 function percent(value: number) {
   return `${(Number(value || 0) * 100).toFixed(1)}%`
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  settlement_contracts: '结算规则',
+  metar: 'METAR 实况',
+  forecast_openmeteo: 'Open-Meteo 多模型',
+  forecast_weathercom_v3: 'Weather.com v3',
+  china_live: '中国 / 香港实况',
+  wunderground_pws: 'Wunderground PWS',
+  truth_wunderground_daily: 'WU 日结算 Truth',
+  truth_wunderground_hourly: 'WU 历史观测',
+  truth_iem_daily: 'IEM 近似 Truth',
+  truth_hko_daily: 'HKO 日结算 Truth',
+  polymarket_orderbook: 'Polymarket 盘口',
+  hourly_consensus: '逐小时证据',
+  signal_decisions: '信号决策',
+}
+
+function sourceStatusLabel(status: string) {
+  return ({ healthy: '正常', degraded: '降级', stale: '过期', missing: '缺失', not_applicable: '不适用' } as Record<string, string>)[status] ?? status
+}
+
+function sourceToneClass(status: string) {
+  if (status === 'healthy') return 'text-green-400'
+  if (status === 'degraded' || status === 'stale') return 'text-amber-300'
+  if (status === 'missing') return 'text-red-300'
+  return 'text-neutral-500'
+}
+
+function ageLabel(seconds?: number | null) {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return '--'
+  if (seconds < 60) return `${Math.round(seconds)} 秒前`
+  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟前`
+  return `${(seconds / 3600).toFixed(1)} 小时前`
 }
 
 function SettingNumber({ label, description, value, min, max, step, suffix, onChange }: {
@@ -171,6 +208,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
   const queryClient = useQueryClient()
   const profilesQuery = useQuery({ queryKey: ['strategy-profiles'], queryFn: fetchStrategyProfiles })
   const schedulerQuery = useQuery({ queryKey: ['scheduler-status'], queryFn: fetchSchedulerStatus, refetchInterval: 30000 })
+  const sourceHealthQuery = useQuery({ queryKey: ['source-health'], queryFn: fetchSourceHealth, refetchInterval: 60000 })
   const validationQuery = useQuery({ queryKey: ['production-validation'], queryFn: fetchProductionValidation, staleTime: 30000 })
   const profiles = profilesQuery.data?.profiles ?? []
   const activeSignal = profiles.find(profile => profile.active_scopes.includes('signal_generation'))
@@ -388,6 +426,58 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                   <StatusLine label="当前模式" value="HOLD TO SETTLEMENT" tone="amber" detail="信息差退出尚未具备 SELL 成交与历史盘口回放证据" />
                 </div>
               </div>
+            </section>
+          )}
+
+          {!profilesQuery.isLoading && section === 'sources' && (
+            <section className="px-4 py-4 sm:px-5">
+              <div className="mb-4">
+                <h2 className="text-[13px] font-semibold text-neutral-100">数据源与接口</h2>
+                <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">这里只显示覆盖、新鲜度和凭据是否已配置。密钥仍只保存在本机 .env，不会发送到浏览器。</p>
+              </div>
+
+              {sourceHealthQuery.isLoading && <div className="border-y border-neutral-800 py-4 text-[11px] text-neutral-500">正在读取数据源健康度...</div>}
+              {sourceHealthQuery.isError && <div className="border border-red-500/30 bg-red-500/5 px-3 py-3 text-[11px] text-red-300">数据源健康度读取失败，请确认后端仍在运行。</div>}
+
+              {sourceHealthQuery.data && (
+                <>
+                  <div className="grid grid-cols-2 border-y border-neutral-800 sm:grid-cols-4">
+                    <div className="border-b border-r border-neutral-800 px-3 py-3 sm:border-b-0"><div className="text-[9px] text-neutral-500">健康</div><div className="mt-1 font-mono text-lg text-green-400">{sourceHealthQuery.data.summary.healthy}</div></div>
+                    <div className="border-b border-neutral-800 px-3 py-3 sm:border-b-0 sm:border-r"><div className="text-[9px] text-neutral-500">过期</div><div className="mt-1 font-mono text-lg text-amber-300">{sourceHealthQuery.data.summary.stale}</div></div>
+                    <div className="border-r border-neutral-800 px-3 py-3"><div className="text-[9px] text-neutral-500">必需阻塞</div><div className="mt-1 font-mono text-lg text-red-300">{sourceHealthQuery.data.summary.required_blockers}</div></div>
+                    <div className="px-3 py-3"><div className="text-[9px] text-neutral-500">启用城市</div><div className="mt-1 font-mono text-lg text-neutral-100">{sourceHealthQuery.data.enabled_cities.length}</div></div>
+                  </div>
+
+                  <div className="mt-5 border-y border-neutral-800">
+                    <StatusLine label="Weather.com v3 凭据" value={sourceHealthQuery.data.config.weather_com_configured ? '已配置' : '未配置'} tone={sourceHealthQuery.data.config.weather_com_configured ? 'green' : 'red'} detail="仅返回布尔状态，不读取或回显密钥" />
+                    <StatusLine label="Wunderground PWS 凭据" value={sourceHealthQuery.data.config.wunderground_pws_configured ? '已配置' : '未配置'} tone={sourceHealthQuery.data.config.wunderground_pws_configured ? 'green' : 'amber'} detail={sourceHealthQuery.data.config.pws_peak_lock_enabled && !sourceHealthQuery.data.config.wunderground_pws_configured ? '功能已允许，但凭据未配置，PWS 不会实际运行' : '用于实时趋势辅助，不解锁结算 truth'} />
+                    <StatusLine label="DEB 权重模式" value={sourceHealthQuery.data.config.deb_weight_mode} detail="当前最高温模型融合口径" />
+                  </div>
+
+                  <div className="mb-2 mt-6 flex items-center justify-between gap-3">
+                    <div className="text-[11px] font-semibold text-neutral-300">采集与派生链路</div>
+                    <div className="text-[9px] text-neutral-600">{sourceHealthQuery.data.generated_at ? new Date(sourceHealthQuery.data.generated_at).toLocaleTimeString('zh-CN', { hour12: false }) : '--'}</div>
+                  </div>
+                  <div className="border-y border-neutral-800">
+                    {sourceHealthQuery.data.sources.map(source => (
+                      <div key={source.key} className="grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-neutral-800 py-2.5 last:border-b-0">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[11px] text-neutral-300">{SOURCE_LABELS[source.key] ?? source.label}</span>
+                            {source.required && <span className="border border-neutral-700 px-1 py-0.5 text-[8px] text-neutral-600">必需</span>}
+                          </div>
+                          <div className="mt-1 truncate text-[9px] text-neutral-600">
+                            覆盖 {source.coverage_pct ?? 0}% · 样本 {source.sample_count ?? 0} · {ageLabel(source.age_seconds)}
+                            {source.stale_cities?.length ? ` · ${source.stale_cities.length} 城过期` : ''}
+                            {source.missing_cities?.length ? ` · ${source.missing_cities.length} 城缺失` : ''}
+                          </div>
+                        </div>
+                        <div className={`font-mono text-[10px] ${sourceToneClass(source.status)}`} title={(source.reasons ?? []).join(', ')}>{sourceStatusLabel(source.status)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
             </section>
           )}
 
