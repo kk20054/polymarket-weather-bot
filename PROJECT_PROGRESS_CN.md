@@ -591,3 +591,11 @@
 - 真实阻塞：核心源因 scheduler stopped 全部过期；历史库存在 40 组 METAR 重复、2 组 consensus 重复；3,285 个 training run 不满足 lead/no-leak，959 个 DEB 来源晚于 issued_at 或身份不匹配；16 个高权重组件校准少于 7 日；176/176 matched 市场盘口不满足新鲜/可执行检查；尚无 14 日/30 笔权威 paper 证据。live executor 仍是 legacy v1，缺聚合风险预算、revision-bound 路由和 CLOB 提交前幂等保留。
 - 结论：代码边界更安全且验证从“报告”升级为机器门禁，但系统当前不具备 observation/paper/live 使用资格，不能通过放宽 edge/gate 制造信号。下一步优先修时序泄漏和重复键，再刷新上游并重建 14 城 revision-2 决策；之后才启动 14-30 日 cohort。
 - 相关提交：`0bab475`。
+
+### 2026-07-13：设置页减法与 API 可配置闭环
+
+- Layer：Layer 7 操作面与既有本机 API 配置接口；未修改 collector、策略、paper/live 执行逻辑。
+- 改动：将五段式“开发者设置”收敛为 `连接服务 / 模拟策略 / 高级设置`，默认进入连接服务；Weather.com、Wunderground PWS、Visual Crossing、MiniMax、飞书五项全部直接展示，支持填写、更新、清除和真实连接验证。已配置值只以固定星号返回，内部版本、source health 与生产阻塞收进高级折叠区，交易台入口统一改名为“设置”。
+- 验证：`tests.test_polywx_contract tests.test_v3_core tests.test_api_settings tests.test_execution_workbench_contract` 共 243 项通过；前端 production build 通过；浏览器浅色主题下无 console error/warn。使用本机已保存且未回传明文的 Weather.com key，真实连接验证成功并读取逐小时预报，耗时约 1622ms。
+- 结论：普通用户不再需要理解环境变量名或打开 `.env`，所有已支持 API 均可在同一页配置和验证；密钥明文仍只保存在本机。Polymarket 钱包私钥继续不进入浏览器，`LIVE_TRADING=false` 与 paper 状态未改变。
+- 下一步：由操作员在“设置 -> 连接服务”补入具备 PWS 产品权限的独立 Wunderground key 并点击“验证连接”；通过后再恢复受控数据刷新与 14-30 日模拟验证。

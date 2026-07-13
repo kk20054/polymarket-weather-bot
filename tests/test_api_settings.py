@@ -67,6 +67,26 @@ class ApiSettingsTests(unittest.TestCase):
         self.assertNotIn(secret, str(payload))
         self.assertNotIn("env_name", str(payload))
 
+    def test_settings_list_exposes_every_supported_service_without_plaintext(self):
+        secrets = {
+            "WEATHER_COM_API_KEY": "weather-secret",
+            "WUNDERGROUND_API_KEY": "pws-secret",
+            "MINIMAX_API_KEY": "minimax-secret",
+            "VISUAL_CROSSING_KEY": "history-secret",
+            "FEISHU_WEBHOOK_URL": "https://example.invalid/secret-hook",
+        }
+        with patch.dict(os.environ, secrets, clear=False):
+            payload = list_api_settings()
+        providers = {item["key"]: item for item in payload["providers"]}
+        self.assertEqual(
+            set(providers),
+            {"weather_com", "wunderground_pws", "minimax", "visual_crossing", "feishu"},
+        )
+        self.assertTrue(all(item["configured"] for item in providers.values()))
+        self.assertTrue(all(item["masked_value"] == MASKED_VALUE for item in providers.values()))
+        for secret in secrets.values():
+            self.assertNotIn(secret, str(payload))
+
     def test_weather_com_connection_test_uses_candidate_without_returning_it(self):
         secret = "candidate-secret"
         session = _Session(_Response({"validTimeUtc": ["2026-07-13T00:00:00Z"]}))

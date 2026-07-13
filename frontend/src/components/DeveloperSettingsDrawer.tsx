@@ -1,14 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity,
   AlertTriangle,
   Check,
   CheckCircle2,
   ChevronRight,
   ExternalLink,
-  Gauge,
-  History,
   KeyRound,
   LockKeyhole,
   Pencil,
@@ -16,7 +13,6 @@ import {
   RotateCcw,
   Save,
   Settings2,
-  ShieldCheck,
   SlidersHorizontal,
   X,
 } from 'lucide-react'
@@ -33,7 +29,7 @@ import {
 } from '../api'
 import type { ApiSettingProvider, ApiSettingTestResult, StrategyProfileParameters, StrategyProfileRevision } from '../types'
 
-type SettingsSection = 'overview' | 'strategy' | 'sources' | 'versions' | 'system'
+type SettingsSection = 'sources' | 'strategy' | 'advanced'
 type ThemeMode = 'light' | 'dark'
 
 interface DrawerProps {
@@ -48,13 +44,16 @@ interface PanelProps {
   standalone?: boolean
 }
 
-const NAV_ITEMS: Array<{ key: SettingsSection; label: string; hint: string; icon: typeof Settings2 }> = [
-  { key: 'overview', label: '运行概览', hint: '当前生效配置', icon: Gauge },
-  { key: 'strategy', label: '交易策略', hint: '仓位和买入条件', icon: SlidersHorizontal },
-  { key: 'sources', label: 'API 配置', hint: '填写密钥并测试', icon: KeyRound },
-  { key: 'versions', label: '版本记录', hint: '历史配置与切换', icon: History },
-  { key: 'system', label: '系统状态', hint: '运行情况与阻塞', icon: Activity },
+const NAV_ITEMS: Array<{ key: SettingsSection; label: string; icon: typeof Settings2 }> = [
+  { key: 'sources', label: '连接服务', icon: KeyRound },
+  { key: 'strategy', label: '模拟策略', icon: SlidersHorizontal },
+  { key: 'advanced', label: '高级设置', icon: Settings2 },
 ]
+
+const API_GROUPS: Array<{ label: string; keys: string[] }> = [
+  { label: '天气数据', keys: ['weather_com', 'wunderground_pws', 'visual_crossing'] },
+  { label: '智能审核与通知', keys: ['minimax', 'feishu'] },
+] as const
 
 const STRATEGY_META: Record<string, { label: string; description: string }> = {
   single_bucket_ev: {
@@ -81,6 +80,14 @@ function shortRevision(value?: string) {
 
 function percent(value: number) {
   return `${(Number(value || 0) * 100).toFixed(1)}%`
+}
+
+function humanizeChangeNote(value?: string) {
+  const note = String(value || '').trim()
+  if (!note) return '未填写变更说明'
+  if (note === 'Preserve existing 300-second orderbook freshness gate') return '保留 5 分钟盘口有效期限制'
+  if (note === 'local developer activation') return '本机设置页激活'
+  return note
 }
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -255,9 +262,9 @@ function ApiProviderCard({ provider }: { provider: ApiSettingProvider }) {
           <KeyRound className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-2">
             <h3 className="text-[12px] font-medium text-neutral-100">{provider.label}</h3>
-            <span className={`inline-flex items-center gap-1 text-[10px] ${provider.configured ? 'text-green-400' : 'text-amber-300'}`}>
+            <span className={`ml-auto inline-flex shrink-0 items-center gap-1 text-[10px] ${provider.configured ? 'text-green-400' : 'text-neutral-500'}`}>
               <span className={`h-1.5 w-1.5 ${provider.configured ? 'bg-green-400' : 'bg-amber-300'}`} />
               {provider.configured ? '已配置' : '未配置'}
             </span>
@@ -270,32 +277,32 @@ function ApiProviderCard({ provider }: { provider: ApiSettingProvider }) {
       </div>
 
       <div className="border-t border-neutral-800 px-3 py-3">
-        <div className="flex min-w-0 gap-2">
+        <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
           <input
             type="password"
             autoComplete="new-password"
             value={editing ? value : provider.masked_value}
             readOnly={!editing}
             onChange={event => setValue(event.target.value)}
-            placeholder="在此粘贴 API Key"
+            placeholder={provider.configured ? '已保存到本机' : '粘贴密钥或 Webhook 地址'}
             aria-label={`${provider.label}密钥`}
             className="h-9 min-w-0 flex-1 border border-neutral-700 bg-neutral-950 px-2.5 font-mono text-[11px] text-neutral-100 outline-none placeholder:font-sans placeholder:text-neutral-600 focus:border-blue-500"
           />
           {editing ? (
-            <button type="button" disabled={busy || !value.trim()} onClick={() => saveMutation.mutate()} className="inline-flex h-9 items-center gap-1 border border-blue-500 bg-blue-600 px-3 text-[10px] text-white hover:bg-blue-500 disabled:opacity-30">
+            <button type="button" disabled={busy || !value.trim()} onClick={() => saveMutation.mutate()} className="inline-flex h-9 items-center justify-center gap-1 border border-blue-500 bg-blue-600 px-3 text-[10px] text-white hover:bg-blue-500 disabled:opacity-30">
               <Save className="h-3.5 w-3.5" /> 保存
             </button>
           ) : (
-            <button type="button" disabled={busy} onClick={() => { setEditing(true); setResult(null) }} className="inline-flex h-9 items-center gap-1 border border-neutral-700 px-3 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">
-              <Pencil className="h-3.5 w-3.5" /> 更换
+            <button type="button" disabled={busy} onClick={() => { setEditing(true); setResult(null) }} className="inline-flex h-9 items-center justify-center gap-1 border border-neutral-700 px-3 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">
+              <Pencil className="h-3.5 w-3.5" /> 更新
             </button>
           )}
+          <button type="button" disabled={busy || !canUseDraft} onClick={runTest} className="inline-flex h-9 items-center justify-center gap-1 border border-neutral-700 px-3 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">
+            <PlugZap className="h-3.5 w-3.5" /> {testMutation.isPending ? '正在验证...' : '验证连接'}
+          </button>
         </div>
 
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <button type="button" disabled={busy || !canUseDraft} onClick={runTest} className="inline-flex min-h-8 items-center gap-1 border border-neutral-700 px-2.5 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">
-            <PlugZap className="h-3.5 w-3.5" /> {testMutation.isPending ? '正在测试...' : provider.test_label}
-          </button>
           {editing && provider.configured && <button type="button" disabled={busy} onClick={() => { setEditing(false); setValue(''); setResult(null) }} className="min-h-8 px-2 text-[10px] text-neutral-500 hover:text-neutral-200">取消更换</button>}
           {provider.configured && !confirmClear && <button type="button" disabled={busy} onClick={() => setConfirmClear(true)} className="ml-auto min-h-8 px-2 text-[10px] text-neutral-600 hover:text-red-300">清除</button>}
         </div>
@@ -321,7 +328,7 @@ function ApiProviderCard({ provider }: { provider: ApiSettingProvider }) {
         {result && (
           <div role="status" className={`mt-2 flex items-start gap-2 border px-2.5 py-2 text-[10px] ${result.ok ? 'border-green-500/30 bg-green-500/5 text-green-200' : 'border-amber-500/30 bg-amber-500/5 text-amber-200'}`}>
             {result.ok ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
-            <span>{result.message}{result.duration_ms > 0 ? `（${result.duration_ms}ms）` : ''}</span>
+            <span className="min-w-0 flex-1"><strong className="font-medium">{result.ok ? '验证成功：' : '验证失败：'}</strong>{result.message}{result.duration_ms > 0 ? `（${result.duration_ms}ms）` : ''}</span>
           </div>
         )}
       </div>
@@ -364,7 +371,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
   const activeSignal = profiles.find(profile => profile.active_scopes.includes('signal_generation'))
   const activePaper = profiles.find(profile => profile.active_scopes.includes('paper_default'))
   const baseline = activeSignal ?? activePaper ?? profiles[0]
-  const [section, setSection] = useState<SettingsSection>('overview')
+  const [section, setSection] = useState<SettingsSection>('sources')
   const [draft, setDraft] = useState<StrategyProfileParameters | null>(null)
   const [draftBaseRevision, setDraftBaseRevision] = useState('')
   const [note, setNote] = useState('')
@@ -402,11 +409,11 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
     }),
     onSuccess: revision => {
       setPublishConfirmOpen(false)
-      setMessage(`已创建 ${shortRevision(revision.revision_id)}，尚未激活。请在“版本与审计”中选择作用域。`)
+      setMessage(`已创建 ${shortRevision(revision.revision_id)}，尚未激活。请在“高级设置”的策略版本记录中选择用途。`)
       setDraft(cloneParameters(revision.parameters))
       setDraftBaseRevision(revision.revision_id)
       setNote('')
-      setSection('versions')
+      setSection('advanced')
       queryClient.invalidateQueries({ queryKey: ['strategy-profiles'] })
     },
     onError: error => {
@@ -449,24 +456,21 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
           <Settings2 className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <h1 className="truncate text-sm font-semibold text-neutral-100">开发者设置</h1>
-            <span className="hidden border border-neutral-700 px-1.5 py-0.5 font-mono text-[9px] text-neutral-500 sm:inline">{shortRevision(activeSignal?.revision_id)}</span>
-          </div>
-          <div className="text-[10px] text-neutral-500">配置交易策略、API 和本地运行状态</div>
+          <h1 className="truncate text-sm font-semibold text-neutral-100">设置</h1>
+          <div className="text-[10px] text-neutral-500">连接数据服务，管理模拟策略</div>
         </div>
         <div className={`hidden items-center gap-1 border px-2 py-1 text-[10px] sm:inline-flex ${liveLocked ? 'border-amber-500/30 text-amber-300' : 'border-green-500/30 text-green-300'}`}>
           <LockKeyhole className="h-3.5 w-3.5" /> {liveLocked ? '实盘保持锁定' : '实盘配置已开启'}
         </div>
         {onClose && (
-          <button type="button" onClick={onClose} className="inline-flex h-8 w-8 items-center justify-center border border-neutral-700 text-neutral-400 hover:bg-neutral-800 hover:text-white" aria-label={standalone ? '返回看板' : '关闭开发者设置'}>
+          <button type="button" onClick={onClose} className="inline-flex h-8 w-8 items-center justify-center border border-neutral-700 text-neutral-400 hover:bg-neutral-800 hover:text-white" aria-label={standalone ? '返回看板' : '关闭设置'}>
             <X className="h-4 w-4" />
           </button>
         )}
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-        <nav className={`flex shrink-0 gap-1 overflow-x-auto border-b border-neutral-800 p-2 sm:w-40 sm:flex-col sm:overflow-visible sm:border-b-0 sm:border-r ${raised}`} aria-label="开发者设置分组">
+      <div className="flex min-h-0 flex-1 flex-col">
+        <nav className={`grid shrink-0 grid-cols-3 gap-1 border-b border-neutral-800 p-2 ${raised}`} aria-label="设置分组">
           {NAV_ITEMS.map(item => {
             const Icon = item.icon
             const active = section === item.key
@@ -475,44 +479,17 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                 key={item.key}
                 type="button"
                 onClick={() => setSection(item.key)}
-                className={`flex min-h-10 min-w-max items-center gap-2 border px-2.5 text-left sm:min-w-0 ${active ? 'border-blue-500/50 bg-blue-600/15 text-blue-200' : 'border-transparent text-neutral-400 hover:border-neutral-700 hover:bg-neutral-900/40 hover:text-neutral-200'}`}
+                className={`flex min-h-10 items-center justify-center gap-2 border px-2.5 ${active ? 'border-blue-500/50 bg-blue-600/15 text-blue-200' : 'border-transparent text-neutral-400 hover:border-neutral-700 hover:bg-neutral-900/40 hover:text-neutral-200'}`}
               >
                 <Icon className="h-4 w-4 shrink-0" />
-                <span className="min-w-0">
-                  <span className="block text-[11px] font-medium">{item.label}</span>
-                  <span className="hidden truncate text-[9px] text-neutral-600 sm:block">{item.hint}</span>
-                </span>
+                <span className="text-[11px] font-medium">{item.label}</span>
               </button>
             )
           })}
         </nav>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {profilesQuery.isLoading && section !== 'sources' && <div className="p-6 text-sm text-neutral-500">正在读取策略版本...</div>}
-
-          {!profilesQuery.isLoading && section === 'overview' && (
-            <section className="px-4 py-4 sm:px-5">
-              <div className="mb-4">
-                <h2 className="text-[13px] font-semibold text-neutral-100">当前运行边界</h2>
-                <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">普通交易台只消费已激活版本。这里修改的是草稿，不会覆盖历史决策或自动解锁实盘。</p>
-              </div>
-              <div className="border-y border-neutral-800">
-                <StatusLine label="信号生成版本" value={shortRevision(activeSignal?.revision_id)} tone="green" detail={activeSignal?.change_note || '未激活'} />
-                <StatusLine label="模拟默认版本" value={shortRevision(activePaper?.revision_id)} tone="green" detail={activePaper?.change_note || '未激活'} />
-                <StatusLine label="实盘状态" value={liveLocked ? '已锁定' : '已启用'} tone={liveLocked ? 'amber' : 'green'} detail="此页面不能解除实盘锁定" />
-                <StatusLine label="策略版本数量" value={String(profiles.length)} detail="历史版本只读，便于复盘" />
-              </div>
-              <div className="mt-5 border border-amber-500/30 bg-amber-500/5 px-3 py-3">
-                <div className="flex items-start gap-2">
-                  <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
-                  <div>
-                    <div className="text-[11px] font-medium text-amber-200">发布与激活分离</div>
-                    <div className="mt-1 text-[10px] leading-relaxed text-neutral-500">创建版本只保存参数快照；激活到“信号生成”或“模拟默认”需要在版本页再次确认。</div>
-                  </div>
-                </div>
-              </div>
-            </section>
-          )}
+          {profilesQuery.isLoading && section !== 'sources' && <div className="p-6 text-sm text-neutral-500">正在读取设置...</div>}
 
           {!profilesQuery.isLoading && section === 'strategy' && draft && (
             <section className="pb-24">
@@ -581,126 +558,112 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
 
           {section === 'sources' && (
             <section className="px-4 py-4 sm:px-5">
-              <div className="mb-4">
-                <h2 className="text-[13px] font-semibold text-neutral-100">API 配置</h2>
-                <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">密钥只保存在这台电脑的 .env 文件中。页面只显示星号，不会读取或回传明文。</p>
-              </div>
-
-              {apiSettingsQuery.isLoading && <div className="border-y border-neutral-800 py-4 text-[11px] text-neutral-500">正在读取本机 API 配置...</div>}
-              {apiSettingsQuery.isError && <div className="border border-red-500/30 bg-red-500/5 px-3 py-3 text-[11px] text-red-300">API 配置读取失败，请确认后端仍在运行。</div>}
-              {apiSettingsQuery.data && (
-                <>
-                  <div className="mb-2 text-[10px] font-medium text-neutral-400">天气数据</div>
-                  <div className="space-y-3">
-                    {apiSettingsQuery.data.providers.filter(provider => ['weather_com', 'wunderground_pws'].includes(provider.key)).map(provider => <ApiProviderCard key={provider.key} provider={provider} />)}
-                  </div>
-                  <details className="mt-4 border-y border-neutral-800">
-                    <summary className="cursor-pointer py-3 text-[11px] font-medium text-neutral-400 hover:text-neutral-200">更多可选服务</summary>
-                    <div className="space-y-3 border-t border-neutral-800 py-3">
-                      {apiSettingsQuery.data.providers.filter(provider => !['weather_com', 'wunderground_pws'].includes(provider.key)).map(provider => <ApiProviderCard key={provider.key} provider={provider} />)}
-                    </div>
-                  </details>
-                </>
-              )}
-
-              <div className="mt-4 border border-amber-500/25 bg-amber-500/5 px-3 py-2.5 text-[10px] leading-relaxed text-neutral-400">
-                Polymarket 钱包私钥不在这里开放配置。实盘仍保持锁定，避免误操作把钱包权限暴露给看板。
-              </div>
-
-              <details className="mt-5 border-y border-neutral-800">
-                <summary className="cursor-pointer py-3 text-[11px] font-medium text-neutral-400 hover:text-neutral-200">高级数据源诊断</summary>
-                <div className="border-t border-neutral-800 pb-3 pt-2">
-                  <p className="mb-2 text-[9px] leading-relaxed text-neutral-600">用于排查采集覆盖和数据过期问题。日常配置 API 时不需要查看这里。</p>
-                  {sourceHealthQuery.isLoading && <div className="py-3 text-[10px] text-neutral-500">正在读取诊断数据...</div>}
-                  {sourceHealthQuery.isError && <div className="py-3 text-[10px] text-red-300">诊断数据读取失败。</div>}
-                  {sourceHealthQuery.data && (
-                    <>
-                      <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-[9px] text-neutral-500">
-                        <span>正常 {sourceHealthQuery.data.summary.healthy}</span>
-                        <span>过期 {sourceHealthQuery.data.summary.stale}</span>
-                        <span>阻塞 {sourceHealthQuery.data.summary.required_blockers}</span>
-                        <span>城市 {sourceHealthQuery.data.enabled_cities.length}</span>
-                        <span>最高温融合：{sourceHealthQuery.data.config.deb_weight_mode}</span>
-                      </div>
-                      <div className="border-t border-neutral-800">
-                        {sourceHealthQuery.data.sources.map(source => (
-                          <div key={source.key} className="grid min-h-11 grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-neutral-800 py-2 last:border-b-0">
-                            <div className="min-w-0">
-                              <div className="text-[10px] text-neutral-400">{SOURCE_LABELS[source.key] ?? source.label}</div>
-                              <div className="truncate text-[9px] text-neutral-600">覆盖 {source.coverage_pct ?? 0}% · {ageLabel(source.age_seconds)}{source.missing_cities?.length ? ` · ${source.missing_cities.length} 城缺失` : ''}</div>
-                            </div>
-                            <div className={`text-[9px] ${sourceToneClass(source.status)}`} title={(source.reasons ?? []).join(', ')}>{sourceStatusLabel(source.status)}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </>
-                  )}
+              <div className="mb-5 flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-[13px] font-semibold text-neutral-100">连接服务</h2>
+                  <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">在这里填写、更新并验证 API。已保存的内容只显示星号，明文不会返回浏览器。</p>
                 </div>
-              </details>
-            </section>
-          )}
-
-          {!profilesQuery.isLoading && section === 'versions' && (
-            <section className="px-4 py-4 sm:px-5">
-              <div className="mb-4">
-                <h2 className="text-[13px] font-semibold text-neutral-100">版本与审计</h2>
-                <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">版本不可修改或删除。激活只影响对应作用域的新决策，不回写旧订单。</p>
-              </div>
-              <div className="border-y border-neutral-800">
-                {profiles.map(profile => (
-                  <div key={profile.revision_id} className="border-b border-neutral-800 py-3 last:border-b-0">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-mono text-[11px] text-neutral-200">{shortRevision(profile.revision_id)}</span>
-                          <span className="text-[9px] text-neutral-600">rev {profile.revision_no} · {profile.engine_version}</span>
-                          {profile.active_scopes.length > 0 && <span className="inline-flex items-center gap-1 border border-green-500/30 px-1.5 py-0.5 text-[9px] text-green-300"><Check className="h-3 w-3" /> 生效</span>}
-                        </div>
-                        <div className="mt-1 text-[10px] text-neutral-500">{profile.change_note || '无变更说明'}</div>
-                        <div className="mt-1 text-[9px] text-neutral-600">{profile.created_at ? new Date(profile.created_at).toLocaleString('zh-CN', { hour12: false }) : '--'} · {profile.created_by || 'system'}</div>
-                      </div>
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <button type="button" disabled={profile.active_scopes.includes('signal_generation') || activationMutation.isPending} onClick={() => setActivationTarget({ revision: profile, scope: 'signal_generation' })} className="min-h-8 border border-neutral-700 px-2.5 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">用于信号生成</button>
-                      <button type="button" disabled={profile.active_scopes.includes('paper_default') || activationMutation.isPending} onClick={() => setActivationTarget({ revision: profile, scope: 'paper_default' })} className="min-h-8 border border-neutral-700 px-2.5 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">用于模拟默认</button>
-                      <button type="button" onClick={() => { setDraft(cloneParameters(profile.parameters)); setDraftBaseRevision(profile.revision_id); setSection('strategy'); setMessage(`已从 ${shortRevision(profile.revision_id)} 创建本地草稿。`) }} className="ml-auto inline-flex min-h-8 items-center gap-1 border border-neutral-700 px-2.5 text-[10px] text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200">基于此版本调整 <ChevronRight className="h-3.5 w-3.5" /></button>
-                    </div>
+                {apiSettingsQuery.data && (
+                  <div className="shrink-0 border border-neutral-700 px-2 py-1 text-[10px] text-neutral-400">
+                    已连接 {apiSettingsQuery.data.providers.filter(provider => provider.configured).length}/{apiSettingsQuery.data.providers.length}
                   </div>
-                ))}
+                )}
               </div>
-            </section>
-          )}
 
-          {!profilesQuery.isLoading && section === 'system' && (
-            <section className="px-4 py-4 sm:px-5">
-              <div className="mb-4">
-                <h2 className="text-[13px] font-semibold text-neutral-100">系统状态</h2>
-                <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">只读摘要用于判断是否可以开始模拟或实盘验收，不在这里启动采集或交易。</p>
-              </div>
-              <div className="border-y border-neutral-800">
-                <StatusLine label="数据调度器" value={schedulerQuery.data?.running ? '运行中' : '已停止'} tone={schedulerQuery.data?.running ? 'green' : 'amber'} detail="采集启停仍在主看板顶部控制" />
-                <StatusLine label="生产准备度" value={validationQuery.data ? `${Math.round(validationQuery.data.score * 100)}%` : '--'} tone={validationQuery.data && validationQuery.data.score >= 0.8 ? 'green' : 'amber'} detail="综合数据、truth、模拟和执行闸门" />
-                <StatusLine label="实盘配置" value={liveLocked ? '已锁定' : '已启用'} tone={liveLocked ? 'amber' : 'green'} detail="前端没有解锁开关" />
-              </div>
-              <div className="mt-6">
-                <div className="mb-2 text-[11px] font-semibold text-neutral-300">主要阻塞项</div>
-                <div className="border-y border-neutral-800">
-                  {(validationQuery.data?.hard_blockers ?? []).slice(0, 6).map((blocker, index) => (
-                    <div key={`${blocker}-${index}`} className="flex gap-2 border-b border-neutral-800 py-2.5 text-[10px] text-neutral-400 last:border-b-0">
-                      <span className="mt-1 h-1.5 w-1.5 shrink-0 bg-amber-400" />
-                      <span className="leading-relaxed">{blocker}</span>
+              {apiSettingsQuery.isLoading && <div className="border-y border-neutral-800 py-4 text-[11px] text-neutral-500">正在读取本机连接...</div>}
+              {apiSettingsQuery.isError && <div className="border border-red-500/30 bg-red-500/5 px-3 py-3 text-[11px] text-red-300">连接配置读取失败，请确认后端仍在运行。</div>}
+              {apiSettingsQuery.data && (
+                <div className="space-y-6">
+                  {API_GROUPS.map(group => (
+                    <div key={group.label}>
+                      <div className="mb-2 text-[10px] font-medium text-neutral-400">{group.label}</div>
+                      <div className="space-y-3">
+                        {apiSettingsQuery.data.providers
+                          .filter(provider => group.keys.includes(provider.key))
+                          .map(provider => <ApiProviderCard key={provider.key} provider={provider} />)}
+                    </div>
                     </div>
                   ))}
-                  {(validationQuery.data?.hard_blockers ?? []).length === 0 && <div className="py-3 text-[10px] text-neutral-500">暂无生产阻塞摘要。</div>}
                 </div>
+              )}
+
+              <div className="mt-5 flex items-start gap-2 border border-amber-500/25 bg-amber-500/5 px-3 py-2.5 text-[10px] leading-relaxed text-neutral-400">
+                <LockKeyhole className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
+                <span>钱包私钥不在网页中配置。公开行情无需密钥，实盘继续保持锁定。</span>
               </div>
+            </section>
+          )}
+
+          {!profilesQuery.isLoading && section === 'advanced' && (
+            <section className="px-4 py-4 sm:px-5">
+              <div className="mb-4">
+                <h2 className="text-[13px] font-semibold text-neutral-100">高级设置</h2>
+                <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">日常使用无需修改。这里保留策略版本和只读诊断，便于排查与复盘。</p>
+              </div>
+
+              <div className="space-y-3">
+                <details className="border border-neutral-800">
+                  <summary className="cursor-pointer px-3 py-3 text-[11px] font-medium text-neutral-300 hover:bg-neutral-900/40">当前运行状态</summary>
+                  <div className="border-t border-neutral-800 px-3">
+                    <StatusLine label="信号策略" value={shortRevision(activeSignal?.revision_id)} tone="green" detail={humanizeChangeNote(activeSignal?.change_note)} />
+                    <StatusLine label="模拟策略" value={shortRevision(activePaper?.revision_id)} tone="green" detail={humanizeChangeNote(activePaper?.change_note)} />
+                    <StatusLine label="数据调度" value={schedulerQuery.data?.running ? '运行中' : '已停止'} tone={schedulerQuery.data?.running ? 'green' : 'amber'} />
+                    <StatusLine label="实盘" value={liveLocked ? '已锁定' : '已启用'} tone={liveLocked ? 'amber' : 'green'} />
+                  </div>
+                </details>
+
+                <details className="border border-neutral-800">
+                  <summary className="cursor-pointer px-3 py-3 text-[11px] font-medium text-neutral-300 hover:bg-neutral-900/40">策略版本记录（{profiles.length}）</summary>
+                  <div className="border-t border-neutral-800 px-3">
+                    {profiles.map(profile => (
+                      <div key={profile.revision_id} className="border-b border-neutral-800 py-3 last:border-b-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-[11px] text-neutral-200">{shortRevision(profile.revision_id)}</span>
+                          <span className="text-[9px] text-neutral-600">版本 {profile.revision_no}</span>
+                          {profile.active_scopes.length > 0 && <span className="inline-flex items-center gap-1 border border-green-500/30 px-1.5 py-0.5 text-[9px] text-green-300"><Check className="h-3 w-3" /> 生效</span>}
+                        </div>
+                        <div className="mt-1 text-[10px] text-neutral-500">{humanizeChangeNote(profile.change_note)}</div>
+                        <div className="mt-1 text-[9px] text-neutral-600">{profile.created_at ? new Date(profile.created_at).toLocaleString('zh-CN', { hour12: false }) : '--'}</div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <button type="button" disabled={profile.active_scopes.includes('signal_generation') || activationMutation.isPending} onClick={() => setActivationTarget({ revision: profile, scope: 'signal_generation' })} className="min-h-8 border border-neutral-700 px-2.5 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">用于信号</button>
+                          <button type="button" disabled={profile.active_scopes.includes('paper_default') || activationMutation.isPending} onClick={() => setActivationTarget({ revision: profile, scope: 'paper_default' })} className="min-h-8 border border-neutral-700 px-2.5 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">用于模拟</button>
+                          <button type="button" onClick={() => { setDraft(cloneParameters(profile.parameters)); setDraftBaseRevision(profile.revision_id); setSection('strategy'); setMessage(`已从 ${shortRevision(profile.revision_id)} 创建本地草稿。`) }} className="ml-auto inline-flex min-h-8 items-center gap-1 border border-neutral-700 px-2.5 text-[10px] text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200">调整此版本 <ChevronRight className="h-3.5 w-3.5" /></button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+
+                <details className="border border-neutral-800">
+                  <summary className="cursor-pointer px-3 py-3 text-[11px] font-medium text-neutral-300 hover:bg-neutral-900/40">系统诊断</summary>
+                  <div className="border-t border-neutral-800 px-3 pb-3">
+                    <StatusLine label="生产准备度" value={validationQuery.data ? `${Math.round(validationQuery.data.score * 100)}%` : '--'} tone={validationQuery.data && validationQuery.data.score >= 0.8 ? 'green' : 'amber'} />
+                    {sourceHealthQuery.isLoading && <div className="py-3 text-[10px] text-neutral-500">正在读取数据源状态...</div>}
+                    {sourceHealthQuery.isError && <div className="py-3 text-[10px] text-red-300">数据源状态读取失败。</div>}
+                    {sourceHealthQuery.data?.sources.map(source => (
+                      <div key={source.key} className="grid min-h-11 grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-neutral-800 py-2 last:border-b-0">
+                        <div className="min-w-0">
+                          <div className="text-[10px] text-neutral-400">{SOURCE_LABELS[source.key] ?? source.label}</div>
+                          <div className="truncate text-[9px] text-neutral-600">覆盖 {source.coverage_pct ?? 0}% · {ageLabel(source.age_seconds)}</div>
+                        </div>
+                        <div className={`text-[9px] ${sourceToneClass(source.status)}`} title={(source.reasons ?? []).join(', ')}>{sourceStatusLabel(source.status)}</div>
+                      </div>
+                    ))}
+                    {(validationQuery.data?.hard_blockers ?? []).length > 0 && (
+                      <div className="mt-3 border-t border-neutral-800 pt-3 text-[10px] text-amber-200">
+                        当前仍有 {(validationQuery.data?.hard_blockers ?? []).length} 项生产阻塞，实盘不会解锁。
+                      </div>
+                    )}
+                  </div>
+                </details>
+                </div>
             </section>
           )}
         </div>
       </div>
 
       {section === 'strategy' && draft && (
-        <footer className={`absolute bottom-0 left-0 right-0 z-10 flex min-h-16 items-center gap-3 border-t border-neutral-700 px-4 shadow-[0_-12px_28px_rgba(0,0,0,0.24)] sm:left-40 ${surface}`}>
+        <footer className={`absolute bottom-0 left-0 right-0 z-10 flex min-h-16 items-center gap-3 border-t border-neutral-700 px-4 shadow-[0_-12px_28px_rgba(0,0,0,0.24)] ${surface}`}>
           <div className="min-w-0 flex-1">
             <label className="block text-[9px] text-neutral-500">变更说明
               <input value={note} onChange={event => setNote(event.target.value)} placeholder="说明为什么调整参数" className="mt-1 h-8 w-full border border-neutral-700 bg-neutral-950 px-2 text-[11px] text-neutral-100 outline-none focus:border-blue-500" />
@@ -762,8 +725,8 @@ export function DeveloperSettingsDrawer({ open, onClose, themeMode }: DrawerProp
 
   return (
     <div className="fixed inset-0 z-[80]" role="presentation">
-      <button type="button" aria-label="关闭开发者设置" onClick={onClose} className="absolute inset-0 h-full w-full bg-[rgba(0,0,0,0.55)]" />
-      <div role="dialog" aria-modal="true" aria-label="开发者设置" className="absolute inset-y-0 right-0 w-full border-l border-neutral-800 shadow-2xl sm:w-[680px]">
+      <button type="button" aria-label="关闭设置" onClick={onClose} className="absolute inset-0 h-full w-full bg-[rgba(0,0,0,0.55)]" />
+      <div role="dialog" aria-modal="true" aria-label="设置" className="absolute inset-y-0 right-0 w-full border-l border-neutral-800 shadow-2xl sm:w-[720px]">
         <DeveloperSettingsPanel themeMode={themeMode} onClose={onClose} />
       </div>
     </div>

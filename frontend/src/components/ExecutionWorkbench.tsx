@@ -379,7 +379,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
         <div className="mt-1 flex items-center justify-between gap-2 text-[9px] text-neutral-600">
           <span title={selectedRevisionId || '未加载'}>策略版本 {selectedRevisionId ? selectedRevisionId.slice(0, 12) : '--'}</span>
           <button type="button" onClick={onOpenDeveloperSettings} className="inline-flex items-center gap-1 text-cyan-500 hover:text-cyan-300">
-            <Settings2 className="h-3 w-3" /> 开发者设置
+            <Settings2 className="h-3 w-3" /> 设置
           </button>
         </div>
         <div className="mt-2 grid grid-cols-2 gap-1 text-[10px]">
