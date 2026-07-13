@@ -209,6 +209,8 @@ class PaperExecutionRequest(BaseModel):
     target_date: str = ""
     amount: float | None = None
     strategies: list[str] | None = None
+    strategy_revision_id: str = ""
+    decision_batch_issued_at: str = ""
     limit: int = 20
     dry_run: bool = True
 
@@ -267,7 +269,7 @@ class LiveOrderUpdate(BaseModel):
 
 class CanaryDryRunUpdate(BaseModel):
     signal_id: int
-    amount: float | None = None
+    amount: float | None = Field(default=None, gt=0.0)
 
 
 def _read_json(path, fallback):
@@ -4843,12 +4845,19 @@ async def paper_orders_execute(request: PaperExecutionRequest):
         )
     if not request.city or not request.target_date:
         raise HTTPException(status_code=400, detail="decision_id or city+target_date is required")
+    if not request.strategy_revision_id or not request.decision_batch_issued_at:
+        raise HTTPException(
+            status_code=400,
+            detail="bulk paper execution requires strategy_revision_id and decision_batch_issued_at",
+        )
     return execute_paper_decisions(
         city_key=request.city,
         target_date=request.target_date,
         limit=request.limit,
         amount=request.amount,
         strategies=request.strategies,
+        strategy_revision_id=request.strategy_revision_id,
+        decision_batch_issued_at=request.decision_batch_issued_at,
         dry_run=request.dry_run,
     )
 
@@ -5572,10 +5581,12 @@ async def canary_dry_run(update: CanaryDryRunUpdate):
     if not signal:
         return {"ok": False, "status": "blocked", "reason": "signal_not_found"}
     cfg = load_v3_config()
-    amount = update.amount
-    if amount is not None:
-        amount = min(float(amount), cfg.canary_max_order_usd)
-    result = LiveExecutor().place_order(signal, amount)
+    amount = min(
+        float(update.amount) if update.amount is not None else 1.0,
+        float(cfg.canary_max_order_usd),
+        float(cfg.live_max_order_usd),
+    )
+    result = LiveExecutor().place_order(signal, amount, force_dry_run=True)
     log_event(
         "info" if result.status == "dry_run" else "warning",
         f"canary dry-run {result.status}: {result.reason or 'ok'}",

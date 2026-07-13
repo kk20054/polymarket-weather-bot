@@ -280,6 +280,19 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
   })
   const activePaperProfile = profilesQuery.data?.profiles.find(profile => profile.active_scopes.includes('paper_default'))
   const selectedRevisionId = validation?.strategy_revision_id ?? activePaperProfile?.revision_id ?? ''
+  const selectedRevisionRows = useMemo(
+    () => selectedRevisionId
+      ? (decisions?.decisions ?? []).filter(row => row.strategy_revision_id === selectedRevisionId)
+      : [],
+    [decisions, selectedRevisionId],
+  )
+  const latestDecisionIssuedAt = useMemo(
+    () => selectedRevisionRows.reduce(
+      (latest, row) => String(row.issued_at ?? '') > latest ? String(row.issued_at ?? '') : latest,
+      '',
+    ),
+    [selectedRevisionRows],
+  )
   useEffect(() => {
     if (!validationActive) return
     setBankroll(String(validation?.bankroll_usd ?? 40))
@@ -287,17 +300,11 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
     if (validation?.strategies?.length) setSelectedStrategies(validation.strategies)
   }, [validationActive, validation?.bankroll_usd, validation?.max_per_trade_usd, validation?.strategies])
   const queue = useMemo(() => {
-    const rows = decisions?.decisions ?? []
-    const latestIssuedAt = rows.reduce(
-      (latest, row) => String(row.issued_at ?? '') > latest ? String(row.issued_at ?? '') : latest,
-      '',
-    )
-    const latestRows = latestIssuedAt ? rows.filter(row => row.issued_at === latestIssuedAt) : rows
-    const revisionRows = selectedRevisionId
-      ? latestRows.filter(row => row.strategy_revision_id === selectedRevisionId)
-      : []
-    return groupDecisions(revisionRows.filter(row => selectedStrategies.includes(row.strategy_name ?? 'single_bucket_ev')))
-  }, [decisions, selectedRevisionId, selectedStrategies])
+    const latestRows = latestDecisionIssuedAt
+      ? selectedRevisionRows.filter(row => row.issued_at === latestDecisionIssuedAt)
+      : selectedRevisionRows
+    return groupDecisions(latestRows.filter(row => selectedStrategies.includes(row.strategy_name ?? 'single_bucket_ev')))
+  }, [latestDecisionIssuedAt, selectedRevisionRows, selectedStrategies])
   const eligibleCount = queue.filter(item => item.decisions.length === (item.ladderGroupId ? 3 : 1)
     && item.decisions.every(row => row.paper_allowed && row.paper_decision === 'buy')).length
   const ordersQuery = useQuery({
@@ -315,6 +322,8 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
       limit: 100,
       dryRun: payload.dryRun,
       strategies: selectedStrategies,
+      strategyRevisionId: selectedRevisionId,
+      decisionBatchIssuedAt: latestDecisionIssuedAt,
     }),
     onSuccess: result => {
       setLastResult(result)

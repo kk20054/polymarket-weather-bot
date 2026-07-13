@@ -52,6 +52,23 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+def connect_readonly(path: Path | None = None) -> sqlite3.Connection:
+    """Open the production database without permitting writes or WAL changes."""
+    cfg = load_config()
+    db_path = Path(path or cfg.v3_db_path).resolve()
+    conn = sqlite3.connect(
+        f"file:{db_path.as_posix()}?mode=ro",
+        uri=True,
+        timeout=30.0,
+        factory=ClosingConnection,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+
+
 def init_v3_db(path: Path | None = None) -> None:
     with connect(path) as conn:
         conn.executescript(

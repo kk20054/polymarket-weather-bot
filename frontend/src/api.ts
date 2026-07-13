@@ -246,6 +246,8 @@ export async function executePaperOrders(options: {
   targetDate?: string
   amount?: number
   strategies?: string[]
+  strategyRevisionId?: string
+  decisionBatchIssuedAt?: string
   limit?: number
   dryRun?: boolean
 }): Promise<PaperExecutionResult> {
@@ -255,6 +257,8 @@ export async function executePaperOrders(options: {
     target_date: options.targetDate ?? '',
     amount: options.amount,
     strategies: options.strategies,
+    strategy_revision_id: options.strategyRevisionId ?? '',
+    decision_batch_issued_at: options.decisionBatchIssuedAt ?? '',
     limit: options.limit ?? 20,
     dry_run: options.dryRun ?? true,
   })

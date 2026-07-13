@@ -12,6 +12,10 @@ from .notifier import FeishuNotifier
 from .polymarket import PolymarketDataClient, MarketQuote, estimate_buy_fill, round_price_to_tick, validate_order_constraints
 
 
+LIVE_EXECUTION_VERSION = "live-execution-v1-legacy"
+LIVE_EXECUTION_PRODUCTION_READY = False
+
+
 @dataclass(frozen=True)
 class ExecutionResult:
     ok: bool
@@ -97,10 +101,16 @@ class PaperExecutor(BaseExecutor):
 class LiveExecutor(BaseExecutor):
     mode = "live"
 
-    def place_order(self, signal: dict[str, Any], amount: float | None = None) -> ExecutionResult:
+    def place_order(
+        self,
+        signal: dict[str, Any],
+        amount: float | None = None,
+        *,
+        force_dry_run: bool = False,
+    ) -> ExecutionResult:
         cfg = load_config()
         signal_id, quote, order, errors = self._prepare(signal, amount)
-        order["dry_run"] = cfg.live_dry_run or not cfg.live_trading
+        order["dry_run"] = bool(force_dry_run or cfg.live_dry_run or not cfg.live_trading)
 
         ai_review = AIReviewer().review(signal_id, signal, quote.raw)
         if cfg.ai_required_for_live and (not ai_review.get("approve") or float(ai_review.get("confidence") or 0) < 0.5):

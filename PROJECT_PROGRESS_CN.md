@@ -582,3 +582,11 @@
 - 验证：Weather.com 使用当前本地密钥真实读取逐小时预报成功；Wunderground PWS 当前为空配置并如实显示。API 单测、核心/PolyWX/执行工作台回归共 242 项通过，前端 production build 通过，浏览器浅色主题下保存/测试/折叠交互无 console error。
 - 结论：开发者不再需要理解内部环境变量名，也不需要手工打开 `.env` 才能配置普通数据/通知 API；密钥权限不足、未配置和连接失败均有中文结果。实盘与 paper 验证状态未改变。
 - 下一步：由操作者在“开发者设置 → API 配置”中补入具备 PWS 产品权限的独立 Wunderground key 并点击测试；通过后再恢复受控数据刷新与策略验证。
+
+### 2026-07-13：跨层定向验证代理与执行安全边界
+
+- 改动：新增只读 `project-verify`，由数据基座、概率模型、信号风控、模拟执行/结算、操作面五类代理分别输出 `observation / paper / paper_evidence / live_canary` 门禁；默认 quick，`--deep-verification` 才做完整 SQLite integrity scan。API 密钥响应同时纳入星号边界验证。
+- 执行安全：`/api/executor/canary-dry-run` 无论 `LIVE_TRADING/LIVE_DRY_RUN` 环境组合都强制 `force_dry_run=true`，默认金额为 $1 且受 canary/live 双上限约束；右侧批量模拟请求必须携带当前显示的 `strategy_revision_id + decision_batch_issued_at`，后端缺任一字段直接拒绝。Kelly 对越界概率返回零仓位。
+- 验证：定向 11 项测试通过；`tests.test_v3_core tests.test_polywx_contract tests.test_project_verification tests.test_execution_workbench_contract` 共 244 项通过；前端 `npm run build` 通过。真实只读 deep 报告保存于 gitignored `audits/project-verification-2026-07-13/`，结果为 `code_only`，四个 readiness stage 均 blocked。
+- 真实阻塞：核心源因 scheduler stopped 全部过期；历史库存在 40 组 METAR 重复、2 组 consensus 重复；3,285 个 training run 不满足 lead/no-leak，959 个 DEB 来源晚于 issued_at 或身份不匹配；16 个高权重组件校准少于 7 日；176/176 matched 市场盘口不满足新鲜/可执行检查；尚无 14 日/30 笔权威 paper 证据。live executor 仍是 legacy v1，缺聚合风险预算、revision-bound 路由和 CLOB 提交前幂等保留。
+- 结论：代码边界更安全且验证从“报告”升级为机器门禁，但系统当前不具备 observation/paper/live 使用资格，不能通过放宽 edge/gate 制造信号。下一步优先修时序泄漏和重复键，再刷新上游并重建 14 城 revision-2 决策；之后才启动 14-30 日 cohort。

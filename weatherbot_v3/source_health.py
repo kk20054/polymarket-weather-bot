@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .config import load_config
-from .db import connect, utc_now
+from .db import connect, connect_readonly, utc_now
 from .env_utils import env_value
 
 
@@ -16,11 +16,13 @@ def build_source_health_matrix(
     path: Path | None = None,
     *,
     now_utc: datetime | None = None,
+    read_only: bool = False,
 ) -> dict[str, Any]:
     """Return an auditable health matrix for source and derived-data layers."""
     now = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
     cfg = load_config()
-    with connect(path) as conn:
+    connection_factory = connect_readonly if read_only else connect
+    with connection_factory(path) as conn:
         enabled_rows = conn.execute(
             """
             SELECT city_key, station_id, settlement_station_id,

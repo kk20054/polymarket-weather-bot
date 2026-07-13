@@ -17,6 +17,7 @@ from .qualification import build_data_readiness, persist_data_readiness
 from .source_health import build_source_health_matrix
 from .stations import list_stations, set_station_enabled, sync_station_registry
 from .validation import build_production_validation_report
+from .verification_agents import build_project_verification_report, project_verification_markdown
 
 
 ORDERBOOK_TERMINAL_SIGNAL_STATUSES = (
@@ -1398,6 +1399,7 @@ def main() -> None:
             "migrate",
             "summary",
             "source-health",
+            "project-verify",
             "state-print",
             "notify-daily",
             "production-refresh",
@@ -1493,6 +1495,14 @@ def main() -> None:
     parser.add_argument("--max-orders-per-day", type=int, default=5, help="Paper validation maximum new orders per UTC day")
     parser.add_argument("--decision-max-age-minutes", type=float, default=30.0, help="Maximum signal decision age for paper validation")
     parser.add_argument("--strategies", default="single_bucket_ev", help="Comma-separated paper validation strategy allowlist")
+    parser.add_argument(
+        "--verification-mode",
+        choices=("observation", "paper", "paper_evidence", "live_canary"),
+        default="observation",
+        help="Readiness stage that controls project-verify exit status",
+    )
+    parser.add_argument("--skip-runtime-probe", action="store_true", help="Skip local HTTP API checks during project-verify")
+    parser.add_argument("--deep-verification", action="store_true", help="Include full SQLite integrity scan during project-verify")
     args = parser.parse_args()
     cities_arg = ",".join(item for item in [args.cities, *args.city] if item)
 
@@ -1507,6 +1517,20 @@ def main() -> None:
         print(json.dumps(dashboard_summary(), ensure_ascii=False, indent=2))
     elif args.command == "source-health":
         print(json.dumps(build_source_health_matrix(), ensure_ascii=False, indent=2))
+    elif args.command == "project-verify":
+        report = build_project_verification_report(
+            probe_runtime=not args.skip_runtime_probe,
+            deep=args.deep_verification,
+        )
+        rendered = json.dumps(report, ensure_ascii=False, indent=2)
+        if args.output_path:
+            output_path = Path(args.output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(rendered + "\n", encoding="utf-8")
+            output_path.with_suffix(".md").write_text(project_verification_markdown(report), encoding="utf-8")
+        print(rendered)
+        if not ((report.get("readiness") or {}).get(args.verification_mode) or {}).get("ready"):
+            raise SystemExit(2)
     elif args.command == "state-print":
         print_current_state()
     elif args.command == "notify-daily":

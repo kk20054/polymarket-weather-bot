@@ -38,7 +38,7 @@ def calculate_kelly_fraction(probability: float | None, ask: float | None) -> fl
     """Return binary YES Kelly fraction for a $1 payout contract."""
     p = _num(probability)
     price = _num(ask)
-    if p is None or price is None or price <= 0.0 or price >= 1.0:
+    if p is None or price is None or p < 0.0 or p > 1.0 or price <= 0.0 or price >= 1.0:
         return 0.0
     odds = (1.0 / price) - 1.0
     if odds <= 0:

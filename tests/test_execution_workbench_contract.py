@@ -25,7 +25,9 @@ class ExecutionWorkbenchContractTests(unittest.TestCase):
         component = (ROOT / "frontend" / "src" / "components" / "ExecutionWorkbench.tsx").read_text(encoding="utf-8")
 
         self.assertIn("实盘锁定", component)
-        self.assertIn("latestIssuedAt", component)
+        self.assertIn("latestDecisionIssuedAt", component)
+        self.assertIn("decisionBatchIssuedAt", component)
+        self.assertIn("strategyRevisionId", component)
         self.assertIn("ladderGroupId", component)
         self.assertIn("模拟当前可用策略", component)
         self.assertIn("一键模拟", component)

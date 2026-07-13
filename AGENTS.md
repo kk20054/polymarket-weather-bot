@@ -71,7 +71,10 @@ For backend/core work:
 ```powershell
 cd C:\Users\Administrator\Documents\polymarket\weatherbot
 .\.venv\Scripts\python.exe -m unittest tests.test_v3_core
+.\.venv\Scripts\python.exe -m weatherbot_v3.cli project-verify --verification-mode observation
 ```
+
+`project-verify` is read-only and exits `2` when the requested readiness stage is blocked. Use `--deep-verification` only for deliberate full SQLite integrity audits; the default quick scope is the per-turn gate.
 
 For PolyWX/dashboard contract work:
 

@@ -190,6 +190,8 @@ def execute_paper_decisions(
     limit: int = 20,
     amount: float | None = None,
     strategies: list[str] | None = None,
+    strategy_revision_id: str = "",
+    decision_batch_issued_at: str = "",
     dry_run: bool = True,
     path: Path | None = None,
 ) -> dict[str, Any]:
@@ -197,6 +199,10 @@ def execute_paper_decisions(
     selected: list[dict[str, Any]] = []
     seen_ladder_groups: set[str] = set()
     for row in list_signal_decisions(city_key=city_key, target_date=target_date, limit=limit, path=path):
+        if strategy_revision_id and str(row.get("strategy_revision_id") or "") != str(strategy_revision_id):
+            continue
+        if decision_batch_issued_at and str(row.get("issued_at") or "") != str(decision_batch_issued_at):
+            continue
         if allowed_strategies and str(row.get("strategy_name") or "single_bucket_ev") not in allowed_strategies:
             continue
         if not bool(row.get("paper_allowed")) or str(row.get("paper_decision") or "") != "buy":
@@ -216,6 +222,8 @@ def execute_paper_decisions(
         "ok": all(item.get("ok") or item.get("status") == "duplicate" for item in results),
         "dry_run": dry_run,
         "execution_version": PAPER_EXECUTION_VERSION,
+        "strategy_revision_id": strategy_revision_id,
+        "decision_batch_issued_at": decision_batch_issued_at,
         "requested": len(rows),
         "executed": sum(1 for item in results if item.get("ok") and item.get("status") != "duplicate"),
         "duplicates": sum(1 for item in results if item.get("status") == "duplicate"),
