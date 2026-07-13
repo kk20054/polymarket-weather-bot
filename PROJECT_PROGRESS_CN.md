@@ -590,3 +590,4 @@
 - 验证：定向 11 项测试通过；`tests.test_v3_core tests.test_polywx_contract tests.test_project_verification tests.test_execution_workbench_contract` 共 244 项通过；前端 `npm run build` 通过。真实只读 deep 报告保存于 gitignored `audits/project-verification-2026-07-13/`，结果为 `code_only`，四个 readiness stage 均 blocked。
 - 真实阻塞：核心源因 scheduler stopped 全部过期；历史库存在 40 组 METAR 重复、2 组 consensus 重复；3,285 个 training run 不满足 lead/no-leak，959 个 DEB 来源晚于 issued_at 或身份不匹配；16 个高权重组件校准少于 7 日；176/176 matched 市场盘口不满足新鲜/可执行检查；尚无 14 日/30 笔权威 paper 证据。live executor 仍是 legacy v1，缺聚合风险预算、revision-bound 路由和 CLOB 提交前幂等保留。
 - 结论：代码边界更安全且验证从“报告”升级为机器门禁，但系统当前不具备 observation/paper/live 使用资格，不能通过放宽 edge/gate 制造信号。下一步优先修时序泄漏和重复键，再刷新上游并重建 14 城 revision-2 决策；之后才启动 14-30 日 cohort。
+- 相关提交：`0bab475`。
