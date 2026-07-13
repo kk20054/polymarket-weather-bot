@@ -1197,6 +1197,34 @@ export interface SourceHealthMatrix {
   }
 }
 
+export interface ApiSettingProvider {
+  key: string
+  label: string
+  description: string
+  configured: boolean
+  masked_value: string
+  docs_url: string
+  test_label: string
+  test_has_side_effect: boolean
+}
+
+export interface ApiSettingsResponse {
+  ok: boolean
+  storage: string
+  updated_at?: string | null
+  providers: ApiSettingProvider[]
+}
+
+export interface ApiSettingTestResult {
+  provider_key: string
+  ok: boolean
+  status: 'success' | 'missing' | 'confirmation_required' | 'unauthorized' | 'rate_limited' | 'failed' | string
+  message: string
+  duration_ms: number
+  tested_at: string
+  reason?: string
+}
+
 export interface PaperValidationStatus {
   ok: boolean
   status: 'inactive' | 'active' | 'stopped' | 'completed' | string

@@ -6,12 +6,13 @@
 - Paper simulation now uses the operator cohort bankroll for Kelly sizing, one explicit cap chain, current stored orderbook freshness and authoritative Polymarket settlement.
 - Every new decision, paper cohort and paper order is bound to an immutable strategy revision; the active conservative profile is revision 2.
 - The normal dashboard now opens developer settings as a right-side drawer with the same PolyWX light/dark theme. The drawer groups overview, strategy/risk, immutable revisions and read-only system status; `/developer` remains a deep-link fallback.
-- Developer settings now includes a read-only data-source page backed by source-health-v2: 13 source roles, 14-city coverage, freshness, required blockers and credential-presence booleans are visible without exposing secrets.
+- Developer settings now includes a Chinese-first API configuration page: Weather.com, Wunderground PWS and optional MiniMax/Visual Crossing/Feishu credentials can be saved locally, masked and connection-tested; source-health-v2 remains available under a collapsed advanced diagnostic section.
 - Layer 6 batch rebuilding now selects all enabled stations and the newest overlapping prediction/market dates; dry-run no longer writes readiness state.
 - Scheduler is stopped and paper validation is inactive after verification. `LIVE_TRADING=false`; profitability is not proven.
 
 ## Latest Ledger Summaries
 - 2026-07-13 / Layer 7/8 settings UX: replaced the isolated developer form with a themed settings drawer; publishing and activation are separate, activation requires confirmation, and live remains read-only locked.
+- 2026-07-13 / API settings UX: replaced credential-presence labels with local editable masked inputs, provider-specific connection tests and Chinese purpose/error text; Weather.com real connectivity passed and Wunderground PWS remains honestly unconfigured.
 - 2026-07-13 / Layer 6 and data-source controls: fixed oldest-first/legacy-five-city signal targeting and added a safe source-health page to developer settings.
 - 2026-07-13 / Layer 8 sizing and strategy audit: cohort bankroll now recomputes Kelly; global `MAX_BET` no longer silently truncates a higher cohort limit; ladder groups reserve three order/position slots.
 - 2026-07-13 / Immutable strategy profiles: append-only revisions and activation events bind signal generation and paper defaults; decisions/orders persist parameter and sizing snapshots.

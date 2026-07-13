@@ -2,12 +2,17 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
+  AlertTriangle,
   Check,
+  CheckCircle2,
   ChevronRight,
-  Database,
+  ExternalLink,
   Gauge,
   History,
+  KeyRound,
   LockKeyhole,
+  Pencil,
+  PlugZap,
   RotateCcw,
   Save,
   Settings2,
@@ -18,12 +23,15 @@ import {
 import {
   activateStrategyProfile,
   createStrategyProfile,
+  fetchApiSettings,
   fetchProductionValidation,
   fetchSchedulerStatus,
   fetchSourceHealth,
   fetchStrategyProfiles,
+  testApiSetting,
+  updateApiSetting,
 } from '../api'
-import type { StrategyProfileParameters, StrategyProfileRevision } from '../types'
+import type { ApiSettingProvider, ApiSettingTestResult, StrategyProfileParameters, StrategyProfileRevision } from '../types'
 
 type SettingsSection = 'overview' | 'strategy' | 'sources' | 'versions' | 'system'
 type ThemeMode = 'light' | 'dark'
@@ -41,11 +49,11 @@ interface PanelProps {
 }
 
 const NAV_ITEMS: Array<{ key: SettingsSection; label: string; hint: string; icon: typeof Settings2 }> = [
-  { key: 'overview', label: '概览', hint: '当前状态与生效版本', icon: Gauge },
-  { key: 'strategy', label: '策略与风控', hint: '仓位、闸门与入场策略', icon: SlidersHorizontal },
-  { key: 'sources', label: '数据源', hint: '覆盖、新鲜度与授权状态', icon: Database },
-  { key: 'versions', label: '版本与审计', hint: '发布、激活与历史记录', icon: History },
-  { key: 'system', label: '系统状态', hint: '调度器与生产阻塞', icon: Activity },
+  { key: 'overview', label: '运行概览', hint: '当前生效配置', icon: Gauge },
+  { key: 'strategy', label: '交易策略', hint: '仓位和买入条件', icon: SlidersHorizontal },
+  { key: 'sources', label: 'API 配置', hint: '填写密钥并测试', icon: KeyRound },
+  { key: 'versions', label: '版本记录', hint: '历史配置与切换', icon: History },
+  { key: 'system', label: '系统状态', hint: '运行情况与阻塞', icon: Activity },
 ]
 
 const STRATEGY_META: Record<string, { label: string; description: string }> = {
@@ -82,10 +90,10 @@ const SOURCE_LABELS: Record<string, string> = {
   forecast_weathercom_v3: 'Weather.com v3',
   china_live: '中国 / 香港实况',
   wunderground_pws: 'Wunderground PWS',
-  truth_wunderground_daily: 'WU 日结算 Truth',
+  truth_wunderground_daily: 'WU 日结算依据',
   truth_wunderground_hourly: 'WU 历史观测',
-  truth_iem_daily: 'IEM 近似 Truth',
-  truth_hko_daily: 'HKO 日结算 Truth',
+  truth_iem_daily: 'IEM 近似结算依据',
+  truth_hko_daily: 'HKO 日结算依据',
   polymarket_orderbook: 'Polymarket 盘口',
   hourly_consensus: '逐小时证据',
   signal_decisions: '信号决策',
@@ -180,6 +188,147 @@ function StatusLine({ label, value, tone = 'neutral', detail }: {
   )
 }
 
+function ApiProviderCard({ provider }: { provider: ApiSettingProvider }) {
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState(!provider.configured)
+  const [value, setValue] = useState('')
+  const [result, setResult] = useState<ApiSettingTestResult | null>(null)
+  const [confirmClear, setConfirmClear] = useState(false)
+  const [confirmTest, setConfirmTest] = useState(false)
+
+  useEffect(() => {
+    if (!provider.configured) setEditing(true)
+  }, [provider.configured])
+
+  const saveMutation = useMutation({
+    mutationFn: () => updateApiSetting(provider.key, value, false),
+    onSuccess: () => {
+      setValue('')
+      setEditing(false)
+      setResult({ provider_key: provider.key, ok: true, status: 'success', message: '已安全保存到本机 .env。', duration_ms: 0, tested_at: new Date().toISOString() })
+      queryClient.invalidateQueries({ queryKey: ['api-settings'] })
+      queryClient.invalidateQueries({ queryKey: ['source-health'] })
+    },
+    onError: error => setResult({ provider_key: provider.key, ok: false, status: 'failed', message: error instanceof Error ? error.message : '保存失败。', duration_ms: 0, tested_at: new Date().toISOString() }),
+  })
+
+  const clearMutation = useMutation({
+    mutationFn: () => updateApiSetting(provider.key, '', true),
+    onSuccess: () => {
+      setConfirmClear(false)
+      setValue('')
+      setEditing(true)
+      setResult({ provider_key: provider.key, ok: true, status: 'success', message: '已从本机配置中清除。', duration_ms: 0, tested_at: new Date().toISOString() })
+      queryClient.invalidateQueries({ queryKey: ['api-settings'] })
+      queryClient.invalidateQueries({ queryKey: ['source-health'] })
+    },
+    onError: error => setResult({ provider_key: provider.key, ok: false, status: 'failed', message: error instanceof Error ? error.message : '清除失败。', duration_ms: 0, tested_at: new Date().toISOString() }),
+  })
+
+  const testMutation = useMutation({
+    mutationFn: (allowSideEffect: boolean) => testApiSetting(provider.key, editing ? value : '', allowSideEffect),
+    onSuccess: payload => {
+      setConfirmTest(false)
+      setResult(payload)
+    },
+    onError: error => {
+      setConfirmTest(false)
+      setResult({ provider_key: provider.key, ok: false, status: 'failed', message: error instanceof Error ? error.message : '连接测试失败。', duration_ms: 0, tested_at: new Date().toISOString() })
+    },
+  })
+
+  const runTest = () => {
+    if (provider.test_has_side_effect) {
+      setConfirmTest(true)
+      return
+    }
+    testMutation.mutate(false)
+  }
+
+  const busy = saveMutation.isPending || clearMutation.isPending || testMutation.isPending
+  const canUseDraft = !editing || value.trim().length > 0
+
+  return (
+    <article className="border border-neutral-800 bg-neutral-950/20">
+      <div className="flex items-start gap-3 px-3 py-3">
+        <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center border border-neutral-700 text-neutral-400">
+          <KeyRound className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-[12px] font-medium text-neutral-100">{provider.label}</h3>
+            <span className={`inline-flex items-center gap-1 text-[10px] ${provider.configured ? 'text-green-400' : 'text-amber-300'}`}>
+              <span className={`h-1.5 w-1.5 ${provider.configured ? 'bg-green-400' : 'bg-amber-300'}`} />
+              {provider.configured ? '已配置' : '未配置'}
+            </span>
+          </div>
+          <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">{provider.description}</p>
+        </div>
+        <a href={provider.docs_url} target="_blank" rel="noreferrer" className="inline-flex h-8 w-8 shrink-0 items-center justify-center border border-neutral-800 text-neutral-500 hover:border-neutral-600 hover:text-neutral-200" title="打开服务说明" aria-label={`打开${provider.label}说明`}>
+          <ExternalLink className="h-3.5 w-3.5" />
+        </a>
+      </div>
+
+      <div className="border-t border-neutral-800 px-3 py-3">
+        <div className="flex min-w-0 gap-2">
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={editing ? value : provider.masked_value}
+            readOnly={!editing}
+            onChange={event => setValue(event.target.value)}
+            placeholder="在此粘贴 API Key"
+            aria-label={`${provider.label}密钥`}
+            className="h-9 min-w-0 flex-1 border border-neutral-700 bg-neutral-950 px-2.5 font-mono text-[11px] text-neutral-100 outline-none placeholder:font-sans placeholder:text-neutral-600 focus:border-blue-500"
+          />
+          {editing ? (
+            <button type="button" disabled={busy || !value.trim()} onClick={() => saveMutation.mutate()} className="inline-flex h-9 items-center gap-1 border border-blue-500 bg-blue-600 px-3 text-[10px] text-white hover:bg-blue-500 disabled:opacity-30">
+              <Save className="h-3.5 w-3.5" /> 保存
+            </button>
+          ) : (
+            <button type="button" disabled={busy} onClick={() => { setEditing(true); setResult(null) }} className="inline-flex h-9 items-center gap-1 border border-neutral-700 px-3 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">
+              <Pencil className="h-3.5 w-3.5" /> 更换
+            </button>
+          )}
+        </div>
+
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button type="button" disabled={busy || !canUseDraft} onClick={runTest} className="inline-flex min-h-8 items-center gap-1 border border-neutral-700 px-2.5 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">
+            <PlugZap className="h-3.5 w-3.5" /> {testMutation.isPending ? '正在测试...' : provider.test_label}
+          </button>
+          {editing && provider.configured && <button type="button" disabled={busy} onClick={() => { setEditing(false); setValue(''); setResult(null) }} className="min-h-8 px-2 text-[10px] text-neutral-500 hover:text-neutral-200">取消更换</button>}
+          {provider.configured && !confirmClear && <button type="button" disabled={busy} onClick={() => setConfirmClear(true)} className="ml-auto min-h-8 px-2 text-[10px] text-neutral-600 hover:text-red-300">清除</button>}
+        </div>
+
+        {confirmClear && (
+          <div className="mt-2 flex items-center gap-2 border border-red-500/30 bg-red-500/5 px-2.5 py-2 text-[10px] text-neutral-300">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-300" />
+            <span className="min-w-0 flex-1">确认清除这个本机密钥？</span>
+            <button type="button" onClick={() => setConfirmClear(false)} className="px-2 py-1 text-neutral-400">取消</button>
+            <button type="button" disabled={busy} onClick={() => clearMutation.mutate()} className="border border-red-500/40 px-2 py-1 text-red-200">清除</button>
+          </div>
+        )}
+
+        {confirmTest && (
+          <div className="mt-2 flex items-center gap-2 border border-amber-500/30 bg-amber-500/5 px-2.5 py-2 text-[10px] text-neutral-300">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-300" />
+            <span className="min-w-0 flex-1">会向飞书发送一条测试消息。</span>
+            <button type="button" onClick={() => setConfirmTest(false)} className="px-2 py-1 text-neutral-400">取消</button>
+            <button type="button" disabled={busy} onClick={() => testMutation.mutate(true)} className="border border-amber-500/40 px-2 py-1 text-amber-200">确认发送</button>
+          </div>
+        )}
+
+        {result && (
+          <div role="status" className={`mt-2 flex items-start gap-2 border px-2.5 py-2 text-[10px] ${result.ok ? 'border-green-500/30 bg-green-500/5 text-green-200' : 'border-amber-500/30 bg-amber-500/5 text-amber-200'}`}>
+            {result.ok ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+            <span>{result.message}{result.duration_ms > 0 ? `（${result.duration_ms}ms）` : ''}</span>
+          </div>
+        )}
+      </div>
+    </article>
+  )
+}
+
 function ConfirmationDialog({ title, description, confirmLabel, pending, onCancel, onConfirm }: {
   title: string
   description: string
@@ -209,6 +358,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
   const profilesQuery = useQuery({ queryKey: ['strategy-profiles'], queryFn: fetchStrategyProfiles })
   const schedulerQuery = useQuery({ queryKey: ['scheduler-status'], queryFn: fetchSchedulerStatus, refetchInterval: 30000 })
   const sourceHealthQuery = useQuery({ queryKey: ['source-health'], queryFn: fetchSourceHealth, refetchInterval: 60000 })
+  const apiSettingsQuery = useQuery({ queryKey: ['api-settings'], queryFn: fetchApiSettings, staleTime: 30000 })
   const validationQuery = useQuery({ queryKey: ['production-validation'], queryFn: fetchProductionValidation, staleTime: 30000 })
   const profiles = profilesQuery.data?.profiles ?? []
   const activeSignal = profiles.find(profile => profile.active_scopes.includes('signal_generation'))
@@ -303,7 +453,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
             <h1 className="truncate text-sm font-semibold text-neutral-100">开发者设置</h1>
             <span className="hidden border border-neutral-700 px-1.5 py-0.5 font-mono text-[9px] text-neutral-500 sm:inline">{shortRevision(activeSignal?.revision_id)}</span>
           </div>
-          <div className="text-[10px] text-neutral-500">策略草稿、不可变参数版本与只读运行状态</div>
+          <div className="text-[10px] text-neutral-500">配置交易策略、API 和本地运行状态</div>
         </div>
         <div className={`hidden items-center gap-1 border px-2 py-1 text-[10px] sm:inline-flex ${liveLocked ? 'border-amber-500/30 text-amber-300' : 'border-green-500/30 text-green-300'}`}>
           <LockKeyhole className="h-3.5 w-3.5" /> {liveLocked ? '实盘保持锁定' : '实盘配置已开启'}
@@ -338,7 +488,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
         </nav>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {profilesQuery.isLoading && <div className="p-6 text-sm text-neutral-500">正在读取策略版本...</div>}
+          {profilesQuery.isLoading && section !== 'sources' && <div className="p-6 text-sm text-neutral-500">正在读取策略版本...</div>}
 
           {!profilesQuery.isLoading && section === 'overview' && (
             <section className="px-4 py-4 sm:px-5">
@@ -349,8 +499,8 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
               <div className="border-y border-neutral-800">
                 <StatusLine label="信号生成版本" value={shortRevision(activeSignal?.revision_id)} tone="green" detail={activeSignal?.change_note || '未激活'} />
                 <StatusLine label="模拟默认版本" value={shortRevision(activePaper?.revision_id)} tone="green" detail={activePaper?.change_note || '未激活'} />
-                <StatusLine label="实盘状态" value={liveLocked ? 'LOCKED' : 'ENABLED'} tone={liveLocked ? 'amber' : 'green'} detail="此页面不会修改 LIVE_TRADING" />
-                <StatusLine label="策略版本数量" value={String(profiles.length)} detail="不可变 revision" />
+                <StatusLine label="实盘状态" value={liveLocked ? '已锁定' : '已启用'} tone={liveLocked ? 'amber' : 'green'} detail="此页面不能解除实盘锁定" />
+                <StatusLine label="策略版本数量" value={String(profiles.length)} detail="历史版本只读，便于复盘" />
               </div>
               <div className="mt-5 border border-amber-500/30 bg-amber-500/5 px-3 py-3">
                 <div className="flex items-start gap-2">
@@ -381,7 +531,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
               <div className="px-4 py-4 sm:px-5">
                 <div className="mb-2 text-[11px] font-semibold text-neutral-300">仓位控制</div>
                 <div className="border-y border-neutral-800">
-                  <SettingNumber label="Kelly 系数" description="对 full Kelly 结果进行折扣，降低模型误差和连续亏损风险。" value={draft.sizing.kelly_multiplier} min={0} max={1} step={0.01} onChange={value => update(['sizing', 'kelly_multiplier'], value)} />
+                  <SettingNumber label="仓位折扣系数" description="按凯莉公式算出仓位后再打折，降低模型误差和连续亏损风险。" value={draft.sizing.kelly_multiplier} min={0} max={1} step={0.01} onChange={value => update(['sizing', 'kelly_multiplier'], value)} />
                   <SettingNumber label="单笔本金比例" description={`当前为 ${percent(draft.sizing.max_bankroll_fraction_per_trade)}，与模拟单笔上限共同取较小值。`} value={draft.sizing.max_bankroll_fraction_per_trade} min={0.001} max={0.25} step={0.005} onChange={value => update(['sizing', 'max_bankroll_fraction_per_trade'], value)} />
                 </div>
 
@@ -408,11 +558,11 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                         </div>
                         {Boolean(parameters.enabled) && (
                           <div className="mt-3 border-l-2 border-blue-500/40 pl-3">
-                            {'min_edge' in parameters && <SettingNumber label="最低 Edge" description="模型概率减去市场 ask 的最低差值。" value={Number(parameters.min_edge)} min={0} max={0.5} step={0.01} onChange={value => update(['strategies', name, 'min_edge'], value)} />}
+                            {'min_edge' in parameters && <SettingNumber label="最低概率优势" description="模型概率减去市场买入价后的最低差值。" value={Number(parameters.min_edge)} min={0} max={0.5} step={0.01} onChange={value => update(['strategies', name, 'min_edge'], value)} />}
                             {'max_ask' in parameters && <SettingNumber label="最高买价" description="尾部策略不会追价到该值以上。" value={Number(parameters.max_ask)} min={0.01} max={0.5} step={0.01} onChange={value => update(['strategies', name, 'max_ask'], value)} />}
-                            {'group_exposure_multiplier' in parameters && <SettingNumber label="组合敞口系数" description="三桶总仓位相对单桶 Kelly 的折扣。" value={Number(parameters.group_exposure_multiplier)} min={0} max={1} step={0.05} onChange={value => update(['strategies', name, 'group_exposure_multiplier'], value)} />}
+                            {'group_exposure_multiplier' in parameters && <SettingNumber label="组合仓位折扣" description="相邻三桶总仓位相对单桶建议仓位的折扣。" value={Number(parameters.group_exposure_multiplier)} min={0} max={1} step={0.05} onChange={value => update(['strategies', name, 'group_exposure_multiplier'], value)} />}
                             {'min_settlement_days' in parameters && <SettingNumber label="最低独立结算日" description="尾部策略需要更长的历史证据。" value={Number(parameters.min_settlement_days)} min={0} max={365} step={1} suffix="天" onChange={value => update(['strategies', name, 'min_settlement_days'], value)} />}
-                            {'max_order_usd' in parameters && <SettingNumber label="策略单笔上限" description="仍会继续受 cohort 与本金比例上限约束。" value={Number(parameters.max_order_usd)} min={0.1} max={1000} step={0.5} suffix="$" onChange={value => update(['strategies', name, 'max_order_usd'], value)} />}
+                            {'max_order_usd' in parameters && <SettingNumber label="策略单笔上限" description="仍会继续受模拟账户和本金比例上限约束。" value={Number(parameters.max_order_usd)} min={0.1} max={1000} step={0.5} suffix="$" onChange={value => update(['strategies', name, 'max_order_usd'], value)} />}
                             {'daily_candidate_cap' in parameters && <SettingNumber label="每日候选上限" description="限制尾部策略每天进入队列的候选数。" value={Number(parameters.daily_candidate_cap)} min={1} max={100} step={1} onChange={value => update(['strategies', name, 'daily_candidate_cap'], value)} />}
                           </div>
                         )}
@@ -423,61 +573,70 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
 
                 <div className="mb-2 mt-6 text-[11px] font-semibold text-neutral-300">退出方式</div>
                 <div className="border-y border-neutral-800">
-                  <StatusLine label="当前模式" value="HOLD TO SETTLEMENT" tone="amber" detail="信息差退出尚未具备 SELL 成交与历史盘口回放证据" />
+                  <StatusLine label="当前模式" value="持有至结算" tone="amber" detail="赚取中间价差仍缺少卖出成交和历史盘口回放证据" />
                 </div>
               </div>
             </section>
           )}
 
-          {!profilesQuery.isLoading && section === 'sources' && (
+          {section === 'sources' && (
             <section className="px-4 py-4 sm:px-5">
               <div className="mb-4">
-                <h2 className="text-[13px] font-semibold text-neutral-100">数据源与接口</h2>
-                <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">这里只显示覆盖、新鲜度和凭据是否已配置。密钥仍只保存在本机 .env，不会发送到浏览器。</p>
+                <h2 className="text-[13px] font-semibold text-neutral-100">API 配置</h2>
+                <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">密钥只保存在这台电脑的 .env 文件中。页面只显示星号，不会读取或回传明文。</p>
               </div>
 
-              {sourceHealthQuery.isLoading && <div className="border-y border-neutral-800 py-4 text-[11px] text-neutral-500">正在读取数据源健康度...</div>}
-              {sourceHealthQuery.isError && <div className="border border-red-500/30 bg-red-500/5 px-3 py-3 text-[11px] text-red-300">数据源健康度读取失败，请确认后端仍在运行。</div>}
-
-              {sourceHealthQuery.data && (
+              {apiSettingsQuery.isLoading && <div className="border-y border-neutral-800 py-4 text-[11px] text-neutral-500">正在读取本机 API 配置...</div>}
+              {apiSettingsQuery.isError && <div className="border border-red-500/30 bg-red-500/5 px-3 py-3 text-[11px] text-red-300">API 配置读取失败，请确认后端仍在运行。</div>}
+              {apiSettingsQuery.data && (
                 <>
-                  <div className="grid grid-cols-2 border-y border-neutral-800 sm:grid-cols-4">
-                    <div className="border-b border-r border-neutral-800 px-3 py-3 sm:border-b-0"><div className="text-[9px] text-neutral-500">健康</div><div className="mt-1 font-mono text-lg text-green-400">{sourceHealthQuery.data.summary.healthy}</div></div>
-                    <div className="border-b border-neutral-800 px-3 py-3 sm:border-b-0 sm:border-r"><div className="text-[9px] text-neutral-500">过期</div><div className="mt-1 font-mono text-lg text-amber-300">{sourceHealthQuery.data.summary.stale}</div></div>
-                    <div className="border-r border-neutral-800 px-3 py-3"><div className="text-[9px] text-neutral-500">必需阻塞</div><div className="mt-1 font-mono text-lg text-red-300">{sourceHealthQuery.data.summary.required_blockers}</div></div>
-                    <div className="px-3 py-3"><div className="text-[9px] text-neutral-500">启用城市</div><div className="mt-1 font-mono text-lg text-neutral-100">{sourceHealthQuery.data.enabled_cities.length}</div></div>
+                  <div className="mb-2 text-[10px] font-medium text-neutral-400">天气数据</div>
+                  <div className="space-y-3">
+                    {apiSettingsQuery.data.providers.filter(provider => ['weather_com', 'wunderground_pws'].includes(provider.key)).map(provider => <ApiProviderCard key={provider.key} provider={provider} />)}
                   </div>
-
-                  <div className="mt-5 border-y border-neutral-800">
-                    <StatusLine label="Weather.com v3 凭据" value={sourceHealthQuery.data.config.weather_com_configured ? '已配置' : '未配置'} tone={sourceHealthQuery.data.config.weather_com_configured ? 'green' : 'red'} detail="仅返回布尔状态，不读取或回显密钥" />
-                    <StatusLine label="Wunderground PWS 凭据" value={sourceHealthQuery.data.config.wunderground_pws_configured ? '已配置' : '未配置'} tone={sourceHealthQuery.data.config.wunderground_pws_configured ? 'green' : 'amber'} detail={sourceHealthQuery.data.config.pws_peak_lock_enabled && !sourceHealthQuery.data.config.wunderground_pws_configured ? '功能已允许，但凭据未配置，PWS 不会实际运行' : '用于实时趋势辅助，不解锁结算 truth'} />
-                    <StatusLine label="DEB 权重模式" value={sourceHealthQuery.data.config.deb_weight_mode} detail="当前最高温模型融合口径" />
-                  </div>
-
-                  <div className="mb-2 mt-6 flex items-center justify-between gap-3">
-                    <div className="text-[11px] font-semibold text-neutral-300">采集与派生链路</div>
-                    <div className="text-[9px] text-neutral-600">{sourceHealthQuery.data.generated_at ? new Date(sourceHealthQuery.data.generated_at).toLocaleTimeString('zh-CN', { hour12: false }) : '--'}</div>
-                  </div>
-                  <div className="border-y border-neutral-800">
-                    {sourceHealthQuery.data.sources.map(source => (
-                      <div key={source.key} className="grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-neutral-800 py-2.5 last:border-b-0">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="text-[11px] text-neutral-300">{SOURCE_LABELS[source.key] ?? source.label}</span>
-                            {source.required && <span className="border border-neutral-700 px-1 py-0.5 text-[8px] text-neutral-600">必需</span>}
-                          </div>
-                          <div className="mt-1 truncate text-[9px] text-neutral-600">
-                            覆盖 {source.coverage_pct ?? 0}% · 样本 {source.sample_count ?? 0} · {ageLabel(source.age_seconds)}
-                            {source.stale_cities?.length ? ` · ${source.stale_cities.length} 城过期` : ''}
-                            {source.missing_cities?.length ? ` · ${source.missing_cities.length} 城缺失` : ''}
-                          </div>
-                        </div>
-                        <div className={`font-mono text-[10px] ${sourceToneClass(source.status)}`} title={(source.reasons ?? []).join(', ')}>{sourceStatusLabel(source.status)}</div>
-                      </div>
-                    ))}
-                  </div>
+                  <details className="mt-4 border-y border-neutral-800">
+                    <summary className="cursor-pointer py-3 text-[11px] font-medium text-neutral-400 hover:text-neutral-200">更多可选服务</summary>
+                    <div className="space-y-3 border-t border-neutral-800 py-3">
+                      {apiSettingsQuery.data.providers.filter(provider => !['weather_com', 'wunderground_pws'].includes(provider.key)).map(provider => <ApiProviderCard key={provider.key} provider={provider} />)}
+                    </div>
+                  </details>
                 </>
               )}
+
+              <div className="mt-4 border border-amber-500/25 bg-amber-500/5 px-3 py-2.5 text-[10px] leading-relaxed text-neutral-400">
+                Polymarket 钱包私钥不在这里开放配置。实盘仍保持锁定，避免误操作把钱包权限暴露给看板。
+              </div>
+
+              <details className="mt-5 border-y border-neutral-800">
+                <summary className="cursor-pointer py-3 text-[11px] font-medium text-neutral-400 hover:text-neutral-200">高级数据源诊断</summary>
+                <div className="border-t border-neutral-800 pb-3 pt-2">
+                  <p className="mb-2 text-[9px] leading-relaxed text-neutral-600">用于排查采集覆盖和数据过期问题。日常配置 API 时不需要查看这里。</p>
+                  {sourceHealthQuery.isLoading && <div className="py-3 text-[10px] text-neutral-500">正在读取诊断数据...</div>}
+                  {sourceHealthQuery.isError && <div className="py-3 text-[10px] text-red-300">诊断数据读取失败。</div>}
+                  {sourceHealthQuery.data && (
+                    <>
+                      <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-[9px] text-neutral-500">
+                        <span>正常 {sourceHealthQuery.data.summary.healthy}</span>
+                        <span>过期 {sourceHealthQuery.data.summary.stale}</span>
+                        <span>阻塞 {sourceHealthQuery.data.summary.required_blockers}</span>
+                        <span>城市 {sourceHealthQuery.data.enabled_cities.length}</span>
+                        <span>最高温融合：{sourceHealthQuery.data.config.deb_weight_mode}</span>
+                      </div>
+                      <div className="border-t border-neutral-800">
+                        {sourceHealthQuery.data.sources.map(source => (
+                          <div key={source.key} className="grid min-h-11 grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-neutral-800 py-2 last:border-b-0">
+                            <div className="min-w-0">
+                              <div className="text-[10px] text-neutral-400">{SOURCE_LABELS[source.key] ?? source.label}</div>
+                              <div className="truncate text-[9px] text-neutral-600">覆盖 {source.coverage_pct ?? 0}% · {ageLabel(source.age_seconds)}{source.missing_cities?.length ? ` · ${source.missing_cities.length} 城缺失` : ''}</div>
+                            </div>
+                            <div className={`text-[9px] ${sourceToneClass(source.status)}`} title={(source.reasons ?? []).join(', ')}>{sourceStatusLabel(source.status)}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </details>
             </section>
           )}
 
@@ -519,9 +678,9 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                 <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">只读摘要用于判断是否可以开始模拟或实盘验收，不在这里启动采集或交易。</p>
               </div>
               <div className="border-y border-neutral-800">
-                <StatusLine label="调度器" value={schedulerQuery.data?.running ? 'RUNNING' : 'STOPPED'} tone={schedulerQuery.data?.running ? 'green' : 'amber'} detail="采集启停仍在主看板顶部控制" />
+                <StatusLine label="数据调度器" value={schedulerQuery.data?.running ? '运行中' : '已停止'} tone={schedulerQuery.data?.running ? 'green' : 'amber'} detail="采集启停仍在主看板顶部控制" />
                 <StatusLine label="生产准备度" value={validationQuery.data ? `${Math.round(validationQuery.data.score * 100)}%` : '--'} tone={validationQuery.data && validationQuery.data.score >= 0.8 ? 'green' : 'amber'} detail="综合数据、truth、模拟和执行闸门" />
-                <StatusLine label="实盘配置" value={liveLocked ? 'LOCKED' : 'ENABLED'} tone={liveLocked ? 'amber' : 'green'} detail="前端没有解锁开关" />
+                <StatusLine label="实盘配置" value={liveLocked ? '已锁定' : '已启用'} tone={liveLocked ? 'amber' : 'green'} detail="前端没有解锁开关" />
               </div>
               <div className="mt-6">
                 <div className="mb-2 text-[11px] font-semibold text-neutral-300">主要阻塞项</div>

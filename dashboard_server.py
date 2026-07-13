@@ -34,6 +34,7 @@ from dashboard_db import (
     upsert_signal_from_market,
 )
 from weatherbot_v3.config import load_config as load_v3_config
+from weatherbot_v3.api_settings import list_api_settings, test_api_setting, update_api_setting
 from weatherbot_v3.db import connect
 from weatherbot_v3.db import dashboard_summary as v3_dashboard_summary
 from weatherbot_v3.db import forecast_summary
@@ -237,6 +238,18 @@ class StrategyProfileActivateRequest(BaseModel):
     scope: str = "paper_default"
     reason: str = ""
     confirm: bool = False
+
+
+class ApiSettingUpdateRequest(BaseModel):
+    value: str = Field(default="", max_length=4096)
+    clear: bool = False
+    confirm: bool = False
+
+
+class ApiSettingTestRequest(BaseModel):
+    value: str = Field(default="", max_length=4096)
+    confirm: bool = False
+    allow_side_effect: bool = False
 
 
 def _require_local_developer_request(request: Request, confirmed: bool) -> None:
@@ -4584,6 +4597,48 @@ async def strategy_profile_activate_api(
             scope=payload.scope,
             actor="local_dashboard",
             reason=payload.reason or "developer profile activation",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"reason": str(exc)}) from exc
+
+
+@app.get("/api/developer/api-settings")
+async def developer_api_settings_api():
+    return await asyncio.to_thread(list_api_settings)
+
+
+@app.put("/api/developer/api-settings/{provider_key}")
+async def developer_api_setting_update_api(
+    provider_key: str,
+    payload: ApiSettingUpdateRequest,
+    request: Request,
+):
+    _require_local_developer_request(request, payload.confirm)
+    try:
+        provider = await asyncio.to_thread(
+            update_api_setting,
+            provider_key,
+            payload.value,
+            clear=payload.clear,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"reason": str(exc)}) from exc
+    return {"ok": True, "provider": provider}
+
+
+@app.post("/api/developer/api-settings/{provider_key}/test")
+async def developer_api_setting_test_api(
+    provider_key: str,
+    payload: ApiSettingTestRequest,
+    request: Request,
+):
+    _require_local_developer_request(request, payload.confirm)
+    try:
+        return await asyncio.to_thread(
+            test_api_setting,
+            provider_key,
+            payload.value,
+            allow_side_effect=payload.allow_side_effect,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"reason": str(exc)}) from exc

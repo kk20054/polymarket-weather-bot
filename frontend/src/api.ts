@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary, SchedulerStatus, SourceHealthMatrix, PaperValidationStatus, PaperValidationStartOptions, PaperExecutionSummary, PaperExecutionResult, WeatherCitySeries, TruthDeltaAuditSummary, ModelRepriceEventSummary, HourlyConsensusSummary, StrategyProfileParameters, StrategyProfileRevision, StrategyProfilesResponse } from './types'
+import type { ApiSettingsResponse, ApiSettingTestResult, AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary, SchedulerStatus, SourceHealthMatrix, PaperValidationStatus, PaperValidationStartOptions, PaperExecutionSummary, PaperExecutionResult, WeatherCitySeries, TruthDeltaAuditSummary, ModelRepriceEventSummary, HourlyConsensusSummary, StrategyProfileParameters, StrategyProfileRevision, StrategyProfilesResponse } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -130,6 +130,27 @@ export async function fetchSchedulerStatus(): Promise<SchedulerStatus> {
 
 export async function fetchSourceHealth(): Promise<SourceHealthMatrix> {
   const { data } = await api.get<SourceHealthMatrix>('/source-health')
+  return data
+}
+
+export async function fetchApiSettings(): Promise<ApiSettingsResponse> {
+  const { data } = await api.get<ApiSettingsResponse>('/developer/api-settings')
+  return data
+}
+
+export async function updateApiSetting(providerKey: string, value = '', clear = false): Promise<ApiSettingsResponse['providers'][number]> {
+  const { data } = await api.put<{ ok: boolean; provider: ApiSettingsResponse['providers'][number] }>(
+    `/developer/api-settings/${encodeURIComponent(providerKey)}`,
+    { value, clear, confirm: true },
+  )
+  return data.provider
+}
+
+export async function testApiSetting(providerKey: string, value = '', allowSideEffect = false): Promise<ApiSettingTestResult> {
+  const { data } = await api.post<ApiSettingTestResult>(
+    `/developer/api-settings/${encodeURIComponent(providerKey)}/test`,
+    { value, confirm: true, allow_side_effect: allowSideEffect },
+  )
   return data
 }
 
