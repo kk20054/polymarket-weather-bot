@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from .db import connect, init_v3_db, upsert_hourly_consensus, upsert_hourly_consensus_rows
 from .forecast_archive import TEMPERATURE_KEYS
+from .forecast_time import assess_forecast_run, forecast_available_at, parse_utc
 from .registry import forecast_source_matches_profile_location
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 
@@ -230,7 +231,7 @@ def build_hourly_consensus(
             "rows_upserted": 0,
         }
     targets = _normalize_target_dates(target_dates_by_city) if target_dates_by_city else _target_map(profiles, target_date, db_path=db_path)
-    forecast_points = forecast_hourly_points(targets, db_path=db_path)
+    forecast_points = forecast_hourly_points(targets, db_path=db_path, require_training=True)
     observation_points = _observation_hourly_points(
         profiles,
         target_date,
@@ -588,11 +589,12 @@ def forecast_revision_peak_marker(
             dict(row)
             for row in conn.execute(
                 """
-                SELECT id, retrieved_at, run_at, created_at, source_url, training_eligible
+                SELECT id, retrieved_at, run_at, available_at, availability_basis,
+                       created_at, source_url, training_eligible
                 FROM forecast_runs
                 WHERE city = ? AND target_date = ? AND source = ?
                   AND COALESCE(parse_status, 'parsed') = 'parsed'
-                ORDER BY COALESCE(retrieved_at, run_at, created_at) DESC, id DESC
+                ORDER BY COALESCE(available_at, retrieved_at, created_at) DESC, id DESC
                 LIMIT 240
                 """,
                 (city_key, str(target_date), WEATHERCOM_SOURCE),
@@ -605,7 +607,7 @@ def forecast_revision_peak_marker(
         ]
         retrieved_times = [
             parsed for row in runs
-            if (parsed := _parse_report_time(row.get("retrieved_at") or row.get("run_at") or row.get("created_at")))
+            if (parsed := _parse_report_time(row.get("available_at") or row.get("retrieved_at") or row.get("created_at")))
         ]
         if not retrieved_times:
             return None
@@ -613,7 +615,7 @@ def forecast_revision_peak_marker(
         cutoff = latest_retrieved - timedelta(hours=max(1, int(lookback_hours or 72)))
         selected_runs = [
             row for row in runs
-            if (parsed := _parse_report_time(row.get("retrieved_at") or row.get("run_at") or row.get("created_at")))
+            if (parsed := _parse_report_time(row.get("available_at") or row.get("retrieved_at") or row.get("created_at")))
             and parsed >= cutoff
         ]
         if not selected_runs:
@@ -647,7 +649,7 @@ def forecast_revision_peak_marker(
             revisions.append({
                 "local_hour": parts[1],
                 "temperature": temperature,
-                "retrieved_at": run.get("retrieved_at") or run.get("run_at") or run.get("created_at"),
+                "retrieved_at": run.get("available_at") or run.get("retrieved_at") or run.get("created_at"),
                 "source": WEATHERCOM_SOURCE,
             })
     return _peak_marker_from_forecast_revisions(
@@ -814,6 +816,8 @@ def forecast_hourly_points(
     targets: dict[str, set[str]] | None = None,
     db_path: Path | None = None,
     max_sources_per_target: int = 4,
+    *,
+    require_training: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
     """Aggregate archived forecast member hourly data for dashboard use.
 
@@ -844,7 +848,7 @@ def forecast_hourly_points(
                 SELECT *
                 FROM forecast_runs
                 WHERE {' AND '.join(where)}
-                ORDER BY city, target_date, COALESCE(retrieved_at, run_at, created_at) DESC, id DESC
+                ORDER BY city, target_date, COALESCE(available_at, retrieved_at, created_at) DESC, id DESC
                 """,
                 params,
             ).fetchall()
@@ -878,7 +882,13 @@ def forecast_hourly_points(
             runs_by_target[(str(run.get("city") or "").strip().lower(), str(run.get("target_date") or ""))].append(run)
         selected_runs: list[dict[str, Any]] = []
         for (city, _target_date), runs in runs_by_target.items():
-            selected_runs.extend(_select_forecast_runs_for_target(city, runs))
+            selected_runs.extend(
+                _select_forecast_runs_for_target(
+                    city,
+                    runs,
+                    require_training=require_training,
+                )
+            )
 
         if not selected_runs:
             return {}
@@ -911,12 +921,17 @@ def forecast_hourly_points(
             continue
         source = _source_label(run)
         source_role = str(run.get("_forecast_role") or "primary")
+        available_at, _availability_basis = forecast_available_at(run)
         for item in hourly:
             if not isinstance(item, dict):
                 continue
             valid_at = str(item.get("valid_at") or item.get("time") or item.get("timestamp") or "").strip()
             if not valid_at:
                 continue
+            if require_training:
+                point_valid_at = parse_utc(valid_at)
+                if available_at is None or point_valid_at is None or available_at > point_valid_at:
+                    continue
             temp = _temperature_value(item)
             if temp is None:
                 continue
@@ -954,7 +969,7 @@ def forecast_hourly_points(
                     **{f"weathercom_{field}_values": [] for field in FIELD_KEYS},
                     "unit": unit,
                     "horizon": run.get("horizon") or "",
-                    "retrieved_at": run.get("retrieved_at") or run.get("run_at") or run.get("created_at"),
+                    "retrieved_at": run.get("available_at") or run.get("retrieved_at") or run.get("run_at") or run.get("created_at"),
                     "roles": set(),
                 },
             )
@@ -1034,15 +1049,30 @@ def forecast_hourly_points(
     }
 
 
-def _select_forecast_runs_for_target(city: str, runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _select_forecast_runs_for_target(
+    city: str,
+    runs: list[dict[str, Any]],
+    *,
+    require_training: bool,
+) -> list[dict[str, Any]]:
     profile = SETTLEMENT_REGISTRY.get(str(city or "").strip().lower())
     primary_sources = set(_primary_sources_for_profile(profile))
-    eligible = [
-        run
-        for run in runs
-        if _is_training_eligible(run)
-        and forecast_source_matches_profile_location(run.get("source_url"), profile)
-    ]
+    eligible = []
+    for run in runs:
+        if not forecast_source_matches_profile_location(run.get("source_url"), profile):
+            continue
+        if require_training:
+            assessment = assess_forecast_run(
+                run,
+                target_date=str(run.get("target_date") or ""),
+                timezone_name=profile.timezone if profile else str(run.get("timezone") or "UTC"),
+                require_training=True,
+            )
+            if not assessment["ok"]:
+                continue
+        elif str(run.get("parse_status") or "parsed").lower() != "parsed" or forecast_available_at(run)[0] is None:
+            continue
+        eligible.append(run)
     weathercom = [
         run
         for run in eligible

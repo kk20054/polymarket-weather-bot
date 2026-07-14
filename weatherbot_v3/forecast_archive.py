@@ -261,6 +261,7 @@ def normalize_archive_record(record: dict[str, Any], strict: bool = True) -> dic
         ])
     )
     quality_flags = list(record.get("quality_flags") or [])
+    quality_flags.append("trusted_forecast_archive")
     if source in {"open_meteo_historical_forecast", "open_meteo_archive"}:
         quality_flags.append("historical_continuous_product_review_required")
 
@@ -275,6 +276,8 @@ def normalize_archive_record(record: dict[str, Any], strict: bool = True) -> dic
         "run_type": str(record.get("run_type") or "forecast"),
         "run_at": run_at.isoformat(),
         "retrieved_at": (retrieved_at or run_at).isoformat(),
+        "available_at": run_at.isoformat(),
+        "availability_basis": "archive_run_at",
         "valid_at": valid_at.isoformat(),
         "horizon": horizon,
         "lead_hours": lead_hours,

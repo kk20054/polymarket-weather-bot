@@ -1,3 +1,7 @@
+from tests import ensure_test_environment
+
+ensure_test_environment()
+
 import csv
 import json
 import os
@@ -304,6 +308,7 @@ class EnsembleProbabilityTests(unittest.TestCase):
 
 
 def _run(city: str, target_date: str, source: str, mean_high: float) -> dict:
+    profile = SETTLEMENT_REGISTRY[city]
     return {
         "run_key": f"{source}:{city}:{target_date}",
         "city": city,
@@ -313,8 +318,10 @@ def _run(city: str, target_date: str, source: str, mean_high: float) -> dict:
         "model": source.replace("openmeteo_", ""),
         "retrieved_at": "2026-07-05T06:00:00+00:00",
         "valid_at": f"{target_date}T12:00:00+00:00",
+        "horizon": "d0",
+        "timezone": profile.timezone,
         "unit": "C",
-        "station_id": "ZBAA",
+        "station_id": profile.station_id,
         "mean_high": mean_high,
         "member_count": 1,
         "parse_status": "parsed",

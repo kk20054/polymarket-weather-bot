@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover - Python always provides zoneinfo in suppo
 
 from .db import connect, init_v3_db, list_daily_max_predictions, list_market_buckets, upsert_daily_max_prediction
 from .env_utils import env_value
+from .forecast_time import assess_forecast_run
 from .registry import forecast_source_matches_profile_location, get_city_profile
 
 
@@ -156,7 +157,7 @@ def build_daily_max_prediction(
     profile = get_city_profile(city_key)
     unit = _clean_unit(profile.unit if profile else "C")
     sigma_floor = sigma_floor_for_unit(unit) if sigma_floor_c == DEFAULT_SIGMA_FLOOR_C else convert_sigma(float(sigma_floor_c), "C", unit)
-    issued = _floor_issued_at(issued_at)
+    issued = _normalize_issued_at(issued_at)
 
     if os.getenv("WEATHERBOT_ENSEMBLE_DEB_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}:
         try:
@@ -208,7 +209,14 @@ def build_daily_max_prediction(
             })
             return ensemble
 
-    forecast_components, component_meta = _forecast_components(city_key, target_date, unit, residual_days, path)
+    forecast_components, component_meta = _forecast_components(
+        city_key,
+        target_date,
+        unit,
+        residual_days,
+        path,
+        issued_at=issued,
+    )
     if not forecast_components:
         return {
             "ok": False,
@@ -346,7 +354,7 @@ def build_daily_max_predictions(
             dict(row)
             for row in conn.execute(
                 f"""
-                SELECT city, target_date, MAX(COALESCE(retrieved_at, run_at, created_at)) AS latest_input_at
+                SELECT city, target_date, MAX(COALESCE(available_at, retrieved_at, created_at)) AS latest_input_at
                 FROM forecast_runs
                 {clause}
                 GROUP BY city, target_date
@@ -498,6 +506,8 @@ def _forecast_components(
     unit: str,
     residual_days: int,
     path: Path | None,
+    *,
+    issued_at: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     profile = get_city_profile(city_key)
     source_weights = _deb_weights_for_profile(profile)
@@ -509,7 +519,7 @@ def _forecast_components(
                 SELECT *
                 FROM forecast_runs
                 WHERE city = ? AND target_date = ?
-                ORDER BY COALESCE(retrieved_at, run_at, created_at) DESC, id DESC
+                ORDER BY COALESCE(available_at, retrieved_at, created_at) DESC, id DESC
                 """,
                 (city_key, target_date),
             ).fetchall()
@@ -537,8 +547,17 @@ def _forecast_components(
     ]
     warnings: list[str] = ["forecast_location_mismatch_excluded"] if location_mismatch else []
     latest_by_source: dict[str, dict[str, Any]] = {}
+    rejected_reasons: set[str] = set()
     for run in runs:
-        if str(run.get("parse_status") or "parsed") != "parsed":
+        assessment = assess_forecast_run(
+            run,
+            as_of=issued_at,
+            target_date=target_date,
+            timezone_name=profile.timezone if profile else "UTC",
+            require_training=True,
+        )
+        if not assessment["ok"]:
+            rejected_reasons.add(str(assessment.get("reason") or "forecast_rejected"))
             continue
         source = str(run.get("source") or run.get("provider") or run.get("model") or "unknown")
         if source == "polywx_forecast":
@@ -547,27 +566,9 @@ def _forecast_components(
             continue
         if source.startswith("openmeteo_") and source not in source_weights:
             continue
-        if not _run_training_eligible(run):
-            continue
         if source not in latest_by_source:
             latest_by_source[source] = run
-
-    if not latest_by_source:
-        for run in runs:
-            source = str(run.get("source") or run.get("provider") or run.get("model") or "unknown")
-            if source == "polywx_forecast" or source.startswith("openmeteo_ensemble_"):
-                continue
-            if source.startswith("openmeteo_") and source not in source_weights:
-                continue
-            if source not in latest_by_source:
-                latest_by_source[source] = run
-        if latest_by_source:
-            warnings.append("legacy_typed_forecast_fallback")
-    if not latest_by_source:
-        polywx = next((run for run in runs if str(run.get("source") or "") == "polywx_forecast"), None)
-        if polywx:
-            latest_by_source["polywx_forecast"] = polywx
-            warnings.append("fallback_polywx_only")
+    warnings.extend(sorted(rejected_reasons))
 
     grouped: dict[str, dict[str, Any]] = {}
     for source, run in latest_by_source.items():
@@ -886,15 +887,13 @@ def _metar_temperature_unit(row: dict[str, Any], default_unit: str) -> str:
     return default_unit
 
 
-def _floor_issued_at(value: str | None) -> str:
-    # Explicit timestamps represent replay cohorts and remain hour-idempotent.
-    # A live build must keep the exact current time so a snapshot fetched after
-    # the top of the hour is not incorrectly excluded from the DEB inputs.
+def _normalize_issued_at(value: str | None) -> str:
+    # Preserve the exact replay cutoff. Rounding backward to the hour makes a
+    # later snapshot appear available before it was actually retrieved.
     if not value:
         return datetime.now(timezone.utc).isoformat()
     parsed = _parse_datetime(value) or datetime.now(timezone.utc)
-    parsed = parsed.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    return parsed.isoformat()
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def _local_date(value: Any, timezone_name: str) -> str | None:

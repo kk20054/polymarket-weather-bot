@@ -102,6 +102,8 @@ def forecast_run_from_polywx_rows(
         "run_type": "forecast",
         "run_at": retrieved.isoformat() if retrieved else "",
         "retrieved_at": retrieved.isoformat() if retrieved else "",
+        "available_at": retrieved.isoformat() if retrieved else "",
+        "availability_basis": "retrieved_at",
         "valid_at": valid_at,
         "horizon": _horizon(profile, target_date, retrieved),
         "lead_hours": _lead_hours(retrieved, valid_at),

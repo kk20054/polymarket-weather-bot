@@ -1,3 +1,7 @@
+from tests import ensure_test_environment
+
+ensure_test_environment()
+
 import unittest
 
 from weatherbot_v3.sizing import calculate_kelly_fraction, size_position

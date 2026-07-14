@@ -1,5 +1,16 @@
 # WeatherBot 项目进度台账
 
+### 2026-07-14：Layer 3/4 预测可用时间契约与历史隔离
+
+- Layer：Layer 3 forecast snapshot、Layer 4 DEB/bias/hourly 及其只读 verifier 直接消费者；未修改前端功能、paper 执行或 live 路径。
+- 改动：新增统一 `forecast_time` 契约。在线源只以实际 `retrieved_at` 作为可用时刻，受信任归档才可用模型 `run_at`；有效 lead 同时检查持久化值和 `valid_at-available_at`。Open-Meteo、Weather.com、archive、ensemble、DEB、bias、hourly 和 model-dataset 全部复用同一 fail-closed 校验。snapshot key 包含精确可用时刻与内容哈希，同一小时的不同抓取不再互相覆盖；DEB `issued_at` 不再向下取整。
+- 数据迁移：版本化迁移 `20260714_01_forecast_availability_contract` 保留全部 44,523 条 forecast，隔离 5,405 条时序无效记录，并失效 1,130 条受污染 DEB；补充迁移 `20260714_02_prediction_source_contract` 又识别出 3 条引用 training-ineligible/METAR 伪 forecast 的旧 DEB。最终 1,776 条历史预测中 643 条有效、1,133 条保留但无效。迁移前后均未删除 forecast 或 prediction 原始行。
+- 测试隔离：首次完整测试暴露旧发现模式会继承本机生产 DB 路径；迁移已在新增冷备前触发，但 7 月 13 日已有同尺寸备份，且本轮迁移不删历史。随后为每个测试入口增加进程级临时数据库护栏；再次完整运行后，生产库大小、修改时间及关键计数前后完全一致。新增备份为 `data/weatherbot_v3.db.bak-forecast-time-20260714`（gitignored）。
+- 验证：最终完整 unittest 335/335 通过，前端 `npm run build` 通过。生产只读 verifier 当前 `prediction_math=pass`、`temporal_no_leak=pass`，14 个 enabled 城市均保留最新有效 DEB；系统仍因实时源/盘口过期、16 个高权重组件校准不足而保持 `code_only`。scheduler stopped、paper validation inactive、`LIVE_TRADING=false`。
+- 结论：此前 3,285/5,405 负 lead 与 959/1,133 污染 DEB 不再能进入训练、概率、信号或证据链；历史仍可审计。下一步必须用新鲜上游重建当前批次，不能恢复旧无效预测或放宽 gate。
+- 下一步：显式启动后端后做一次受控上游刷新，重建 14 城 D+0/D+1 DEB、market buckets 与激活 revision decisions，再运行 observation/paper verifier；随后处理 Layer 7 fail-open 表达和操作员浏览器验收。
+- 相关提交：本条所在提交。
+
 ### 2026-07-13: Layer 7/8 开发者设置抽屉与主看板统一
 - 改动：将孤立、平铺的 `/developer` 表单重构为主看板右侧设置抽屉，并保留 `/developer` 深链接。入口同时位于顶栏设置图标与模拟交易台；设置按“概览 / 策略与风控 / 版本与审计 / 系统状态”分组，继承 PolyWX 风格浅色/深色主题。
 - 安全：创建参数版本与激活作用域彻底分离；新版本默认 `activate_scopes=[]`，切换信号生成或模拟默认前必须二次确认。实盘状态只读锁定，不提供密钥、live 或 webhook 开关。

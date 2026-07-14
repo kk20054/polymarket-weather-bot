@@ -1,3 +1,7 @@
+from tests import ensure_test_environment
+
+ensure_test_environment()
+
 import sqlite3
 import unittest
 from pathlib import Path

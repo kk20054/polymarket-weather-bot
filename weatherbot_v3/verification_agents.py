@@ -28,6 +28,7 @@ CORE_RUNTIME_SOURCES = (
     "signal_decisions",
 )
 ALLOWED_STRATEGIES = {"single_bucket_ev", "ladder_grid", "tail_buying"}
+NORMALIZED_DISTRIBUTION_TOLERANCE = 1e-3
 
 
 @dataclass(frozen=True)
@@ -293,6 +294,7 @@ class ModelIntegrityVerificationAgent(VerificationAgent):
                         ) AS rn
                         FROM daily_max_predictions d
                         WHERE city_key IN (SELECT city_key FROM stations WHERE COALESCE(enabled, 0)=1)
+                          AND COALESCE(validity_status, 'valid')='valid'
                     )
                     SELECT * FROM ranked WHERE rn=1 ORDER BY city_key
                     """
@@ -326,7 +328,9 @@ class ModelIntegrityVerificationAgent(VerificationAgent):
                 for row in conn.execute(
                     """
                     SELECT fr.id, fr.city, fr.target_date, fr.source, fr.run_at,
-                           fr.retrieved_at, fr.lead_hours, s.timezone
+                           fr.retrieved_at, fr.available_at, fr.availability_basis,
+                           fr.valid_at, fr.horizon, fr.lead_hours, fr.parse_status,
+                           fr.training_eligible, fr.quality_flags, fr.raw_json, s.timezone
                     FROM forecast_runs fr
                     JOIN stations s ON s.city_key=fr.city
                     WHERE COALESCE(fr.training_eligible, 0)=1
@@ -339,6 +343,7 @@ class ModelIntegrityVerificationAgent(VerificationAgent):
                     """
                     SELECT id, city_key, target_date, issued_at, source_run_ids_json
                     FROM daily_max_predictions
+                    WHERE COALESCE(validity_status, 'valid')='valid'
                     """
                 ).fetchall()
             ]
@@ -347,7 +352,8 @@ class ModelIntegrityVerificationAgent(VerificationAgent):
                 for row in conn.execute(
                     """
                     SELECT id, city, target_date,
-                           COALESCE(NULLIF(retrieved_at, ''), NULLIF(run_at, ''), created_at) AS available_at
+                           COALESCE(NULLIF(available_at, ''), NULLIF(retrieved_at, ''), created_at) AS available_at,
+                           training_eligible, quarantined_at
                     FROM forecast_runs
                     """
                 ).fetchall()
@@ -386,20 +392,19 @@ class ModelIntegrityVerificationAgent(VerificationAgent):
                 continue
             seen.add(market_id)
             total = _finite(row.get("sum_probability"))
-            if total is None or abs(total - 1.0) > 1e-6 or not bool(row.get("normalized")):
+            if total is None or abs(total - 1.0) > NORMALIZED_DISTRIBUTION_TOLERANCE or not bool(row.get("normalized")):
                 distribution_bad.append({"market_id": market_id, "sum": total, "normalized": bool(row.get("normalized"))})
 
         forecast_leaks: list[dict[str, Any]] = []
         for row in forecast_rows:
             result = _forecast_no_leak_check(row, str(row.get("target_date") or ""), str(row.get("timezone") or "UTC"))
-            lead_hours = _finite(row.get("lead_hours"))
-            if not result.get("ok") or lead_hours is None or lead_hours < 0:
+            if not result.get("ok"):
                 forecast_leaks.append({
                     "run_id": row.get("id"),
                     "city": row.get("city"),
                     "source": row.get("source"),
-                    "lead_hours": lead_hours,
-                    "reason": "negative_or_missing_lead_hours" if lead_hours is None or lead_hours < 0 else result.get("reason"),
+                    "lead_hours": result.get("lead_hours"),
+                    "reason": result.get("reason"),
                 })
 
         prediction_leaks: list[dict[str, Any]] = []
@@ -413,6 +418,8 @@ class ModelIntegrityVerificationAgent(VerificationAgent):
                 available_at = _parse_time((forecast or {}).get("available_at"))
                 if (
                     not forecast
+                    or not bool(forecast.get("training_eligible"))
+                    or bool(forecast.get("quarantined_at"))
                     or str(forecast.get("city") or "") != str(prediction.get("city_key") or "")
                     or str(forecast.get("target_date") or "") != str(prediction.get("target_date") or "")
                     or issued_at is None

@@ -11,6 +11,7 @@ from ..config import DATA_DIR
 from ..db import connect, init_v3_db, upsert_model_reprice_event, utc_now
 from ..deb import bucket_bounds_in_prediction_unit, sigma_with_floor
 from ..env_utils import env_value
+from ..forecast_time import assess_forecast_run
 from ..registry import CitySettlementProfile, forecast_source_matches_profile_location, get_city_profile
 
 
@@ -61,7 +62,10 @@ def fetch_ensemble(
             for row in conn.execute(
                 """
                 SELECT fr.id AS run_id, fr.city, fr.target_date, fr.source, fr.model,
-                       fr.unit, fr.station_id, fr.retrieved_at, fm.member_id,
+                       fr.unit, fr.station_id, fr.run_at, fr.retrieved_at,
+                       fr.available_at, fr.availability_basis, fr.horizon, fr.lead_hours,
+                       fr.timezone, fr.training_eligible, fr.parse_status,
+                       fm.member_id,
                        fm.high_temp, fm.hourly_json
                 FROM forecast_runs fr
                 JOIN forecast_members fm ON fm.run_id = fr.id
@@ -69,11 +73,20 @@ def fetch_ensemble(
                   AND fr.target_date = ?
                   AND COALESCE(fr.training_eligible, 0) = 1
                   AND COALESCE(fr.parse_status, 'parsed') = 'parsed'
-                ORDER BY fr.retrieved_at DESC, fr.id DESC, fm.member_id
+                ORDER BY COALESCE(fr.available_at, fr.retrieved_at) DESC, fr.id DESC, fm.member_id
                 """,
                 (station, str(target_date)),
             ).fetchall()
         ]
+    rows = [
+        row for row in rows
+        if assess_forecast_run(
+            row,
+            target_date=target_date,
+            timezone_name=str(row.get("timezone") or "UTC"),
+            require_training=True,
+        )["ok"]
+    ]
     latest_by_source: dict[str, int] = {}
     for row in rows:
         source = str(row.get("source") or "").lower()
@@ -349,6 +362,8 @@ def previous_run_samples(
                 """
                 SELECT fr.id AS run_id, fr.city, fr.target_date, fr.source, fr.model,
                        fr.unit, fr.lead_hours, fr.run_at, fr.retrieved_at,
+                       fr.available_at, fr.availability_basis, fr.horizon,
+                       fr.timezone, fr.training_eligible, fr.parse_status,
                        fm.member_id, fm.high_temp
                 FROM forecast_runs fr
                 JOIN forecast_members fm ON fm.run_id = fr.id
@@ -364,6 +379,14 @@ def previous_run_samples(
         ]
     samples: list[dict[str, Any]] = []
     for row in rows:
+        assessment = assess_forecast_run(
+            row,
+            target_date=target_date,
+            timezone_name=str(row.get("timezone") or "UTC"),
+            require_training=True,
+        )
+        if not assessment["ok"]:
+            continue
         model = str(row.get("model") or "").lower()
         source = str(row.get("source") or "").lower()
         if wanted_models and model not in wanted_models and source not in wanted_models:
@@ -604,7 +627,10 @@ def _latest_forecast_members(
             for row in conn.execute(
                 """
                 SELECT fr.id AS run_id, fr.city, fr.target_date, fr.source, fr.provider,
-                       fr.model, fr.run_at, fr.retrieved_at, fr.valid_at, fr.unit, fr.mean_high,
+                       fr.model, fr.run_at, fr.retrieved_at, fr.available_at,
+                       fr.availability_basis, fr.valid_at, fr.horizon, fr.lead_hours,
+                       fr.timezone, fr.training_eligible, fr.parse_status,
+                       fr.unit, fr.mean_high,
                        fr.std_high, fr.member_count, fr.source_url, fm.member_id, fm.high_temp,
                        fm.hourly_json
                 FROM forecast_runs fr
@@ -614,19 +640,25 @@ def _latest_forecast_members(
                   AND COALESCE(fr.training_eligible, 0) = 1
                   AND COALESCE(fr.parse_status, 'parsed') = 'parsed'
                   AND (fr.source LIKE 'openmeteo_%' OR fr.source = 'weathercom_v3_forecast')
-                ORDER BY fr.retrieved_at DESC, fr.id DESC, fm.member_id
+                ORDER BY COALESCE(fr.available_at, fr.retrieved_at) DESC, fr.id DESC, fm.member_id
                 """,
                 (profile.city, target_date),
             ).fetchall()
         ]
-    cutoff = _parse_time(str(as_of or ""))
-    if cutoff is not None:
-        eligible_rows = []
-        for row in rows:
-            snapshot_at = _parse_time(str(row.get("run_at") or "")) or _parse_time(str(row.get("retrieved_at") or ""))
-            if snapshot_at is not None and snapshot_at <= cutoff:
-                eligible_rows.append(row)
-        rows = eligible_rows
+    eligible_rows = []
+    for row in rows:
+        assessment = assess_forecast_run(
+            row,
+            as_of=as_of,
+            target_date=target_date,
+            timezone_name=profile.timezone,
+            require_training=True,
+        )
+        if assessment["ok"]:
+            row["available_at"] = assessment["available_at"]
+            row["availability_basis"] = assessment["availability_basis"]
+            eligible_rows.append(row)
+    rows = eligible_rows
     rows = [
         row
         for row in rows
@@ -696,6 +728,8 @@ def _components_from_rows(
             "mae_7d": _mae_for(bias_table, profile.station_id, family, profile=profile),
             "truth_basis": _truth_basis(profile, target_date, path),
             "retrieved_at": str(first.get("retrieved_at") or ""),
+            "available_at": str(first.get("available_at") or ""),
+            "availability_basis": str(first.get("availability_basis") or ""),
             "peak_hour": peak_hour.get("peak_hour") or "",
             "peak_temp_c": peak_hour.get("peak_temp_c"),
         })
@@ -715,7 +749,7 @@ def _best_source_group(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         by_source.setdefault(str(row.get("source") or ""), []).append(row)
     return max(
         by_source.values(),
-        key=lambda group: (len(group), str(group[0].get("retrieved_at") or ""), int(group[0].get("run_id") or 0)),
+        key=lambda group: (len(group), str(group[0].get("available_at") or ""), int(group[0].get("run_id") or 0)),
         default=[],
     )
 

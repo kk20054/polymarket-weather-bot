@@ -1,49 +1,35 @@
 # WeatherBot Current State
 
 ## Current Phase And Usability
-- Date: 2026-07-13. Phase 2/3 data-source alignment, Layer 7 operator review and Layer 8 paper validation are active.
-- The dashboard has 51 display profiles; 14 collector-enabled cities retain independent Forecast, METAR, WU Historical, China Live and optional PWS roles.
-- Paper simulation now uses the operator cohort bankroll for Kelly sizing, one explicit cap chain, current stored orderbook freshness and authoritative Polymarket settlement.
-- Every new decision, paper cohort and paper order is bound to an immutable strategy revision; the active conservative profile is revision 2.
-- The normal dashboard now opens a right-side `设置` drawer with three user-facing sections: `连接服务 / 模拟策略 / 高级设置`; `/developer` remains a deep-link fallback.
-- All five supported services (Weather.com, Wunderground PWS, Visual Crossing, MiniMax and Feishu) are directly editable on the connection page. Saved values are returned only as stars, can be replaced or cleared, and have provider-level connection tests; diagnostics and immutable revisions remain collapsed under advanced settings.
-- A read-only five-agent verifier now reports separate `observation / paper / paper_evidence / live_canary` readiness and exits nonzero when the requested stage is blocked. The quick gate is `python -m weatherbot_v3.cli project-verify --verification-mode observation`; `--deep-verification` adds full SQLite integrity scanning.
-- The canary endpoint now forces dry-run regardless of environment flags. Bulk paper execution requires the exact strategy revision and decision `issued_at` batch shown in the workbench; out-of-range Kelly probabilities return zero sizing.
-- Layer 6 batch rebuilding now selects all enabled stations and the newest overlapping prediction/market dates; dry-run no longer writes readiness state.
-- Versioned migration `20260713_01_canonical_weather_keys` now enforces METAR `(station_id, report_time)` and consensus `(city, target_date, local_hour)` identities. The production migration removed 40/2 duplicate rows; both duplicate-group counts are now zero and `storage_integrity` passes.
-- Scheduler is stopped and paper validation is inactive after verification. `LIVE_TRADING=false`; profitability is not proven.
+- Date: 2026-07-14. Phase 2/3 data-source alignment is active; Layer 3/4 temporal integrity is now fail-closed.
+- Online forecasts use actual `retrieved_at`; only trusted archives may use model `run_at`. Same-hour snapshots and DEB cutoffs are immutable and minute-accurate.
+- Production history remains intact: 44,523 forecast rows are preserved, 5,405 temporally invalid rows are quarantined, and 1,133 of 1,776 legacy DEBs are invalidated rather than deleted.
+- The current valid set is 643 DEBs; all 14 enabled cities retain a latest valid prediction. The verifier reports `prediction_math=pass` and `temporal_no_leak=pass`.
+- The dashboard backend and scheduler are stopped, paper validation is inactive, and `LIVE_TRADING=false`. Runtime sources and orderbooks are stale, so the system remains `code_only`, not paper-ready or live-ready.
+- Profitability is not proven. No gate may be relaxed to manufacture recommendations or paper orders.
 
 ## Latest Ledger Summaries
-- 2026-07-13 / Layer 7/8 settings UX: replaced the isolated developer form with a themed settings drawer; publishing and activation are separate, activation requires confirmation, and live remains read-only locked.
-- 2026-07-13 / API settings UX: replaced credential-presence labels with local editable masked inputs, provider-specific connection tests and Chinese purpose/error text; Weather.com real connectivity passed and Wunderground PWS remains honestly unconfigured.
-- 2026-07-13 / Cross-layer verification: data/model, decision/risk, paper/settlement and operator-surface agents became a machine gate; the real database is currently `code_only`, not observation-ready.
-- 2026-07-13 / Layer 6 and data-source controls: fixed oldest-first/legacy-five-city signal targeting and added a safe source-health page to developer settings.
-- 2026-07-13 / Layer 8 sizing and strategy audit: cohort bankroll now recomputes Kelly; global `MAX_BET` no longer silently truncates a higher cohort limit; ladder groups reserve three order/position slots.
-- 2026-07-13 / Immutable strategy profiles: append-only revisions and activation events bind signal generation and paper defaults; decisions/orders persist parameter and sizing snapshots.
-- 2026-07-13 / Developer boundary: `/developer` publishes confirmed local revisions and shows read-only system state; normal UI hides maintenance diagnostics and exposes no secret/live toggle.
-- 2026-07-12 / Scheduler containment: heavy pollers are serialized/staggered; controlled collector cycles stayed below 87.3MB RSS and scheduler remains stopped after the test (`1d63438`).
+- 2026-07-14 / Layer 3/4 forecast time contract: centralized availability validation, immutable snapshots, source-bound DEBs, quarantine migration and test-database isolation are complete.
+- 2026-07-13 / Layer 2/4 storage keys: canonical METAR and hourly-consensus identities removed 40/2 duplicates and now reject ambiguous writes.
+- 2026-07-13 / Cross-layer verifier: observation, paper, evidence and live-canary readiness became machine gates; live canary remains blocked.
+- 2026-07-13 / Settings and API UX: the dashboard settings drawer supports masked local credentials and provider-level connection tests without exposing secrets.
+- 2026-07-13 / Layer 6/8 controls: strategy revisions, bankroll-aware Kelly sizing and revision-bound paper batches are implemented; no fresh eligible cohort is active.
 
 ## Production Blockers
-- Twenty-five display-only cities still need source smoke tests and settlement-contract probes before collector or paper admission.
-- Exact PolyWX private recommendation logic is not public; local weather focus is an auditable approximation, not a copied buy signal.
-- Independent WU PWS entitlement is missing; PWS series and peak-lock remain unavailable.
-- WU/HKO truth coverage and resolved paper outcomes are insufficient for profitability claims.
-- Current Shanghai revision-2 decisions are all paper-blocked by actual gates; do not relax gates merely to manufacture orders.
-- Revision 2 currently covers only the last Shanghai build; weather, orderbook and derived sources are stale while the scheduler is stopped, so a fresh 14-city rebuild has intentionally not been run yet.
-- The verifier still finds 3,285 training runs with negative lead and 959 DEB predictions whose sources were not available by `issued_at`; the affected historical predictions must be quarantined/rebuilt before training or paper evidence.
-- Targeted execution audit found the legacy live route submits before durable idempotency reservation and is not revision-bound; live canary remains blocked until this path is removed or rewritten.
-- Targeted paper audit found evidence aggregation is not yet restricted to independent, revision-bound cohort settlements; Layer 9 profitability evidence is therefore not authoritative yet.
-- Targeted UI audit found stale quotes can still look like signals, missing probabilities can render as 0%, and `today` uses the browser rather than settlement timezone. These are the next Layer 7 correctness fixes.
-- All 176 current/future `matched` bucket rows fail fresh executable-book checks; no paper execution may use them until CLOB refresh and revalidation.
-- Live executor remains explicitly `live-execution-v1-legacy`: aggregate risk budgets, revision-bound live routing and pre-submit idempotency reservation are not implemented, so live canary stays blocked even after paper evidence improves.
-- Information-edge exits remain disabled until SELL fills and historical orderbook replay are implemented.
-- Correct-location Tokyo forecast history and same-local-day Chicago Historical benchmark still need additional archive density.
-- Collector-level timeout/residual-worker reporting and a controlled runtime observation remain before unattended scheduling.
-- Live dry-run/canary gates remain unaccepted and intentionally locked.
+- METAR, Open-Meteo, Weather.com v3, orderbook, consensus and signal decisions are stale while the scheduler/backend are stopped.
+- Sixteen high-weight forecast components still lack seven independent days of eligible calibration evidence.
+- All 22 currently matched market buckets fail fresh executable-orderbook checks.
+- The active strategy revision has no fresh 14-city decision batch and no current paper candidate.
+- Wunderground PWS entitlement is missing; PWS and peak-lock remain explicitly unavailable.
+- Authoritative WU/HKO truth and revision-bound resolved paper outcomes are insufficient for ROI/Brier claims.
+- The legacy live executor lacks pre-submit idempotency reservation, aggregate risk budgeting and revision-bound routing.
+- Layer 7 still needs fail-closed stale-quote/probability/date rendering fixes and an operator browser acceptance pass.
+- Twenty-five display-only cities still require source smoke tests and settlement-contract admission before collection or paper use.
+- Information-edge exits remain disabled until SELL fills and historical orderbook replay exist.
 
 ## Next Step
-- First add a single forecast availability validator and immutable snapshots, quarantine negative-lead runs, then rebuild affected DEB rows; do not train or build evidence from contaminated history.
-- Then run a controlled upstream refresh, rebuild revision-2 decisions across all 14 enabled cities and rerun the observation/paper verifier before starting a cohort.
-- Run a browser/operator acceptance pass on normal and `/developer` pages, then start the explicit 14-30 day paper cohort only if accepted.
-- Admit new cities one at a time through source and settlement probes; keep catalog-only cities disabled meanwhile.
-- Continue PolyWX numeric benchmarks and obtain an entitled PWS key or keep PWS explicitly disabled.
+- Run one controlled upstream refresh after the backend is deliberately started; do not auto-start the scheduler.
+- Rebuild current D+0/D+1 DEB, buckets and revision-bound decisions for all 14 enabled cities, then rerun the observation/paper verifier.
+- Fix the remaining Layer 7 fail-open rendering issues and complete Shanghai/Chicago browser QA.
+- Start a 14-30 day paper cohort only after operator acceptance and fresh executable-book checks pass.
+- Keep live locked until authoritative paper evidence and the live-executor rewrite both pass.

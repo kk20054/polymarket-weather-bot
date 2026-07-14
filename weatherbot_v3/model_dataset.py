@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import load_config
 from .db import connect, init_v3_db
+from .forecast_time import assess_forecast_run
 from .qualification import LIVE_TRUTH_PROVIDERS
 
 
@@ -102,12 +103,17 @@ def build_model_dataset_audit(
             and truth.get("provider") in LIVE_TRUTH_PROVIDERS
             and truth.get("actual_temp") is not None
         ]
-        candidate_runs = [
-            run for run in runs_by_city_date.get((city, target_date), [])
-            if run.get("training_eligible")
-        ]
+        target_runs = runs_by_city_date.get((city, target_date), [])
+        candidate_runs = [run for run in target_runs if run.get("training_eligible")]
         no_leak_runs = []
-        rejected_runs = []
+        rejected_runs = [
+            {**run, "_leak_reason": str(run.get("quarantine_reason") or run.get("ineligibility_reason") or "forecast_training_ineligible")}
+            for run in target_runs
+            if not run.get("training_eligible")
+            and (run.get("quarantined_at") or run.get("quarantine_reason"))
+        ]
+        for run in rejected_runs:
+            leakage_flags[str(run["_leak_reason"])] += 1
         for run in candidate_runs:
             check = _forecast_no_leak_check(run, target_date, timezone_name)
             if check["ok"]:
@@ -386,27 +392,12 @@ def _target_preview(targets: set[tuple[str, str]], limit: int = 20) -> list[dict
 
 
 def _forecast_no_leak_check(run: dict[str, Any], target_date: str, timezone_name: str) -> dict[str, Any]:
-    available_at = _parse_time(run.get("run_at")) or _parse_time(run.get("retrieved_at"))
-    if not available_at:
-        return {"ok": False, "reason": "forecast_time_missing", "horizon_bucket": "unknown"}
-    bounds = _local_day_bounds(target_date, timezone_name)
-    if not bounds:
-        return {"ok": False, "reason": "target_timezone_invalid", "horizon_bucket": "unknown"}
-    local_start, local_end = bounds
-    lead_hours = _float(run.get("lead_hours"))
-    if lead_hours >= 48:
-        horizon_bucket = "d2_plus"
-        deadline = local_start
-    elif lead_hours >= 24:
-        horizon_bucket = "d1"
-        deadline = local_start
-    else:
-        horizon_bucket = "d0"
-        deadline = local_end
-    if available_at > deadline:
-        reason = "forecast_after_target_start" if horizon_bucket != "d0" else "forecast_after_target_day"
-        return {"ok": False, "reason": reason, "horizon_bucket": horizon_bucket}
-    return {"ok": True, "reason": "", "horizon_bucket": horizon_bucket}
+    return assess_forecast_run(
+        run,
+        target_date=target_date,
+        timezone_name=timezone_name,
+        require_training=True,
+    )
 
 
 def is_settlement_pending(target_date: str, timezone_name: str, now: datetime | None = None) -> bool:

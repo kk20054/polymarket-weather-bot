@@ -475,6 +475,7 @@ def init_v3_db(path: Path | None = None) -> None:
             CREATE TABLE IF NOT EXISTS forecast_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_key TEXT UNIQUE,
+                snapshot_key TEXT UNIQUE,
                 city TEXT,
                 target_date TEXT,
                 source TEXT,
@@ -484,6 +485,8 @@ def init_v3_db(path: Path | None = None) -> None:
                 run_type TEXT,
                 run_at TEXT,
                 retrieved_at TEXT,
+                available_at TEXT,
+                availability_basis TEXT,
                 valid_at TEXT,
                 horizon TEXT,
                 lead_hours REAL,
@@ -505,6 +508,8 @@ def init_v3_db(path: Path | None = None) -> None:
                 source_unit TEXT,
                 training_eligible INTEGER,
                 ineligibility_reason TEXT,
+                quarantined_at TEXT,
+                quarantine_reason TEXT,
                 raw_json TEXT,
                 created_at TEXT NOT NULL
             );
@@ -648,6 +653,9 @@ def init_v3_db(path: Path | None = None) -> None:
                 peak_hour TEXT,
                 peak_temp REAL,
                 peak_source TEXT,
+                validity_status TEXT,
+                invalidated_at TEXT,
+                invalidation_reason TEXT,
                 raw_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -1056,11 +1064,14 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         },
         "forecast_runs": {
             "run_key": "TEXT",
+            "snapshot_key": "TEXT",
             "provider": "TEXT",
             "model": "TEXT",
             "model_version": "TEXT",
             "run_type": "TEXT",
             "retrieved_at": "TEXT",
+            "available_at": "TEXT",
+            "availability_basis": "TEXT",
             "valid_at": "TEXT",
             "lead_hours": "REAL",
             "latitude": "REAL",
@@ -1079,6 +1090,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "source_unit": "TEXT",
             "training_eligible": "INTEGER",
             "ineligibility_reason": "TEXT",
+            "quarantined_at": "TEXT",
+            "quarantine_reason": "TEXT",
         },
         "forecast_members": {
             "member_id": "TEXT",
@@ -1127,6 +1140,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "peak_hour": "TEXT",
             "peak_temp": "REAL",
             "peak_source": "TEXT",
+            "validity_status": "TEXT",
+            "invalidated_at": "TEXT",
+            "invalidation_reason": "TEXT",
         },
         "market_buckets": {
             "bucket_key": "TEXT",
@@ -1852,7 +1868,15 @@ def upsert_daily_max_prediction(prediction: dict[str, Any], path: Path | None = 
     method = str(prediction.get("method") or "weatherbot-deb-v1")
     prediction_key = str(
         prediction.get("prediction_key")
-        or _stable_key("daily_max_prediction", city_key, target_date, issued_at, method)
+        or _stable_key(
+            "daily_max_prediction",
+            city_key,
+            target_date,
+            issued_at,
+            method,
+            dump_json(prediction.get("source_run_ids", [])),
+            dump_json(prediction.get("model_weights", {})),
+        )
     )
     row = {
         "prediction_key": prediction_key,
@@ -1880,6 +1904,9 @@ def upsert_daily_max_prediction(prediction: dict[str, Any], path: Path | None = 
         "peak_hour": str(prediction.get("peak_hour") or ""),
         "peak_temp": _nullable_num(prediction.get("peak_temp")),
         "peak_source": str(prediction.get("peak_source") or ""),
+        "validity_status": str(prediction.get("validity_status") or "valid"),
+        "invalidated_at": prediction.get("invalidated_at"),
+        "invalidation_reason": prediction.get("invalidation_reason"),
         "raw_json": dump_json(prediction),
         "created_at": now,
         "updated_at": now,
@@ -1894,6 +1921,7 @@ def upsert_daily_max_prediction(prediction: dict[str, Any], path: Path | None = 
                 sigma_from_history, bias_correction, bias_sample_count, deb_version,
                 observed_floor, sigma_floor, time_decay_factor,
                 mu_observed_floor_applied, peak_hour, peak_temp, peak_source,
+                validity_status, invalidated_at, invalidation_reason,
                 raw_json, created_at, updated_at
             ) VALUES (
                 :prediction_key, :city_key, :target_date, :issued_at, :mu, :sigma, :unit,
@@ -1902,32 +1930,10 @@ def upsert_daily_max_prediction(prediction: dict[str, Any], path: Path | None = 
                 :sigma_from_history, :bias_correction, :bias_sample_count, :deb_version,
                 :observed_floor, :sigma_floor, :time_decay_factor,
                 :mu_observed_floor_applied, :peak_hour, :peak_temp, :peak_source,
+                :validity_status, :invalidated_at, :invalidation_reason,
                 :raw_json, :created_at, :updated_at
             )
-            ON CONFLICT(prediction_key) DO UPDATE SET
-                mu=excluded.mu,
-                sigma=excluded.sigma,
-                unit=excluded.unit,
-                method=excluded.method,
-                model_weights_json=excluded.model_weights_json,
-                member_count=excluded.member_count,
-                components_json=excluded.components_json,
-                source_run_ids_json=excluded.source_run_ids_json,
-                member_daily_highs_json=excluded.member_daily_highs_json,
-                sigma_from_spread=excluded.sigma_from_spread,
-                sigma_from_history=excluded.sigma_from_history,
-                bias_correction=excluded.bias_correction,
-                bias_sample_count=excluded.bias_sample_count,
-                deb_version=excluded.deb_version,
-                observed_floor=excluded.observed_floor,
-                sigma_floor=excluded.sigma_floor,
-                time_decay_factor=excluded.time_decay_factor,
-                mu_observed_floor_applied=excluded.mu_observed_floor_applied,
-                peak_hour=excluded.peak_hour,
-                peak_temp=excluded.peak_temp,
-                peak_source=excluded.peak_source,
-                raw_json=excluded.raw_json,
-                updated_at=excluded.updated_at
+            ON CONFLICT(prediction_key) DO NOTHING
             """,
             row,
         )
@@ -1943,6 +1949,7 @@ def list_daily_max_predictions(
     target_date: str | None = None,
     limit: int = 100,
     path: Path | None = None,
+    include_invalid: bool = False,
 ) -> list[dict[str, Any]]:
     init_v3_db(path)
     where: list[str] = []
@@ -1953,6 +1960,8 @@ def list_daily_max_predictions(
     if target_date:
         where.append("target_date = ?")
         params.append(target_date)
+    if not include_invalid:
+        where.append("COALESCE(validity_status, 'valid') = 'valid'")
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     bounded_limit = max(1, min(int(limit or 100), 1000))
     with connect(path) as conn:
@@ -3168,7 +3177,7 @@ def weather_evidence_summary(city: str | None = None, target_date: str | None = 
             "latest_forecast_runs": [
                 dict(r)
                 for r in conn.execute(
-                    f"SELECT * FROM forecast_runs {consensus_clause} ORDER BY COALESCE(retrieved_at, run_at, created_at) DESC, id DESC LIMIT 10",
+                    f"SELECT * FROM forecast_runs {consensus_clause} ORDER BY COALESCE(available_at, retrieved_at, created_at) DESC, id DESC LIMIT 10",
                     tuple(params),
                 ).fetchall()
             ],
@@ -3196,7 +3205,7 @@ def forecast_summary(city: str | None = None, target_date: str | None = None) ->
                 SELECT *
                 FROM forecast_runs
                 {clause}
-                ORDER BY COALESCE(retrieved_at, run_at, created_at) DESC, id DESC
+                ORDER BY COALESCE(available_at, retrieved_at, created_at) DESC, id DESC
                 LIMIT 50
                 """,
                 tuple(params),
@@ -3246,98 +3255,93 @@ def insert_forecast_run(
 ) -> int:
     if _connection is None:
         init_v3_db(path)
+    from .forecast_time import prepare_forecast_snapshot
+
     now = utc_now()
-    run_key = str(
-        run.get("run_key")
-        or ":".join(
-            [
-                str(run.get("provider") or run.get("source") or "unknown"),
-                str(run.get("model") or "unknown"),
-                str(run.get("city") or ""),
-                str(run.get("target_date") or ""),
-                str(run.get("raw_response_hash") or run.get("retrieved_at") or now),
-            ]
-        )
-    )
+    prepared = prepare_forecast_snapshot(run, members or [])
+    temporal_reasons = {
+        "forecast_available_at_missing",
+        "forecast_lead_missing",
+        "forecast_lead_negative",
+        "forecast_after_target_day",
+        "forecast_after_target_start",
+    }
+    ineligibility_reason = str(prepared.get("ineligibility_reason") or "")
+    quarantined_at = now if ineligibility_reason in temporal_reasons else None
+    row = {
+        "run_key": str(prepared["run_key"]),
+        "snapshot_key": str(prepared["snapshot_key"]),
+        "city": prepared.get("city"),
+        "target_date": prepared.get("target_date"),
+        "source": prepared.get("source"),
+        "provider": prepared.get("provider"),
+        "model": prepared.get("model"),
+        "model_version": prepared.get("model_version"),
+        "run_type": prepared.get("run_type", "forecast"),
+        "run_at": prepared.get("run_at"),
+        "retrieved_at": prepared.get("retrieved_at"),
+        "available_at": prepared.get("available_at"),
+        "availability_basis": prepared.get("availability_basis"),
+        "valid_at": prepared.get("valid_at"),
+        "horizon": prepared.get("horizon"),
+        "lead_hours": _nullable_num(prepared.get("lead_hours")),
+        "latitude": _nullable_num(prepared.get("latitude")),
+        "longitude": _nullable_num(prepared.get("longitude")),
+        "station_id": prepared.get("station_id"),
+        "timezone": prepared.get("timezone"),
+        "unit": prepared.get("unit"),
+        "mean_high": _nullable_num(prepared.get("mean_high")),
+        "std_high": _nullable_num(prepared.get("std_high")),
+        "member_count": int(prepared.get("member_count") or len(members or [])),
+        "source_url": prepared.get("source_url"),
+        "raw_response_hash": prepared.get("raw_response_hash"),
+        "data_license": prepared.get("data_license"),
+        "quality_flags": dump_json(prepared.get("quality_flags", [])),
+        "parser_version": prepared.get("parser_version") or "forecast-run-v1",
+        "parse_status": prepared.get("parse_status") or "parsed",
+        "parse_warnings": dump_json(prepared.get("parse_warnings", [])),
+        "source_unit": prepared.get("source_unit") or prepared.get("unit") or "",
+        "training_eligible": 1 if prepared.get("training_eligible") else 0,
+        "ineligibility_reason": ineligibility_reason,
+        "quarantined_at": quarantined_at,
+        "quarantine_reason": ineligibility_reason if quarantined_at else None,
+        "raw_json": dump_json(prepared),
+        "created_at": now,
+    }
     connection_context = connect(path) if _connection is None else nullcontext(_connection)
     with connection_context as conn:
         conn.execute(
             """
             INSERT INTO forecast_runs (
-                run_key, city, target_date, source, provider, model, model_version,
-                run_type, run_at, retrieved_at, valid_at, horizon, lead_hours,
+                run_key, snapshot_key, city, target_date, source, provider, model, model_version,
+                run_type, run_at, retrieved_at, available_at, availability_basis,
+                valid_at, horizon, lead_hours,
                 latitude, longitude, station_id, timezone, unit, mean_high, std_high,
                 member_count, source_url, raw_response_hash, data_license,
                 quality_flags, parser_version, parse_status, parse_warnings, source_unit,
                 training_eligible, ineligibility_reason,
-                raw_json, created_at
+                quarantined_at, quarantine_reason, raw_json, created_at
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                :run_key, :snapshot_key, :city, :target_date, :source, :provider, :model, :model_version,
+                :run_type, :run_at, :retrieved_at, :available_at, :availability_basis,
+                :valid_at, :horizon, :lead_hours,
+                :latitude, :longitude, :station_id, :timezone, :unit, :mean_high, :std_high,
+                :member_count, :source_url, :raw_response_hash, :data_license,
+                :quality_flags, :parser_version, :parse_status, :parse_warnings, :source_unit,
+                :training_eligible, :ineligibility_reason,
+                :quarantined_at, :quarantine_reason, :raw_json, :created_at
             )
-            ON CONFLICT(run_key) DO UPDATE SET
-                source=excluded.source,
-                provider=excluded.provider,
-                model=excluded.model,
-                model_version=excluded.model_version,
-                run_type=excluded.run_type,
-                run_at=excluded.run_at,
-                retrieved_at=excluded.retrieved_at,
-                valid_at=excluded.valid_at,
-                horizon=excluded.horizon,
-                lead_hours=excluded.lead_hours,
-                mean_high=excluded.mean_high,
-                std_high=excluded.std_high,
-                member_count=excluded.member_count,
-                source_url=excluded.source_url,
-                raw_response_hash=excluded.raw_response_hash,
-                data_license=excluded.data_license,
-                quality_flags=excluded.quality_flags,
-                parser_version=excluded.parser_version,
-                parse_status=excluded.parse_status,
-                parse_warnings=excluded.parse_warnings,
-                source_unit=excluded.source_unit,
-                training_eligible=excluded.training_eligible,
-                ineligibility_reason=excluded.ineligibility_reason,
-                raw_json=excluded.raw_json
+            ON CONFLICT(snapshot_key) DO NOTHING
             """,
-            (
-                run_key,
-                run.get("city"),
-                run.get("target_date"),
-                run.get("source"),
-                run.get("provider"),
-                run.get("model"),
-                run.get("model_version"),
-                run.get("run_type", "forecast"),
-                run.get("run_at"),
-                run.get("retrieved_at"),
-                run.get("valid_at"),
-                run.get("horizon"),
-                _num(run.get("lead_hours"), 0.0),
-                _num(run.get("latitude"), 0.0),
-                _num(run.get("longitude"), 0.0),
-                run.get("station_id"),
-                run.get("timezone"),
-                run.get("unit"),
-                _num(run.get("mean_high"), 0.0),
-                _num(run.get("std_high"), 0.0),
-                int(run.get("member_count") or len(members or [])),
-                run.get("source_url"),
-                run.get("raw_response_hash"),
-                run.get("data_license"),
-                dump_json(run.get("quality_flags", [])),
-                run.get("parser_version") or "forecast-run-v1",
-                run.get("parse_status") or "parsed",
-                dump_json(run.get("parse_warnings", [])),
-                run.get("source_unit") or run.get("unit") or "",
-                1 if run.get("training_eligible") else 0,
-                run.get("ineligibility_reason"),
-                dump_json(run),
-                now,
-            ),
+            row,
         )
-        run_id = int(conn.execute("SELECT id FROM forecast_runs WHERE run_key = ?", (run_key,)).fetchone()["id"])
+        found = conn.execute(
+            "SELECT id FROM forecast_runs WHERE snapshot_key = ?",
+            (row["snapshot_key"],),
+        ).fetchone()
+        if found is None:
+            raise ValueError("forecast snapshot identity conflict")
+        run_id = int(found["id"])
         for member in members or []:
             conn.execute(
                 """
@@ -3345,11 +3349,7 @@ def insert_forecast_run(
                     run_id, member_name, high_temp, member_id, hourly_json,
                     raw_json, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(run_id, member_id) DO UPDATE SET
-                    member_name=excluded.member_name,
-                    high_temp=excluded.high_temp,
-                    hourly_json=excluded.hourly_json,
-                    raw_json=excluded.raw_json
+                ON CONFLICT(run_id, member_id) DO NOTHING
                 """,
                 (
                     run_id,

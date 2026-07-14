@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from tests import ensure_test_environment
+
+ensure_test_environment()
+
 import os
 import tempfile
 import unittest

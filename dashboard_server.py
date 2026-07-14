@@ -798,13 +798,13 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
                 SELECT
                     city,
                     target_date,
-                    COALESCE(retrieved_at, run_at, created_at) AS forecast_time,
+                    COALESCE(available_at, retrieved_at, created_at) AS forecast_time,
                     source
                 FROM forecast_runs
                 WHERE target_date >= ?
                   AND city IS NOT NULL
                   AND TRIM(city) != ''
-                ORDER BY city, target_date, COALESCE(retrieved_at, run_at, created_at) DESC, id DESC
+                ORDER BY city, target_date, COALESCE(available_at, retrieved_at, created_at) DESC, id DESC
                 LIMIT 1500
                 """,
                 (query_cutoff,),
@@ -2684,7 +2684,7 @@ def _recent_hourly_targets(limit_per_city: int = 10) -> dict[str, set[str]]:
                         SELECT
                             city,
                             target_date,
-                            COALESCE(retrieved_at, run_at, created_at, '') AS sort_key
+                            COALESCE(available_at, retrieved_at, created_at, '') AS sort_key
                         FROM forecast_runs
                         WHERE COALESCE(run_type, 'forecast') = 'forecast'
                         UNION ALL

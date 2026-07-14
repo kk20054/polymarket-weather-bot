@@ -1,3 +1,7 @@
+from tests import ensure_test_environment
+
+ensure_test_environment()
+
 import asyncio
 import json
 import os
@@ -1357,7 +1361,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(details["hourly_consensus_rows_deleted"], 1)
         self.assertEqual(migration_count, 1)
 
-    def test_forecast_bulk_insert_is_idempotent_in_one_transaction(self):
+    def test_forecast_bulk_insert_preserves_corrected_snapshot_in_one_transaction(self):
         db_path = test_db_path("forecast_bulk_insert")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         first_run = openmeteo_hourly_run(
@@ -1383,10 +1387,10 @@ class V3CoreTests(unittest.TestCase):
                     for row in conn.execute("SELECT high_temp FROM forecast_members ORDER BY id").fetchall()
                 ]
 
-        self.assertEqual(first_ids, second_ids)
-        self.assertEqual(run_count, 2)
-        self.assertEqual(member_count, 2)
-        self.assertEqual(highs, [99.0, 99.0])
+        self.assertNotEqual(first_ids, second_ids)
+        self.assertEqual(run_count, 4)
+        self.assertEqual(member_count, 4)
+        self.assertEqual(highs, [21.0, 23.0, 99.0, 99.0])
 
     def test_pws_mesonet_rows_parse_and_persist_polywx_xhr_shape(self):
         db_path = test_db_path("mesonet_pws")
@@ -4644,7 +4648,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(target_run["mean_high"], 72.5, places=1)
         self.assertGreater(target_run["std_high"], 0)
 
-    def test_openmeteo_run_key_deduplicates_same_retrieved_hour_not_response_hash(self):
+    def test_openmeteo_snapshots_preserve_distinct_retrievals_within_same_hour(self):
         db_path = test_db_path("openmeteo_idempotent")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         payload = {
@@ -4689,8 +4693,8 @@ class V3CoreTests(unittest.TestCase):
             with connect(db_path) as conn:
                 next_hour_count = conn.execute("SELECT COUNT(*) FROM forecast_runs").fetchone()[0]
 
-        self.assertEqual(same_hour_count, 1)
-        self.assertEqual(next_hour_count, 2)
+        self.assertEqual(same_hour_count, 2)
+        self.assertEqual(next_hour_count, 3)
 
     def test_openmeteo_missing_temperature_records_failed_parse_without_exception(self):
         db_path = test_db_path("openmeteo_failed")
@@ -5022,6 +5026,8 @@ class V3CoreTests(unittest.TestCase):
                 ("openmeteo_gfs_seamless", 85.0),
             ]:
                 run, members = openmeteo_hourly_run("chicago", "2026-07-01", source, [temp], valid_times=[valid_time])
+                run["retrieved_at"] = "2026-06-30T12:00:00+00:00"
+                run["horizon"] = "d1"
                 insert_forecast_run(run, members)
             polywx_run, polywx_members = forecast_run_from_polywx_rows(
                 "chicago",
@@ -5193,7 +5199,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertFalse(prediction["mu_observed_floor_applied"])
         self.assertLess(float(prediction["mu"]), 100.0)
 
-    def test_daily_max_v2_same_issued_hour_is_idempotent(self):
+    def test_daily_max_v2_preserves_distinct_cutoffs_within_same_hour(self):
         db_path = test_db_path("daily_max_v2_idempotent")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         run, members = openmeteo_hourly_run(
@@ -5211,7 +5217,7 @@ class V3CoreTests(unittest.TestCase):
                 count = conn.execute("SELECT COUNT(*) FROM daily_max_predictions").fetchone()[0]
                 row = conn.execute("SELECT deb_version, bias_sample_count FROM daily_max_predictions").fetchone()
 
-        self.assertEqual(count, 1)
+        self.assertEqual(count, 2)
         self.assertEqual(row["deb_version"], "weatherbot-deb-v2")
 
     def test_daily_max_peak_hour_uses_mixed_curve_and_latest_tie(self):
@@ -6081,7 +6087,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(audit["summary"]["training_eligible_samples"], 1)
         self.assertEqual(audit["summary"]["baseline_ready_samples"], 1)
         self.assertEqual(audit["summary"]["replay_ready_samples"], 1)
-        self.assertEqual(audit["leakage_flags"]["forecast_after_target_start"], 1)
+        self.assertEqual(audit["leakage_flags"]["forecast_lead_negative"], 1)
         self.assertEqual(audit["samples"][0]["no_leak_forecast_runs"], 2)
 
     def test_model_dataset_audit_next_actions_prioritize_contract_review(self):
@@ -6818,8 +6824,9 @@ class V3CoreTests(unittest.TestCase):
                     """
                     INSERT INTO forecast_runs (
                         run_key, city, target_date, source, model, retrieved_at,
-                        unit, mean_high, training_eligible, parse_status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        available_at, availability_basis, valid_at, horizon, lead_hours,
+                        timezone, unit, mean_high, training_eligible, parse_status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_key,
@@ -6828,6 +6835,12 @@ class V3CoreTests(unittest.TestCase):
                         "openmeteo_ecmwf_ifs025",
                         "ecmwf_ifs025",
                         retrieved_at,
+                        retrieved_at,
+                        "retrieved_at",
+                        "2026-07-01T20:00:00+00:00",
+                        "D+0" if run_key == "leaked" else "D+1",
+                        8 if run_key == "leaked" else 32,
+                        "America/Chicago",
                         "C",
                         mean_high,
                         1,
@@ -6870,12 +6883,21 @@ class V3CoreTests(unittest.TestCase):
                     """
                     INSERT INTO forecast_runs (
                         run_key, city, target_date, source, model, run_at, retrieved_at,
-                        horizon, unit, mean_high, training_eligible, parse_status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        available_at, availability_basis, valid_at, lead_hours, timezone,
+                        horizon, unit, mean_high, training_eligible, parse_status, quality_flags, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_key, "chicago", "2026-07-01", source, "ecmwf_ifs025",
-                        run_at, retrieved_at, horizon, "C", mean_high, 1, "parsed", now,
+                        run_at, retrieved_at,
+                        run_at or retrieved_at,
+                        "archive_run_at" if run_at else "retrieved_at",
+                        "2026-07-01T20:00:00+00:00",
+                        39 if run_at else 16,
+                        "America/Chicago",
+                        horizon, "C", mean_high, 1, "parsed",
+                        '["trusted_forecast_archive"]' if run_at else "[]",
+                        now,
                     ),
                 )
 
@@ -6906,14 +6928,32 @@ class V3CoreTests(unittest.TestCase):
                     """
                     INSERT INTO forecast_runs (
                         run_key, city, target_date, source, model, run_at, retrieved_at,
-                        horizon, unit, mean_high, training_eligible, parse_status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        available_at, availability_basis, valid_at, lead_hours, timezone,
+                        horizon, unit, mean_high, training_eligible, parse_status, quality_flags, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         f"run:{target_date}", "chicago", target_date,
                         "openmeteo_previous_ecmwf_ifs025_day1", "ecmwf_ifs025",
-                        f"{target_date}T00:00:00+00:00", now, "D+1", "C", forecast,
-                        1, "parsed", now,
+                        (
+                            datetime.fromisoformat(target_date)
+                            .replace(tzinfo=timezone.utc)
+                            .__sub__(timedelta(hours=19))
+                            .isoformat()
+                        ),
+                        now,
+                        (
+                            datetime.fromisoformat(target_date)
+                            .replace(tzinfo=timezone.utc)
+                            .__sub__(timedelta(hours=19))
+                            .isoformat()
+                        ),
+                        "archive_run_at",
+                        f"{target_date}T20:00:00+00:00",
+                        39,
+                        "America/Chicago",
+                        "D+1", "C", forecast,
+                        1, "parsed", '["trusted_forecast_archive"]', now,
                     ),
                 )
 

@@ -582,7 +582,7 @@ def openmeteo_previous_runs_from_response(
         high_point = max(hourly_points, key=lambda item: float(item.get("temperature_2m") or -999))
         run_at = _previous_run_at(target_date, profile.timezone, day)
         run = {
-            "run_key": f"openmeteo-previous:{profile.city}:{target_date}:{model}:day{day}",
+            "run_key": f"openmeteo-previous:{profile.city}:{target_date}:{model}:{run_at.isoformat()}:{raw_hash[:16]}",
             "city": profile.city,
             "target_date": target_date,
             "source": f"openmeteo_previous_{model}_day{day}",
@@ -592,6 +592,8 @@ def openmeteo_previous_runs_from_response(
             "run_type": "forecast",
             "run_at": run_at.isoformat(),
             "retrieved_at": retrieved.isoformat() if retrieved else utc_now(),
+            "available_at": run_at.isoformat(),
+            "availability_basis": "archive_run_at",
             "valid_at": str(high_point.get("valid_at") or ""),
             "horizon": f"D+{day}",
             "lead_hours": day * 24.0,
@@ -606,7 +608,12 @@ def openmeteo_previous_runs_from_response(
             "source_url": source_url,
             "raw_response_hash": raw_hash,
             "data_license": "open-meteo-free-api",
-            "quality_flags": ["openmeteo_previous_runs", "archived_model_output", f"previous_day{day}"],
+            "quality_flags": [
+                "openmeteo_previous_runs",
+                "archived_model_output",
+                "trusted_forecast_archive",
+                f"previous_day{day}",
+            ],
             "parser_version": OPENMETEO_PREVIOUS_PARSER_VERSION,
             "parse_status": "parsed",
             "parse_warnings": [],
@@ -710,7 +717,10 @@ def _runs_from_member_series(
             "raw_temperature_unit": "C",
         }
         run = {
-            "run_key": f"openmeteo:{endpoint_kind}:{profile.city}:{target_date}:{model}:{retrieved_hour}",
+            "run_key": (
+                f"openmeteo:{endpoint_kind}:{profile.city}:{target_date}:{model}:"
+                f"{retrieved.isoformat() if retrieved else 'missing'}:{raw_hash[:16]}"
+            ),
             "city": profile.city,
             "target_date": target_date,
             "source": source,
@@ -720,6 +730,8 @@ def _runs_from_member_series(
             "run_type": "forecast",
             "run_at": "",
             "retrieved_at": retrieved.isoformat() if retrieved else "",
+            "available_at": retrieved.isoformat() if retrieved else "",
+            "availability_basis": "retrieved_at",
             "valid_at": peak_valid_at,
             "horizon": _horizon(profile, target_date, retrieved),
             "lead_hours": _lead_hours(retrieved, peak_valid_at),
@@ -775,7 +787,10 @@ def _failed_openmeteo_run(
         source = f"openmeteo_ensemble_{model}"
     parser_version = OPENMETEO_PREVIOUS_PARSER_VERSION if endpoint_kind == "previous_runs" else OPENMETEO_PARSER_VERSION
     run = {
-        "run_key": f"openmeteo:{endpoint_kind}:{profile.city}:{target_date}:{model}:{retrieved_hour}:failed",
+        "run_key": (
+            f"openmeteo:{endpoint_kind}:{profile.city}:{target_date}:{model}:"
+            f"{retrieved.isoformat() if retrieved else 'missing'}:{raw_hash[:16]}:failed"
+        ),
         "city": profile.city,
         "target_date": target_date,
         "source": source,
@@ -785,6 +800,8 @@ def _failed_openmeteo_run(
         "run_type": "forecast",
         "run_at": "",
         "retrieved_at": retrieved.isoformat() if retrieved else "",
+        "available_at": retrieved.isoformat() if retrieved else "",
+        "availability_basis": "retrieved_at",
         "valid_at": "",
         "horizon": _horizon(profile, target_date, retrieved),
         "lead_hours": 0,
@@ -830,7 +847,7 @@ def _failed_previous_run(
 ) -> dict[str, Any]:
     run_at = _previous_run_at(target_date, profile.timezone, previous_day)
     return {
-        "run_key": f"openmeteo-previous:{profile.city}:{target_date}:{model}:day{previous_day}:failed",
+        "run_key": f"openmeteo-previous:{profile.city}:{target_date}:{model}:{run_at.isoformat()}:{raw_hash[:16]}:failed",
         "city": profile.city,
         "target_date": target_date,
         "source": f"openmeteo_previous_{model}_day{previous_day}",
@@ -840,6 +857,8 @@ def _failed_previous_run(
         "run_type": "forecast",
         "run_at": run_at.isoformat(),
         "retrieved_at": retrieved.isoformat() if retrieved else utc_now(),
+        "available_at": run_at.isoformat(),
+        "availability_basis": "archive_run_at",
         "valid_at": "",
         "horizon": f"D+{previous_day}",
         "lead_hours": previous_day * 24.0,

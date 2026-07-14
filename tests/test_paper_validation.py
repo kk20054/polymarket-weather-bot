@@ -1,3 +1,7 @@
+from tests import ensure_test_environment
+
+ensure_test_environment()
+
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

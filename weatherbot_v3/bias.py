@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from .config import DATA_DIR
 from .db import connect, init_v3_db
 from .forecasts.ensemble import BIAS_MIN_SAMPLE_COUNT, model_family
+from .forecast_time import assess_forecast_run, parse_utc
 from .registry import SETTLEMENT_REGISTRY, forecast_source_matches_profile_location
 
 
@@ -227,7 +228,9 @@ def _residual_records_for_family(
             for row in conn.execute(
                 """
                 SELECT id, target_date, source, model, unit, mean_high, source_url,
-                       run_at, retrieved_at, lead_hours, horizon
+                       run_at, retrieved_at, available_at, availability_basis,
+                       valid_at, lead_hours, horizon, timezone,
+                       training_eligible, parse_status
                 FROM forecast_runs
                 WHERE city = ?
                   AND target_date IN ({})
@@ -253,7 +256,16 @@ def _residual_records_for_family(
             location_mismatch_excluded += 1
             continue
         target_date = str(row.get("target_date") or "")
-        as_of = _forecast_as_of(row)
+        assessment = assess_forecast_run(
+            row,
+            target_date=target_date,
+            timezone_name=timezone_name,
+            require_training=True,
+        )
+        if not assessment["ok"]:
+            invalid_as_of += 1
+            continue
+        as_of = parse_utc(assessment.get("available_at"))
         cutoff = _target_local_start_utc(target_date, timezone_name)
         if as_of is None or cutoff is None:
             invalid_as_of += 1
@@ -290,10 +302,6 @@ def _residual_records_for_family(
         "invalid_as_of_rows": invalid_as_of,
         "duplicate_rows": max(0, family_rows - leakage_excluded - invalid_as_of - len(records)),
     }
-
-
-def _forecast_as_of(row: dict[str, Any]) -> datetime | None:
-    return _parse_datetime(row.get("run_at")) or _parse_datetime(row.get("retrieved_at"))
 
 
 def _is_previous_day1(row: dict[str, Any]) -> bool:

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from tests import ensure_test_environment
+
+ensure_test_environment()
+
 import asyncio
 import tempfile
 import unittest
@@ -7,7 +11,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from weatherbot_v3.db import connect_readonly, init_v3_db
+from weatherbot_v3.db import (
+    connect,
+    connect_readonly,
+    init_v3_db,
+    insert_forecast_run,
+    upsert_daily_max_prediction,
+)
 from weatherbot_v3.executor import ExecutionResult
 from weatherbot_v3.paper import execute_paper_decisions
 from weatherbot_v3.sizing import calculate_kelly_fraction
@@ -69,6 +79,92 @@ class ProjectVerificationTests(unittest.TestCase):
             runtime = probe_local_runtime()
         self.assertTrue(runtime["available"])
         self.assertTrue(runtime["api_settings_safe"])
+
+    def test_model_gate_ignores_quarantined_history_and_accepts_stored_rounding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "weatherbot.db"
+            init_v3_db(path)
+            with connect(path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO stations (
+                        city_key, city_name, station_id, station_name, timezone,
+                        unit, enabled, updated_at
+                    ) VALUES ('chicago', 'Chicago', 'KORD', 'O Hare',
+                              'America/Chicago', 'F', 1, '2026-07-14T00:00:00+00:00')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO event_distributions (
+                        market_id, sum_probability, normalized, raw_json, created_at
+                    ) VALUES ('m1', 0.9999, 1, '{}', '2026-07-14T00:00:00+00:00')
+                    """
+                )
+            run_id = insert_forecast_run(
+                {
+                    "city": "chicago",
+                    "target_date": "2026-07-15",
+                    "source": "weathercom_v3_forecast",
+                    "provider": "weathercom",
+                    "model": "v3",
+                    "run_type": "forecast",
+                    "run_at": "2026-07-14T00:00:00+00:00",
+                    "retrieved_at": "2026-07-14T00:05:00+00:00",
+                    "valid_at": "2026-07-15T18:00:00+00:00",
+                    "horizon": "d+1",
+                    "lead_hours": 41.9167,
+                    "timezone": "America/Chicago",
+                    "unit": "F",
+                    "parse_status": "parsed",
+                    "training_eligible": True,
+                    "raw_response_hash": "a" * 64,
+                },
+                path=path,
+            )
+            upsert_daily_max_prediction(
+                {
+                    "city_key": "chicago",
+                    "target_date": "2026-07-15",
+                    "issued_at": "2026-07-14T01:00:00+00:00",
+                    "mu": 86.0,
+                    "sigma": 1.2,
+                    "sigma_floor": 0.5,
+                    "model_weights": {"weathercom_v3_forecast": 1.0},
+                    "components": [{
+                        "source": "weathercom_v3_forecast",
+                        "weight_after_mae": 1.0,
+                        "bias_sample_count": 10,
+                    }],
+                    "source_run_ids": [run_id],
+                    "validity_status": "valid",
+                },
+                path=path,
+            )
+            upsert_daily_max_prediction(
+                {
+                    "city_key": "chicago",
+                    "target_date": "2026-07-15",
+                    "issued_at": "2026-07-14T02:00:00+00:00",
+                    "mu": 99.0,
+                    "sigma": 1.0,
+                    "model_weights": {"invalid": 1.0},
+                    "source_run_ids": [999999],
+                    "validity_status": "invalid",
+                    "invalidation_reason": "source_run_missing",
+                },
+                path=path,
+            )
+
+            report = build_project_verification_report(
+                path=path,
+                source_health={"sources": [], "city_matrix": []},
+                runtime={"probed": False, "available": None},
+            )
+        model_agent = next(agent for agent in report["agents"] if agent["key"] == "model_integrity")
+        checks = {check["id"]: check for check in model_agent["checks"]}
+        self.assertEqual(checks["temporal_no_leak"]["status"], "pass")
+        self.assertEqual(checks["prediction_math"]["status"], "pass")
 
 
 class ExecutionBoundaryTests(unittest.TestCase):

@@ -1,3 +1,7 @@
+from tests import ensure_test_environment
+
+ensure_test_environment()
+
 import json
 import math
 import unittest
@@ -89,6 +93,11 @@ class DebGaussianTests(unittest.TestCase):
                     "std_high": 0.0,
                     "member_count": 1,
                     "retrieved_at": "2026-07-02T06:00:00Z",
+                    "valid_at": "2026-07-02T12:00:00Z",
+                    "horizon": "d0",
+                    "timezone": "Europe/Paris",
+                    "parse_status": "parsed",
+                    "training_eligible": True,
                 },
                 [{"member_id": "m0", "high_temp": 25.0}],
             )
@@ -123,6 +132,11 @@ class DebGaussianTests(unittest.TestCase):
                     "std_high": 0.0,
                     "member_count": 1,
                     "retrieved_at": "2026-07-05T00:00:00Z",
+                    "valid_at": "2026-07-05T06:00:00Z",
+                    "horizon": "d0",
+                    "timezone": "Asia/Tokyo",
+                    "parse_status": "parsed",
+                    "training_eligible": True,
                 },
                 [{"member_id": "m0", "high_temp": 24.0}],
             )
@@ -157,6 +171,9 @@ class DebGaussianTests(unittest.TestCase):
                     "std_high": 0.0,
                     "member_count": 1,
                     "retrieved_at": "2026-07-04T06:00:00Z",
+                    "valid_at": "2026-07-04T20:00:00Z",
+                    "horizon": "d0",
+                    "timezone": "America/Chicago",
                     "parse_status": "parsed",
                     "training_eligible": True,
                 },

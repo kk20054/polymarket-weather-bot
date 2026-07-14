@@ -196,7 +196,7 @@ def weathercom_runs_from_response(
         high = max(highs)
         peak = max(day_rows, key=lambda row: (float(row.get("temperature_2m") or -999), str(row.get("local_hour") or "")))
         run = {
-            "run_key": f"weathercom:v3:{profile.city}:{target_date}:{retrieved_hour}",
+            "run_key": f"weathercom:v3:{profile.city}:{target_date}:{retrieved.isoformat()}:{raw_hash[:16]}",
             "city": profile.city,
             "target_date": target_date,
             "source": WEATHERCOM_SOURCE,
@@ -209,6 +209,8 @@ def weathercom_runs_from_response(
             # ordering and as-of replay.
             "run_at": retrieved.isoformat(),
             "retrieved_at": retrieved.isoformat(),
+            "available_at": retrieved.isoformat(),
+            "availability_basis": "retrieved_at",
             "valid_at": str(peak.get("valid_at") or ""),
             "horizon": _horizon(profile, target_date, retrieved),
             "lead_hours": _lead_hours(retrieved, str(peak.get("valid_at") or "")),
@@ -319,7 +321,7 @@ def _failed_run(
     target_date = retrieved.astimezone(_zone(profile.timezone)).date().isoformat()
     retrieved_hour = retrieved.replace(minute=0, second=0, microsecond=0).isoformat()
     return {
-        "run_key": f"weathercom:v3:{profile.city}:{target_date}:{retrieved_hour}:failed",
+        "run_key": f"weathercom:v3:{profile.city}:{target_date}:{retrieved.isoformat()}:{raw_hash[:16]}:failed",
         "city": profile.city,
         "target_date": target_date,
         "source": WEATHERCOM_SOURCE,
@@ -328,6 +330,8 @@ def _failed_run(
         "model_version": "weather.com-v3-hourly",
         "run_type": "forecast",
         "retrieved_at": retrieved.isoformat(),
+        "available_at": retrieved.isoformat(),
+        "availability_basis": "retrieved_at",
         "valid_at": "",
         "station_id": profile.station_id,
         "timezone": profile.timezone,
