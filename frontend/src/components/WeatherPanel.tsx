@@ -112,6 +112,7 @@ type LayerDistributionItem = DistributionItem & {
   live_allowed?: boolean
   quote_timestamp?: string | null
   quote_valid?: boolean
+  diagnostic_label?: string
 }
 
 type EvidenceCardTone = 'green' | 'amber' | 'red' | 'cyan' | 'neutral'
@@ -473,6 +474,23 @@ function localDateString(date = new Date()) {
   return `${year}-${month}-${day}`
 }
 
+function localDateStringInTimeZone(timeZone?: string | null, date = new Date()) {
+  if (!timeZone) return localDateString(date)
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date)
+    const values = Object.fromEntries(parts.map(part => [part.type, part.value]))
+    if (values.year && values.month && values.day) return `${values.year}-${values.month}-${values.day}`
+  } catch {
+    // Browser-local time is the honest fallback for an invalid station timezone.
+  }
+  return localDateString(date)
+}
+
 function quoteTimestampMs(value?: string | null) {
   const text = String(value ?? '').trim()
   if (!text) return null
@@ -786,25 +804,27 @@ function buildGaussianFallbackItems(mu?: number | null, sigma?: number | null, u
   if (center === null || rawSigma === null) return []
   const sigmaFloor = unit === 'C' ? 0.5 : 0.9
   const sigmaValue = Math.max(Math.abs(rawSigma), sigmaFloor)
-  const bucketSize = unit === 'C'
-    ? Math.max(0.5, Math.round((sigmaValue / 1.4) * 2) / 2)
-    : Math.max(1, Math.round(sigmaValue / 1.4))
-  const start = Math.floor((center - 3 * sigmaValue) / bucketSize) * bucketSize
-  const raw = Array.from({ length: 9 }, (_, index) => {
-    const low = start + index * bucketSize
-    const high = low + bucketSize
+  // PolyWX's DEB chart is a fixed diagnostic density grid, not the market's
+  // variable integer buckets. Keep the two views separate and comparable.
+  const bucketSize = unit === 'C' ? 0.5 : 1
+  const bucketCount = 18
+  const roundedCenter = Math.round(center / bucketSize) * bucketSize
+  const startCenter = roundedCenter - (bucketCount / 2 - 1) * bucketSize
+  const raw = Array.from({ length: bucketCount }, (_, index) => {
+    const diagnosticCenter = startCenter + index * bucketSize
+    const low = diagnosticCenter - bucketSize / 2
+    const high = diagnosticCenter + bucketSize / 2
     const probability = normalCdf((high - center) / sigmaValue) - normalCdf((low - center) / sigmaValue)
-    return { low, high, probability }
+    return { low, high, diagnosticCenter, probability }
   })
-  const total = raw.reduce((sum, item) => sum + item.probability, 0)
-  if (total <= 0) return []
+  if (raw.every(item => item.probability <= 0)) return []
   return raw.map((item, index) => ({
     market_id: `fallback-gaussian-${index}`,
     question: '暂无匹配市场桶，仅展示 DEB 高斯模型分布',
     bucket_low: item.low,
     bucket_high: item.high,
     probability_raw: item.probability,
-    probability: item.probability / total,
+    probability: item.probability,
     ask: 0,
     bid: 0,
     spread: 0,
@@ -812,6 +832,7 @@ function buildGaussianFallbackItems(mu?: number | null, sigma?: number | null, u
     ev: 0,
     is_signal: false,
     bucket_label: `${fmtBucketTemp(item.low, unit)}–${fmtBucketTemp(item.high, unit)}`,
+    diagnostic_label: fmtBucketAxisTemp(item.diagnosticCenter, unit),
     bucket_direction: 'range',
     gate_status: 'model_distribution_only',
     gate_reasons: ['missing_market_bucket_match'],
@@ -1032,7 +1053,7 @@ export function WeatherPanel({
   const forecastFallback = forecasts.find(row => row.city_key === selected) ?? (!selected ? forecasts[0] : undefined)
   const cityKey = series?.city_key ?? forecastFallback?.city_key ?? selected
   const unit = series?.unit ?? 'F'
-  const todayDate = localDateString()
+  const todayDate = localDateStringInTimeZone(series?.settlement_timezone)
 
   const citySignals = useMemo(() => signals.filter(signal => signal.city_key === cityKey), [signals, cityKey])
   const actionableSignals = citySignals.filter(signal => signal.actionable)
@@ -1137,11 +1158,14 @@ export function WeatherPanel({
       : 'truth 待补'
 
   useEffect(() => {
-    const fallbackDate = availableDates[availableDates.length - 1] ?? forecastFallback?.target_date ?? latestForecast?.target_date ?? ''
+    const datesNotAfterToday = availableDates.filter(date => date <= todayDate)
+    const fallbackDate = availableDates.includes(todayDate)
+      ? todayDate
+      : datesNotAfterToday[datesNotAfterToday.length - 1] ?? todayDate
     if (!selectedDate && fallbackDate) {
       setSelectedDate(fallbackDate)
     }
-  }, [availableDates, forecastFallback?.target_date, latestForecast?.target_date, selectedDate])
+  }, [availableDates, selectedDate, todayDate])
 
   const selectedDateRow = chartData.find(row => row.date === selectedDate)
     ?? (selectedDate ? { date: selectedDate, label: shortDate(selectedDate) } : chartData[chartData.length - 1])
@@ -1974,15 +1998,6 @@ function HourlyEvidencePanel({
   forecastPeakMarker?: HourlyConsensusSummary['forecast_peak_marker']
   loading?: boolean
 }) {
-  const numericValues = (values: unknown[]) =>
-    values.map(asNumber).filter((value): value is number => value !== null)
-  const forecastValues = numericValues(rows.map(row => row.forecast))
-  const metarValues = numericValues(rows.map(row => row.metar))
-  const historicalValues = numericValues(rows.map(row => row.historical))
-  const chinaLiveValues = numericValues(rows.map(row => row.china_live))
-  const pwsValues = numericValues(rows.map(row => row.pws))
-  const forecastMax = forecastValues.length > 0 ? Math.max(...forecastValues) : null
-  const metarMax = metarValues.length > 0 ? Math.max(...metarValues) : null
   const hourlyChartRows = rows.map(row => ({
     ...row,
     time_minute: Number(row.label.slice(0, 2)) * 60 + Number(row.label.slice(3, 5) || 0),
@@ -1999,6 +2014,15 @@ function HourlyEvidencePanel({
   const chartRows = hasNativeSeries
     ? mergeNativeHourlySeries(nativeSeries)
     : hourlyChartRows
+  const numericValues = (values: unknown[]) =>
+    values.map(asNumber).filter((value): value is number => value !== null)
+  const forecastValues = numericValues(chartRows.map(row => row.forecast_value))
+  const metarValues = numericValues(chartRows.map(row => row.metar_value))
+  const historicalValues = numericValues(chartRows.map(row => row.historical_value))
+  const chinaLiveValues = numericValues(chartRows.map(row => row.china_live_value))
+  const pwsValues = numericValues(chartRows.map(row => row.pws_value))
+  const forecastMax = forecastValues.length > 0 ? Math.max(...forecastValues) : null
+  const metarMax = metarValues.length > 0 ? Math.max(...metarValues) : null
 
   if (loading && !hasNativeSeries) {
     return (
@@ -2015,9 +2039,9 @@ function HourlyEvidencePanel({
     || row.pws_value !== null
     || row.cloud_pct !== null
   )
-  const metarStats = sourceStats(hourlyChartRows, 'metar_value')
-  const historicalStats = sourceStats(hourlyChartRows, 'historical_value')
-  const overlapStats = overlapPill(hourlyChartRows)
+  const metarStats = sourceStats(chartRows, 'metar_value')
+  const historicalStats = sourceStats(chartRows, 'historical_value')
+  const overlapStats = overlapPill(chartRows)
   const hasHistorical = historicalValues.length > 0
   const hasChinaLive = chinaLiveValues.length > 0
   const hasPws = pwsValues.length > 0
@@ -2026,7 +2050,7 @@ function HourlyEvidencePanel({
     .sort((a, b) => Number(b.forecast_value ?? -Infinity) - Number(a.forecast_value ?? -Infinity))[0]
   const peakHour = normalizePeakHour(forecastPeakMarker?.local_time)
     ?? dailyMaxPeakHour(dailyMaxPrediction, peakRow?.label)
-  if (rows.length === 0) {
+  if (chartRows.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center p-4 text-center text-neutral-600">
         No hourly rows for this date.
@@ -2530,12 +2554,14 @@ function TemperatureDistributionPanel({
     : unit === 'C'
       ? Number(distribution.sigma_f) * 5 / 9
       : Number(distribution.sigma_f)
-  const fallbackItems = items.length === 0 && deb ? buildGaussianFallbackItems(forecastValue, sigmaValue, unit) : []
+  const gaussianItems = deb ? buildGaussianFallbackItems(forecastValue, sigmaValue, unit) : []
+  const fallbackItems = items.length === 0 ? gaussianItems : []
   const displayItems = items.length > 0 ? items : fallbackItems
   const fallbackMode = items.length === 0 && fallbackItems.length > 0
-  const chartRows = displayItems.map(item => ({
+  const chartItems = gaussianItems.length > 0 ? gaussianItems : displayItems
+  const chartRows = chartItems.map(item => ({
     ...item,
-    label: fmtBucketAxisLabel(item, unit),
+    label: item.diagnostic_label ?? fmtBucketAxisLabel(item, unit),
     probabilityPct: Number(item.probability ?? 0) * 100,
     edgePct: Number(item.probability_edge ?? item.ev ?? 0) * 100,
   }))
@@ -2608,13 +2634,13 @@ function TemperatureDistributionPanel({
         </div>
       </div>
 
-      {displayItems.length === 0 ? (
+      {chartRows.length === 0 ? (
         <div className="flex min-h-[220px] items-center justify-center px-3 text-center text-[10px] leading-relaxed text-neutral-600">
           {loading ? '正在加载 DEB / 市场桶...' : 'No probability buckets for this date.'}
         </div>
       ) : (
         <div className="grid gap-2 p-2">
-          <div className="grid gap-2 xl:grid-cols-[360px_minmax(0,1fr)]">
+          <div className="grid gap-2 2xl:grid-cols-[360px_minmax(0,1fr)]">
             <aside className="border border-[#2C3445] bg-[#161A22]">
               <div className="border-b border-[#2C3445] px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-[#7D8694]">
                 Per-source weights (DEB)

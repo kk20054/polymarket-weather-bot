@@ -1,5 +1,13 @@
 # WeatherBot 项目进度台账
 
+### 2026-07-14：WU Historical、V3 预报修订与高斯桶概率口径修复
+- Layer：修复 Layer 2/3/4/6 数据链及其直接 Layer 7 展示消费者；未启动 scheduler、paper cohort 或 live。
+- 改动：WU Historical 调度写入改为单写者并避免每城重复同步 station registry；主图、统计和历史观测表统一读取 exact-date 原生 WU series。Weather.com v3 不再把最新的晚间残缺 run 当作全天预报，而是按本地 valid hour 选择最新已知快照并用旧快照补齐已过去小时，保留 revision run ids、快照数和覆盖小时数。高斯诊断图改为摄氏 0.5°C/华氏 1°F 的 18 个固定桶，不再动态放大桶宽。`polywx_aligned_deb_v1` 的市场桶概率改用 μ/σ 高斯 CDF 积分，不再把六个模型家族均值误当作独立 ensemble members。
+- 验证：Shanghai 2026-07-14 原生 WU Historical 46 行、Chicago 9 行；上海 v3 全天最高由错误的 30.56°C 修复为 35.0°C，DEB σ 由约 2.55°C 收敛到 1.624°C。上海 11 个实际市场桶概率变为连续的 `0.0/0.2/1.3/4.6/11.6/20.1/24.2/20.1/11.6/4.6/1.6%`，不再出现模型权重尖峰。`python -m unittest tests.test_v3_core tests.test_scheduler tests.test_polywx_contract` 267/267 通过，`npm run build` 通过；内置浏览器实测 Shanghai/Chicago 历史曲线、统计和高斯图，console error=0、无页面级横向溢出。
+- 结论：用户观察到的两项偏差都是真问题，而非读图错误。PolyWX 的“变更”是某个有效小时的历史预报快照，主表/主图使用该小时最新值；WeatherBot 现在已在计算链复现这一“latest snapshot per local hour”口径，但尚缺详细修订弹窗。上海本地当前 `35.50±1.62°C` 与 PolyWX 截图 `35.18±1.54°C` 的剩余均值差主要来自本地 36.0°C 已观测最高温 floor，不允许模型均值低于已经发生的实况。
+- 阻塞/下一步：此前未持续保存的历史 forecast snapshot 无法事后补造；当前 scheduler 停止且 orderbook/METAR 已陈旧，市场价格栏仍为空或受 gate 阻塞。下一步先做一次受控新鲜数据刷新，再补只读 forecast revision 明细；14-30 天 cohort 与 live 均不在本轮开启。
+- 相关提交：本条所在提交。
+
 ### 2026-07-14：Layer 8 模拟订单强制绑定 cohort 与内置浏览器验收
 - Layer：仅修复 Layer 8 paper executor、paper validation 及其直接 Layer 7 工作台/设置消费者；未启动 scheduler、未创建 paper cohort、未触碰 live 下单。
 - 改动：手动单笔、批量与自动 tick 统一走 active cohort 的 run/revision/decision-batch 约束，共享同一现金、日额度、持仓与策略 cap 台账；执行前重新读取本地最新盘口，以新 ask 重算 edge 与 Kelly，并重新检查盘口年龄、spread、尾部价格和零 Kelly。缺 cohort 的非 dry-run 请求返回 409，错误 run 被拒绝。设置抽屉同步修正“已配置/已连接”、实盘执行器就绪状态、校准日和每轮候选上限等中文语义；工作台移除可绕过 Kelly 的手填金额，并在模拟账户未启动时禁用检查/买入。

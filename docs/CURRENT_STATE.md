@@ -1,38 +1,34 @@
 # WeatherBot Current State
 
 ## Current Phase And Usability
-- Date: 2026-07-14. Phase 2/3 data-source alignment and Phase 7/8 fail-closed hardening are active.
-- A controlled 14-city refresh rebuilt D+0/D+1 markets, forecasts, hourly evidence, DEB predictions and revision-bound decisions without starting the scheduler.
-- D+0 and D+1 each have 14 active weather events and 154 strictly matched buckets with CLOB snapshots; 28 DEBs and 341 latest-build decisions were generated.
-- A production-only SQLite mismatch was fixed: `forecast_runs(snapshot_key)` now has a full unique index compatible with `ON CONFLICT(snapshot_key)`.
-- China Live now isolates per-city failures: Hong Kong succeeded while Shanghai's upstream HTTP 502 was recorded without aborting the batch.
-- Paper execution rejects missing, stale or materially future quote timestamps. Every non-dry-run manual or bulk paper order is now bound to the active validation cohort, immutable strategy revision and decision batch; cohort caps and fresh-book checks cannot be bypassed from the UI.
-- Layer 7 now refuses cross-date/cross-city fallback, does not label historical fallback as WU Historical, and hides edge/action styling for stale or invalid quotes.
-- The prior full 341-test suite remains green; the current Layer 8 regression set passed 264 tests and the frontend production build. The local backend/Vite are running for operator review, while the scheduler is stopped, paper validation is inactive and `LIVE_TRADING=false`.
-- Runtime METAR/orderbooks became stale after the controlled refresh because continuous scheduling stayed off; readiness therefore remains `code_only`.
-- Profitability is not proven. No gate may be relaxed to manufacture recommendations or paper orders.
+- Date: 2026-07-14. The project remains in Phase 2/3 data-source alignment with Layer 7/8 fail-closed hardening.
+- Recent-date Wunderground Historical is repaired: Shanghai 2026-07-14 has 46 native rows and Chicago has 9; both the chart and statistics now consume the native WU series.
+- Weather.com v3 DEB reconstruction now keeps forecast revisions and takes the latest snapshot per local valid hour. Shanghai v3 daily high changed from the invalid partial-run value 30.56C to 35.0C.
+- Shanghai DEB is now 35.50C +/- 1.62C with a 36.0C observed floor. PolyWX showed 35.18C +/- 1.54C; the remaining mean difference is explainable by WeatherBot's observed-floor safety contract.
+- The diagnostic Gaussian chart uses 18 fixed-width bins. Layer 6 market buckets for `polywx_aligned_deb_v1` now use Gaussian CDF integration instead of treating six model-family means as empirical ensemble members.
+- Shanghai's 11 market buckets now form a continuous distribution with a 24.2% central peak rather than model-weight spikes.
+- Python regression tests (267) and the frontend production build pass. Shanghai and Chicago browser QA show native Historical data, continuous Gaussian bars, no console errors and no page-level horizontal overflow.
+- Scheduler is stopped, auto simulation is off, paper validation is inactive and `LIVE_TRADING=false`. Profitability and production readiness are not proven.
 
 ## Latest Ledger Summaries
-- 2026-07-14 / Layer 8 cohort-bound execution: manual and bulk simulation now share the cohort ledger, fresh quote, Kelly and risk limits; settings/workbench passed in-app browser acceptance.
-- 2026-07-14 / Controlled Layer 2-6 refresh: 14-city D+0/D+1 data and decision chains rebuilt; current data later became stale with scheduler intentionally stopped.
-- 2026-07-14 / Execution and verifier hardening: quote time fails closed, live submit is structurally locked, CLOB epoch timestamps and terminal prices are verified correctly.
-- 2026-07-14 / Layer 7 truthfulness: exact-date rendering, real WU Historical provenance and stale quote display now fail closed.
-- 2026-07-14 / Layer 3/4 forecast time contract: availability validation, immutable snapshots, source-bound DEBs and quarantine migration are complete.
+- 2026-07-14 / Layers 2/3/4/6/7: repaired WU Historical writes and native display, v3 revision-aware daily reconstruction, Gaussian visualization and Layer 6 bucket math.
+- 2026-07-14 / Layer 8: bound every non-dry-run paper order to an active cohort, immutable strategy revision, fresh executable quote and shared Kelly/risk ledger.
+- 2026-07-14 / Layers 2-6: completed a controlled 14-city D+0/D+1 rebuild while keeping scheduler, paper cohort and live execution off.
+- 2026-07-14 / Layers 3/4: enforced leakage-safe forecast availability and source contracts, quarantining invalid historical predictions without deleting raw rows.
+- 2026-07-13 / Layer 7/8: moved developer parameters into the main dashboard settings drawer and separated save from activation.
 
 ## Production Blockers
 - METAR and Polymarket orderbooks are stale while the scheduler is stopped.
-- Sixteen high-weight forecast components still lack seven independent days of eligible calibration evidence.
-- Wunderground PWS entitlement is missing; PWS and peak-lock remain explicitly unavailable.
-- Shanghai China Live upstream returned HTTP 502 during the controlled refresh and needs a later source retry/fallback review.
-- Authoritative WU/HKO truth and revision-bound resolved paper outcomes remain insufficient for ROI/Brier claims.
-- No 14-30 day paper cohort is active; the existing 60 paper records are legacy and not valid evidence.
-- The live executor remains intentionally non-production and still needs idempotency reservation plus aggregate risk budgeting before canary review.
-- Recent-date `Historical Observation` tabs still return zero rows even when older WU evidence exists; this Layer 2/3 date/provenance chain must be repaired before a paper cohort.
-- Twenty-five display-only cities still require source smoke tests and settlement-contract admission before collection or paper use.
-- Information-edge exits remain disabled until SELL fills and historical orderbook replay exist.
+- Forecast revision history that was never captured cannot be recreated after the fact; future comparisons require continuous collection.
+- The PolyWX-style per-hour forecast revision popup is not implemented yet; WeatherBot currently exposes only revision counts while using revision history in calculations.
+- Sixteen high-weight components still lack seven independent eligible calibration days.
+- Wunderground PWS entitlement is missing; PWS and peak-lock remain unavailable.
+- Authoritative WU/HKO resolved truth and revision-bound paper outcomes remain insufficient for ROI/Brier claims.
+- No 14-30 day paper cohort is active; legacy paper records are not production evidence.
+- The live executor still needs idempotency reservation and aggregate risk budgeting before any canary review.
 
 ## Next Step
-- Repair and verify the recent-date WU Historical ingestion/query path for Shanghai and Chicago; do not mask it with Open-Meteo fallback.
-- After the Historical path is proven, run one short controlled fresh-data cycle and rerun observation/paper verification immediately.
-- Start a 14-30 day revision-bound paper cohort only after fresh executable-book checks pass.
+- Refresh current METAR, model runs and executable orderbooks in one controlled cycle, then verify the same decision batch immediately.
+- Add a read-only PolyWX-style forecast revision detail view without changing model math or execution gates.
+- Start a 14-30 day revision-bound paper cohort only after fresh-source and fresh-book verification passes.
 - Keep live locked until authoritative paper evidence and the live-executor rewrite both pass.

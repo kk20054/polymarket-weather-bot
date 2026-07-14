@@ -268,7 +268,12 @@ def build_ensemble_prediction(
         "model_weights": {component["source"]: component["weight"] for component in usable},
         "member_count": len(samples_unit),
         "components": usable,
-        "source_run_ids": sorted({component["run_id"] for component in usable}),
+        "source_run_ids": sorted({
+            int(run_id)
+            for component in usable
+            for run_id in (component.get("source_run_ids") or [component["run_id"]])
+            if int(run_id or 0) > 0
+        }),
         "member_daily_highs": {
             component["source"]: [
                 round(convert_temperature(value, "C", profile.unit), 4)
@@ -668,7 +673,12 @@ def _latest_forecast_members(
     for row in rows:
         source = str(row.get("source") or "")
         latest_by_source.setdefault(source, int(row.get("run_id") or 0))
-    return [row for row in rows if latest_by_source.get(str(row.get("source") or "")) == int(row.get("run_id") or 0)]
+    return [
+        row
+        for row in rows
+        if str(row.get("source") or "") == "weathercom_v3_forecast"
+        or latest_by_source.get(str(row.get("source") or "")) == int(row.get("run_id") or 0)
+    ]
 
 
 def _components_from_rows(
@@ -695,20 +705,36 @@ def _components_from_rows(
         unit = str(first.get("unit") or profile.unit or "C").upper()
         bias_c, sample_count = _bias_for(bias_table, profile.station_id, family, profile=profile)
         bias_unit = convert_temperature_delta(bias_c, "C", unit)
-        highs_unit = [_first_number(row.get("high_temp")) for row in best_source]
-        highs_c = [
-            convert_temperature(float(value), unit, "C")
-            for value in highs_unit
-            if value is not None and math.isfinite(float(value))
-        ]
-        adjusted_c = [
-            convert_temperature(float(value) - bias_unit, unit, "C")
-            for value in highs_unit
-            if value is not None and math.isfinite(float(value))
-        ]
+        weathercom_archive = (
+            _weathercom_archived_daily_high(best_source, profile, target_date)
+            if family == "weathercom_v3"
+            else {}
+        )
+        if weathercom_archive:
+            highs_c = [float(weathercom_archive["high_c"])]
+            adjusted_c = [float(weathercom_archive["high_c"]) - float(bias_c)]
+        else:
+            highs_unit = [_first_number(row.get("high_temp")) for row in best_source]
+            highs_c = [
+                convert_temperature(float(value), unit, "C")
+                for value in highs_unit
+                if value is not None and math.isfinite(float(value))
+            ]
+            adjusted_c = [
+                convert_temperature(float(value) - bias_unit, unit, "C")
+                for value in highs_unit
+                if value is not None and math.isfinite(float(value))
+            ]
         if not adjusted_c:
             continue
-        peak_hour = _peak_hour_from_members(best_source, unit, bias_unit, profile.timezone)
+        peak_hour = {
+            "peak_hour": weathercom_archive.get("peak_hour"),
+            "peak_temp_c": (
+                float(weathercom_archive["peak_temp_c"]) - float(bias_c)
+                if weathercom_archive.get("peak_temp_c") is not None
+                else None
+            ),
+        } if weathercom_archive else _peak_hour_from_members(best_source, unit, bias_unit, profile.timezone)
         components.append({
             "source": str(first.get("source") or ""),
             "family": family,
@@ -732,6 +758,10 @@ def _components_from_rows(
             "availability_basis": str(first.get("availability_basis") or ""),
             "peak_hour": peak_hour.get("peak_hour") or "",
             "peak_temp_c": peak_hour.get("peak_temp_c"),
+            "source_run_ids": weathercom_archive.get("source_run_ids") or [int(first.get("run_id") or 0)],
+            "snapshot_count": int(weathercom_archive.get("snapshot_count") or 1),
+            "archive_hour_count": int(weathercom_archive.get("hour_count") or 0),
+            "daily_high_basis": weathercom_archive.get("basis") or "latest_forecast_run",
         })
     if _deb_algo() == POLYWX_ALIGNED_ALGO:
         _apply_mae_adjusted_weights(components)
@@ -752,6 +782,74 @@ def _best_source_group(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         key=lambda group: (len(group), str(group[0].get("available_at") or ""), int(group[0].get("run_id") or 0)),
         default=[],
     )
+
+
+def _weathercom_archived_daily_high(
+    rows: list[dict[str, Any]],
+    profile: CitySettlementProfile,
+    target_date: str,
+) -> dict[str, Any]:
+    """Rebuild a full local-day v3 curve from the latest snapshot per hour.
+
+    Weather.com removes elapsed hours from the current hourly response. Treating
+    the latest partial run's maximum as the daily forecast high can therefore
+    turn an afternoon 35 C forecast into an evening-only 30 C forecast. Rows
+    arrive newest first, so older snapshots only fill hours no longer present.
+    """
+
+    latest_by_hour: dict[str, dict[str, Any]] = {}
+    snapshot_run_ids = {
+        int(row.get("run_id") or 0)
+        for row in rows
+        if int(row.get("run_id") or 0) > 0
+    }
+    contributing_run_ids: set[int] = set()
+    zone = _zone(profile.timezone)
+    for row in rows:
+        row_unit = str(row.get("unit") or profile.unit or "C").upper()
+        run_id = int(row.get("run_id") or 0)
+        hourly = _loads(row.get("hourly_json"), [])
+        if not isinstance(hourly, list):
+            continue
+        for point in hourly:
+            if not isinstance(point, dict):
+                continue
+            valid_at = _parse_time(str(point.get("valid_at") or point.get("time") or point.get("timestamp") or ""))
+            point_date = str(point.get("target_date") or "")
+            if valid_at is not None:
+                local_time = valid_at.astimezone(zone)
+                point_date = point_date or local_time.date().isoformat()
+                local_hour = str(point.get("local_hour") or local_time.strftime("%H:%M"))[:5]
+            else:
+                local_hour = str(point.get("local_hour") or "")[:5]
+            if point_date != target_date or not local_hour or local_hour in latest_by_hour:
+                continue
+            temperature = _first_number(point.get("temperature_2m"), point.get("temperature"), point.get("temp"))
+            if temperature is None or not math.isfinite(float(temperature)):
+                continue
+            temperature_c = convert_temperature(float(temperature), row_unit, "C")
+            latest_by_hour[local_hour] = {
+                "temperature_c": temperature_c,
+                "run_id": run_id,
+            }
+            if run_id > 0:
+                contributing_run_ids.add(run_id)
+
+    if not latest_by_hour:
+        return {}
+    peak_hour, peak = max(
+        latest_by_hour.items(),
+        key=lambda item: (float(item[1]["temperature_c"]), item[0]),
+    )
+    return {
+        "high_c": float(peak["temperature_c"]),
+        "peak_hour": peak_hour,
+        "peak_temp_c": float(peak["temperature_c"]),
+        "hour_count": len(latest_by_hour),
+        "snapshot_count": len(snapshot_run_ids),
+        "source_run_ids": sorted(contributing_run_ids),
+        "basis": "latest_snapshot_per_local_hour",
+    }
 
 
 def _weighted_member_highs(profile: CitySettlementProfile, components: list[dict[str, Any]]) -> list[tuple[float, float, dict[str, Any]]]:

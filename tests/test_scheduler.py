@@ -219,9 +219,21 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             {"city_key": "hong-kong", "station_id": "VHHH", "timezone": "Asia/Hong_Kong"},
         ]
         seen: list[str] = []
+        sync_flags: list[bool] = []
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
 
-        def fake_fetch(city: str, **_kwargs):
+        def fake_fetch(city: str, **kwargs):
+            nonlocal active, max_active
             seen.append(city)
+            sync_flags.append(bool(kwargs.get("sync_registry", True)))
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
             return {"ok": True, "city": city, "rows_upserted": 1}
 
         with patch("weatherbot_v3.scheduler._enabled_rows", return_value=rows), patch(
@@ -231,6 +243,8 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(sorted(seen), ["hong-kong", "shanghai"])
+        self.assertEqual(max_active, 1)
+        self.assertEqual(sync_flags, [False, False])
 
     async def test_metar_run_once_limits_concurrency_and_logs_per_city(self):
         db_path = test_db_path("scheduler_concurrency")

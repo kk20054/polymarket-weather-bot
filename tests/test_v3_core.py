@@ -2637,6 +2637,38 @@ class V3CoreTests(unittest.TestCase):
         self.assertTrue(mid["strategy_revision_id"].startswith("spr_"))
         self.assertIn("daily_max_prediction_id", mid["evidence_links"])
 
+    def test_polywx_aligned_decisions_integrate_gaussian_instead_of_model_weight_spikes(self):
+        db_path = test_db_path("signal_decision_polywx_gaussian")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            self._seed_signal_decision_fixture(db_path)
+            upsert_daily_max_prediction({
+                "city_key": "chicago",
+                "target_date": "2026-07-02",
+                "issued_at": "2026-07-02T13:00:00+00:00",
+                "mu": 90.0,
+                "sigma": 2.0,
+                "unit": "F",
+                "method": "polywx_aligned_deb_v1",
+                "deb_version": "polywx_aligned_deb_v1",
+                "forecast_algo": "polywx_aligned_deb_v1",
+                "sigma_floor": 0.9,
+                "source_run_ids": [201, 202],
+                "ensemble_samples": [
+                    {"value": 84.0, "weight": 0.55, "source": "weathercom_v3_forecast"},
+                    {"value": 96.0, "weight": 0.45, "source": "openmeteo_gfs_seamless"},
+                ],
+            }, path=db_path)
+            result = build_signal_decisions("chicago", "2026-07-02", path=db_path)
+            rows = list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
+            mid = next(row for row in rows if row["bucket_key"] == "chicago-20260702-mid")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(mid["model_distribution"]["method"], "gaussian-cdf-v1")
+        self.assertGreater(mid["model_probability"], 0.50)
+        self.assertLess(mid["model_probability"], 0.60)
+
     def test_signal_decisions_are_idempotent_by_decision_id(self):
         db_path = test_db_path("signal_decision_idempotent")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -5407,6 +5439,71 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(v3_component["role"], "weather.com/WU-style v3 forecast")
         self.assertIn("truth_basis", v3_component)
         self.assertNotIn("missing_weathercom_v3", prediction["build_warnings"])
+
+    def test_weathercom_v3_deb_rebuilds_elapsed_hours_from_forecast_snapshots(self):
+        db_path = test_db_path("weathercom_v3_snapshot_daily_high")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        profile = SETTLEMENT_REGISTRY["shanghai"]
+
+        def epoch(local_value: str) -> int:
+            return int(datetime.fromisoformat(local_value).timestamp())
+
+        full_day_payload = {
+            "validTimeUtc": [
+                epoch("2026-07-14T00:00:00+08:00"),
+                epoch("2026-07-14T15:00:00+08:00"),
+                epoch("2026-07-14T20:00:00+08:00"),
+                epoch("2026-07-14T23:00:00+08:00"),
+            ],
+            "temperature": [28.0, 35.0, 31.0, 30.0],
+        }
+        partial_evening_payload = {
+            "validTimeUtc": [
+                epoch("2026-07-14T20:00:00+08:00"),
+                epoch("2026-07-14T23:00:00+08:00"),
+            ],
+            "temperature": [30.0, 29.0],
+        }
+        old_runs, old_members = weathercom_runs_from_response(
+            profile,
+            full_day_payload,
+            source_url="https://api.weather.com/v3/wx/forecast/hourly/15day?apiKey=***",
+            retrieved_at="2026-07-13T12:00:00+00:00",
+            forecast_days=3,
+        )
+        new_runs, new_members = weathercom_runs_from_response(
+            profile,
+            partial_evening_payload,
+            source_url="https://api.weather.com/v3/wx/forecast/hourly/15day?apiKey=***",
+            retrieved_at="2026-07-14T12:00:00+00:00",
+            forecast_days=2,
+        )
+        gfs_run, gfs_members = openmeteo_hourly_run(
+            "shanghai",
+            "2026-07-14",
+            "openmeteo_gfs_seamless",
+            [30.0, 34.0],
+            valid_times=["2026-07-14T00:00:00+08:00", "2026-07-14T15:00:00+08:00"],
+        )
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
+            for run, members in [*zip(old_runs, old_members), *zip(new_runs, new_members)]:
+                insert_forecast_run(run, members)
+            insert_forecast_run(gfs_run, gfs_members)
+            prediction = build_daily_max_prediction(
+                "shanghai",
+                "2026-07-14",
+                issued_at="2026-07-14T13:00:00Z",
+                path=db_path,
+                bias_table=[],
+            )
+
+        self.assertTrue(prediction["ok"])
+        v3_component = next(component for component in prediction["components"] if component["family"] == "weathercom_v3")
+        self.assertAlmostEqual(v3_component["model_daily_high_c"], 35.0, places=2)
+        self.assertEqual(v3_component["archive_hour_count"], 4)
+        self.assertEqual(v3_component["daily_high_basis"], "latest_snapshot_per_local_hour")
+        self.assertGreaterEqual(v3_component["snapshot_count"], 2)
 
     def test_weathercom_forecast_fields_survive_hourly_consensus(self):
         db_path = test_db_path("weathercom_v3_hourly_consensus_fields")

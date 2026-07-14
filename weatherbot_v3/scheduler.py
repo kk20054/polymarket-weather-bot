@@ -425,6 +425,7 @@ class WeatherBotScheduler:
                 target_date=target_date,
                 limit_cities=1,
                 dry_run=False,
+                sync_registry=False,
             )
             return {
                 "ok": _payload_ok(payload),
@@ -436,7 +437,10 @@ class WeatherBotScheduler:
 
         result = await _run_city_batch(
             rows,
-            self.city_concurrency,
+            # WU fetches write both source audit rows and hourly observations.
+            # SQLite has one writer, so concurrent city workers only add lock
+            # waits and can misclassify a successful HTTP response as failed.
+            1,
             run_city,
             poller_key="historical_poller",
             timeout_seconds=FORECAST_CITY_TIMEOUT_SECONDS,

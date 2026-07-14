@@ -16,7 +16,10 @@ from .db import (
     upsert_signal_decision_record,
 )
 from .deb import bucket_probabilities
-from .forecasts.ensemble import distribution_for_prediction as ensemble_distribution_for_prediction
+from .forecasts.ensemble import (
+    POLYWX_ALIGNED_ALGO,
+    distribution_for_prediction as ensemble_distribution_for_prediction,
+)
 from .stations import get_station
 from .strategies import LadderGridStrategy, SingleBucketEVStrategy, TailBuyingStrategy
 from .strategy_profiles import ensure_default_strategy_profile, profile_snapshot
@@ -61,7 +64,18 @@ def build_signal_decisions(
             "decisions": [],
         }
 
-    distribution = ensemble_distribution_for_prediction(prediction, buckets)
+    forecast_algo = str(
+        prediction.get("forecast_algo")
+        or prediction.get("method")
+        or prediction.get("deb_version")
+        or ""
+    )
+    # polywx_aligned_deb_v1 persists one weighted daily high per model family.
+    # Those six component means estimate mu/sigma; they are not independent
+    # ensemble members and must not become six discrete bucket spikes.
+    distribution = None
+    if forecast_algo != POLYWX_ALIGNED_ALGO:
+        distribution = ensemble_distribution_for_prediction(prediction, buckets)
     if not distribution:
         distribution = bucket_probabilities(
             float(prediction["mu"]),
@@ -90,7 +104,7 @@ def build_signal_decisions(
         "distribution": distribution,
         "evidence": evidence,
         "station_live_reasons": station_live_reasons,
-        "forecast_algo": prediction.get("forecast_algo") or prediction.get("method") or prediction.get("deb_version"),
+        "forecast_algo": forecast_algo,
         "max_spread_bps": decision_policy.get("max_spread_bps", MAX_SPREAD_BPS),
         "stale_book_seconds": decision_policy.get("stale_book_seconds", STALE_BOOK_SECONDS),
         "min_bias_sample_days": decision_policy.get("min_bias_sample_days", MIN_BIAS_SAMPLE_DAYS),
@@ -139,7 +153,7 @@ def build_signal_decisions(
         "target_date": date,
         "prediction_id": prediction.get("id"),
         "deb_version": prediction.get("deb_version") or prediction.get("method"),
-        "forecast_algo": prediction.get("forecast_algo") or prediction.get("method") or prediction.get("deb_version"),
+        "forecast_algo": forecast_algo,
         "bucket_count": len(buckets),
         "decision_count": len(decisions),
         "stored": stored,

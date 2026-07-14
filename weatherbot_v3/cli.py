@@ -1095,10 +1095,12 @@ def run_wunderground_hourly_fetch(
     all_cities: bool = False,
     limit_cities: int = 10,
     dry_run: bool = False,
+    sync_registry: bool = True,
 ) -> dict:
     from .truth.wunderground import fetch_wunderground_hourly_result, persist_wunderground_hourly
 
-    sync_station_registry()
+    if sync_registry:
+        sync_station_registry()
     requested = _cities_from_arg(cities_arg)
     rows = list_stations()
     if requested:
