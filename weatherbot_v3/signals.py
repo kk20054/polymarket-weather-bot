@@ -94,6 +94,7 @@ def build_signal_decisions(
         "max_spread_bps": decision_policy.get("max_spread_bps", MAX_SPREAD_BPS),
         "stale_book_seconds": decision_policy.get("stale_book_seconds", STALE_BOOK_SECONDS),
         "min_bias_sample_days": decision_policy.get("min_bias_sample_days", MIN_BIAS_SAMPLE_DAYS),
+        "low_price_tail_ask": decision_policy.get("low_price_tail_ask", 0.05),
         "bankroll": getattr(cfg, "bankroll_usd", getattr(cfg, "max_bet", 0.0)),
         "kelly_multiplier": sizing_policy.get("kelly_multiplier", getattr(cfg, "kelly_multiplier", 0.15)),
         "bankroll_fraction_cap": sizing_policy.get("max_bankroll_fraction_per_trade", 0.05),

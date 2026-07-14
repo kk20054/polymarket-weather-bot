@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Any
 
 from .config import ASIAN_CITY_PRIORITY
 from .db import connect, init_v3_db, list_signal_decisions, utc_now
-from .paper import PAPER_EXECUTION_VERSION, execute_paper_decision_record
+from .paper import PAPER_EXECUTION_VERSION, execute_paper_decision_record, refresh_paper_decision_quote
 from .sizing import size_for_cohort
 from .stations import enabled_station_rows
 from .strategy_profiles import (
@@ -19,6 +20,7 @@ from .strategy_profiles import (
 
 
 PAPER_VALIDATION_VERSION = "paper-validation-v2"
+_PAPER_VALIDATION_EXECUTION_LOCK = threading.RLock()
 
 
 def start_paper_validation_run(
@@ -146,10 +148,66 @@ def paper_validation_status(*, run_id: str = "", path: Path | None = None) -> di
     return {"ok": True, **run, **metrics}
 
 
-def run_paper_validation_tick(*, apply: bool = True, path: Path | None = None) -> dict[str, Any]:
-    run = get_active_paper_validation_run(path=path)
+def run_paper_validation_tick(
+    *,
+    apply: bool = True,
+    run_id: str = "",
+    decision_id: str = "",
+    city_key: str = "",
+    target_date: str = "",
+    strategies: list[str] | None = None,
+    strategy_revision_id: str = "",
+    decision_batch_issued_at: str = "",
+    path: Path | None = None,
+) -> dict[str, Any]:
+    with _PAPER_VALIDATION_EXECUTION_LOCK:
+        return _run_paper_validation_tick_locked(
+            apply=apply,
+            run_id=run_id,
+            decision_id=decision_id,
+            city_key=city_key,
+            target_date=target_date,
+            strategies=strategies,
+            strategy_revision_id=strategy_revision_id,
+            decision_batch_issued_at=decision_batch_issued_at,
+            path=path,
+        )
+
+
+def _run_paper_validation_tick_locked(
+    *,
+    apply: bool,
+    run_id: str,
+    decision_id: str,
+    city_key: str,
+    target_date: str,
+    strategies: list[str] | None,
+    strategy_revision_id: str,
+    decision_batch_issued_at: str,
+    path: Path | None,
+) -> dict[str, Any]:
+    active = get_active_paper_validation_run(path=path)
+    if run_id:
+        requested = _load_run(run_id, path=path)
+        if not requested or requested.get("status") != "active" or not active or active.get("run_id") != run_id:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "reason": "paper_validation_run_not_active",
+                "run_id": run_id,
+            }
+        run = requested
+    else:
+        run = active
     if not run:
         return {"ok": True, "status": "inactive", "skipped": True, "reason": "no_active_paper_validation_run"}
+    if strategy_revision_id and str(run.get("strategy_revision_id") or "") != str(strategy_revision_id):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "strategy_revision_mismatch",
+            "run_id": run["run_id"],
+        }
     metrics = _run_metrics(run, path=path)
     remaining_open = max(0, int(run["max_open_positions"]) - int(metrics["open_positions"]))
     remaining_orders = max(0, int(run["max_orders_per_day"]) - int(metrics["orders_today"]))
@@ -165,8 +223,23 @@ def run_paper_validation_tick(*, apply: bool = True, path: Path | None = None) -
             "metrics": metrics,
         }
 
-    candidates = _fresh_candidates(run, path=path)
+    candidates = _fresh_candidates(
+        run,
+        decision_id=decision_id,
+        city_key=city_key,
+        target_date=target_date,
+        strategies=strategies,
+        strategy_revision_id=strategy_revision_id,
+        decision_batch_issued_at=decision_batch_issued_at,
+        path=path,
+    )
     results: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    profile_parameters = (run.get("strategy_profile_snapshot") or {}).get("parameters", {})
+    decision_policy = profile_parameters.get("decision_policy", {})
+    strategy_parameters = profile_parameters.get("strategies", {})
+    max_book_age_seconds = _number_or_default(decision_policy.get("stale_book_seconds"), 300.0)
+    max_spread_bps = _number_or_default(decision_policy.get("max_spread_bps"), 500.0)
     for decision in candidates:
         group_rows = _candidate_group_rows(decision, path=path)
         leg_count = len(group_rows) if decision.get("ladder_group_id") else 1
@@ -174,11 +247,29 @@ def run_paper_validation_tick(*, apply: bool = True, path: Path | None = None) -
             continue
         if remaining_daily < 0.01 or cash_available < 0.01:
             break
+        fresh_group_rows = [refresh_paper_decision_quote(row, path=path) for row in (group_rows or [decision])]
+        fresh_reasons = _fresh_quote_gate_reasons(
+            fresh_group_rows,
+            decision_policy=decision_policy,
+            strategy_parameters=strategy_parameters,
+        )
+        if fresh_reasons:
+            skipped.append({
+                "decision_id": decision.get("decision_id"),
+                "ladder_group_id": decision.get("ladder_group_id") or "",
+                "reason": fresh_reasons[0],
+                "reasons": fresh_reasons,
+            })
+            continue
+        decision = next(
+            (row for row in fresh_group_rows if row.get("decision_id") == decision.get("decision_id")),
+            fresh_group_rows[0],
+        )
+        group_rows = fresh_group_rows
         sizing_decision = max(
             group_rows or [decision],
             key=lambda row: float(row.get("model_probability") or 0.0),
         )
-        strategy_parameters = (run.get("strategy_profile_snapshot") or {}).get("parameters", {}).get("strategies", {})
         strategy_config = strategy_parameters.get(str(decision.get("strategy_name") or "single_bucket_ev"), {})
         strategy_cap = strategy_config.get("max_order_usd") if decision.get("strategy_name") == "tail_buying" else None
         exposure_multiplier = (
@@ -190,8 +281,8 @@ def run_paper_validation_tick(*, apply: bool = True, path: Path | None = None) -
             sizing_decision.get("market_ask"),
             bankroll=cash_available,
             max_per_trade_usd=float(run["max_per_trade_usd"]),
-            kelly_multiplier=float(run.get("kelly_multiplier") or 0.15),
-            bankroll_fraction_cap=float(run.get("bankroll_fraction_cap") or 0.05),
+            kelly_multiplier=_number_or_default(run.get("kelly_multiplier"), 0.15),
+            bankroll_fraction_cap=_number_or_default(run.get("bankroll_fraction_cap"), 0.05),
             strategy_cap_usd=strategy_cap,
             remaining_daily_usd=remaining_daily,
             cash_available_usd=cash_available,
@@ -215,8 +306,16 @@ def run_paper_validation_tick(*, apply: bool = True, path: Path | None = None) -
             cohort_run_id=run["run_id"],
             max_per_trade_usd=float(run["max_per_trade_usd"]),
             sizing_snapshot=sizing_snapshot,
+            max_book_age_seconds=max_book_age_seconds,
+            max_spread_bps=max_spread_bps,
         )
         if not preflight.get("ok"):
+            skipped.append({
+                "decision_id": decision.get("decision_id"),
+                "ladder_group_id": decision.get("ladder_group_id") or "",
+                "reason": preflight.get("reason") or "paper_preflight_failed",
+                "reasons": preflight.get("risk_reasons") or [preflight.get("reason") or "paper_preflight_failed"],
+            })
             continue
         result = preflight
         if apply:
@@ -228,6 +327,8 @@ def run_paper_validation_tick(*, apply: bool = True, path: Path | None = None) -
                 cohort_run_id=run["run_id"],
                 max_per_trade_usd=float(run["max_per_trade_usd"]),
                 sizing_snapshot=sizing_snapshot,
+                max_book_age_seconds=max_book_age_seconds,
+                max_spread_bps=max_spread_bps,
             )
         results.append(result)
         if result.get("ok") and result.get("status") != "duplicate":
@@ -238,21 +339,35 @@ def run_paper_validation_tick(*, apply: bool = True, path: Path | None = None) -
             remaining_orders = max(0, remaining_orders - leg_count)
     return {
         "ok": all(row.get("ok") or row.get("status") == "duplicate" for row in results),
-        "status": "executed" if results else "no_fresh_candidates",
+        "status": ("executed" if apply else "dry_run") if results else ("no_executable_candidates" if skipped else "no_fresh_candidates"),
+        "reason": skipped[0]["reason"] if skipped and not results else None,
         "run_id": run["run_id"],
         "apply": apply,
         "candidate_count": len(candidates),
         "executed": sum(1 for row in results if row.get("ok") and row.get("status") != "duplicate"),
         "duplicates": sum(1 for row in results if row.get("status") == "duplicate"),
         "results": results,
+        "skipped_candidates": skipped,
         "metrics": _run_metrics(run, path=path) if apply else metrics,
     }
 
 
-def _fresh_candidates(run: dict[str, Any], *, path: Path | None) -> list[dict[str, Any]]:
+def _fresh_candidates(
+    run: dict[str, Any],
+    *,
+    decision_id: str = "",
+    city_key: str = "",
+    target_date: str = "",
+    strategies: list[str] | None = None,
+    strategy_revision_id: str = "",
+    decision_batch_issued_at: str = "",
+    path: Path | None,
+) -> list[dict[str, Any]]:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=float(run["decision_max_age_minutes"]))
     allowed_cities = set(run.get("cities") or [])
     allowed_strategies = set(run.get("strategies") or [])
+    if strategies:
+        allowed_strategies &= set(strategies)
     rows = list_signal_decisions(limit=2000, path=path)
     with connect(path) as conn:
         existing_rows = conn.execute(
@@ -265,6 +380,14 @@ def _fresh_candidates(run: dict[str, Any], *, path: Path | None) -> list[dict[st
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in rows:
+        if decision_id and str(row.get("decision_id") or "") != str(decision_id):
+            continue
+        if city_key and str(row.get("city_key") or "") != str(city_key):
+            continue
+        if target_date and str(row.get("target_date") or "") != str(target_date):
+            continue
+        if decision_batch_issued_at and str(row.get("issued_at") or "") != str(decision_batch_issued_at):
+            continue
         issued = _parse_time(str(row.get("issued_at") or row.get("updated_at") or ""))
         if issued < cutoff:
             continue
@@ -272,7 +395,8 @@ def _fresh_candidates(run: dict[str, Any], *, path: Path | None) -> list[dict[st
         strategy = str(row.get("strategy_name") or "single_bucket_ev")
         if city not in allowed_cities or strategy not in allowed_strategies:
             continue
-        if str(row.get("strategy_revision_id") or "") != str(run.get("strategy_revision_id") or ""):
+        expected_revision = strategy_revision_id or str(run.get("strategy_revision_id") or "")
+        if str(row.get("strategy_revision_id") or "") != expected_revision:
             continue
         if not bool(row.get("paper_allowed")) or str(row.get("paper_decision") or "") != "buy":
             continue
@@ -287,6 +411,71 @@ def _fresh_candidates(run: dict[str, Any], *, path: Path | None) -> list[dict[st
         selected.append(row)
     selected.sort(key=lambda row: (-float(row.get("edge") or 0.0), str(row.get("issued_at") or "")))
     return selected
+
+
+def _fresh_quote_gate_reasons(
+    rows: list[dict[str, Any]],
+    *,
+    decision_policy: dict[str, Any],
+    strategy_parameters: dict[str, Any],
+) -> list[str]:
+    reasons: list[str] = []
+    max_spread_bps = _number_or_default(decision_policy.get("max_spread_bps"), 500.0)
+    stale_book_seconds = _number_or_default(decision_policy.get("stale_book_seconds"), 300.0)
+    for row in rows:
+        probability = _optional_number(row.get("model_probability"))
+        ask = _optional_number(row.get("market_ask"))
+        bid = _optional_number(row.get("market_bid"))
+        if probability is None:
+            reasons.append("model_probability_missing")
+            continue
+        if ask is None or ask <= 0 or ask >= 1:
+            reasons.append("best_ask_missing_or_invalid")
+            continue
+        strategy_name = str(row.get("strategy_name") or "single_bucket_ev")
+        strategy_config = strategy_parameters.get(strategy_name, {})
+        edge = probability - ask
+        row["market_implied_probability"] = ask
+        row["edge"] = edge
+        min_edge = _number_or_default(strategy_config.get("min_edge"), 0.0)
+        if edge + 1e-12 < min_edge:
+            reasons.append("edge_below_min_after_reprice")
+        if strategy_name == "tail_buying" and ask > _number_or_default(strategy_config.get("max_ask"), 0.15) + 1e-12:
+            reasons.append("tail_ask_above_max_after_reprice")
+        snapshot = row.get("orderbook_snapshot") or {}
+        spread = _optional_number(snapshot.get("spread"))
+        if spread is None and bid is not None:
+            spread = max(0.0, ask - bid)
+        spread_bps = spread / ask * 10_000.0 if spread is not None else None
+        row["spread_bps"] = spread_bps
+        if spread_bps is None:
+            reasons.append("spread_missing_after_reprice")
+        elif spread_bps > max_spread_bps + 1e-9:
+            reasons.append("spread_too_wide_after_reprice")
+        age_seconds = _optional_number((row.get("execution_quote") or {}).get("age_seconds"))
+        if age_seconds is None:
+            reasons.append("orderbook_timestamp_missing_or_invalid")
+        elif age_seconds > stale_book_seconds:
+            reasons.append("orderbook_stale")
+    return _unique_strings(reasons)
+
+
+def _optional_number(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _number_or_default(value: Any, default: float) -> float:
+    number = _optional_number(value)
+    return default if number is None else number
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(str(value) for value in values if value))
 
 
 def _run_metrics(run: dict[str, Any], *, path: Path | None) -> dict[str, Any]:

@@ -56,6 +56,8 @@ def execute_paper_decision_record(
     cohort_run_id: str = "",
     max_per_trade_usd: float | None = None,
     sizing_snapshot: dict[str, Any] | None = None,
+    max_book_age_seconds: float | None = None,
+    max_spread_bps: float | None = None,
 ) -> dict[str, Any]:
     ladder_group_id = str(decision.get("ladder_group_id") or "").strip()
     if ladder_group_id:
@@ -68,6 +70,8 @@ def execute_paper_decision_record(
             cohort_run_id=cohort_run_id,
             max_per_trade_usd=max_per_trade_usd,
             sizing_snapshot=sizing_snapshot,
+            max_book_age_seconds=max_book_age_seconds,
+            max_spread_bps=max_spread_bps,
         )
     return _execute_single_paper_decision_record(
         decision,
@@ -77,6 +81,8 @@ def execute_paper_decision_record(
         cohort_run_id=cohort_run_id,
         max_per_trade_usd=max_per_trade_usd,
         sizing_snapshot=sizing_snapshot,
+        max_book_age_seconds=max_book_age_seconds,
+        max_spread_bps=max_spread_bps,
     )
 
 
@@ -89,6 +95,8 @@ def _execute_single_paper_decision_record(
     cohort_run_id: str = "",
     max_per_trade_usd: float | None = None,
     sizing_snapshot: dict[str, Any] | None = None,
+    max_book_age_seconds: float | None = None,
+    max_spread_bps: float | None = None,
 ) -> dict[str, Any]:
     cfg = load_config()
     now = datetime.now(timezone.utc).isoformat()
@@ -113,7 +121,14 @@ def _execute_single_paper_decision_record(
             "order": existing,
         }
 
-    risk_reasons = _risk_reasons(execution_decision, order, cfg, path=path)
+    risk_reasons = _risk_reasons(
+        execution_decision,
+        order,
+        cfg,
+        path=path,
+        max_book_age_seconds=max_book_age_seconds,
+        max_spread_bps=max_spread_bps,
+    )
     if risk_reasons:
         order.update({
             "status": "rejected",
@@ -244,6 +259,8 @@ def execute_paper_ladder_group(
     cohort_run_id: str = "",
     max_per_trade_usd: float | None = None,
     sizing_snapshot: dict[str, Any] | None = None,
+    max_book_age_seconds: float | None = None,
+    max_spread_bps: float | None = None,
 ) -> dict[str, Any]:
     group_id = str(ladder_group_id or "").strip()
     if not group_id:
@@ -304,7 +321,14 @@ def execute_paper_ladder_group(
 
     grouped_reasons: dict[str, list[str]] = {}
     for row, order in zip(rows, orders):
-        reasons = _risk_reasons(row, order, cfg, path=path)
+        reasons = _risk_reasons(
+            row,
+            order,
+            cfg,
+            path=path,
+            max_book_age_seconds=max_book_age_seconds,
+            max_spread_bps=max_spread_bps,
+        )
         requested_shares = _num((order.get("derived") or {}).get("requested_shares"), 0.0) or 0.0
         ask_depth = _num((row.get("orderbook_snapshot") or {}).get("ask_depth"), 0.0) or 0.0
         if ask_depth + 1e-9 < requested_shares:
@@ -541,6 +565,20 @@ def _decision_with_latest_quote(
     return result
 
 
+def refresh_paper_decision_quote(
+    decision: dict[str, Any],
+    *,
+    path: Path | None = None,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Return a decision bound to the latest locally persisted orderbook quote."""
+    return _decision_with_latest_quote(
+        decision,
+        path=path,
+        now=now or datetime.now(timezone.utc).isoformat(),
+    )
+
+
 def _age_seconds(value: str, now: str) -> float | None:
     try:
         text = str(value or "").strip()
@@ -570,7 +608,15 @@ def _age_seconds(value: str, now: str) -> float | None:
         return None
 
 
-def _risk_reasons(decision: dict[str, Any], order: dict[str, Any], cfg: Any, *, path: Path | None) -> list[str]:
+def _risk_reasons(
+    decision: dict[str, Any],
+    order: dict[str, Any],
+    cfg: Any,
+    *,
+    path: Path | None,
+    max_book_age_seconds: float | None = None,
+    max_spread_bps: float | None = None,
+) -> list[str]:
     reasons: list[str] = []
     if not bool(decision.get("paper_allowed")) or str(decision.get("paper_decision") or "") != "buy":
         reasons.append("paper_gate_not_passed")
@@ -597,6 +643,14 @@ def _risk_reasons(decision: dict[str, Any], order: dict[str, Any], cfg: Any, *, 
         reasons.append("ask_below_min_price")
     if spread is not None and spread > cfg.max_slippage:
         reasons.append("spread_above_max_slippage")
+    if (
+        max_spread_bps is not None
+        and market_ask is not None
+        and market_ask > 0
+        and spread is not None
+        and spread / market_ask * 10_000.0 > float(max_spread_bps) + 1e-9
+    ):
+        reasons.append("spread_too_wide")
     if tick_size is None or tick_size <= 0:
         reasons.append("tick_size_missing")
     elif market_ask is not None and not price_matches_tick(market_ask, tick_size):
@@ -612,7 +666,11 @@ def _risk_reasons(decision: dict[str, Any], order: dict[str, Any], cfg: Any, *, 
         reasons.append("ask_depth_missing")
     if book_age_seconds is None:
         reasons.append("orderbook_timestamp_missing_or_invalid")
-    elif book_age_seconds > cfg.orderbook_max_age_minutes * 60:
+    elif book_age_seconds > (
+        float(max_book_age_seconds)
+        if max_book_age_seconds is not None
+        else cfg.orderbook_max_age_minutes * 60
+    ):
         reasons.append("orderbook_stale")
     duplicate = open_paper_order_for_token(order["yes_token_id"], path=path)
     if duplicate and duplicate.get("idempotency_key") != order["idempotency_key"]:

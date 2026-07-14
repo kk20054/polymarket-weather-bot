@@ -3228,7 +3228,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(orders[0]["lifecycle_status"], "rejected")
         self.assertEqual(fills, 0)
 
-    def test_layer8_paper_execution_api_and_cli_are_controlled(self):
+    def test_layer8_paper_execution_api_requires_active_cohort_for_writes(self):
         db_path = test_db_path("paper_execution_api_cli")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "2.0"}, clear=False):
@@ -3242,16 +3242,24 @@ class V3CoreTests(unittest.TestCase):
             dry_run_cli = run_paper_execute(decision_id=decision["decision_id"], amount=2.0, apply=False)
             self.assertTrue(dry_run_cli["dry_run"])
             self.assertEqual(len(list_paper_orders(path=db_path)), 0)
-            api_result = asyncio.run(paper_orders_execute_api(PaperExecutionRequest(
+            api_dry_run = asyncio.run(paper_orders_execute_api(PaperExecutionRequest(
                 decision_id=decision["decision_id"],
                 amount=2.0,
-                dry_run=False,
+                dry_run=True,
             )))
+            from fastapi import HTTPException
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(paper_orders_execute_api(PaperExecutionRequest(
+                    decision_id=decision["decision_id"],
+                    amount=2.0,
+                    dry_run=False,
+                )))
             api_summary = asyncio.run(paper_orders_api(city="chicago", target_date="2026-07-02"))
 
-        self.assertTrue(api_result["ok"])
-        self.assertFalse(api_result["dry_run"])
-        self.assertEqual(api_summary["count"], 1)
+        self.assertTrue(api_dry_run["ok"])
+        self.assertTrue(api_dry_run["dry_run"])
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(api_summary["count"], 0)
 
     def test_signal_decisions_cli_runner_calls_layer6_builder(self):
         with patch("weatherbot_v3.cli.build_data_readiness", return_value={"stages": [{"key": "signal_decisions", "status": "ready"}]}), \

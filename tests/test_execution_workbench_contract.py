@@ -31,12 +31,16 @@ class ExecutionWorkbenchContractTests(unittest.TestCase):
         self.assertIn("实盘锁定", component)
         self.assertIn("latestDecisionIssuedAt", component)
         self.assertIn("decisionBatchIssuedAt", component)
+        self.assertIn("cohortRunId: validation?.run_id", component)
+        self.assertIn("accountActive={validationActive}", component)
+        self.assertIn("runId: started.run_id", component)
         self.assertIn("strategyRevisionId", component)
         self.assertIn("ladderGroupId", component)
         self.assertIn("模拟当前可用策略", component)
         self.assertIn("一键模拟", component)
         self.assertIn("startPaperValidation", component)
         self.assertIn("暂无模拟订单", component)
+        self.assertNotIn("模拟金额", component)
 
     def test_strategy_lab_is_separate_from_normal_workbench(self):
         main = (ROOT / "frontend" / "src" / "main.tsx").read_text(encoding="utf-8")

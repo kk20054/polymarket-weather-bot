@@ -90,18 +90,24 @@ class StrategyBase:
             hard_blocks.append("market_probability_missing")
         if model_probability is None:
             hard_blocks.append("model_probability_missing")
-        if not allow_low_price_tail and is_low_price_tail(bucket, market_ask):
+        low_price_tail_ask = context_number(context, "low_price_tail_ask", 0.05)
+        max_spread_bps = context_number(context, "max_spread_bps", 500.0)
+        stale_book_seconds = context_number(context, "stale_book_seconds", 300.0)
+        min_bias_sample_days = int(context_number(context, "min_bias_sample_days", 7.0))
+        kelly_multiplier = context_number(context, "kelly_multiplier", 0.15)
+        bankroll_fraction_cap = context_number(context, "bankroll_fraction_cap", 0.05)
+        if not allow_low_price_tail and is_low_price_tail(bucket, market_ask, threshold=low_price_tail_ask):
             hard_blocks.append("low_price_tail_bucket")
-        if spread_bps is not None and spread_bps > float(context.get("max_spread_bps") or 500.0) + 1e-9:
+        if spread_bps is not None and spread_bps > max_spread_bps + 1e-9:
             hard_blocks.append("spread_too_wide")
         if book_age_seconds is None:
             cautions.append("book_timestamp_missing")
-        elif book_age_seconds > float(context.get("stale_book_seconds") or 300.0):
+        elif book_age_seconds > stale_book_seconds:
             cautions.append("stale_book")
         forecast_algo = str(prediction.get("forecast_algo") or prediction.get("method") or prediction.get("deb_version") or "")
         if forecast_algo not in {"weatherbot-deb-v2", "ensemble_v1", "polywx_aligned_deb_v1"}:
             hard_blocks.append("forecast_algo_not_supported")
-        if int(prediction.get("bias_sample_count") or 0) < int(context.get("min_bias_sample_days") or 7):
+        if int(prediction.get("bias_sample_count") or 0) < min_bias_sample_days:
             gate_reasons.append("insufficient_bias_samples")
         if edge is None or edge < float(min_edge):
             skip_reasons.append("edge_below_min")
@@ -119,7 +125,7 @@ class StrategyBase:
         live_allowed = False
         live_decision = "blocked"
         live_reasons = []
-        if int(prediction.get("bias_sample_count") or 0) < int(context.get("min_bias_sample_days") or 7):
+        if int(prediction.get("bias_sample_count") or 0) < min_bias_sample_days:
             live_reasons.append("insufficient_bias_samples")
         live_reasons.extend(context.get("station_live_reasons") or [])
         if not paper_allowed:
@@ -134,8 +140,8 @@ class StrategyBase:
             market_ask,
             bankroll=float(context.get("bankroll") or 0.0),
             max_per_trade_usd=float(context.get("max_per_trade_usd") or 0.0),
-            kelly_multiplier=float(context.get("kelly_multiplier") or 0.15),
-            bankroll_fraction_cap=float(context.get("bankroll_fraction_cap") or 0.05),
+            kelly_multiplier=kelly_multiplier,
+            bankroll_fraction_cap=bankroll_fraction_cap,
         )
         kelly_fraction = sizing.kelly_fraction if kelly_fraction_override is None else round(max(0.0, float(kelly_fraction_override)), 8)
         position_size = sizing.capped_position_size_usd if position_size_override is None else round(max(0.0, float(position_size_override)), 4)
@@ -174,8 +180,8 @@ class StrategyBase:
             "strategy_params_snapshot": context.get("strategy_params_snapshot") or {},
             "sizing_bankroll_usd": float(context.get("bankroll") or 0.0),
             "sizing_max_per_trade_usd": float(context.get("max_per_trade_usd") or 0.0),
-            "kelly_multiplier": float(context.get("kelly_multiplier") or 0.15),
-            "bankroll_fraction_cap": float(context.get("bankroll_fraction_cap") or 0.05),
+            "kelly_multiplier": kelly_multiplier,
+            "bankroll_fraction_cap": bankroll_fraction_cap,
             "sizing_snapshot": sizing.snapshot(),
             "orderbook_snapshot": {
                 "best_bid": market_bid,
@@ -349,11 +355,16 @@ def hour_key(value: Any) -> str:
     return parsed.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
 
 
-def is_low_price_tail(bucket: dict[str, Any], ask: float | None) -> bool:
+def context_number(context: dict[str, Any], key: str, default: float) -> float:
+    value = optional_float(context.get(key))
+    return default if value is None else value
+
+
+def is_low_price_tail(bucket: dict[str, Any], ask: float | None, *, threshold: float = 0.05) -> bool:
     direction = str(bucket.get("bucket_direction") or "").lower()
     if direction not in {"or_above", "or_below", "above", "below", "under", "over", "at_or_above", "at_or_below"}:
         return False
-    return ask is not None and ask < 0.05
+    return ask is not None and ask < max(0.0, float(threshold))
 
 
 def unique(values: list[str]) -> list[str]:

@@ -169,8 +169,26 @@ export async function stopPaperValidation(): Promise<PaperValidationStatus & { r
   return data
 }
 
-export async function runPaperValidationTick(): Promise<PaperExecutionResult> {
-  const { data } = await api.post<PaperExecutionResult>('/paper-validation/tick')
+export async function runPaperValidationTick(options: {
+  runId?: string
+  decisionId?: string
+  city?: string
+  targetDate?: string
+  strategies?: string[]
+  strategyRevisionId?: string
+  decisionBatchIssuedAt?: string
+  apply?: boolean
+} = {}): Promise<PaperExecutionResult> {
+  const { data } = await api.post<PaperExecutionResult>('/paper-validation/tick', {
+    run_id: options.runId ?? '',
+    decision_id: options.decisionId ?? '',
+    city: options.city ?? '',
+    target_date: options.targetDate ?? '',
+    strategies: options.strategies,
+    strategy_revision_id: options.strategyRevisionId ?? '',
+    decision_batch_issued_at: options.decisionBatchIssuedAt ?? '',
+    apply: options.apply ?? true,
+  })
   return data
 }
 
@@ -248,6 +266,7 @@ export async function executePaperOrders(options: {
   strategies?: string[]
   strategyRevisionId?: string
   decisionBatchIssuedAt?: string
+  cohortRunId?: string
   limit?: number
   dryRun?: boolean
 }): Promise<PaperExecutionResult> {
@@ -259,6 +278,7 @@ export async function executePaperOrders(options: {
     strategies: options.strategies,
     strategy_revision_id: options.strategyRevisionId ?? '',
     decision_batch_issued_at: options.decisionBatchIssuedAt ?? '',
+    cohort_run_id: options.cohortRunId ?? '',
     limit: options.limit ?? 20,
     dry_run: options.dryRun ?? true,
   })

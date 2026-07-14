@@ -699,6 +699,15 @@ export interface PaperExecutionResult {
   rejected?: number
   decision_id?: string
   ladder_group_id?: string
+  run_id?: string
+  candidate_count?: number
+  skipped_candidates?: Array<{
+    decision_id?: string
+    ladder_group_id?: string
+    reason?: string
+    reasons?: string[]
+  }>
+  metrics?: Partial<PaperValidationStatus>
   order?: PaperOrderRecord
   results?: PaperExecutionResult[]
   summary?: PaperExecutionSummary
@@ -1313,6 +1322,7 @@ export interface StrategyProfilesResponse {
   profiles: StrategyProfileRevision[]
   allowed_scopes: string[]
   live_trading: boolean
+  live_execution_production_ready: boolean
 }
 
 export interface CityEvidenceModule {

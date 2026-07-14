@@ -370,7 +370,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
   const profiles = profilesQuery.data?.profiles ?? []
   const activeSignal = profiles.find(profile => profile.active_scopes.includes('signal_generation'))
   const activePaper = profiles.find(profile => profile.active_scopes.includes('paper_default'))
-  const baseline = activeSignal ?? activePaper ?? profiles[0]
+  const baseline = activePaper ?? activeSignal ?? profiles[0]
   const [section, setSection] = useState<SettingsSection>('sources')
   const [draft, setDraft] = useState<StrategyProfileParameters | null>(null)
   const [draftBaseRevision, setDraftBaseRevision] = useState('')
@@ -393,8 +393,9 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
 
   const resetDraft = () => {
     if (!baseline) return
-    setDraft(cloneParameters(baseline.parameters))
-    setDraftBaseRevision(baseline.revision_id)
+    const source = profiles.find(profile => profile.revision_id === draftBaseRevision) ?? baseline
+    setDraft(cloneParameters(source.parameters))
+    setDraftBaseRevision(source.revision_id)
     setNote('')
     setMessage('')
   }
@@ -425,9 +426,11 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
   const activationMutation = useMutation({
     mutationFn: ({ revision, scope }: { revision: StrategyProfileRevision; scope: string }) =>
       activateStrategyProfile(revision.revision_id, scope, 'local developer activation'),
-    onSuccess: () => {
+    onSuccess: (_revision, variables) => {
       setActivationTarget(null)
-      setMessage('策略作用域已更新，新信号或新模拟 cohort 将使用该版本。')
+      setMessage(variables.scope === 'paper_default'
+        ? '模拟策略版本已更新。需要等待同版本信号重建后，策略队列才会出现可执行候选。'
+        : '信号策略版本已更新，将在下一轮派生任务重建信号。')
       queryClient.invalidateQueries({ queryKey: ['strategy-profiles'] })
     },
     onError: error => {
@@ -447,7 +450,12 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
 
   const surface = themeMode === 'dark' ? 'bg-[#1B212C] text-[#CBD2DC]' : 'bg-white text-gray-900'
   const raised = themeMode === 'dark' ? 'bg-[#222A37]' : 'bg-gray-50'
-  const liveLocked = !(profilesQuery.data?.live_trading ?? false)
+  const liveConfigured = profilesQuery.data?.live_trading ?? false
+  const liveExecutionReady = profilesQuery.data?.live_execution_production_ready ?? false
+  const liveLocked = !(liveConfigured && liveExecutionReady)
+  const liveStatusText = liveExecutionReady
+    ? (liveConfigured ? '实盘已通过结构闸门' : '实盘保持锁定')
+    : '实盘执行器未就绪'
 
   return (
     <div className={`relative flex h-full min-h-0 flex-col ${surface}`}>
@@ -460,7 +468,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
           <div className="text-[10px] text-neutral-500">连接数据服务，管理模拟策略</div>
         </div>
         <div className={`hidden items-center gap-1 border px-2 py-1 text-[10px] sm:inline-flex ${liveLocked ? 'border-amber-500/30 text-amber-300' : 'border-green-500/30 text-green-300'}`}>
-          <LockKeyhole className="h-3.5 w-3.5" /> {liveLocked ? '实盘保持锁定' : '实盘配置已开启'}
+          <LockKeyhole className="h-3.5 w-3.5" /> {liveStatusText}
         </div>
         {onClose && (
           <button type="button" onClick={onClose} className="inline-flex h-8 w-8 items-center justify-center border border-neutral-700 text-neutral-400 hover:bg-neutral-800 hover:text-white" aria-label={standalone ? '返回看板' : '关闭设置'}>
@@ -516,7 +524,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                 <div className="border-y border-neutral-800">
                   <SettingNumber label="最大价差" description="超过该 spread 的候选只观察，不进入模拟成交。" value={draft.decision_policy.max_spread_bps} min={0} max={5000} step={10} suffix="bps" onChange={value => update(['decision_policy', 'max_spread_bps'], value)} />
                   <SettingNumber label="盘口有效期" description="成交前会读取最新本地盘口；超过该时间则拒绝。" value={draft.decision_policy.stale_book_seconds} min={30} max={3600} step={30} suffix="秒" onChange={value => update(['decision_policy', 'stale_book_seconds'], value)} />
-                  <SettingNumber label="最少独立校准日" description="按独立结算日计数，不把同一天的重复快照当成新样本。" value={draft.decision_policy.min_bias_sample_days} min={0} max={365} step={1} suffix="天" onChange={value => update(['decision_policy', 'min_bias_sample_days'], value)} />
+                  <SettingNumber label="实盘最少校准日" description="只影响实盘准备度；模拟盘保留这些候选，用于继续积累独立结算样本。" value={draft.decision_policy.min_bias_sample_days} min={0} max={365} step={1} suffix="天" onChange={value => update(['decision_policy', 'min_bias_sample_days'], value)} />
                   <SettingNumber label="低价尾部阈值" description="低于该价格的桶会进入更严格的尾部概率检查。" value={draft.decision_policy.low_price_tail_ask} min={0} max={0.5} step={0.01} onChange={value => update(['decision_policy', 'low_price_tail_ask'], value)} />
                 </div>
 
@@ -540,7 +548,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                             {'group_exposure_multiplier' in parameters && <SettingNumber label="组合仓位折扣" description="相邻三桶总仓位相对单桶建议仓位的折扣。" value={Number(parameters.group_exposure_multiplier)} min={0} max={1} step={0.05} onChange={value => update(['strategies', name, 'group_exposure_multiplier'], value)} />}
                             {'min_settlement_days' in parameters && <SettingNumber label="最低独立结算日" description="尾部策略需要更长的历史证据。" value={Number(parameters.min_settlement_days)} min={0} max={365} step={1} suffix="天" onChange={value => update(['strategies', name, 'min_settlement_days'], value)} />}
                             {'max_order_usd' in parameters && <SettingNumber label="策略单笔上限" description="仍会继续受模拟账户和本金比例上限约束。" value={Number(parameters.max_order_usd)} min={0.1} max={1000} step={0.5} suffix="$" onChange={value => update(['strategies', name, 'max_order_usd'], value)} />}
-                            {'daily_candidate_cap' in parameters && <SettingNumber label="每日候选上限" description="限制尾部策略每天进入队列的候选数。" value={Number(parameters.daily_candidate_cap)} min={1} max={100} step={1} onChange={value => update(['strategies', name, 'daily_candidate_cap'], value)} />}
+                            {'daily_candidate_cap' in parameters && <SettingNumber label="每轮候选上限" description="限制单个城市、单个日期在一次信号重建中保留的尾部候选数。" value={Number(parameters.daily_candidate_cap)} min={1} max={100} step={1} onChange={value => update(['strategies', name, 'daily_candidate_cap'], value)} />}
                           </div>
                         )}
                       </div>
@@ -565,7 +573,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                 </div>
                 {apiSettingsQuery.data && (
                   <div className="shrink-0 border border-neutral-700 px-2 py-1 text-[10px] text-neutral-400">
-                    已连接 {apiSettingsQuery.data.providers.filter(provider => provider.configured).length}/{apiSettingsQuery.data.providers.length}
+                    已配置 {apiSettingsQuery.data.providers.filter(provider => provider.configured).length}/{apiSettingsQuery.data.providers.length}
                   </div>
                 )}
               </div>
@@ -608,7 +616,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                     <StatusLine label="信号策略" value={shortRevision(activeSignal?.revision_id)} tone="green" detail={humanizeChangeNote(activeSignal?.change_note)} />
                     <StatusLine label="模拟策略" value={shortRevision(activePaper?.revision_id)} tone="green" detail={humanizeChangeNote(activePaper?.change_note)} />
                     <StatusLine label="数据调度" value={schedulerQuery.data?.running ? '运行中' : '已停止'} tone={schedulerQuery.data?.running ? 'green' : 'amber'} />
-                    <StatusLine label="实盘" value={liveLocked ? '已锁定' : '已启用'} tone={liveLocked ? 'amber' : 'green'} />
+                    <StatusLine label="实盘" value={liveStatusText} tone={liveLocked ? 'amber' : 'green'} />
                   </div>
                 </details>
 

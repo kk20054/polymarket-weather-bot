@@ -49,7 +49,7 @@ from weatherbot_v3.db import weather_evidence_summary
 from weatherbot_v3.db import bulk_settlement_contract_verification, list_settlement_contracts, set_settlement_contract_verification, truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
 from weatherbot_v3.deb import build_daily_max_predictions, latest_bucket_probabilities
 from weatherbot_v3.distribution import build_event_distribution
-from weatherbot_v3.executor import LiveExecutor, PaperExecutor
+from weatherbot_v3.executor import LIVE_EXECUTION_PRODUCTION_READY, LiveExecutor, PaperExecutor
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
 from weatherbot_v3.hourly import forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary
@@ -211,6 +211,7 @@ class PaperExecutionRequest(BaseModel):
     strategies: list[str] | None = None
     strategy_revision_id: str = ""
     decision_batch_issued_at: str = ""
+    cohort_run_id: str = ""
     limit: int = 20
     dry_run: bool = True
 
@@ -226,6 +227,17 @@ class PaperValidationStartRequest(BaseModel):
     cities: list[str] | None = None
     strategies: list[str] | None = None
     strategy_revision_id: str = ""
+
+
+class PaperValidationTickRequest(BaseModel):
+    run_id: str = ""
+    decision_id: str = ""
+    city: str = ""
+    target_date: str = ""
+    strategies: list[str] | None = None
+    strategy_revision_id: str = ""
+    decision_batch_issued_at: str = ""
+    apply: bool = True
 
 
 class StrategyProfileCreateRequest(BaseModel):
@@ -4555,6 +4567,7 @@ async def strategy_profiles_api():
         "profiles": profiles,
         "allowed_scopes": sorted(ALLOWED_SCOPES),
         "live_trading": bool(load_v3_config().live_trading),
+        "live_execution_production_ready": bool(LIVE_EXECUTION_PRODUCTION_READY),
     }
 
 
@@ -4652,8 +4665,19 @@ async def paper_validation_stop_api():
 
 
 @app.post("/api/paper-validation/tick")
-async def paper_validation_tick_api():
-    return await asyncio.to_thread(run_paper_validation_tick, apply=True)
+async def paper_validation_tick_api(request: PaperValidationTickRequest | None = None):
+    payload = request or PaperValidationTickRequest()
+    return await asyncio.to_thread(
+        run_paper_validation_tick,
+        apply=payload.apply,
+        run_id=payload.run_id,
+        decision_id=payload.decision_id,
+        city_key=payload.city,
+        target_date=payload.target_date,
+        strategies=payload.strategies,
+        strategy_revision_id=payload.strategy_revision_id,
+        decision_batch_issued_at=payload.decision_batch_issued_at,
+    )
 
 
 @app.get("/api/source-health")
@@ -4837,6 +4861,28 @@ async def paper_orders(city: str = "", target_date: str = "", limit: int = 100):
 
 @app.post("/api/paper-orders/execute")
 async def paper_orders_execute(request: PaperExecutionRequest):
+    if not request.dry_run and not request.cohort_run_id:
+        raise HTTPException(
+            status_code=409,
+            detail="start a paper validation account before writing simulated orders",
+        )
+    if request.cohort_run_id:
+        if not request.strategy_revision_id or not request.decision_batch_issued_at:
+            raise HTTPException(
+                status_code=400,
+                detail="cohort paper execution requires strategy_revision_id and decision_batch_issued_at",
+            )
+        return await asyncio.to_thread(
+            run_paper_validation_tick,
+            apply=not request.dry_run,
+            run_id=request.cohort_run_id,
+            decision_id=request.decision_id,
+            city_key=request.city,
+            target_date=request.target_date,
+            strategies=request.strategies,
+            strategy_revision_id=request.strategy_revision_id,
+            decision_batch_issued_at=request.decision_batch_issued_at,
+        )
     if request.decision_id:
         return execute_paper_decision(
             request.decision_id,

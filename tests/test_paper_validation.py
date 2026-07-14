@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from weatherbot_v3.db import init_v3_db, list_paper_orders, upsert_signal_decision_record
+from weatherbot_v3.db import init_v3_db, insert_orderbook, list_paper_orders, upsert_signal_decision_record
 from weatherbot_v3.paper_validation import (
     paper_validation_status,
     run_paper_validation_tick,
@@ -14,6 +14,7 @@ from weatherbot_v3.paper_validation import (
     stop_paper_validation_run,
 )
 from weatherbot_v3.paper import execute_paper_decisions
+from weatherbot_v3.strategy_profiles import DEFAULT_PARAMETERS, create_strategy_profile_revision
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -183,6 +184,127 @@ class PaperValidationTests(unittest.TestCase):
 
         self.assertEqual(result["requested"], 1)
         self.assertEqual(result["results"][0]["decision_id"], "tail")
+
+    def test_scoped_manual_and_batch_paths_share_one_cohort_ledger(self):
+        path = test_db_path("paper_validation_scoped_paths")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        started = start_paper_validation_run(
+            bankroll_usd=40,
+            max_per_trade_usd=2,
+            daily_max_usd=10,
+            max_open_positions=5,
+            max_orders_per_day=5,
+            cities=["chicago"],
+            strategies=["single_bucket_ev"],
+            path=path,
+        )
+        run = started["run"]
+        issued_at = datetime.now(timezone.utc)
+        for key in ("manual-one", "manual-two"):
+            upsert_signal_decision_record(
+                _decision(key, issued_at, f"yes-{key}", edge=0.2, revision_id=run["strategy_revision_id"]),
+                path=path,
+            )
+
+        single = run_paper_validation_tick(
+            apply=True,
+            run_id=run["run_id"],
+            decision_id="manual-one",
+            strategy_revision_id=run["strategy_revision_id"],
+            decision_batch_issued_at=issued_at.isoformat(),
+            path=path,
+        )
+        batch = run_paper_validation_tick(
+            apply=True,
+            run_id=run["run_id"],
+            city_key="chicago",
+            target_date=issued_at.date().isoformat(),
+            strategies=["single_bucket_ev"],
+            strategy_revision_id=run["strategy_revision_id"],
+            decision_batch_issued_at=issued_at.isoformat(),
+            path=path,
+        )
+        orders = list_paper_orders(path=path)
+
+        self.assertEqual(single["executed"], 1)
+        self.assertEqual(batch["executed"], 1)
+        self.assertEqual({row["cohort_run_id"] for row in orders}, {run["run_id"]})
+        self.assertLessEqual(sum(float(row["filled_amount"]) for row in orders), 10.0)
+        self.assertLessEqual(max(float(row["filled_amount"]) for row in orders), 2.0)
+
+    def test_tick_rejects_wrong_or_inactive_run_id(self):
+        path = test_db_path("paper_validation_wrong_run")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        started = start_paper_validation_run(cities=["chicago"], path=path)
+        result = run_paper_validation_tick(apply=True, run_id="paper-not-active", path=path)
+
+        self.assertTrue(started["ok"])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "paper_validation_run_not_active")
+        self.assertEqual(list_paper_orders(path=path), [])
+
+    def test_latest_quote_that_removes_edge_blocks_execution(self):
+        path = test_db_path("paper_validation_reprice")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        started = start_paper_validation_run(
+            cities=["chicago"],
+            strategies=["single_bucket_ev"],
+            path=path,
+        )
+        run = started["run"]
+        now = datetime.now(timezone.utc)
+        decision = _decision("repriced", now, "yes-repriced", edge=0.2, revision_id=run["strategy_revision_id"])
+        upsert_signal_decision_record(decision, path=path)
+        insert_orderbook(
+            "market-repriced",
+            {
+                "snapshot_key": "repriced-latest",
+                "yes_token_id": "yes-repriced",
+                "bids": [{"price": 0.37, "size": 100}],
+                "asks": [{"price": 0.38, "size": 100}],
+                "orderMinSize": 5,
+                "orderPriceMinTickSize": 0.01,
+                "quote_timestamp": now.isoformat(),
+            },
+            path=path,
+        )
+
+        result = run_paper_validation_tick(
+            apply=True,
+            run_id=run["run_id"],
+            decision_id="repriced",
+            strategy_revision_id=run["strategy_revision_id"],
+            decision_batch_issued_at=now.isoformat(),
+            path=path,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "no_executable_candidates")
+        self.assertEqual(result["reason"], "edge_below_min_after_reprice")
+        self.assertEqual(list_paper_orders(path=path), [])
+
+    def test_zero_kelly_multiplier_really_disables_cohort_sizing(self):
+        path = test_db_path("paper_validation_zero_kelly")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        parameters = {**DEFAULT_PARAMETERS, "sizing": {**DEFAULT_PARAMETERS["sizing"], "kelly_multiplier": 0.0}}
+        profile = create_strategy_profile_revision(parameters, profile_key="zero-kelly", path=path)
+        started = start_paper_validation_run(
+            cities=["chicago"],
+            strategies=["single_bucket_ev"],
+            strategy_revision_id=profile["revision_id"],
+            path=path,
+        )
+        now = datetime.now(timezone.utc)
+        upsert_signal_decision_record(
+            _decision("zero-kelly", now, "yes-zero-kelly", edge=0.2, revision_id=profile["revision_id"]),
+            path=path,
+        )
+
+        result = run_paper_validation_tick(apply=True, run_id=started["run"]["run_id"], path=path)
+
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(result["executed"], 0)
+        self.assertEqual(list_paper_orders(path=path), [])
 
 
 def _decision(

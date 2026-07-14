@@ -46,6 +46,12 @@ const REASON_LABELS: Record<string, string> = {
   tick_size_missing: '价格步长缺失',
   low_price_tail_bucket: '低价尾部桶风险',
   live_trading_disabled: '实盘已锁定',
+  paper_validation_run_not_active: '模拟账户未启动或已停止',
+  strategy_revision_mismatch: '模拟账户与策略版本不一致',
+  edge_below_min_after_reprice: '最新盘口下的概率优势已不足',
+  spread_too_wide_after_reprice: '最新盘口价差过大',
+  tail_ask_above_max_after_reprice: '尾部桶最新买价超过策略上限',
+  orderbook_timestamp_missing_or_invalid: '最新盘口时间无效',
 }
 
 function reasonText(reason?: string | null) {
@@ -118,7 +124,11 @@ function groupDecisions(rows: SignalDecisionRecord[]): QueueItem[] {
 function resultMessage(result?: PaperExecutionResult | null) {
   if (!result) return null
   if (result.status === 'duplicate') return '该策略已存在模拟订单，没有重复买入。'
+  if (result.status === 'capacity_reached') return '模拟账户已达到今日额度或持仓上限。'
+  if (result.status === 'no_executable_candidates') return `当前盘口不再满足策略：${reasonText(result.reason)}`
+  if (result.status === 'no_fresh_candidates') return '当前批次没有可执行的新策略。'
   if (result.ok && result.dry_run) return `检查通过：${result.requested ?? result.results?.length ?? 1} 组策略可模拟成交。`
+  if (result.ok && result.status === 'dry_run') return `检查通过：${result.executed ?? 0} 组策略符合当前账户与盘口约束。`
   if (result.ok) return `模拟完成：成交 ${result.executed ?? result.results?.length ?? 1} 组。`
   return `未执行：${reasonText(result.reason)}`
 }
@@ -126,18 +136,19 @@ function resultMessage(result?: PaperExecutionResult | null) {
 function DecisionRow({
   item,
   pending,
+  accountActive,
   onExecute,
 }: {
   item: QueueItem
   pending: boolean
-  onExecute: (decisionId: string, amount: number | undefined, dryRun: boolean) => void
+  accountActive: boolean
+  onExecute: (decisionId: string, dryRun: boolean) => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const first = item.decisions[0]
   const eligible = item.decisions.length === (item.ladderGroupId ? 3 : 1)
     && item.decisions.every(row => row.paper_allowed && row.paper_decision === 'buy')
   const suggested = item.decisions.reduce((sum, row) => sum + Number(row.position_size_usd ?? 0), 0)
-  const [amount, setAmount] = useState(suggested > 0 ? suggested.toFixed(2) : '2.00')
   const reasons = [...new Set(item.decisions.flatMap(row => row.gate_reasons ?? row.reasons ?? []))]
   const eventUrl = String(first.evidence_links?.event_url ?? '')
 
@@ -192,30 +203,24 @@ function DecisionRow({
               )}
             </div>
           )}
-          <label className="grid grid-cols-[1fr_88px] items-center gap-2 text-[10px] text-neutral-500">
-            模拟金额{item.ladderGroupId ? '（整组）' : ''}
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              value={amount}
-              onChange={event => setAmount(event.target.value)}
-              className="h-8 w-full border border-neutral-700 bg-black px-2 text-right tabular-nums text-neutral-200"
-            />
-          </label>
+          <div className="flex items-center justify-between border border-neutral-800 px-2 py-2 text-[10px] text-neutral-500">
+            <span>账户将按 Kelly 与风控自动分配</span>
+            <span className="tabular-nums text-neutral-300">建议 {money(suggested)}</span>
+          </div>
+          {!accountActive && <div className="text-[10px] text-amber-300">请先启动上方模拟账户，再检查或执行该策略。</div>}
           <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
-              disabled={!eligible || pending}
-              onClick={() => onExecute(first.decision_id, Number(amount) || undefined, true)}
+              disabled={!eligible || !accountActive || pending}
+              onClick={() => onExecute(first.decision_id, true)}
               className="min-h-9 border border-neutral-700 text-[10px] text-neutral-300 hover:bg-neutral-900 disabled:opacity-30"
             >
               检查成交条件
             </button>
             <button
               type="button"
-              disabled={!eligible || pending}
-              onClick={() => onExecute(first.decision_id, Number(amount) || undefined, false)}
+              disabled={!eligible || !accountActive || pending}
+              onClick={() => onExecute(first.decision_id, false)}
               className="min-h-9 border border-cyan-500/40 bg-cyan-500/10 text-[10px] text-cyan-200 hover:bg-cyan-500/15 disabled:opacity-30"
             >
               模拟买入
@@ -314,16 +319,16 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
     refetchInterval: 30000,
   })
   const executeMutation = useMutation({
-    mutationFn: (payload: { decisionId?: string; amount?: number; dryRun: boolean }) => executePaperOrders({
+    mutationFn: (payload: { decisionId?: string; dryRun: boolean }) => executePaperOrders({
       decisionId: payload.decisionId,
       city: payload.decisionId ? undefined : cityKey,
       targetDate: payload.decisionId ? undefined : targetDate,
-      amount: payload.amount,
       limit: 100,
       dryRun: payload.dryRun,
       strategies: selectedStrategies,
       strategyRevisionId: selectedRevisionId,
       decisionBatchIssuedAt: latestDecisionIssuedAt,
+      cohortRunId: validation?.run_id,
     }),
     onSuccess: result => {
       setLastResult(result)
@@ -346,7 +351,8 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
         strategies: selectedStrategies,
         strategy_revision_id: selectedRevisionId,
       })
-      await runPaperValidationTick()
+      if (!started.ok || started.status !== 'active' || !started.run_id) return started
+      await runPaperValidationTick({ runId: started.run_id })
       return started
     },
     onSuccess: () => {
@@ -447,7 +453,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
             <span className="text-[10px] text-neutral-500">{cityKey} · {targetDate}</span>
             <button
               type="button"
-              disabled={eligibleCount === 0 || executeMutation.isPending}
+              disabled={!validationActive || eligibleCount === 0 || executeMutation.isPending}
               onClick={() => executeMutation.mutate({ dryRun: false })}
               className="border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-30"
             >
@@ -460,7 +466,8 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
                 key={item.key}
                 item={item}
                 pending={executeMutation.isPending}
-                onExecute={(decisionId, amount, dryRun) => executeMutation.mutate({ decisionId, amount, dryRun })}
+                accountActive={validationActive}
+                onExecute={(decisionId, dryRun) => executeMutation.mutate({ decisionId, dryRun })}
               />
             )) : (
               <div className="px-3 py-8 text-center text-[11px] text-neutral-600">当前城市和日期暂无策略决策</div>
