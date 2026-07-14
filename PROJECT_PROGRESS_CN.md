@@ -1,5 +1,13 @@
 # WeatherBot 项目进度台账
 
+### 2026-07-14：Layer 8 模拟订单强制绑定 cohort 与内置浏览器验收
+- Layer：仅修复 Layer 8 paper executor、paper validation 及其直接 Layer 7 工作台/设置消费者；未启动 scheduler、未创建 paper cohort、未触碰 live 下单。
+- 改动：手动单笔、批量与自动 tick 统一走 active cohort 的 run/revision/decision-batch 约束，共享同一现金、日额度、持仓与策略 cap 台账；执行前重新读取本地最新盘口，以新 ask 重算 edge 与 Kelly，并重新检查盘口年龄、spread、尾部价格和零 Kelly。缺 cohort 的非 dry-run 请求返回 409，错误 run 被拒绝。设置抽屉同步修正“已配置/已连接”、实盘执行器就绪状态、校准日和每轮候选上限等中文语义；工作台移除可绕过 Kelly 的手填金额，并在模拟账户未启动时禁用检查/买入。
+- 验证：`python -m unittest tests.test_v3_core tests.test_polywx_contract tests.test_paper_validation tests.test_execution_workbench_contract tests.test_project_verification` 共 264 项通过；`npm run build`、`python -m py_compile` 与 `git diff --check` 通过。内置浏览器实际打开 Chicago 页面，逐项验证设置抽屉、API 星号状态、策略页、候选展开、Polymarket 链接与账户停用状态；console error/warn=0，1280x720 无页面级横向溢出。
+- 结论：右侧模拟交易台不再存在“单笔/批量按钮绕过 cohort 风控”的 P0 路径，用户输入的模拟本金只能通过 Kelly 和统一风控分配；实盘仍结构性锁定。本轮浏览器同时确认近期日期的 `历史观测` 仍为空，这是独立的 Layer 2/3 WU 日期/查询链阻塞，不能用 UI 通过掩盖。
+- 阻塞/下一步：先修上海与 Chicago 近期 WU Historical 的采集、持久化和 exact-date 查询，完成同日期浏览器对照后再做一次短受控刷新；只有新鲜盘口、真实历史观测和 verifier 同时通过，才可启动首轮 14-30 天 revision-bound paper cohort。
+- 相关提交：`180ac6f`。
+
 ### 2026-07-14：14 城受控刷新、执行安全与 Layer 7 诚实展示
 - Layer：补强 Layer 2-6 的当前批次数据链，并修复 Layer 7/8 的 fail-closed 边界；未启动 scheduler、paper cohort 或 live。
 - 改动：对 14 个 enabled 城市显式刷新 METAR、Open-Meteo、Weather.com v3、Gamma/CLOB，并重建 D+0/D+1 hourly consensus、DEB 与 signal decisions。修复生产库 `forecast_runs(snapshot_key)` 部分唯一索引无法满足 `ON CONFLICT` 的问题；China Live 改为单城市失败隔离。Paper executor 不再用 decision issued_at 冒充盘口时间，并拒绝缺失/未来盘口；legacy live executor 即使误配 `LIVE_TRADING=true` 也被架构常量锁死。核验器支持 CLOB 毫秒时间戳，并不再把已跳过的 ask=1 终局盘口误判为 paper 决策违规。前端取消跨日期/跨城市数据回退、WU 缺失时不再把 fallback 画成历史观测、失效盘口不再显示 edge 或信号高亮。
