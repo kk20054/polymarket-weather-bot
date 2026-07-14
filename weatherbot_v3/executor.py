@@ -109,6 +109,24 @@ class LiveExecutor(BaseExecutor):
         force_dry_run: bool = False,
     ) -> ExecutionResult:
         cfg = load_config()
+        requested_live_submit = bool(
+            cfg.live_trading
+            and not cfg.live_dry_run
+            and not force_dry_run
+        )
+        if requested_live_submit and not LIVE_EXECUTION_PRODUCTION_READY:
+            return ExecutionResult(
+                False,
+                self.mode,
+                "blocked",
+                0,
+                "live_executor_not_production_ready",
+                {
+                    "dry_run": False,
+                    "execution_version": LIVE_EXECUTION_VERSION,
+                    "production_ready": False,
+                },
+            )
         signal_id, quote, order, errors = self._prepare(signal, amount)
         order["dry_run"] = bool(force_dry_run or cfg.live_dry_run or not cfg.live_trading)
 

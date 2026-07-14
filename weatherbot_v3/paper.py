@@ -23,6 +23,7 @@ from .polymarket import price_matches_tick
 
 
 PAPER_EXECUTION_VERSION = "paper-execution-v2"
+MAX_QUOTE_CLOCK_SKEW_SECONDS = 5.0
 
 
 def execute_paper_decision(
@@ -520,7 +521,6 @@ def _decision_with_latest_quote(
     quote_timestamp = str(
         snapshot.get("quote_timestamp")
         or decision.get("quote_timestamp")
-        or decision.get("issued_at")
         or ""
     )
     age_seconds = _age_seconds(quote_timestamp, now)
@@ -562,7 +562,10 @@ def _age_seconds(value: str, now: str) -> float | None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         if current.tzinfo is None:
             current = current.replace(tzinfo=timezone.utc)
-        return max(0.0, (current - parsed).total_seconds())
+        age_seconds = (current - parsed).total_seconds()
+        if age_seconds < -MAX_QUOTE_CLOCK_SKEW_SECONDS:
+            return None
+        return max(0.0, age_seconds)
     except Exception:
         return None
 
@@ -607,7 +610,9 @@ def _risk_reasons(decision: dict[str, Any], order: dict[str, Any], cfg: Any, *, 
         reasons.append("below_order_min_size")
     if ask_depth is None or ask_depth <= 0:
         reasons.append("ask_depth_missing")
-    if book_age_seconds is not None and book_age_seconds > cfg.orderbook_max_age_minutes * 60:
+    if book_age_seconds is None:
+        reasons.append("orderbook_timestamp_missing_or_invalid")
+    elif book_age_seconds > cfg.orderbook_max_age_minutes * 60:
         reasons.append("orderbook_stale")
     duplicate = open_paper_order_for_token(order["yes_token_id"], path=path)
     if duplicate and duplicate.get("idempotency_key") != order["idempotency_key"]:

@@ -111,6 +111,7 @@ type LayerDistributionItem = DistributionItem & {
   paper_allowed?: boolean
   live_allowed?: boolean
   quote_timestamp?: string | null
+  quote_valid?: boolean
 }
 
 type EvidenceCardTone = 'green' | 'amber' | 'red' | 'cyan' | 'neutral'
@@ -143,6 +144,7 @@ function bucketGridClass(count: number) {
 }
 
 function marketMid(item: LayerDistributionItem) {
+  if (item.quote_valid === false) return null
   const bid = item.bid === null || item.bid === undefined ? null : Number(item.bid)
   const ask = item.ask === null || item.ask === undefined ? null : Number(item.ask)
   if (bid !== null && ask !== null && Number.isFinite(bid) && Number.isFinite(ask)) return (bid + ask) / 2
@@ -471,6 +473,24 @@ function localDateString(date = new Date()) {
   return `${year}-${month}-${day}`
 }
 
+function quoteTimestampMs(value?: string | null) {
+  const text = String(value ?? '').trim()
+  if (!text) return null
+  const numeric = Number(text)
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return numeric >= 1_000_000_000_000 ? numeric : numeric * 1000
+  }
+  const parsed = Date.parse(text)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function quoteIsFresh(value?: string | null, maxAgeMinutes = 10) {
+  const timestamp = quoteTimestampMs(value)
+  if (timestamp === null) return false
+  const ageMs = Date.now() - timestamp
+  return ageMs >= -5_000 && ageMs <= maxAgeMinutes * 60_000
+}
+
 function addDateDays(value: string, days: number) {
   const parsed = new Date(`${value || localDateString()}T00:00:00`)
   if (Number.isNaN(parsed.getTime())) return localDateString()
@@ -699,10 +719,17 @@ function buildLayerDistributionItems(buckets?: MarketBucketSummary | null, decis
       const decision = decisionByMarket.get(String(bucket.market_id)) ?? decisionByBucket.get(String(bucket.bucket_key ?? ''))
       const modelBucket = decisionBucket(decision)
       const probability = asNumber(modelBucket.probability) ?? asNumber(decision?.model_probability) ?? 0
-      const ask = asNumber(bucket.best_ask) ?? asNumber(modelBucket.best_ask) ?? asNumber(bucket.price) ?? 0
-      const bid = asNumber(bucket.best_bid) ?? asNumber(modelBucket.best_bid) ?? 0
+      const rawAsk = asNumber(bucket.best_ask) ?? asNumber(modelBucket.best_ask) ?? asNumber(bucket.price)
+      const rawBid = asNumber(bucket.best_bid) ?? asNumber(modelBucket.best_bid)
+      const quoteValid = quoteIsFresh(bucket.quote_timestamp)
+        && rawAsk !== null && rawAsk > 0 && rawAsk < 1
+        && rawBid !== null && rawBid >= 0 && rawBid <= rawAsk
+      const ask = rawAsk ?? 0
+      const bid = rawBid ?? 0
       const spread = asNumber(bucket.spread) ?? Math.max(0, ask - bid)
-      const edge = asNumber(decision?.edge) ?? asNumber(modelBucket.edge) ?? (probability - ask)
+      const edge = quoteValid
+        ? asNumber(decision?.edge) ?? asNumber(modelBucket.edge) ?? (probability - ask)
+        : 0
       return {
         market_id: String(bucket.market_id),
         bucket_key: bucket.bucket_key ?? modelBucket.bucket_key,
@@ -716,7 +743,7 @@ function buildLayerDistributionItems(buckets?: MarketBucketSummary | null, decis
         spread,
         probability_edge: edge,
         ev: edge,
-        is_signal: Boolean(decision?.paper_allowed || (edge !== null && edge > 0)),
+        is_signal: Boolean(quoteValid && decision?.paper_allowed),
         bucket_label: bucket.bucket_label ?? modelBucket.bucket_label,
         bucket_direction: bucket.bucket_direction ?? modelBucket.bucket_direction,
         event_url: bucket.event_url ?? null,
@@ -730,6 +757,7 @@ function buildLayerDistributionItems(buckets?: MarketBucketSummary | null, decis
         paper_allowed: decision?.paper_allowed,
         live_allowed: decision?.live_allowed,
         quote_timestamp: bucket.quote_timestamp,
+        quote_valid: quoteValid,
       }
     })
 }
@@ -1000,8 +1028,8 @@ export function WeatherPanel({
     }
   }, [cities, selected])
 
-  const series = citySeries.find(row => row.city_key === selected) ?? citySeries[0]
-  const forecastFallback = forecasts.find(row => row.city_key === selected) ?? forecasts[0]
+  const series = citySeries.find(row => row.city_key === selected) ?? (!selected ? citySeries[0] : undefined)
+  const forecastFallback = forecasts.find(row => row.city_key === selected) ?? (!selected ? forecasts[0] : undefined)
   const cityKey = series?.city_key ?? forecastFallback?.city_key ?? selected
   const unit = series?.unit ?? 'F'
   const todayDate = localDateString()
@@ -1009,7 +1037,7 @@ export function WeatherPanel({
   const citySignals = useMemo(() => signals.filter(signal => signal.city_key === cityKey), [signals, cityKey])
   const actionableSignals = citySignals.filter(signal => signal.actionable)
   const selectedDateSignals = citySignals.filter(signal => !selectedDate || signal.target_date === selectedDate)
-  const bestSignal = [...(selectedDateSignals.length > 0 ? selectedDateSignals : citySignals)]
+  const bestSignal = [...selectedDateSignals]
     .sort((a, b) => {
       const actionDelta = Number(Boolean(b.actionable)) - Number(Boolean(a.actionable))
       if (actionDelta !== 0) return actionDelta
@@ -1018,8 +1046,7 @@ export function WeatherPanel({
   const distributionSignal = useMemo(() => {
     const dated = citySignals.filter(signal => !selectedDate || signal.target_date === selectedDate)
     const withDistribution = dated.filter(signal => (signal.distribution?.items?.length ?? 0) > 0)
-    const candidates = withDistribution.length > 0 ? withDistribution : citySignals.filter(signal => (signal.distribution?.items?.length ?? 0) > 0)
-    return [...candidates].sort((a, b) => {
+    return [...withDistribution].sort((a, b) => {
       const actionDelta = Number(Boolean(b.actionable)) - Number(Boolean(a.actionable))
       if (actionDelta !== 0) return actionDelta
       return Math.abs((b.probability_edge ?? b.edge ?? 0)) - Math.abs((a.probability_edge ?? a.edge ?? 0))
@@ -1292,7 +1319,7 @@ export function WeatherPanel({
               items={probabilityItems}
               unit={unit}
               selectedDate={selectedDate}
-              actualHigh={selectedDateRow?.actual_high ?? latestHistory?.actual_high}
+              actualHigh={selectedDateRow?.actual_high}
               observedSampleCount={metarTableRows.length}
               cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
               dailyMaxPrediction={dailyMaxPrediction}
@@ -1923,9 +1950,6 @@ function mergeNativeHourlySeries(series: HourlySourceSeries): HourlyChartRow[] {
   for (const point of series.forecast ?? []) put(point, 'forecast_value')
   for (const point of series.metar ?? []) put(point, 'metar_value')
   for (const point of series.historical ?? []) put(point, 'historical_value')
-  if ((series.historical?.length ?? 0) === 0) {
-    for (const point of series.historical_fallback ?? []) put(point, 'historical_value')
-  }
   for (const point of series.china_live ?? []) put(point, 'china_live_value')
   for (const point of series.pws ?? []) put(point, 'pws_value')
   return [...rows.values()].sort((left, right) => left.time_minute - right.time_minute)
@@ -2648,25 +2672,25 @@ function TemperatureDistributionPanel({
           <aside className="border border-[#2C3445] bg-[#161A22]">
             <div className={`grid gap-1 p-2 text-[10px] ${bucketGridClass(displayItems.length)}`}>
               {displayItems.map((item, index) => {
-                const edge = Number(item.probability_edge ?? item.ev ?? 0)
+                const edge = item.quote_valid === false ? null : Number(item.probability_edge ?? item.ev ?? 0)
                 const alpha = alphaForItem(item)
                 const mid = marketMid(item)
                 return (
                   <div
                     key={`${item.market_id || item.bucket_key || item.bucket_label || `${item.bucket_low}-${item.bucket_high}` || 'bucket'}-${index}`}
-                    className={`min-h-[112px] border p-2 ${item.is_signal ? 'border-cyan-500/40 bg-cyan-500/10' : 'border-[#2C3445] bg-[#1B212C]'} ${Math.abs(edge) > 0.08 ? 'animate-pulse shadow-[0_0_0_1px_rgba(34,197,94,0.25)]' : ''}`}
-                    title={`${item.question || fmtBucketAxisLabel(item, unit)} | bid/ask ${fallbackMode ? '--' : `${fmtPrice(item.bid)} / ${fmtPrice(item.ask)}`}`}
+                    className={`min-h-[112px] border p-2 ${item.is_signal ? 'border-cyan-500/40 bg-cyan-500/10' : 'border-[#2C3445] bg-[#1B212C]'} ${edge !== null && Math.abs(edge) > 0.08 ? 'animate-pulse shadow-[0_0_0_1px_rgba(34,197,94,0.25)]' : ''}`}
+                    title={`${item.question || fmtBucketAxisLabel(item, unit)} | bid/ask ${fallbackMode || item.quote_valid === false ? '--' : `${fmtPrice(item.bid)} / ${fmtPrice(item.ask)}`}`}
                   >
                     <div className="flex items-start justify-between gap-1">
                       <span className="min-w-0 truncate font-semibold text-[#F8FAFC]">{fmtBucketAxisLabel(item, unit)}</span>
                       {alpha ? <span title={alphaEventTitle(alpha)} className="shrink-0 text-amber-300">⚡</span> : null}
                     </div>
-                    <div className={`mt-2 text-lg font-semibold tabular-nums ${edge >= 0 ? 'text-green-300' : 'text-red-300'}`}>
-                      {fallbackMode ? '--' : fmtSignedPct(edge)}
+                    <div className={`mt-2 text-lg font-semibold tabular-nums ${edge === null ? 'text-[#7D8694]' : edge >= 0 ? 'text-green-300' : 'text-red-300'}`}>
+                      {fallbackMode || edge === null ? '--' : fmtSignedPct(edge)}
                     </div>
                     <div className="mt-1 flex justify-between gap-2 text-[10px] tabular-nums text-[#7D8694]">
                       <span>model {fmtProb(item.probability)}</span>
-                      <span>market {fallbackMode ? '--' : fmtPrice(mid)}</span>
+                      <span>market {fallbackMode || item.quote_valid === false ? '--' : fmtPrice(mid)}</span>
                     </div>
                   </div>
                 )

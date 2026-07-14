@@ -229,6 +229,7 @@ def _decision(
             "best_bid": 0.19,
             "spread": 0.01,
             "ask_depth": 100,
+            "quote_timestamp": issued_at.isoformat(),
         },
     }
 

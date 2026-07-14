@@ -73,7 +73,17 @@ def fetch_china_weather(cities: list[str] | None = None, *, dry_run: bool = Fals
     started_perf = time.perf_counter()
     results = []
     for city in dict.fromkeys(selected):
-        results.append(fetch_china_weather_city(city, dry_run=dry_run))
+        try:
+            results.append(fetch_china_weather_city(city, dry_run=dry_run))
+        except Exception as exc:
+            results.append({
+                "ok": False,
+                "city": city,
+                "error": "china_live_fetch_failed",
+                "message": str(exc)[:240],
+                "rows_upserted": 0,
+                "dry_run": dry_run,
+            })
     failures = [item for item in results if not item.get("ok")]
     finished = utc_now()
     log_data_fetch(

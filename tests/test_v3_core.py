@@ -1725,6 +1725,44 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(result["rows_upserted"], 0)
         self.assertEqual(count, 0)
 
+    def test_china_weather_batch_isolates_one_city_http_failure(self):
+        db_path = test_db_path("china_weather_batch_failure")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        hko_payload = {
+            "updateTime": "2026-07-04T10:02:00+08:00",
+            "temperature": {
+                "recordTime": "2026-07-04T10:00:00+08:00",
+                "data": [{"place": "Hong Kong Observatory", "value": 30, "unit": "C"}],
+            },
+            "humidity": {"data": [{"place": "Hong Kong Observatory", "value": 80, "unit": "percent"}]},
+        }
+
+        def fake_http_get(url, **_kwargs):
+            if "weather.com.cn" in url:
+                raise OSError("upstream 502")
+            return json.dumps(hko_payload)
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db()
+            with patch("weatherbot_v3.china_weather._http_get", side_effect=fake_http_get):
+                result = run_china_weather_fetch(
+                    "shanghai,hongkong",
+                    dry_run=False,
+                    refresh_readiness=False,
+                )
+            with connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT city, network FROM mesonet_observations ORDER BY city"
+                ).fetchall()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["cities"], 2)
+        self.assertEqual(result["ok_cities"], 1)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["rows_upserted"], 1)
+        self.assertEqual(result["results"][0]["error"], "china_live_fetch_failed")
+        self.assertEqual([(row["city"], row["network"]) for row in rows], [("hong-kong", "china_live")])
+
     def test_hourly_consensus_exposes_china_live_without_overwriting_metar(self):
         db_path = test_db_path("hourly_china_live")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -2947,6 +2985,60 @@ class V3CoreTests(unittest.TestCase):
         self.assertTrue(first["ok"])
         self.assertEqual(second["status"], "duplicate")
         self.assertEqual(len(orders), 1)
+
+    def test_layer8_paper_execution_rejects_missing_or_future_quote_time(self):
+        db_path = test_db_path("paper_execution_quote_time")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        now = datetime.now(timezone.utc)
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "2.0"}, clear=False):
+            init_v3_db(db_path)
+            for suffix, quote_timestamp in (
+                ("missing", None),
+                ("future", (now + timedelta(minutes=5)).isoformat()),
+            ):
+                snapshot = {
+                    "best_ask": 0.2,
+                    "best_bid": 0.19,
+                    "spread": 0.01,
+                    "ask_depth": 100,
+                }
+                if quote_timestamp:
+                    snapshot["quote_timestamp"] = quote_timestamp
+                upsert_signal_decision_record({
+                    "decision_id": f"quote-{suffix}",
+                    "bucket_key": f"bucket-{suffix}",
+                    "city_key": "chicago",
+                    "target_date": now.date().isoformat(),
+                    "issued_at": now.isoformat(),
+                    "market_id": f"market-{suffix}",
+                    "yes_token_id": f"yes-{suffix}",
+                    "token_id": f"yes-{suffix}",
+                    "model_probability": 0.3,
+                    "market_ask": 0.2,
+                    "market_bid": 0.19,
+                    "market_implied_probability": 0.2,
+                    "edge": 0.1,
+                    "strategy_name": "single_bucket_ev",
+                    "kelly_fraction": 0.125,
+                    "position_size_usd": 2.0,
+                    "tick_size": 0.01,
+                    "order_min_size": 5.0,
+                    "paper_allowed": True,
+                    "paper_decision": "buy",
+                    "live_allowed": False,
+                    "live_decision": "blocked",
+                    "gate_status": "paper_allowed",
+                    "gate_reasons": ["live_trading_disabled"],
+                    "orderbook_snapshot": snapshot,
+                }, path=db_path)
+
+            missing = execute_paper_decision("quote-missing", amount=2.0, path=db_path)
+            future = execute_paper_decision("quote-future", amount=2.0, path=db_path)
+
+        self.assertFalse(missing["ok"])
+        self.assertFalse(future["ok"])
+        self.assertIn("orderbook_timestamp_missing_or_invalid", missing["reason"])
+        self.assertIn("orderbook_timestamp_missing_or_invalid", future["reason"])
 
     def test_layer8_paper_execution_runs_ladder_group_atomically(self):
         db_path = test_db_path("paper_execution_ladder")

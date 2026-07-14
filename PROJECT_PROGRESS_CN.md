@@ -1,5 +1,13 @@
 # WeatherBot 项目进度台账
 
+### 2026-07-14：14 城受控刷新、执行安全与 Layer 7 诚实展示
+- Layer：补强 Layer 2-6 的当前批次数据链，并修复 Layer 7/8 的 fail-closed 边界；未启动 scheduler、paper cohort 或 live。
+- 改动：对 14 个 enabled 城市显式刷新 METAR、Open-Meteo、Weather.com v3、Gamma/CLOB，并重建 D+0/D+1 hourly consensus、DEB 与 signal decisions。修复生产库 `forecast_runs(snapshot_key)` 部分唯一索引无法满足 `ON CONFLICT` 的问题；China Live 改为单城市失败隔离。Paper executor 不再用 decision issued_at 冒充盘口时间，并拒绝缺失/未来盘口；legacy live executor 即使误配 `LIVE_TRADING=true` 也被架构常量锁死。核验器支持 CLOB 毫秒时间戳，并不再把已跳过的 ask=1 终局盘口误判为 paper 决策违规。前端取消跨日期/跨城市数据回退、WU 缺失时不再把 fallback 画成历史观测、失效盘口不再显示 edge 或信号高亮。
+- 验证：D+0 与 D+1 各找到 14/14 事件、154/154 严格匹配桶和 154/154 盘口；生成 28 个 DEB 与最新构建 341 条决策，`live_allowed=0`。生产迁移已应用且无数据删除。全套 `python -m unittest discover tests` 为 341/341 通过；`npm run build`、`git diff --check` 通过。刷新结束后因 scheduler 保持关闭，METAR/盘口按预期转为 stale，project verifier 仍返回 `code_only`；paper validation inactive、`LIVE_TRADING=false`。
+- 结论：当前批次证明 14 城数据链可以完整重建，并关闭了生产库写入、模拟盘口时间、误开 live 和 Layer 7 误导展示四类高风险缺陷；它不等于连续运行稳定或策略盈利证明。上海 China Live 本轮上游 HTTP 502 已被隔离并诚实记录，香港成功。
+- 阻塞/下一步：先提交本轮代码，再启动后端/Vite 做 Shanghai/Chicago 双主题与窄屏人工验收；验收后紧邻一次短周期受控刷新重跑 observation/paper verifier。只有新鲜可执行盘口通过后才启动 14-30 天 revision-bound paper cohort；live 继续锁定。
+- 相关提交：本条所在提交。
+
 ### 2026-07-14：Layer 3/4 预测可用时间契约与历史隔离
 
 - Layer：Layer 3 forecast snapshot、Layer 4 DEB/bias/hourly 及其只读 verifier 直接消费者；未修改前端功能、paper 执行或 live 路径。

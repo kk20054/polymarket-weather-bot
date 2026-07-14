@@ -10,6 +10,7 @@ from .forecast_time import assess_forecast_run
 CANONICAL_WEATHER_KEYS_MIGRATION = "20260713_01_canonical_weather_keys"
 FORECAST_AVAILABILITY_MIGRATION = "20260714_01_forecast_availability_contract"
 PREDICTION_SOURCE_CONTRACT_MIGRATION = "20260714_02_prediction_source_contract"
+FORECAST_SNAPSHOT_UNIQUE_MIGRATION = "20260714_03_forecast_snapshot_unique"
 
 
 def _utc_now() -> str:
@@ -123,6 +124,7 @@ def run_schema_migrations(conn: sqlite3.Connection) -> None:
         "ON hourly_consensus(city, target_date, local_hour)"
     )
     _run_forecast_availability_migration(conn)
+    _run_forecast_snapshot_unique_migration(conn)
     _run_prediction_source_contract_migration(conn)
 
 
@@ -304,6 +306,59 @@ def _run_prediction_source_contract_migration(conn: sqlite3.Connection) -> None:
                     "daily_max_predictions_invalidated": max(0, int(invalidated or 0)),
                     "history_preserved": True,
                     "source_rule": "training_eligible+not_quarantined+available_by_issued_at+same_city_date",
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+
+
+def _run_forecast_snapshot_unique_migration(conn: sqlite3.Connection) -> None:
+    applied = conn.execute(
+        "SELECT 1 FROM schema_migrations WHERE migration_id = ?",
+        (FORECAST_SNAPSHOT_UNIQUE_MIGRATION,),
+    ).fetchone()
+    if applied is not None:
+        return
+
+    blank_count = int(conn.execute(
+        "SELECT COUNT(*) FROM forecast_runs WHERE snapshot_key IS NULL OR TRIM(snapshot_key) = ''"
+    ).fetchone()[0])
+    duplicate_count = int(conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM (
+            SELECT snapshot_key
+            FROM forecast_runs
+            GROUP BY snapshot_key
+            HAVING COUNT(*) > 1
+        )
+        """
+    ).fetchone()[0])
+    if blank_count or duplicate_count:
+        raise RuntimeError(
+            "forecast snapshot uniqueness migration refused: "
+            f"blank={blank_count}, duplicate_groups={duplicate_count}"
+        )
+
+    # A partial unique index cannot satisfy SQLite's
+    # `ON CONFLICT(snapshot_key)` conflict target on upgraded databases.
+    conn.execute("DROP INDEX IF EXISTS idx_forecast_runs_snapshot_key")
+    conn.execute(
+        "CREATE UNIQUE INDEX idx_forecast_runs_snapshot_key "
+        "ON forecast_runs(snapshot_key)"
+    )
+    conn.execute(
+        "INSERT INTO schema_migrations (migration_id, applied_at, details_json) VALUES (?, ?, ?)",
+        (
+            FORECAST_SNAPSHOT_UNIQUE_MIGRATION,
+            _utc_now(),
+            json.dumps(
+                {
+                    "blank_snapshot_keys": blank_count,
+                    "duplicate_snapshot_key_groups": duplicate_count,
+                    "index_scope": "full",
+                    "supports_on_conflict_target": True,
                 },
                 sort_keys=True,
             ),

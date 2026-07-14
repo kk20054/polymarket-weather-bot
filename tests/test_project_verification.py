@@ -18,10 +18,15 @@ from weatherbot_v3.db import (
     insert_forecast_run,
     upsert_daily_max_prediction,
 )
-from weatherbot_v3.executor import ExecutionResult
+from weatherbot_v3.executor import ExecutionResult, LiveExecutor
 from weatherbot_v3.paper import execute_paper_decisions
 from weatherbot_v3.sizing import calculate_kelly_fraction
-from weatherbot_v3.verification_agents import build_project_verification_report, probe_local_runtime
+from weatherbot_v3.verification_agents import (
+    _decision_probability_price_violations,
+    _parse_time,
+    build_project_verification_report,
+    probe_local_runtime,
+)
 
 
 class ProjectVerificationTests(unittest.TestCase):
@@ -168,6 +173,41 @@ class ProjectVerificationTests(unittest.TestCase):
 
 
 class ExecutionBoundaryTests(unittest.TestCase):
+    def test_verifier_accepts_epoch_milliseconds_from_clob(self):
+        parsed = _parse_time("1784029559006")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.utcoffset().total_seconds(), 0)
+        self.assertEqual(parsed.year, 2026)
+
+    def test_blocked_terminal_price_is_not_a_paper_invariant_violation(self):
+        blocked = {
+            "model_probability": 0.25,
+            "market_ask": 1.0,
+            "edge": -0.75,
+            "paper_allowed": False,
+        }
+        candidate = {**blocked, "paper_allowed": True}
+
+        self.assertEqual(_decision_probability_price_violations(blocked), [])
+        self.assertEqual(
+            _decision_probability_price_violations(candidate),
+            ["paper_allowed_price_not_executable"],
+        )
+
+    def test_live_executor_is_architecturally_locked_even_when_config_enables_live(self):
+        config = SimpleNamespace(live_trading=True, live_dry_run=False)
+        with patch("weatherbot_v3.executor.load_config", return_value=config):
+            result = LiveExecutor().place_order(
+                {"market_id": "market-1"},
+                1.0,
+            )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.order_id, 0)
+        self.assertEqual(result.reason, "live_executor_not_production_ready")
+        self.assertFalse(result.payload["production_ready"])
+
     def test_bulk_paper_execution_is_bound_to_revision_and_batch(self):
         decisions = [
             {"decision_id": "visible", "strategy_name": "single_bucket_ev", "strategy_revision_id": "r2", "issued_at": "2026-07-13T01:00:00+00:00", "paper_allowed": True, "paper_decision": "buy"},

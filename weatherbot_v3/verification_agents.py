@@ -562,11 +562,8 @@ class DecisionRiskVerificationAgent(VerificationAgent):
             strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
             if strategy not in ALLOWED_STRATEGIES:
                 violations.append({"decision_id": row.get("decision_id"), "reason": "unknown_strategy"})
-            probability = _finite(row.get("model_probability"))
-            ask = _finite(row.get("market_ask"))
-            edge = _finite(row.get("edge"))
-            if probability is None or not 0 <= probability <= 1 or ask is None or not 0 < ask < 1 or edge is None:
-                violations.append({"decision_id": row.get("decision_id"), "reason": "invalid_probability_or_price"})
+            for reason in _decision_probability_price_violations(row):
+                violations.append({"decision_id": row.get("decision_id"), "reason": reason})
             if bool(row.get("paper_allowed")):
                 paper_candidates += 1
                 required = (
@@ -1001,13 +998,47 @@ def _get_json(url: str, timeout_seconds: float) -> dict[str, Any]:
 def _parse_time(value: Any) -> datetime | None:
     if not value:
         return None
+    text = str(value).strip()
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        numeric = float(text)
+        if numeric >= 1_000_000_000_000:
+            numeric /= 1000.0
+        if math.isfinite(numeric) and numeric > 0:
+            return datetime.fromtimestamp(numeric, tz=timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _decision_probability_price_violations(row: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    raw_probability = row.get("model_probability")
+    raw_ask = row.get("market_ask")
+    raw_edge = row.get("edge")
+    probability = _finite(raw_probability)
+    ask = _finite(raw_ask)
+    edge = _finite(raw_edge)
+    if raw_probability not in (None, "") and (probability is None or not 0 <= probability <= 1):
+        reasons.append("invalid_model_probability")
+    if raw_ask not in (None, "") and (ask is None or not 0 <= ask <= 1):
+        reasons.append("invalid_market_price")
+    if raw_edge not in (None, "") and edge is None:
+        reasons.append("invalid_edge")
+    if bool(row.get("paper_allowed")) and (
+        probability is None
+        or ask is None
+        or edge is None
+        or not 0 <= probability <= 1
+        or not 0 < ask < 1
+    ):
+        reasons.append("paper_allowed_price_not_executable")
+    return reasons
 
 
 def _finite(value: Any) -> float | None:

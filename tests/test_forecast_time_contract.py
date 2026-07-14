@@ -5,6 +5,7 @@ from tests import ensure_test_environment
 ensure_test_environment()
 
 import os
+import sqlite3
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +21,7 @@ from weatherbot_v3.deb import build_daily_max_prediction
 from weatherbot_v3.forecast_time import assess_forecast_run
 from weatherbot_v3.migrations import (
     FORECAST_AVAILABILITY_MIGRATION,
+    FORECAST_SNAPSHOT_UNIQUE_MIGRATION,
     PREDICTION_SOURCE_CONTRACT_MIGRATION,
     run_schema_migrations,
 )
@@ -60,6 +62,72 @@ def valid_online_run(*, retrieved_at: str, raw_hash: str = "hash-a") -> dict:
 
 
 class ForecastTimeContractTests(unittest.TestCase):
+    def test_upgraded_database_gets_full_snapshot_unique_index(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE metar_reports (
+                    id INTEGER PRIMARY KEY, station_id TEXT, report_time TEXT,
+                    parse_status TEXT, updated_at TEXT, created_at TEXT
+                );
+                CREATE TABLE hourly_consensus (
+                    id INTEGER PRIMARY KEY, city TEXT, target_date TEXT, local_hour TEXT,
+                    updated_at TEXT, created_at TEXT
+                );
+                CREATE TABLE forecast_runs (
+                    id INTEGER PRIMARY KEY, snapshot_key TEXT, city TEXT, target_date TEXT,
+                    timezone TEXT, availability_basis TEXT, raw_json TEXT, run_at TEXT,
+                    retrieved_at TEXT, available_at TEXT, training_eligible INTEGER,
+                    lead_hours REAL, ineligibility_reason TEXT, quarantined_at TEXT,
+                    quarantine_reason TEXT
+                );
+                CREATE UNIQUE INDEX idx_forecast_runs_snapshot_key
+                    ON forecast_runs(snapshot_key)
+                    WHERE snapshot_key IS NOT NULL AND snapshot_key <> '';
+                CREATE TABLE daily_max_predictions (
+                    id INTEGER PRIMARY KEY, city_key TEXT, target_date TEXT, issued_at TEXT,
+                    source_run_ids_json TEXT, validity_status TEXT, invalidated_at TEXT,
+                    invalidation_reason TEXT
+                );
+                INSERT INTO forecast_runs (
+                    id, snapshot_key, city, target_date, timezone, raw_json,
+                    run_at, retrieved_at, available_at, availability_basis,
+                    training_eligible, lead_hours
+                ) VALUES (
+                    1, 'snapshot-1', 'shanghai', '2026-07-15', 'Asia/Shanghai', '{}',
+                    '2026-07-14T00:00:00+00:00', '2026-07-14T01:00:00+00:00',
+                    '2026-07-14T01:00:00+00:00', 'retrieved_at', 1, 29
+                );
+                """
+            )
+
+            run_schema_migrations(conn)
+            run_schema_migrations(conn)
+            index_row = conn.execute(
+                "SELECT partial FROM pragma_index_list('forecast_runs') WHERE name = ?",
+                ("idx_forecast_runs_snapshot_key",),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO forecast_runs (id, snapshot_key, city, target_date)
+                VALUES (2, 'snapshot-1', 'shanghai', '2026-07-15')
+                ON CONFLICT(snapshot_key) DO NOTHING
+                """
+            )
+            migration_count = conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE migration_id = ?",
+                (FORECAST_SNAPSHOT_UNIQUE_MIGRATION,),
+            ).fetchone()[0]
+            row_count = conn.execute("SELECT COUNT(*) FROM forecast_runs").fetchone()[0]
+        finally:
+            conn.close()
+
+        self.assertEqual(index_row[0], 0)
+        self.assertEqual(migration_count, 1)
+        self.assertEqual(row_count, 1)
+
     def test_online_snapshot_is_not_available_before_actual_retrieval(self):
         run = valid_online_run(retrieved_at="2026-07-14T14:00:00+00:00")
         result = assess_forecast_run(

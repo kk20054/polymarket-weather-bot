@@ -1170,7 +1170,7 @@ function App() {
 
   const selectedCityMeta = cityOptions.find(city => city.key === selectedCity)
   const selectedCityEvidence = cityEvidence.find(city => city.city_key === selectedCity)
-  const selectedDateEvidence = selectedCityEvidence?.dates.find(item => item.target_date === selectedDate) ?? selectedCityEvidence?.dates[0]
+  const selectedDateEvidence = selectedCityEvidence?.dates.find(item => item.target_date === selectedDate)
   const selectedTradingStatus = resolveCityTradingStatus(selectedCityMeta?.key, selectedCityMeta?.verificationStatus, cityStatusMap, selectedCityMeta?.cityScope)
   const selectedStatusConfig = selectedCityMeta?.key ? (cityStatusMap[selectedCityMeta.key] ?? ROUND5_STATUS_FALLBACK[selectedCityMeta.key]) : undefined
   const recommendations = data?.recommendations ?? null

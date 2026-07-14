@@ -159,6 +159,7 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertNotIn('aria-label="Diff residual bars"', rendered)
         self.assertNotIn('name="Cloud / RH" fill="#2563EB"', rendered)
         self.assertIn("No hourly rows for this date.", panel)
+        self.assertNotIn("series.historical_fallback ?? []) put(point, 'historical_value'", panel)
         self.assertNotIn("点击“自动抓取”后，这里会按抓取时间展示", panel)
 
     def test_layer7_visual_alignment_matches_polywx_priority(self):
@@ -189,6 +190,10 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("normalCdf", panel)
         self.assertIn("buildGaussianFallbackItems", panel)
         self.assertIn("latestDecisionBatch", panel)
+        self.assertIn("quoteIsFresh", panel)
+        self.assertIn("quote_valid", panel)
+        self.assertNotIn("selectedDateSignals.length > 0 ? selectedDateSignals : citySignals", panel)
+        self.assertNotIn("?? selectedCityEvidence?.dates[0]", app)
         self.assertIn("topBucketIndexes", panel)
         self.assertIn("'#2563EB' : '#4B5563'", panel)
         self.assertIn("domain={[0, 25]}", panel)
