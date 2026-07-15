@@ -17,9 +17,11 @@ from weatherbot_v3.db import (
     init_v3_db,
     insert_forecast_run,
     upsert_daily_max_prediction,
+    upsert_signal_decision_record,
 )
 from weatherbot_v3.executor import ExecutionResult, LiveExecutor
 from weatherbot_v3.paper import execute_paper_decisions
+from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.sizing import calculate_kelly_fraction
 from weatherbot_v3.verification_agents import (
     _decision_probability_price_violations,
@@ -30,6 +32,46 @@ from weatherbot_v3.verification_agents import (
 
 
 class ProjectVerificationTests(unittest.TestCase):
+    def test_readiness_excludes_legacy_prediction_decisions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "weatherbot.db"
+            init_v3_db(path)
+            prediction_id = upsert_daily_max_prediction(
+                {
+                    "city_key": "shanghai",
+                    "target_date": "2026-07-14",
+                    "issued_at": "2026-07-14T12:00:00Z",
+                    "mu": 35.5,
+                    "sigma": 1.2,
+                    "unit": "C",
+                    "method": "polywx_aligned_deb_v1",
+                    "forecast_algo": "polywx_aligned_deb_v1",
+                    "components": [{"source": "weathercom_v3_forecast"}],
+                },
+                path=path,
+            )
+            upsert_signal_decision_record(
+                {
+                    "decision_id": "legacy-readiness-decision",
+                    "city_key": "shanghai",
+                    "target_date": "2026-07-14",
+                    "issued_at": "2026-07-14T12:00:00Z",
+                    "forecast_algo": "polywx_aligned_deb_v1",
+                    "decision_version": "signal-decision-v3",
+                    "strategy_revision_id": "spr-test",
+                    "paper_allowed": True,
+                    "paper_decision": "buy",
+                    "evidence_links": {"daily_max_prediction_id": prediction_id},
+                },
+                path=path,
+            )
+
+            readiness = build_data_readiness(path)
+
+        self.assertEqual(readiness["summary"]["signal_decisions_raw"], 1)
+        self.assertEqual(readiness["summary"]["signal_decisions"], 0)
+        self.assertEqual(readiness["summary"]["signal_decisions_suppressed"], 1)
+
     def test_missing_database_is_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:
             report = build_project_verification_report(
@@ -173,6 +215,18 @@ class ProjectVerificationTests(unittest.TestCase):
 
 
 class ExecutionBoundaryTests(unittest.TestCase):
+    def test_legacy_scanner_start_endpoint_is_retired(self):
+        import dashboard_server
+        from fastapi import HTTPException
+
+        with patch.object(dashboard_server.subprocess, "Popen") as popen:
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(dashboard_server.start_bot())
+
+        self.assertEqual(raised.exception.status_code, 410)
+        self.assertEqual(raised.exception.detail["code"], "legacy_scanner_retired")
+        popen.assert_not_called()
+
     def test_verifier_accepts_epoch_milliseconds_from_clob(self):
         parsed = _parse_time("1784029559006")
         self.assertIsNotNone(parsed)

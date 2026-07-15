@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .config import V3Config, load_config
-from .db import connect_readonly
+from .db import connect_readonly, signal_decision_prediction_cohort_statuses
 from .model_dataset import _forecast_no_leak_check
 from .executor import LIVE_EXECUTION_PRODUCTION_READY, LIVE_EXECUTION_VERSION
 from .source_health import build_source_health_matrix
@@ -519,7 +519,8 @@ class DecisionRiskVerificationAgent(VerificationAgent):
                            strategy_name, strategy_revision_id, model_probability, market_ask,
                            market_bid, edge, kelly_fraction, position_size_usd, tick_size,
                            order_min_size, book_age_seconds, spread_bps, paper_allowed,
-                           paper_decision, live_allowed, live_decision, gate_reasons_json
+                           paper_decision, live_allowed, live_decision, gate_reasons_json,
+                           forecast_algo, deb_version, evidence_links_json
                     FROM signal_decisions
                     WHERE COALESCE(strategy_revision_id, '') = ?
                     ORDER BY issued_at DESC, id DESC
@@ -542,6 +543,19 @@ class DecisionRiskVerificationAgent(VerificationAgent):
                     (context.now.date().isoformat(),),
                 ).fetchall()
             ]
+        raw_decision_count = len(rows)
+        cohort_statuses = signal_decision_prediction_cohort_statuses(rows, path=context.path)
+        suppressed_reasons: dict[str, int] = {}
+        visible_rows: list[dict[str, Any]] = []
+        for row, status in zip(rows, cohort_statuses):
+            if status.get("ok", True):
+                visible_rows.append(row)
+                continue
+            for reason in status.get("reasons") or ["prediction_source_cohort_invalid"]:
+                key = str(reason)
+                suppressed_reasons[key] = suppressed_reasons.get(key, 0) + 1
+        rows = visible_rows
+
         newest_by_city: dict[str, datetime] = {}
         for row in rows:
             issued = _parse_time(row.get("issued_at"))
@@ -631,7 +645,13 @@ class DecisionRiskVerificationAgent(VerificationAgent):
                 "paper_candidate_visibility",
                 "pass" if paper_candidates > 0 else "warn",
                 f"当前激活版本有 {paper_candidates} 条可模拟候选。" if paper_candidates else "当前激活版本没有通过 paper gate 的候选；不得通过放松真实闸门制造信号。",
-                evidence={"paper_candidates": paper_candidates, "strategy_counts": strategy_counts},
+                evidence={
+                    "paper_candidates": paper_candidates,
+                    "strategy_counts": strategy_counts,
+                    "raw_decisions": raw_decision_count,
+                    "suppressed_decisions": raw_decision_count - len(rows),
+                    "suppressed_reasons": suppressed_reasons,
+                },
             ),
             _check(
                 self.key,
@@ -643,7 +663,15 @@ class DecisionRiskVerificationAgent(VerificationAgent):
                 action="刷新 Gamma/CLOB 盘口并修复 crossed/stale/tick/orderMinSize 异常后再执行模拟。",
             ),
         ]
-        return _agent_result(self, checks, {"active_revision": active_revision, "rows": len(rows), "paper_candidates": paper_candidates, "strategy_counts": strategy_counts})
+        return _agent_result(self, checks, {
+            "active_revision": active_revision,
+            "rows": len(rows),
+            "raw_rows": raw_decision_count,
+            "suppressed_rows": raw_decision_count - len(rows),
+            "suppressed_reasons": suppressed_reasons,
+            "paper_candidates": paper_candidates,
+            "strategy_counts": strategy_counts,
+        })
 
 
 class PaperExecutionVerificationAgent(VerificationAgent):

@@ -99,7 +99,10 @@ auto_refresh_task: asyncio.Task | None = None
 bulk_simulation_lock = asyncio.Lock()
 production_refresh_lock = asyncio.Lock()
 _market_rule_sync_signature: tuple[tuple[str, float], ...] | None = None
-AUTO_START_SCANNER = os.getenv("WEATHERBOT_AUTO_START_SCANNER", "false").strip().lower() not in {"0", "false", "no", "off"}
+# The legacy weatherbet.py scanner bypasses the v3 prediction-cohort,
+# strategy, and execution audit chain. The production dashboard must never
+# launch it, even when an obsolete environment variable is still present.
+AUTO_START_SCANNER = False
 AUTO_REFRESH_ENABLED = os.getenv("WEATHERBOT_AUTO_REFRESH", "false").strip().lower() not in {"0", "false", "no", "off"}
 AUTO_REFRESH_INTERVAL_SECONDS = max(900, int(os.getenv("WEATHERBOT_AUTO_REFRESH_INTERVAL", "1800") or "1800"))
 AUTO_REFRESH_INITIAL_DELAY_SECONDS = max(0, int(os.getenv("WEATHERBOT_AUTO_REFRESH_INITIAL_DELAY", "30") or "30"))
@@ -1355,37 +1358,12 @@ def _cleanup_stale_bot_process():
 
 
 def _start_bot_process(source: str = "dashboard") -> dict:
-    global bot_process
-    if _bot_running():
-        return {"status": "running", "is_running": True, "already_running": True}
-    _cleanup_stale_bot_process()
-    DATA_DIR.mkdir(exist_ok=True)
-    log_file = BOT_LOG_PATH.open("a", encoding="utf-8")
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUNBUFFERED"] = "1"
-    for proxy_key in (
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ):
-        env.pop(proxy_key, None)
-    env["NO_PROXY"] = "*"
-    env["no_proxy"] = "*"
-    bot_process = subprocess.Popen(
-        [sys.executable, "-u", "weatherbet.py"],
-        cwd=ROOT,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=env,
-    )
-    BOT_PID_PATH.write_text(str(bot_process.pid), encoding="utf-8")
-    log_event("success", f"Scanner started by {source}; logs write to data/weatherbet-dashboard.log")
-    return {"status": "running", "is_running": True, "pid": bot_process.pid}
+    return {
+        "status": "retired",
+        "is_running": False,
+        "reason": "legacy_scanner_retired_use_v3_scheduler",
+        "source": source,
+    }
 
 
 def _event_to_payload(event):
@@ -5250,37 +5228,13 @@ async def settle_trades():
 
 @app.post("/api/bot/start")
 async def start_bot():
-    global bot_process
-    if _bot_running():
-        return {"status": "running", "is_running": True}
-    _cleanup_stale_bot_process()
-    DATA_DIR.mkdir(exist_ok=True)
-    log_file = BOT_LOG_PATH.open("a", encoding="utf-8")
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUNBUFFERED"] = "1"
-    for proxy_key in (
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ):
-        env.pop(proxy_key, None)
-    env["NO_PROXY"] = "*"
-    env["no_proxy"] = "*"
-    bot_process = subprocess.Popen(
-        [sys.executable, "-u", "weatherbet.py"],
-        cwd=ROOT,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=env,
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "code": "legacy_scanner_retired",
+            "message": "Legacy weatherbet.py scanner is retired; use the controlled v3 scheduler.",
+        },
     )
-    BOT_PID_PATH.write_text(str(bot_process.pid), encoding="utf-8")
-    log_event("success", "扫描器已从看板启动；日志写入 data/weatherbet-dashboard.log")
-    return {"status": "running", "is_running": True}
 
 
 @app.post("/api/bot/stop")

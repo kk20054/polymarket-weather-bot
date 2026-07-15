@@ -9,7 +9,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import load_config
-from .db import connect, init_v3_db
+from .db import connect, init_v3_db, signal_decision_prediction_cohort_statuses
 from .registry import REGISTRY_VERSION, SETTLEMENT_REGISTRY
 from .stations import list_stations, sync_station_registry
 
@@ -136,6 +136,7 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
                 """
                 SELECT city_key, target_date, gate_status, paper_decision, live_decision,
                        gate_reasons_json, updated_at, edge,
+                       forecast_algo, deb_version, evidence_links_json,
                        CASE WHEN model_distribution_json IS NULL OR model_distribution_json = '' THEN 0 ELSE 1 END
                            AS has_model_distribution,
                        CASE WHEN model_bucket_probs_json IS NULL OR model_bucket_probs_json = '' THEN 0 ELSE 1 END
@@ -170,6 +171,18 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
         ]
     finally:
         conn.close()
+
+    raw_signal_decision_count = len(signal_decisions)
+    signal_decision_contracts = signal_decision_prediction_cohort_statuses(signal_decisions, path=path)
+    signal_decision_suppressed_reasons: Counter[str] = Counter()
+    visible_signal_decisions: list[dict[str, Any]] = []
+    for row, contract in zip(signal_decisions, signal_decision_contracts):
+        if contract.get("ok", True):
+            visible_signal_decisions.append(row)
+            continue
+        for reason in contract.get("reasons") or ["prediction_source_cohort_invalid"]:
+            signal_decision_suppressed_reasons[str(reason)] += 1
+    signal_decisions = visible_signal_decisions
 
     rules_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     contracts_by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -656,6 +669,9 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             ],
             {
                 "decisions": len(signal_decisions),
+                "raw_decisions": raw_signal_decision_count,
+                "suppressed_decisions": raw_signal_decision_count - len(signal_decisions),
+                "suppressed_reasons": dict(signal_decision_suppressed_reasons),
                 "cities": len(signal_decision_cities),
                 "city_dates": len(signal_decision_city_dates),
                 "required_cities": signal_decision_required_cities,
@@ -749,6 +765,8 @@ def build_data_readiness(path: Path | None = None) -> dict[str, Any]:
             "hourly_consensus": len(hourly_consensus),
             "market_buckets": len(market_buckets),
             "signal_decisions": len(signal_decisions),
+            "signal_decisions_raw": raw_signal_decision_count,
+            "signal_decisions_suppressed": raw_signal_decision_count - len(signal_decisions),
             "paper_orders": len(paper_orders),
             "paper_fills": len(paper_fills),
             "orderbook_snapshots": len(orderbooks),
