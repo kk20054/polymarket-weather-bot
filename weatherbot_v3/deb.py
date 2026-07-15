@@ -74,6 +74,7 @@ def bucket_probabilities(
     *,
     unit: str = "C",
     sigma_floor: float | None = None,
+    observed_floor: float | None = None,
     normalize: bool = True,
 ) -> dict[str, Any]:
     prediction_unit = _clean_unit(unit)
@@ -81,7 +82,9 @@ def bucket_probabilities(
     sigma_safe = sigma_with_floor(sigma, floor)
     items: list[dict[str, Any]] = []
     raw_sum = 0.0
+    unconditioned_raw_sum = 0.0
     notes: list[str] = []
+    excluded_by_observed_floor = 0
 
     for index, bucket in enumerate(buckets):
         bounds = _bucket_bounds_in_prediction_unit(bucket, prediction_unit)
@@ -89,7 +92,16 @@ def bucket_probabilities(
             notes.append(f"bucket_{index}_missing_bounds")
             continue
         low, high = bounds
-        probability = _bounded_probability(float(mu), sigma_safe, low, high)
+        probability_before_floor = _bounded_probability(float(mu), sigma_safe, low, high)
+        unconditioned_raw_sum += probability_before_floor
+        floor_excluded = _bucket_excluded_by_observed_floor(
+            bucket,
+            prediction_unit=prediction_unit,
+            observed_floor=observed_floor,
+        )
+        probability = 0.0 if floor_excluded else probability_before_floor
+        if floor_excluded:
+            excluded_by_observed_floor += 1
         raw_sum += probability
         market_probability = _market_probability(bucket)
         item = {
@@ -103,6 +115,8 @@ def bucket_probabilities(
             "bucket_low": None if math.isinf(low) and low < 0 else low,
             "bucket_high": None if math.isinf(high) and high > 0 else high,
             "bucket_unit": prediction_unit,
+            "probability_before_observed_floor": probability_before_floor,
+            "observed_floor_excluded": floor_excluded,
             "probability_raw": probability,
             "probability": probability,
             "market_probability": market_probability,
@@ -121,6 +135,9 @@ def bucket_probabilities(
             item["edge"] = None if market_probability is None else probability - float(market_probability)
     elif normalize and raw_sum <= 0:
         notes.append("zero_probability_mass")
+
+    if excluded_by_observed_floor:
+        notes.append("conditioned_on_observed_daily_max")
 
     total = sum(float(item.get("probability") or 0.0) for item in items)
     if normalize and items and abs(total - 1.0) > 1e-6:
@@ -141,9 +158,14 @@ def bucket_probabilities(
         "unit": prediction_unit,
         "sigma_floor": floor,
         "sigma_floor_applied": sigma_safe != float(sigma or 0.0),
+        "observed_floor": _optional_float(observed_floor),
+        "observed_floor_settlement_value": _observed_settlement_value(observed_floor, prediction_unit),
+        "observed_floor_applied_to_distribution": excluded_by_observed_floor > 0,
+        "observed_floor_excluded_bucket_count": excluded_by_observed_floor,
         "normalized": bool(normalize and items and raw_sum > 0),
         "sum_probability": total,
         "raw_sum_probability": raw_sum,
+        "unconditioned_raw_sum_probability": unconditioned_raw_sum,
         "items": items,
         "top_model": ranked[:5],
         "notes": notes,
@@ -169,6 +191,20 @@ def build_daily_max_prediction(
         "polywx_aligned",
         "polywx_aligned_deb_v1",
     }
+    if issued_at is not None and _parse_datetime(issued_at) is None:
+        method = "polywx_aligned_deb_v1" if aligned_mode else METHOD
+        return {
+            "ok": False,
+            "city_key": city_key,
+            "target_date": target_date,
+            "issued_at": str(issued_at),
+            "unit": unit,
+            "method": method,
+            "deb_version": method,
+            "sigma_floor": sigma_floor,
+            "mu_observed_floor_applied": False,
+            "reasons": ["invalid_issued_at"],
+        }
     if issued_at is None and historical_build_requires_explicit_as_of(
         target_date,
         profile.timezone if profile else "UTC",
@@ -381,6 +417,7 @@ def build_daily_max_predictions(
     target_date: str | None = None,
     limit: int = 50,
     dry_run: bool = False,
+    issued_at: str | None = None,
     path: Path | None = None,
 ) -> dict[str, Any]:
     init_v3_db(path)
@@ -412,15 +449,28 @@ def build_daily_max_predictions(
     results = []
     for row in targets:
         if dry_run:
-            results.append(build_daily_max_prediction(str(row["city"]), str(row["target_date"]), path=path))
+            results.append(build_daily_max_prediction(
+                str(row["city"]),
+                str(row["target_date"]),
+                issued_at=issued_at,
+                path=path,
+            ))
         else:
-            results.append(build_and_store_daily_max_prediction(str(row["city"]), str(row["target_date"]), path=path))
+            results.append(build_and_store_daily_max_prediction(
+                str(row["city"]),
+                str(row["target_date"]),
+                issued_at=issued_at,
+                path=path,
+            ))
+    failed = sum(1 for item in results if not item.get("ok"))
     return {
-        "ok": True,
+        "ok": bool(targets) and failed == 0,
         "dry_run": dry_run,
+        "issued_at": issued_at or "",
         "requested": len(targets),
         "stored": 0 if dry_run else sum(1 for item in results if item.get("ok")),
-        "failed": sum(1 for item in results if not item.get("ok")),
+        "failed": failed,
+        "reasons": ["no_forecast_targets"] if not targets else [],
         "predictions": results,
     }
 
@@ -466,6 +516,7 @@ def latest_bucket_probabilities(
         buckets,
         unit=str(prediction.get("unit") or "C"),
         sigma_floor=_optional_float(prediction.get("sigma_floor")),
+        observed_floor=_optional_float(prediction.get("observed_floor")),
         normalize=True,
     )
     distribution.update({
@@ -1123,6 +1174,41 @@ def _bucket_bounds_in_prediction_unit(bucket: dict[str, Any], prediction_unit: s
     if high < low:
         low, high = high, low
     return low, high
+
+
+def _observed_settlement_value(observed_floor: float | None, unit: str) -> float | None:
+    value = _optional_float(observed_floor)
+    if value is None:
+        return None
+    if _clean_unit(unit) == "C":
+        return float(math.floor(value + 1e-9))
+    return float(math.floor(value + 0.5 + 1e-9))
+
+
+def _bucket_excluded_by_observed_floor(
+    bucket: dict[str, Any],
+    *,
+    prediction_unit: str,
+    observed_floor: float | None,
+) -> bool:
+    if observed_floor is None:
+        return False
+    direction = str(bucket.get("bucket_direction") or "").strip().lower()
+    if direction in {"or_above", "above", "over", "at_or_above"}:
+        return False
+
+    bucket_unit = _clean_unit(bucket.get("unit") or prediction_unit)
+    observed_in_bucket_unit = convert_temp(float(observed_floor), prediction_unit, bucket_unit)
+    observed_settlement_value = _observed_settlement_value(observed_in_bucket_unit, bucket_unit)
+    if observed_settlement_value is None:
+        return False
+
+    maximum = _optional_float(bucket.get("bucket_high"))
+    if maximum is None:
+        maximum = _optional_float(bucket.get("bucket_value"))
+    if maximum is None:
+        return False
+    return observed_settlement_value > maximum + 1e-9
 
 
 def bucket_bounds_in_prediction_unit(

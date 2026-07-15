@@ -82,6 +82,49 @@ class DebGaussianTests(unittest.TestCase):
         self.assertTrue(math.isfinite(result["sigma"]))
         self.assertTrue(math.isfinite(item["probability"]))
 
+    def test_observed_celsius_max_removes_impossible_lower_buckets(self):
+        result = bucket_probabilities(
+            38.5,
+            1.7,
+            [
+                {"bucket_key": "37", "bucket_low": 37.0, "bucket_high": 37.0, "unit": "C"},
+                {"bucket_key": "38", "bucket_low": 38.0, "bucket_high": 38.0, "unit": "C"},
+                {"bucket_key": "39", "bucket_low": 39.0, "bucket_high": 39.0, "unit": "C"},
+                {"bucket_key": "40+", "bucket_low": 40.0, "bucket_direction": "or_above", "unit": "C"},
+            ],
+            unit="C",
+            observed_floor=39.0,
+        )
+
+        probabilities = {item["bucket_key"]: item["probability"] for item in result["items"]}
+        self.assertEqual(probabilities["37"], 0.0)
+        self.assertEqual(probabilities["38"], 0.0)
+        self.assertGreater(probabilities["39"], 0.0)
+        self.assertGreater(probabilities["40+"], 0.0)
+        self.assertAlmostEqual(result["sum_probability"], 1.0, places=6)
+        self.assertTrue(result["observed_floor_applied_to_distribution"])
+        self.assertEqual(result["observed_floor_excluded_bucket_count"], 2)
+        self.assertIn("conditioned_on_observed_daily_max", result["notes"])
+
+    def test_observed_fahrenheit_max_keeps_inclusive_range_bucket(self):
+        result = bucket_probabilities(
+            81.0,
+            2.0,
+            [
+                {"bucket_key": "78-79", "bucket_low": 78.0, "bucket_high": 79.0, "unit": "F"},
+                {"bucket_key": "80-81", "bucket_low": 80.0, "bucket_high": 81.0, "unit": "F"},
+                {"bucket_key": "82+", "bucket_low": 82.0, "bucket_direction": "or_above", "unit": "F"},
+            ],
+            unit="F",
+            observed_floor=81.0,
+        )
+
+        probabilities = {item["bucket_key"]: item["probability"] for item in result["items"]}
+        self.assertEqual(probabilities["78-79"], 0.0)
+        self.assertGreater(probabilities["80-81"], 0.0)
+        self.assertGreater(probabilities["82+"], 0.0)
+        self.assertAlmostEqual(result["sum_probability"], 1.0, places=6)
+
     def test_daily_max_prediction_applies_observed_temperature_floor(self):
         path = test_db_path("deb_observed_floor")
         with patch("weatherbot_v3.db.load_config", return_value=SimpleNamespace(v3_db_path=path)), patch.dict(

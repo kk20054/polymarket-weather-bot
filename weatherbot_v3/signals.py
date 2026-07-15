@@ -84,6 +84,7 @@ def build_signal_decisions(
             buckets,
             unit=str(prediction.get("unit") or "C"),
             sigma_floor=_optional_float(prediction.get("sigma_floor")),
+            observed_floor=_optional_float(prediction.get("observed_floor")),
             normalize=True,
         )
     probabilities = {

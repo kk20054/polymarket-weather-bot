@@ -171,6 +171,7 @@ def run_daily_max_build(
     *,
     days_arg: int | None = None,
     dry_run: bool = False,
+    issued_at: str = "",
     limit_cities: int = 5,
     refresh_readiness: bool = True,
 ) -> dict:
@@ -188,6 +189,7 @@ def run_daily_max_build(
                 target_date=date_value,
                 limit=1,
                 dry_run=dry_run,
+                issued_at=issued_at or None,
             ))
     else:
         for city in cities or [None]:
@@ -196,6 +198,7 @@ def run_daily_max_build(
                 target_date=target_date or None,
                 limit=max(1, int(days_arg or 50)),
                 dry_run=dry_run,
+                issued_at=issued_at or None,
             ))
     if refresh_readiness:
         readiness = build_data_readiness()
@@ -205,6 +208,7 @@ def run_daily_max_build(
         "dry_run": dry_run,
         "cities": cities,
         "target_date": target_date or "",
+        "issued_at": issued_at or "",
         "days_requested": days_arg,
         "requested": sum(int(item.get("requested") or 0) for item in results),
         "stored": sum(int(item.get("stored") or 0) for item in results),
@@ -1465,6 +1469,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=50, help="Maximum current/future signal markets to refresh")
     parser.add_argument("--start-date", default="", help="Inclusive local target date filter")
     parser.add_argument("--target-date", default="", help="Single local target date for Layer 4 build commands")
+    parser.add_argument("--issued-at", default="", help="Explicit UTC ISO8601 as-of cutoff for auditable historical DEB replay")
     parser.add_argument("--end-date", default="", help="Inclusive local target date filter")
     parser.add_argument(
         "--status",
@@ -1708,6 +1713,7 @@ def main() -> None:
                 args.target_date or args.start_date,
                 days_arg=args.days,
                 dry_run=args.dry_run,
+                issued_at=args.issued_at,
                 limit_cities=args.limit_cities,
             ),
             ensure_ascii=False,

@@ -20,7 +20,7 @@ from weatherbot_v3.db import (
     upsert_metar_report,
     upsert_signal_decision_record,
 )
-from weatherbot_v3.deb import build_daily_max_prediction
+from weatherbot_v3.deb import build_daily_max_prediction, build_daily_max_predictions
 from weatherbot_v3.forecast_time import (
     FORECAST_COMPONENT_COHORT_VERSION,
     apply_forecast_component_cohort,
@@ -349,6 +349,33 @@ class ForecastTimeContractTests(unittest.TestCase):
 
         self.assertFalse(prediction["ok"])
         self.assertEqual(prediction["reasons"], ["historical_build_requires_explicit_issued_at"])
+
+    def test_invalid_deb_cutoff_fails_closed(self):
+        path = test_db_path("deb_invalid_cutoff")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
+            prediction = build_daily_max_prediction(
+                "shanghai",
+                "2026-07-14",
+                issued_at="not-an-iso-timestamp",
+                path=path,
+            )
+
+        self.assertFalse(prediction["ok"])
+        self.assertEqual(prediction["reasons"], ["invalid_issued_at"])
+
+    def test_daily_max_batch_without_forecast_targets_is_not_success(self):
+        path = test_db_path("deb_empty_batch")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(path)}, clear=False):
+            result = build_daily_max_predictions(
+                city="shanghai",
+                target_date="2026-07-14",
+                issued_at="2026-07-14T12:00:00Z",
+                path=path,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["requested"], 0)
+        self.assertEqual(result["reasons"], ["no_forecast_targets"])
 
     def test_aligned_deb_does_not_fall_back_when_ensemble_is_insufficient(self):
         path = test_db_path("deb_aligned_fail_closed")

@@ -3937,16 +3937,23 @@ class V3CoreTests(unittest.TestCase):
             with patch("weatherbot_v3.cli.build_data_readiness") as mocked_readiness:
                 mocked_readiness.return_value = {"stages": []}
                 with patch("weatherbot_v3.cli.persist_data_readiness"):
-                    payload = run_daily_max_build("chicago", "2026-07-01", dry_run=False)
+                    payload = run_daily_max_build(
+                        "chicago",
+                        "2026-07-01",
+                        dry_run=False,
+                        issued_at="2026-07-01T18:30:00Z",
+                    )
 
         mocked_build.assert_called_once_with(
             city="chicago",
             target_date="2026-07-01",
             limit=50,
             dry_run=False,
+            issued_at="2026-07-01T18:30:00Z",
         )
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["stored"], 1)
+        self.assertEqual(payload["issued_at"], "2026-07-01T18:30:00Z")
 
     def test_market_buckets_cli_runner_ingests_local_market_payloads(self):
         db_path = test_db_path("market_buckets_cli")
