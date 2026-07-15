@@ -12,19 +12,29 @@ from unittest.mock import patch
 
 from weatherbot_v3.db import (
     connect,
+    daily_max_prediction_summary,
     init_v3_db,
     insert_forecast_run,
     list_daily_max_predictions,
     upsert_daily_max_prediction,
+    upsert_metar_report,
+    upsert_signal_decision_record,
 )
 from weatherbot_v3.deb import build_daily_max_prediction
-from weatherbot_v3.forecast_time import assess_forecast_run
+from weatherbot_v3.forecast_time import (
+    FORECAST_COMPONENT_COHORT_VERSION,
+    apply_forecast_component_cohort,
+    assess_forecast_run,
+    persisted_prediction_cohort_status,
+)
 from weatherbot_v3.migrations import (
     FORECAST_AVAILABILITY_MIGRATION,
     FORECAST_SNAPSHOT_UNIQUE_MIGRATION,
     PREDICTION_SOURCE_CONTRACT_MIGRATION,
     run_schema_migrations,
 )
+from weatherbot_v3.paper import execute_paper_decision
+from weatherbot_v3.signals import signal_decisions_summary
 
 
 TEST_DB_DIR = Path(__file__).resolve().parents[1] / ".tmp-tests"
@@ -62,6 +72,133 @@ def valid_online_run(*, retrieved_at: str, raw_hash: str = "hash-a") -> dict:
 
 
 class ForecastTimeContractTests(unittest.TestCase):
+    def test_persisted_polywx_prediction_requires_source_cohort_contract(self):
+        legacy = persisted_prediction_cohort_status({
+            "forecast_algo": "polywx_aligned_deb_v1",
+            "components": [{"source": "weathercom_v3_forecast"}],
+        })
+        current = persisted_prediction_cohort_status({
+            "forecast_algo": "polywx_aligned_deb_v1",
+            "cohort_contract_version": FORECAST_COMPONENT_COHORT_VERSION,
+            "cohort_as_of": "2026-07-14T13:00:00Z",
+            "components": [{
+                "source": "weathercom_v3_forecast",
+                "source_age_ok": True,
+                "source_skew_ok": True,
+            }],
+        })
+
+        self.assertFalse(legacy["ok"])
+        self.assertIn("prediction_missing_source_cohort_contract", legacy["reasons"])
+        self.assertTrue(current["ok"])
+
+    def test_daily_max_summary_hides_legacy_unverified_polywx_prediction(self):
+        path = test_db_path("legacy_deb_read_gate")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(path)}, clear=False):
+            upsert_daily_max_prediction({
+                "city_key": "shanghai",
+                "target_date": "2026-07-14",
+                "issued_at": "2026-07-14T12:00:00Z",
+                "mu": 35.5,
+                "sigma": 1.2,
+                "unit": "C",
+                "method": "polywx_aligned_deb_v1",
+                "forecast_algo": "polywx_aligned_deb_v1",
+                "components": [{"source": "weathercom_v3_forecast"}],
+            }, path=path)
+            summary = daily_max_prediction_summary("shanghai", "2026-07-14")
+
+        self.assertIsNone(summary["latest"])
+        self.assertFalse(summary["quality_ok"])
+        self.assertIn("prediction_missing_source_cohort_contract", summary["quality_reasons"])
+
+    def test_legacy_prediction_decisions_are_hidden_and_not_executable(self):
+        path = test_db_path("legacy_deb_decision_gate")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(path)}, clear=False):
+            prediction_id = upsert_daily_max_prediction({
+                "city_key": "shanghai",
+                "target_date": "2026-07-14",
+                "issued_at": "2026-07-14T12:00:00Z",
+                "mu": 35.5,
+                "sigma": 1.2,
+                "unit": "C",
+                "method": "polywx_aligned_deb_v1",
+                "forecast_algo": "polywx_aligned_deb_v1",
+                "components": [{"source": "weathercom_v3_forecast"}],
+            }, path=path)
+            upsert_signal_decision_record({
+                "decision_id": "legacy-deb-decision",
+                "city_key": "shanghai",
+                "target_date": "2026-07-14",
+                "issued_at": "2026-07-14T12:00:00Z",
+                "forecast_algo": "polywx_aligned_deb_v1",
+                "paper_allowed": True,
+                "paper_decision": "buy",
+                "evidence_links": {"daily_max_prediction_id": prediction_id},
+            }, path=path)
+            summary = signal_decisions_summary("shanghai", "2026-07-14", path=path)
+            execution = execute_paper_decision(
+                "legacy-deb-decision",
+                path=path,
+                cohort_run_id="test-cohort",
+            )
+
+        self.assertEqual(summary["count"], 0)
+        self.assertEqual(summary["suppressed_count"], 1)
+        self.assertEqual(execution["reason"], "prediction_source_cohort_invalid")
+
+    def test_unversioned_decisions_fail_closed_before_paper_execution(self):
+        path = test_db_path("unversioned_decision_gate")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(path)}, clear=False):
+            upsert_signal_decision_record({
+                "decision_id": "unversioned-decision",
+                "city_key": "shanghai",
+                "target_date": "2026-07-14",
+                "issued_at": "2026-07-14T12:00:00Z",
+                "paper_allowed": True,
+                "paper_decision": "buy",
+            }, path=path)
+            summary = signal_decisions_summary("shanghai", "2026-07-14", path=path)
+            execution = execute_paper_decision(
+                "unversioned-decision",
+                dry_run=True,
+                path=path,
+            )
+
+        self.assertEqual(summary["count"], 0)
+        self.assertEqual(summary["suppressed_reasons"]["decision_forecast_algo_unverified"], 1)
+        self.assertEqual(execution["reason"], "prediction_source_cohort_invalid")
+        self.assertIn("decision_forecast_algo_unverified", execution["gate_reasons"])
+
+    def test_component_cohort_excludes_stale_evidence(self):
+        result = apply_forecast_component_cohort(
+            [
+                {"source": "weathercom_v3", "available_at": "2026-07-14T12:00:00Z"},
+                {"source": "gfs", "available_at": "2026-07-13T12:00:00Z"},
+            ],
+            as_of="2026-07-14T13:00:00Z",
+            max_age_hours=18,
+            max_skew_hours=12,
+        )
+
+        self.assertEqual([row["source"] for row in result["components"]], ["weathercom_v3"])
+        self.assertEqual(result["excluded"][0]["cohort_exclusion_reason"], "forecast_component_stale")
+        self.assertTrue(any(reason.startswith("forecast_component_stale:gfs") for reason in result["warnings"]))
+
+    def test_component_cohort_excludes_cross_source_skew(self):
+        result = apply_forecast_component_cohort(
+            [
+                {"source": "weathercom_v3", "effective_available_at": "2026-07-14T12:00:00Z"},
+                {"source": "gfs", "effective_available_at": "2026-07-14T06:00:00Z"},
+            ],
+            as_of="2026-07-14T13:00:00Z",
+            max_age_hours=18,
+            max_skew_hours=3,
+        )
+
+        self.assertEqual([row["source"] for row in result["components"]], ["weathercom_v3"])
+        self.assertEqual(result["excluded"][0]["cohort_exclusion_reason"], "forecast_component_skew_exceeded")
+
     def test_upgraded_database_gets_full_snapshot_unique_index(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -204,6 +341,74 @@ class ForecastTimeContractTests(unittest.TestCase):
             )
 
         self.assertEqual(prediction["issued_at"], "2026-07-14T12:34:56+00:00")
+
+    def test_historical_deb_build_without_cutoff_fails_closed(self):
+        path = test_db_path("deb_historical_cutoff_required")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
+            prediction = build_daily_max_prediction("shanghai", "2026-07-14", path=path)
+
+        self.assertFalse(prediction["ok"])
+        self.assertEqual(prediction["reasons"], ["historical_build_requires_explicit_issued_at"])
+
+    def test_aligned_deb_does_not_fall_back_when_ensemble_is_insufficient(self):
+        path = test_db_path("deb_aligned_fail_closed")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False), patch(
+            "weatherbot_v3.forecasts.ensemble.build_ensemble_prediction",
+            return_value={"ok": False, "reasons": ["insufficient_ensemble_sources"]},
+        ):
+            prediction = build_daily_max_prediction(
+                "shanghai",
+                "2026-07-15",
+                issued_at="2026-07-15T03:00:00+00:00",
+                path=path,
+            )
+
+        self.assertFalse(prediction["ok"])
+        self.assertEqual(prediction["method"], "polywx_aligned_deb_v1")
+        self.assertEqual(prediction["reasons"], ["insufficient_ensemble_sources"])
+
+    def test_observed_floor_excludes_reports_after_replay_cutoff(self):
+        path = test_db_path("deb_observed_floor_cutoff")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
+            init_v3_db(path)
+            for report_time, temperature in (
+                ("2026-07-15T02:00:00+00:00", 30.0),
+                ("2026-07-15T04:00:00+00:00", 40.0),
+            ):
+                upsert_metar_report({
+                    "city": "shanghai",
+                    "station_id": "ZSPD",
+                    "report_time": report_time,
+                    "raw_text": f"METAR ZSPD {temperature}",
+                    "temperature": temperature,
+                    "parser_version": "weatherbot-v3-awc-v1",
+                    "parse_status": "parsed",
+                }, path=path)
+            with patch(
+                "weatherbot_v3.forecasts.ensemble.build_ensemble_prediction",
+                return_value={
+                    "ok": True,
+                    "city_key": "shanghai",
+                    "target_date": "2026-07-15",
+                    "issued_at": "2026-07-15T03:00:00+00:00",
+                    "mu": 20.0,
+                    "sigma": 1.0,
+                    "unit": "C",
+                    "method": "polywx_aligned_deb_v1",
+                    "deb_version": "polywx_aligned_deb_v1",
+                    "components": [],
+                },
+            ):
+                prediction = build_daily_max_prediction(
+                    "shanghai",
+                    "2026-07-15",
+                    issued_at="2026-07-15T03:00:00+00:00",
+                    path=path,
+                )
+
+        self.assertEqual(prediction["observed_floor"], 30.0)
+        self.assertEqual(prediction["mu"], 29.5)
+        self.assertTrue(prediction["mu_observed_floor_applied"])
 
     def test_migration_preserves_rows_quarantines_source_and_invalidates_prediction(self):
         path = test_db_path("forecast_migration")

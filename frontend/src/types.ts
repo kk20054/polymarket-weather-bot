@@ -512,6 +512,25 @@ export interface DailyMaxPredictionSummary {
   target_date?: string
   count: number
   latest?: DailyMaxPrediction | null
+  quality_ok?: boolean
+  quality_reasons?: string[]
+  rejected_latest_id?: number | null
+}
+
+export type Layer7ResourceStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'error'
+
+export interface Layer7ResourceState {
+  status: Layer7ResourceStatus
+  refreshing?: boolean
+  error?: string
+  refresh_error?: string
+}
+
+export interface Layer7QueryState {
+  deb: Layer7ResourceState
+  buckets: Layer7ResourceState
+  signals: Layer7ResourceState
+  aggregate_error?: string
 }
 
 export interface SignalDecisionRecord {

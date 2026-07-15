@@ -43,7 +43,7 @@ from weatherbot_v3.metar import backfill_iem_asos_metars, ingest_iem_asos_csv, p
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
 from weatherbot_v3.truth.wunderground import _country_from_icao, fetch_wunderground_daily_result, fetch_wunderground_hourly_result, persist_wunderground_hourly
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
-from weatherbot_v3.weathercom import weathercom_runs_from_response
+from weatherbot_v3.weathercom import weathercom_request_units, weathercom_runs_from_response
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import _stage_result, default_orderbook_start_date, run_china_weather_fetch, run_daily_max_build, run_hourly_consensus_build, run_iem_asos_truth_fetch, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_polymarket_market_probe, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _recommendations_payload, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
@@ -118,9 +118,17 @@ def openmeteo_hourly_run(
     temps: list[float],
     *,
     valid_times: list[str] | None = None,
-    retrieved_at: str = "2026-07-02T12:00:00+00:00",
+    retrieved_at: str | None = None,
 ) -> tuple[dict, list[dict]]:
     profile = SETTLEMENT_REGISTRY[city]
+    retrieved_at = retrieved_at or f"{target_date}T00:00:00+00:00"
+    target_start_utc = datetime.combine(
+        date.fromisoformat(target_date),
+        datetime.min.time(),
+        tzinfo=ZoneInfo(profile.timezone),
+    ).astimezone(timezone.utc)
+    retrieved_dt = datetime.fromisoformat(retrieved_at.replace("Z", "+00:00"))
+    horizon = "d0" if retrieved_dt >= target_start_utc else "d1"
     times = valid_times or [f"{target_date}T{hour:02d}:00:00+00:00" for hour in range(len(temps))]
     hourly = [
         {
@@ -143,7 +151,7 @@ def openmeteo_hourly_run(
             "run_type": "forecast",
             "retrieved_at": retrieved_at,
             "valid_at": times[-1] if times else "",
-            "horizon": "d1",
+            "horizon": horizon,
             "station_id": profile.station_id,
             "timezone": profile.timezone,
             "unit": profile.unit,
@@ -421,7 +429,7 @@ class V3CoreTests(unittest.TestCase):
             self.assertTrue(saved["enabled"])
             self.assertEqual(_auto_simulation_state()["interval_seconds"], 60)
 
-    def test_auto_simulation_api_enables_without_running_real_orders(self):
+    def test_auto_simulation_api_retires_legacy_execution_path(self):
         TEST_DB_DIR.mkdir(exist_ok=True)
         state_path = TEST_DB_DIR / "auto-simulation-api.json"
         state_path.unlink(missing_ok=True)
@@ -435,10 +443,11 @@ class V3CoreTests(unittest.TestCase):
             result = asyncio.run(update_auto_simulation(
                 AutoSimulationUpdate(enabled=True, interval_seconds=300)
             ))
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["enabled"])
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["enabled"])
+        self.assertEqual(result["reason"], "legacy_auto_simulation_retired_use_paper_validation")
         self.assertEqual(result["interval_seconds"], 300)
-        ensure_task.assert_called_once()
+        ensure_task.assert_not_called()
         refresh_cache.assert_not_called()
 
     def test_quote_uses_best_bid_ask_and_constraints(self):
@@ -2546,12 +2555,20 @@ class V3CoreTests(unittest.TestCase):
             "mu": 90.0,
             "sigma": 2.0,
             "unit": "F",
-            "method": "weatherbot-deb-v2",
-            "deb_version": "weatherbot-deb-v2",
+            "method": "polywx_aligned_deb_v1",
+            "deb_version": "polywx_aligned_deb_v1",
+            "forecast_algo": "polywx_aligned_deb_v1",
+            "cohort_contract_version": "forecast-component-cohort-v1",
+            "cohort_as_of": "2026-07-02T12:00:00+00:00",
             "sigma_floor": 0.5,
             "bias_sample_count": bias_sample_count,
             "source_run_ids": [101, 102],
-            "components": [{"source": "openmeteo_ncep_hrrr_conus", "weight": 0.5}],
+            "components": [{
+                "source": "openmeteo_ncep_hrrr_conus",
+                "weight": 0.5,
+                "source_age_ok": True,
+                "source_skew_ok": True,
+            }],
         }, path=db_path)
         for bucket in [
             {
@@ -2748,6 +2765,35 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(stage["metrics"]["live_blocked_insufficient_bias_samples"], 3)
         self.assertEqual(readiness["summary"]["signal_decisions"], 3)
 
+    def _store_trusted_signal_decision(self, db_path: Path, decision: dict) -> int:
+        issued_at = str(decision.get("issued_at") or datetime.now(timezone.utc).isoformat())
+        prediction_id = upsert_daily_max_prediction({
+            "city_key": decision.get("city_key") or "chicago",
+            "target_date": decision.get("target_date") or issued_at[:10],
+            "issued_at": issued_at,
+            "mu": 82.0,
+            "sigma": 1.5,
+            "unit": "F",
+            "method": "polywx_aligned_deb_v1",
+            "forecast_algo": "polywx_aligned_deb_v1",
+            "cohort_contract_version": "forecast-component-cohort-v1",
+            "cohort_as_of": issued_at,
+            "components": [{
+                "source": "fixture_forecast",
+                "source_age_ok": True,
+                "source_skew_ok": True,
+            }],
+        }, path=db_path)
+        return upsert_signal_decision_record({
+            **decision,
+            "forecast_algo": "polywx_aligned_deb_v1",
+            "deb_version": "polywx_aligned_deb_v1",
+            "evidence_links": {
+                **(decision.get("evidence_links") or {}),
+                "daily_max_prediction_id": prediction_id,
+            },
+        }, path=db_path)
+
     def test_dashboard_recommendations_use_fresh_verified_signal_decisions(self):
         db_path = test_db_path("dashboard_recommendations")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -2776,6 +2822,7 @@ class V3CoreTests(unittest.TestCase):
                 "temperature": 33.0,
                 "parser_version": "fixture",
             })
+
             build_signal_decisions("chicago", target, path=db_path)
             payload = _recommendations_payload(scheduler_status={"running": True}, path=db_path)
 
@@ -2979,7 +3026,9 @@ class V3CoreTests(unittest.TestCase):
                 row for row in list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
                 if row["bucket_key"] == "chicago-20260702-mid"
             )
-            result = execute_paper_decision(decision["decision_id"], amount=2.0, path=db_path)
+            result = execute_paper_decision(
+                decision["decision_id"], amount=2.0, path=db_path, cohort_run_id="test-cohort"
+            )
             orders = list_paper_orders(decision_id=decision["decision_id"], path=db_path)
             summary = paper_execution_summary("chicago", "2026-07-02", path=db_path)
             readiness = build_data_readiness(db_path)
@@ -3010,8 +3059,12 @@ class V3CoreTests(unittest.TestCase):
                 row for row in list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
                 if row["bucket_key"] == "chicago-20260702-mid"
             )
-            first = execute_paper_decision(decision["decision_id"], amount=2.0, path=db_path)
-            second = execute_paper_decision(decision["decision_id"], amount=2.0, path=db_path)
+            first = execute_paper_decision(
+                decision["decision_id"], amount=2.0, path=db_path, cohort_run_id="test-cohort"
+            )
+            second = execute_paper_decision(
+                decision["decision_id"], amount=2.0, path=db_path, cohort_run_id="test-cohort"
+            )
             orders = list_paper_orders(decision_id=decision["decision_id"], path=db_path)
 
         self.assertTrue(first["ok"])
@@ -3036,7 +3089,7 @@ class V3CoreTests(unittest.TestCase):
                 }
                 if quote_timestamp:
                     snapshot["quote_timestamp"] = quote_timestamp
-                upsert_signal_decision_record({
+                self._store_trusted_signal_decision(db_path, {
                     "decision_id": f"quote-{suffix}",
                     "bucket_key": f"bucket-{suffix}",
                     "city_key": "chicago",
@@ -3062,10 +3115,14 @@ class V3CoreTests(unittest.TestCase):
                     "gate_status": "paper_allowed",
                     "gate_reasons": ["live_trading_disabled"],
                     "orderbook_snapshot": snapshot,
-                }, path=db_path)
+                })
 
-            missing = execute_paper_decision("quote-missing", amount=2.0, path=db_path)
-            future = execute_paper_decision("quote-future", amount=2.0, path=db_path)
+            missing = execute_paper_decision(
+                "quote-missing", amount=2.0, path=db_path, cohort_run_id="test-cohort"
+            )
+            future = execute_paper_decision(
+                "quote-future", amount=2.0, path=db_path, cohort_run_id="test-cohort"
+            )
 
         self.assertFalse(missing["ok"])
         self.assertFalse(future["ok"])
@@ -3078,7 +3135,7 @@ class V3CoreTests(unittest.TestCase):
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "10.0"}, clear=False):
             init_v3_db(db_path)
             for index, bucket in enumerate(("low", "mid", "high")):
-                upsert_signal_decision_record({
+                self._store_trusted_signal_decision(db_path, {
                     "decision_id": f"ladder-{bucket}",
                     "bucket_key": bucket,
                     "city_key": "chicago",
@@ -3115,9 +3172,9 @@ class V3CoreTests(unittest.TestCase):
                         "ask_depth": 100,
                         "quote_timestamp": datetime.now(timezone.utc).isoformat(),
                     },
-                }, path=db_path)
+                })
 
-            result = execute_paper_decision("ladder-mid", path=db_path)
+            result = execute_paper_decision("ladder-mid", path=db_path, cohort_run_id="test-cohort")
             orders = list_paper_orders(city_key="chicago", target_date="2026-07-02", path=db_path)
 
         self.assertTrue(result["ok"])
@@ -3133,7 +3190,7 @@ class V3CoreTests(unittest.TestCase):
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "10.0"}, clear=False):
             init_v3_db(db_path)
             for index, bucket in enumerate(("low", "mid", "high")):
-                upsert_signal_decision_record({
+                self._store_trusted_signal_decision(db_path, {
                     "decision_id": f"bad-ladder-{bucket}",
                     "bucket_key": bucket,
                     "city_key": "chicago",
@@ -3169,9 +3226,9 @@ class V3CoreTests(unittest.TestCase):
                         "spread": 0.005,
                         "ask_depth": 0 if bucket == "high" else 100,
                     },
-                }, path=db_path)
+                })
 
-            result = execute_paper_decision("bad-ladder-mid", path=db_path)
+            result = execute_paper_decision("bad-ladder-mid", path=db_path, cohort_run_id="test-cohort")
             orders = list_paper_orders(city_key="chicago", target_date="2026-07-02", path=db_path)
 
         self.assertFalse(result["ok"])
@@ -3185,7 +3242,7 @@ class V3CoreTests(unittest.TestCase):
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "10.0"}, clear=False):
             init_v3_db(db_path)
             for index, bucket in enumerate(("low", "mid", "high")):
-                upsert_signal_decision_record({
+                self._store_trusted_signal_decision(db_path, {
                     "decision_id": f"thin-ladder-{bucket}",
                     "bucket_key": bucket,
                     "city_key": "chicago",
@@ -3221,9 +3278,9 @@ class V3CoreTests(unittest.TestCase):
                         "spread": 0.005,
                         "ask_depth": 6 if bucket == "high" else 100,
                     },
-                }, path=db_path)
+                })
 
-            result = execute_paper_decision("thin-ladder-mid", path=db_path)
+            result = execute_paper_decision("thin-ladder-mid", path=db_path, cohort_run_id="test-cohort")
             orders = list_paper_orders(city_key="chicago", target_date="2026-07-02", path=db_path)
             with connect(db_path) as conn:
                 fills = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
@@ -3248,7 +3305,9 @@ class V3CoreTests(unittest.TestCase):
                 row for row in list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
                 if row["bucket_key"] == "chicago-20260702-mid"
             )
-            result = execute_paper_decision(decision["decision_id"], amount=2.0, path=db_path)
+            result = execute_paper_decision(
+                decision["decision_id"], amount=2.0, path=db_path, cohort_run_id="test-cohort"
+            )
             orders = list_paper_orders(decision_id=decision["decision_id"], path=db_path)
             with connect(db_path) as conn:
                 fills = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
@@ -3995,13 +4054,11 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(result["reason"], "operator_confirmation_required")
 
     def test_dashboard_paper_validation_action_executes_confirmed_paper_pass(self):
-        with patch("dashboard_server._bulk_simulate_signals_once") as mocked_simulate:
-            mocked_simulate.return_value = {
+        with patch("dashboard_server.run_paper_validation_tick") as mocked_tick:
+            mocked_tick.return_value = {
                 "ok": True,
-                "count": 1,
-                "spent": 2.0,
-                "remaining": 38.0,
-                "skipped": 0,
+                "status": "executed",
+                "executed": 1,
             }
             result = asyncio.run(_run_paper_validation_action(
                 ProductionActionRequest(
@@ -4014,8 +4071,8 @@ class V3CoreTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "executed")
-        self.assertEqual(result["payload"]["count"], 1)
-        mocked_simulate.assert_called_once_with(False, 4)
+        self.assertEqual(result["payload"]["executed"], 1)
+        mocked_tick.assert_called_once_with(apply=True)
 
     def test_production_action_executes_whitelisted_orderbook_backfill(self):
         with patch("weatherbot_v3.production_actions.run_orderbook_backfill") as mocked_backfill:
@@ -5232,7 +5289,11 @@ class V3CoreTests(unittest.TestCase):
                 "2026-07-02T16:00:00+00:00",
             ],
         )
-        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+        with patch.dict(os.environ, {
+            "V3_DB_PATH": str(db_path),
+            "DEB_WEIGHT_MODE": "legacy",
+            "WEATHERBOT_ENSEMBLE_DEB_ENABLED": "false",
+        }, clear=False):
             insert_forecast_run(run, members)
             prediction = build_daily_max_prediction("tokyo", "2026-07-02", issued_at="2026-07-02T12:34:00+00:00", path=db_path)
 
@@ -5251,7 +5312,11 @@ class V3CoreTests(unittest.TestCase):
             [88.0],
             valid_times=["2026-07-10T21:00:00+00:00"],
         )
-        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+        with patch.dict(os.environ, {
+            "V3_DB_PATH": str(db_path),
+            "DEB_WEIGHT_MODE": "legacy",
+            "WEATHERBOT_ENSEMBLE_DEB_ENABLED": "false",
+        }, clear=False):
             insert_forecast_run(run, members)
             upsert_metar_report({
                 "city": "chicago",
@@ -5297,7 +5362,11 @@ class V3CoreTests(unittest.TestCase):
             [80.0],
             valid_times=["2026-07-10T21:00:00+00:00"],
         )
-        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+        with patch.dict(os.environ, {
+            "V3_DB_PATH": str(db_path),
+            "DEB_WEIGHT_MODE": "legacy",
+            "WEATHERBOT_ENSEMBLE_DEB_ENABLED": "false",
+        }, clear=False):
             insert_forecast_run(run, members)
             upsert_mesonet_observation({
                 "observation_key": "history:future-hot",
@@ -5341,7 +5410,11 @@ class V3CoreTests(unittest.TestCase):
             [88.0],
             valid_times=["2026-07-10T21:00:00+00:00"],
         )
-        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+        with patch.dict(os.environ, {
+            "V3_DB_PATH": str(db_path),
+            "DEB_WEIGHT_MODE": "legacy",
+            "WEATHERBOT_ENSEMBLE_DEB_ENABLED": "false",
+        }, clear=False):
             insert_forecast_run(run, members)
             build_and_store_daily_max_prediction("chicago", "2026-07-10", issued_at="2026-07-10T12:10:00Z", path=db_path)
             build_and_store_daily_max_prediction("chicago", "2026-07-10", issued_at="2026-07-10T12:50:00Z", path=db_path)
@@ -5362,8 +5435,13 @@ class V3CoreTests(unittest.TestCase):
             "openmeteo_ncep_hrrr_conus",
             [88.0] * 24,
             valid_times=valid_times,
+            retrieved_at="2026-07-02T12:00:00+00:00",
         )
-        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+        with patch.dict(os.environ, {
+            "V3_DB_PATH": str(db_path),
+            "DEB_WEIGHT_MODE": "legacy",
+            "WEATHERBOT_ENSEMBLE_DEB_ENABLED": "false",
+        }, clear=False):
             insert_forecast_run(run, members)
             for hour in range(24):
                 local_hour = f"{hour:02d}:00"
@@ -5422,12 +5500,25 @@ class V3CoreTests(unittest.TestCase):
             "openmeteo_gfs_seamless",
             [28.0, 34.0],
             valid_times=["2026-07-06T00:00:00+00:00", "2026-07-06T06:00:00+00:00"],
+            retrieved_at="2026-07-05T12:00:00+00:00",
         )
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
             for run, members in zip(weather_runs, weather_members):
                 insert_forecast_run(run, members)
             insert_forecast_run(gfs_run, gfs_members)
-            prediction = build_daily_max_prediction("shanghai", "2026-07-06", issued_at="2026-07-05T13:00:00Z", path=db_path)
+            prediction = build_daily_max_prediction(
+                "shanghai",
+                "2026-07-06",
+                issued_at="2026-07-05T13:00:00Z",
+                path=db_path,
+                bias_table=[{
+                    "icao": "ZSPD",
+                    "model": "gfs",
+                    "sample_count": 20,
+                    "mae_7d_c": 0.8,
+                    "location_version": profile.location_version,
+                }],
+            )
 
         self.assertTrue(prediction["ok"])
         self.assertEqual(prediction["deb_version"], "polywx_aligned_deb_v1")
@@ -5438,6 +5529,9 @@ class V3CoreTests(unittest.TestCase):
         v3_component = next(component for component in prediction["components"] if component["family"] == "weathercom_v3")
         self.assertEqual(v3_component["role"], "weather.com/WU-style v3 forecast")
         self.assertIn("truth_basis", v3_component)
+        self.assertTrue(v3_component["mae_imputed"])
+        self.assertGreaterEqual(v3_component["effective_mae_c"], 1.2)
+        self.assertLess(v3_component["weight"], 0.484 / (0.484 + 0.152))
         self.assertNotIn("missing_weathercom_v3", prediction["build_warnings"])
 
     def test_weathercom_v3_deb_rebuilds_elapsed_hours_from_forecast_snapshots(self):
@@ -5468,7 +5562,7 @@ class V3CoreTests(unittest.TestCase):
             profile,
             full_day_payload,
             source_url="https://api.weather.com/v3/wx/forecast/hourly/15day?apiKey=***",
-            retrieved_at="2026-07-13T12:00:00+00:00",
+            retrieved_at="2026-07-14T02:00:00+00:00",
             forecast_days=3,
         )
         new_runs, new_members = weathercom_runs_from_response(
@@ -5484,6 +5578,7 @@ class V3CoreTests(unittest.TestCase):
             "openmeteo_gfs_seamless",
             [30.0, 34.0],
             valid_times=["2026-07-14T00:00:00+08:00", "2026-07-14T15:00:00+08:00"],
+            retrieved_at="2026-07-14T02:00:00+00:00",
         )
 
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
@@ -5504,6 +5599,46 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(v3_component["archive_hour_count"], 4)
         self.assertEqual(v3_component["daily_high_basis"], "latest_snapshot_per_local_hour")
         self.assertGreaterEqual(v3_component["snapshot_count"], 2)
+
+    def test_polywx_deb_does_not_fall_back_when_all_components_are_stale(self):
+        db_path = test_db_path("polywx_stale_components_fail_closed")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        profile = SETTLEMENT_REGISTRY["shanghai"]
+        valid_time = int(datetime.fromisoformat("2026-07-14T15:00:00+08:00").timestamp())
+        weather_runs, weather_members = weathercom_runs_from_response(
+            profile,
+            {"validTimeUtc": [valid_time], "temperature": [35.0]},
+            retrieved_at="2026-07-12T12:00:00+00:00",
+            forecast_days=3,
+        )
+        gfs_run, gfs_members = openmeteo_hourly_run(
+            "shanghai",
+            "2026-07-14",
+            "openmeteo_gfs_seamless",
+            [34.0],
+            valid_times=["2026-07-14T15:00:00+08:00"],
+            retrieved_at="2026-07-12T12:00:00+00:00",
+        )
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
+            for run, members in zip(weather_runs, weather_members):
+                insert_forecast_run(run, members)
+            insert_forecast_run(gfs_run, gfs_members)
+            prediction = build_daily_max_prediction(
+                "shanghai",
+                "2026-07-14",
+                issued_at="2026-07-14T13:00:00Z",
+                path=db_path,
+                bias_table=[],
+            )
+
+        self.assertFalse(prediction["ok"])
+        self.assertEqual(prediction["deb_version"], "polywx_aligned_deb_v1")
+        self.assertTrue(any(reason.startswith("forecast_component_stale") for reason in prediction["reasons"]))
+
+    def test_weathercom_request_units_follow_city_settlement_unit(self):
+        self.assertEqual(weathercom_request_units(SETTLEMENT_REGISTRY["shanghai"]), ("m", "C"))
+        self.assertEqual(weathercom_request_units(SETTLEMENT_REGISTRY["chicago"]), ("e", "F"))
 
     def test_weathercom_forecast_history_separates_snapshots_from_integer_revisions(self):
         db_path = test_db_path("weathercom_v3_forecast_history")
@@ -5690,6 +5825,7 @@ class V3CoreTests(unittest.TestCase):
                 "2026-07-06T06:00:00+00:00",
                 "2026-07-06T08:00:00+00:00",
             ],
+            retrieved_at="2026-07-05T12:00:00+00:00",
         )
         ecmwf_run, ecmwf_members = openmeteo_hourly_run(
             "shanghai",
@@ -5697,6 +5833,7 @@ class V3CoreTests(unittest.TestCase):
             "openmeteo_ecmwf_ifs025",
             [33.0, 34.5],
             valid_times=["2026-07-06T00:00:00+00:00", "2026-07-06T06:00:00+00:00"],
+            retrieved_at="2026-07-05T12:00:00+00:00",
         )
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
             insert_forecast_run(gfs_run, gfs_members)
@@ -5720,6 +5857,7 @@ class V3CoreTests(unittest.TestCase):
                 "2026-07-10T19:00:00+00:00",
                 "2026-07-10T20:00:00+00:00",
             ],
+            retrieved_at="2026-07-10T06:00:00+00:00",
         )
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "WEATHERBOT_ENSEMBLE_DEB_ENABLED": "false"}, clear=False):
             insert_forecast_run(run, members)

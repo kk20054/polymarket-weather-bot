@@ -624,6 +624,13 @@ def run_paper_execute(
     from .paper import execute_paper_decision, execute_paper_decisions
 
     dry_run = not bool(apply)
+    if apply:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "paper_validation_run_required_use_paper_cohort_tick",
+            "dry_run": False,
+        }
     if decision_id:
         payload = execute_paper_decision(decision_id, amount=amount, dry_run=dry_run)
     else:

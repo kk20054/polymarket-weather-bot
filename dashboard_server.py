@@ -49,7 +49,7 @@ from weatherbot_v3.db import weather_evidence_summary
 from weatherbot_v3.db import bulk_settlement_contract_verification, list_settlement_contracts, set_settlement_contract_verification, truth_coverage_summary, upsert_market_rules, upsert_settlement_contracts, upsert_signal_decision, upsert_truth_observation
 from weatherbot_v3.deb import build_daily_max_predictions, latest_bucket_probabilities
 from weatherbot_v3.distribution import build_event_distribution
-from weatherbot_v3.executor import LIVE_EXECUTION_PRODUCTION_READY, LiveExecutor, PaperExecutor
+from weatherbot_v3.executor import LIVE_EXECUTION_PRODUCTION_READY, LiveExecutor
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
 from weatherbot_v3.hourly import forecast_hourly_points, forecast_revision_history, hourly_consensus_points, hourly_consensus_summary
@@ -94,7 +94,6 @@ BOT_PID_PATH = DATA_DIR / "weatherbet-dashboard.pid"
 AUTO_SIMULATION_PATH = DATA_DIR / "auto-simulation.json"
 PRODUCTION_REFRESH_PATH = DATA_DIR / "production-refresh.json"
 bot_process: subprocess.Popen | None = None
-auto_simulation_task: asyncio.Task | None = None
 dashboard_refresh_task: asyncio.Task | None = None
 auto_refresh_task: asyncio.Task | None = None
 bulk_simulation_lock = asyncio.Lock()
@@ -109,7 +108,6 @@ AUTO_REFRESH_LIMIT = max(1, min(int(os.getenv("WEATHERBOT_AUTO_REFRESH_LIMIT", "
 AUTO_REFRESH_CITIES = os.getenv("WEATHERBOT_AUTO_REFRESH_CITIES", "").strip()
 AUTO_REFRESH_SIGNAL_SCAN = os.getenv("WEATHERBOT_AUTO_REFRESH_SIGNAL_SCAN", "false").strip().lower() not in {"0", "false", "no", "off"}
 SCHEDULER_AUTO_START = os.getenv("WEATHERBOT_SCHEDULER", "false").strip().lower() not in {"0", "false", "no", "off"}
-RESUME_AUTO_SIMULATION = os.getenv("WEATHERBOT_RESUME_AUTO_SIMULATION", "false").strip().lower() not in {"0", "false", "no", "off"}
 dashboard_payload_cache: dict | None = None
 dashboard_payload_cache_at: datetime | None = None
 DASHBOARD_CACHE_TTL_SECONDS = int(os.getenv("WEATHERBOT_DASHBOARD_CACHE_TTL", "20") or "20")
@@ -4360,47 +4358,8 @@ async def _stop_auto_refresh_task():
             pass
 
 
-async def _auto_simulation_loop():
-    global auto_simulation_task
-    try:
-        while True:
-            state = _auto_simulation_state()
-            if not state["enabled"]:
-                return
-            try:
-                async with bulk_simulation_lock:
-                    result = await asyncio.to_thread(_bulk_simulate_signals_once, False)
-                _save_auto_simulation_state(
-                    last_run=datetime.now(timezone.utc).isoformat(),
-                    last_result={
-                        "count": result.get("count", 0),
-                        "spent": result.get("spent", 0),
-                        "skipped": result.get("skipped", 0),
-                        "remaining": result.get("remaining", 0),
-                        "orderbooks_refreshed": result.get("orderbooks_refreshed", 0),
-                        "orderbook_refresh_failed": result.get("orderbook_refresh_failed", 0),
-                    },
-                    last_error=None,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                _save_auto_simulation_state(
-                    last_run=datetime.now(timezone.utc).isoformat(),
-                    last_error=str(exc),
-                )
-                log_event("error", f"自动模拟运行失败：{exc}")
-            await asyncio.sleep(state["interval_seconds"])
-    finally:
-        auto_simulation_task = None
-
-
 def _ensure_auto_simulation_task():
-    global auto_simulation_task
-    if not _auto_simulation_state()["enabled"]:
-        return
-    if auto_simulation_task is None or auto_simulation_task.done():
-        auto_simulation_task = asyncio.create_task(_auto_simulation_loop())
+    return _disable_persisted_auto_simulation_on_startup()
 
 
 def _disable_persisted_auto_simulation_on_startup():
@@ -4408,18 +4367,6 @@ def _disable_persisted_auto_simulation_on_startup():
     if not state["enabled"]:
         return state
     return _save_auto_simulation_state(enabled=False, last_error=None)
-
-
-async def _stop_auto_simulation_task():
-    global auto_simulation_task
-    task = auto_simulation_task
-    auto_simulation_task = None
-    if task and not task.done():
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
 
 
 @app.on_event("startup")
@@ -4436,10 +4383,7 @@ async def startup():
         except Exception as exc:
             log_event("error", f"Scanner auto-start failed: {exc}")
     _ensure_auto_refresh_task()
-    if RESUME_AUTO_SIMULATION:
-        _ensure_auto_simulation_task()
-    else:
-        _disable_persisted_auto_simulation_on_startup()
+    _ensure_auto_simulation_task()
     if SCHEDULER_AUTO_START:
         await get_scheduler().start()
     global dashboard_payload_cache
@@ -4451,7 +4395,7 @@ async def startup():
         "auto_refresh_initial_delay_seconds": AUTO_REFRESH_INITIAL_DELAY_SECONDS,
         "auto_refresh_interval_seconds": AUTO_REFRESH_INTERVAL_SECONDS,
         "auto_refresh_signal_scan": AUTO_REFRESH_SIGNAL_SCAN,
-        "auto_simulation_resume": RESUME_AUTO_SIMULATION,
+        "auto_simulation_resume": False,
         "scheduler_auto_start": SCHEDULER_AUTO_START,
         "legacy_scanner_auto_start": AUTO_START_SCANNER,
         "dashboard_auto_build": DASHBOARD_AUTO_BUILD,
@@ -4463,7 +4407,6 @@ async def startup():
 async def shutdown():
     await get_scheduler().stop()
     await _stop_auto_refresh_task()
-    await _stop_auto_simulation_task()
     if _bot_running():
         _terminate_pid_tree(bot_process.pid)
 
@@ -4767,7 +4710,12 @@ async def forecasts(city: str = "", target_date: str = ""):
 
 @app.get("/api/hourly-consensus")
 async def hourly_consensus(city: str = "", target_date: str = ""):
-    return await asyncio.to_thread(hourly_consensus_summary, city or None, target_date or None)
+    return await asyncio.to_thread(
+        hourly_consensus_summary,
+        city or None,
+        target_date or None,
+        ensure_schema=False,
+    )
 
 
 @app.get("/api/forecast-history")
@@ -4820,7 +4768,7 @@ async def daily_max_predictions_build(city: str = "", target_date: str = "", lim
 async def bucket_probabilities_api(city: str = "", target_date: str = ""):
     if not city or not target_date:
         raise HTTPException(status_code=400, detail="city and target_date are required")
-    return latest_bucket_probabilities(city, target_date)
+    return await asyncio.to_thread(latest_bucket_probabilities, city, target_date)
 
 
 @app.get("/api/signal-decisions")
@@ -5062,10 +5010,10 @@ async def _run_paper_validation_action(request: ProductionActionRequest):
             "params": params,
         }
     async with bulk_simulation_lock:
-        payload = await asyncio.to_thread(_bulk_simulate_signals_once, False, bounded_limit)
+        payload = await asyncio.to_thread(run_paper_validation_tick, apply=True)
     return {
-        "ok": bool(payload.get("ok", True)),
-        "status": "executed",
+        "ok": bool(payload.get("ok", False)),
+        "status": str(payload.get("status") or "blocked"),
         "action_key": request.action_key,
         "action": action,
         "params": params,
@@ -5382,121 +5330,14 @@ async def reset_simulation(update: SimulationReset):
 
 
 def _bulk_simulate_signals_once(log_when_idle=True, limit=None):
-    today = _today_str()
-    count = 0
-    spent = 0.0
-    skipped = []
-    state = _read_json(DATA_DIR / "state.json", {})
-    simulation_start = _parse_iso(state.get("simulation_started_at"))
-    opened_at = datetime.now(timezone.utc).isoformat()
-    current_signals = [
-        s for s in list_signals(500)
-        if (s.get("date") or "") >= today and not _is_dashboard_position_import(s)
-    ]
-    quote_refresh = _refresh_signal_orderbooks(current_signals)
-    dashboard = build_dashboard_payload()
-    remaining = max(
-        0.0,
-        float((dashboard.get("stats") or {}).get("cash_balance") or state.get("balance", state.get("starting_balance", 0)) or 0),
-    )
-    dashboard_by_id = {
-        int(s.get("id")): s
-        for s in dashboard.get("weather_signals", [])
-        if s.get("id") is not None
+    return {
+        "ok": False,
+        "status": "retired",
+        "reason": "legacy_bulk_simulation_retired_use_paper_validation",
+        "count": 0,
+        "spent": 0.0,
+        "skipped": 0,
     }
-
-    def skip(signal, reason):
-        skipped.append({
-            "id": signal.get("id"),
-            "reason": reason,
-            "city": _clean_text(signal.get("city_name") or signal.get("city")),
-            "target_date": signal.get("date"),
-            "title": _clean_text(signal.get("question")),
-            "event_url": signal.get("event_url"),
-        })
-
-    def sort_edge(signal):
-        try:
-            signal_id = int(signal.get("id") or 0)
-            return float((dashboard_by_id.get(signal_id) or {}).get("edge") or signal.get("ev") or 0)
-        except Exception:
-            return 0.0
-
-    candidates = sorted(
-        current_signals,
-        key=sort_edge,
-        reverse=True,
-    )
-    if limit is not None:
-        candidates = candidates[:max(1, min(int(limit or 1), 500))]
-    for signal in candidates:
-        signal_id = int(signal.get("id") or 0)
-        dashboard_signal = dashboard_by_id.get(signal_id) or {}
-        reason = _bulk_simulation_skip_reason(signal, dashboard_signal, today)
-        if reason:
-            skip(signal, reason)
-            continue
-        requested = float(
-            signal.get("sim_amount")
-            or dashboard_signal.get("suggested_size")
-            or signal.get("amount")
-            or 0
-        )
-        if requested <= 0:
-            skip(signal, "no_requested_amount")
-            continue
-        if remaining <= 0:
-            skip(signal, "no_simulation_cash")
-            break
-        amount = min(requested, remaining)
-        result = PaperExecutor().place_order(signal, amount)
-        if not result.ok:
-            update_signal_status(signal["id"], "skipped", f"v3 paper rejected: {result.reason}", amount)
-            skip(signal, f"paper_rejected:{result.reason or 'unknown'}")
-            continue
-        filled_amount = float(result.payload.get("amount") or 0)
-        if filled_amount <= 0:
-            skip(signal, "paper_fill_zero")
-            continue
-        if not _open_paper_position(signal, filled_amount, simulation_start, opened_at, result.payload):
-            skip(signal, "position_write_failed")
-            continue
-        update_signal_status(
-            signal["id"],
-            "simulated",
-            f"Bulk paper {result.status} ${filled_amount:.2f}",
-            filled_amount,
-        )
-        count += 1
-        spent += filled_amount
-        remaining -= filled_amount
-    if spent > 0:
-        state["balance"] = round(max(0.0, remaining), 2)
-        state["total_trades"] = int(state.get("total_trades", 0) or 0) + count
-        _write_json(DATA_DIR / "state.json", state)
-    reason_counts = dict(Counter(item["reason"] for item in skipped))
-    reason_summary = ", ".join(f"{key}={value}" for key, value in sorted(reason_counts.items()))
-    message = (
-        f"One-click paper simulate: bought {count}, skipped {len(skipped)}, "
-        f"spent ${spent:.2f}, remaining ${remaining:.2f}"
-    )
-    if reason_summary:
-        message += f"; reasons: {reason_summary}"
-    payload = {
-        "count": count,
-        "spent": round(spent, 2),
-        "remaining": round(remaining, 2),
-        "total_current": len(current_signals),
-        "skipped": len(skipped),
-        "reason_counts": reason_counts,
-        "examples": skipped[:10],
-        "orderbooks_refreshed": quote_refresh["refreshed"],
-        "orderbook_refresh_failed": quote_refresh["failed"],
-    }
-    if count or log_when_idle:
-        log_event("success" if count else "warning", message, payload)
-    return {"ok": True, **payload}
-
 
 def _refresh_signal_orderbooks(signals, limit=50):
     market_ids = []
@@ -5528,10 +5369,10 @@ def _refresh_signal_orderbooks(signals, limit=50):
 
 @app.post("/api/signals/bulk-simulate")
 async def bulk_simulate_signals():
-    async with bulk_simulation_lock:
-        result = await asyncio.to_thread(_bulk_simulate_signals_once)
-    _clear_production_validation_cache()
-    return result
+    raise HTTPException(
+        status_code=410,
+        detail="legacy bulk simulation retired; start a paper validation run",
+    )
 
 
 @app.get("/api/simulation/auto")
@@ -5543,17 +5384,23 @@ async def auto_simulation_status():
 async def update_auto_simulation(update: AutoSimulationUpdate):
     global dashboard_payload_cache
     interval = max(60, min(int(update.interval_seconds or 300), 3600))
+    if update.enabled:
+        state = _save_auto_simulation_state(
+            enabled=False,
+            interval_seconds=interval,
+            last_error="legacy_auto_simulation_retired_use_paper_validation",
+        )
+        return {
+            "ok": False,
+            **state,
+            "reason": "legacy_auto_simulation_retired_use_paper_validation",
+        }
     state = _save_auto_simulation_state(
-        enabled=bool(update.enabled),
+        enabled=False,
         interval_seconds=interval,
         last_error=None,
     )
-    if update.enabled:
-        _ensure_auto_simulation_task()
-        log_event("success", f"自动模拟已启动，每 {interval // 60} 分钟检查一次新信号")
-    else:
-        await _stop_auto_simulation_task()
-        log_event("warning", "自动模拟已停止")
+    log_event("warning", "旧版自动模拟保持关闭")
     _clear_production_validation_cache()
     if dashboard_payload_cache is not None:
         payload = dict(dashboard_payload_cache)
@@ -5567,34 +5414,10 @@ async def signal_status(signal_id: int, update: StatusUpdate):
     note = update.note
     amount = update.amount
     if update.status == "simulated":
-        signal = next((s for s in list_signals(500) if int(s.get("id") or 0) == signal_id and not _is_dashboard_position_import(s)), None)
-        if not signal:
-            return {"ok": False, "error": "signal_not_found"}
-        state = _read_json(DATA_DIR / "state.json", {})
-        cash = max(0.0, float(state.get("balance", state.get("starting_balance", 0)) or 0))
-        requested = float(amount if amount is not None else signal.get("amount") or 0)
-        amount = min(requested, cash)
-        if amount <= 0:
-            log_event("warning", f"Signal {signal_id} skipped: no simulation cash available")
-            return {"ok": False, "error": "no_cash"}
-        result = PaperExecutor().place_order(signal, amount)
-        if not result.ok:
-            update_signal_status(signal_id, "skipped", f"v3 paper rejected: {result.reason}", amount)
-            log_event("warning", f"Signal {signal_id} v3 paper rejected: {result.reason}", result.payload)
-            return {"ok": False, "error": result.reason or "paper_rejected"}
-        opened_at = datetime.now(timezone.utc).isoformat()
-        filled_amount = float(result.payload.get("amount") or 0)
-        if _open_paper_position(
-            signal,
-            filled_amount,
-            _parse_iso(state.get("simulation_started_at")),
-            opened_at,
-            result.payload,
-        ):
-            amount = filled_amount
-            state["balance"] = round(cash - filled_amount, 2)
-            state["total_trades"] = int(state.get("total_trades", 0) or 0) + 1
-            _write_json(DATA_DIR / "state.json", state)
+        return {
+            "ok": False,
+            "error": "legacy_signal_simulation_retired_use_paper_validation",
+        }
     if amount is not None:
         note = note or f"Paper amount ${amount:.2f}"
     update_signal_status(signal_id, update.status, note, amount)

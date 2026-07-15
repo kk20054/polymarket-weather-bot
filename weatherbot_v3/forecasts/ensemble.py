@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import statistics
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,13 @@ from ..config import DATA_DIR
 from ..db import connect, init_v3_db, upsert_model_reprice_event, utc_now
 from ..deb import bucket_bounds_in_prediction_unit, sigma_with_floor
 from ..env_utils import env_value
-from ..forecast_time import assess_forecast_run
+from ..forecast_time import (
+    FORECAST_COMPONENT_COHORT_VERSION,
+    apply_forecast_component_cohort,
+    assess_forecast_run,
+    forecast_component_cohort_as_of,
+    historical_build_requires_explicit_as_of,
+)
 from ..registry import CitySettlementProfile, forecast_source_matches_profile_location, get_city_profile
 
 
@@ -200,11 +207,31 @@ def build_ensemble_prediction(
     profile = get_city_profile(city_key)
     if not profile:
         return {"ok": False, "city_key": city_key, "target_date": target_date, "reasons": ["unknown_city"]}
+    if issued_at is None and historical_build_requires_explicit_as_of(target_date, profile.timezone):
+        return {
+            "ok": False,
+            "city_key": city_key,
+            "target_date": target_date,
+            "reasons": ["historical_build_requires_explicit_issued_at"],
+        }
     init_v3_db(path)
     algo = _deb_algo()
     rows = _latest_forecast_members(profile, target_date, path, as_of=issued_at)
     components = _components_from_rows(profile, rows, bias_table if bias_table is not None else load_bias_table(), path, target_date=target_date)
+    requested_as_of = issued_at or utc_now()
+    cohort_as_of, _historical_rebase = forecast_component_cohort_as_of(
+        components,
+        requested_as_of=requested_as_of,
+        target_date=target_date,
+        timezone_name=profile.timezone,
+    )
+    cohort = apply_forecast_component_cohort(
+        components,
+        as_of=cohort_as_of,
+    )
+    components = list(cohort.get("components") or [])
     usable = [component for component in components if component["member_count"] > 0 and component["family"] in region_model_weights(profile)]
+    _normalize_component_weights(usable, algo)
     usable_families = {component["family"] for component in usable}
     total_members = sum(int(component["member_count"]) for component in usable)
     if len(usable_families) < MIN_FAMILIES_FOR_ENSEMBLE and total_members < MIN_MEMBER_COUNT_FOR_SINGLE_FAMILY:
@@ -212,9 +239,14 @@ def build_ensemble_prediction(
             "ok": False,
             "city_key": city_key,
             "target_date": target_date,
-            "reasons": ["insufficient_ensemble_sources"],
+            "reasons": [
+                "insufficient_ensemble_sources",
+                *(cohort.get("warnings") or []),
+            ],
             "families": sorted(usable_families),
             "member_count": total_members,
+            "excluded_components": cohort.get("excluded") or [],
+            "cohort_as_of": cohort.get("cohort_as_of") or "",
         }
 
     weighted = _weighted_member_highs(profile, usable)
@@ -225,9 +257,9 @@ def build_ensemble_prediction(
     mu = _weighted_mean(values, weights)
     sigma_from_spread_c = _weighted_std(values, weights)
     residual_terms = [
-        (float(component.get("mae_7d")), float(component.get("weight") or 0.0))
+        (float(component.get("effective_mae_c")), float(component.get("weight") or 0.0))
         for component in usable
-        if _first_number(component.get("mae_7d")) is not None
+        if _first_number(component.get("effective_mae_c")) is not None
     ]
     residual_weight = sum(weight for _value, weight in residual_terms)
     sigma_from_history_c = math.sqrt(
@@ -253,6 +285,11 @@ def build_ensemble_prediction(
         float(component.get("bias_correction_c") or 0.0) * float(component.get("weight") or 0.0)
         for component in usable
     )
+    calibration_coverage_weight = sum(
+        float(component.get("weight") or 0.0)
+        for component in usable
+        if not component.get("mae_imputed")
+    )
     return {
         "ok": True,
         "city_key": profile.city,
@@ -268,6 +305,10 @@ def build_ensemble_prediction(
         "model_weights": {component["source"]: component["weight"] for component in usable},
         "member_count": len(samples_unit),
         "components": usable,
+        "excluded_components": cohort.get("excluded") or [],
+        "cohort_as_of": cohort.get("cohort_as_of") or issued,
+        "cohort_contract_version": FORECAST_COMPONENT_COHORT_VERSION,
+        "calibration_coverage_weight": round(calibration_coverage_weight, 6),
         "source_run_ids": sorted({
             int(run_id)
             for component in usable
@@ -296,6 +337,9 @@ def build_ensemble_prediction(
         "ensemble_sample_weights": [row["weight"] for row in samples_unit],
         "build_warnings": sorted(set([
             *_source_warnings(usable, algo),
+            *(cohort.get("warnings") or []),
+            *(["mae_imputed_for_uncalibrated_sources"] if calibration_coverage_weight < 1.0 - 1e-9 else []),
+            *(["low_calibration_coverage"] if calibration_coverage_weight < 0.5 else []),
             *([] if residual_weight > 0 else ["uncalibrated_sigma_default"]),
         ])),
     }
@@ -735,6 +779,12 @@ def _components_from_rows(
                 else None
             ),
         } if weathercom_archive else _peak_hour_from_members(best_source, unit, bias_unit, profile.timezone)
+        effective_available_at = (
+            weathercom_archive.get("peak_available_at")
+            or first.get("available_at")
+            or first.get("retrieved_at")
+            or ""
+        )
         components.append({
             "source": str(first.get("source") or ""),
             "family": family,
@@ -755,9 +805,12 @@ def _components_from_rows(
             "truth_basis": _truth_basis(profile, target_date, path),
             "retrieved_at": str(first.get("retrieved_at") or ""),
             "available_at": str(first.get("available_at") or ""),
+            "effective_available_at": str(effective_available_at),
             "availability_basis": str(first.get("availability_basis") or ""),
             "peak_hour": peak_hour.get("peak_hour") or "",
             "peak_temp_c": peak_hour.get("peak_temp_c"),
+            "peak_run_id": int(weathercom_archive.get("peak_run_id") or first.get("run_id") or 0),
+            "peak_available_at": str(weathercom_archive.get("peak_available_at") or effective_available_at),
             "source_run_ids": weathercom_archive.get("source_run_ids") or [int(first.get("run_id") or 0)],
             "snapshot_count": int(weathercom_archive.get("snapshot_count") or 1),
             "archive_hour_count": int(weathercom_archive.get("hour_count") or 0),
@@ -831,6 +884,7 @@ def _weathercom_archived_daily_high(
             latest_by_hour[local_hour] = {
                 "temperature_c": temperature_c,
                 "run_id": run_id,
+                "available_at": str(row.get("available_at") or row.get("retrieved_at") or ""),
             }
             if run_id > 0:
                 contributing_run_ids.add(run_id)
@@ -845,6 +899,8 @@ def _weathercom_archived_daily_high(
         "high_c": float(peak["temperature_c"]),
         "peak_hour": peak_hour,
         "peak_temp_c": float(peak["temperature_c"]),
+        "peak_run_id": int(peak.get("run_id") or 0),
+        "peak_available_at": str(peak.get("available_at") or ""),
         "hour_count": len(latest_by_hour),
         "snapshot_count": len(snapshot_run_ids),
         "source_run_ids": sorted(contributing_run_ids),
@@ -985,11 +1041,23 @@ def _truth_basis(profile: CitySettlementProfile, target_date: str, path: Path | 
 
 
 def _apply_mae_adjusted_weights(components: list[dict[str, Any]]) -> None:
+    known_maes = [
+        float(value)
+        for component in components
+        if (value := _first_number(component.get("mae_7d"))) is not None
+    ]
+    imputed_mae = max(
+        UNCALIBRATED_SIGMA_C,
+        statistics.median(known_maes) if known_maes else UNCALIBRATED_SIGMA_C,
+    )
     scored: list[tuple[dict[str, Any], float]] = []
     for component in components:
         prior = max(0.0, float(component.get("weight_prior") or component.get("weight_raw") or 0.0))
         mae = _first_number(component.get("mae_7d"))
-        quality = 1.0 if mae is None else 1.0 / max(float(mae), 0.05)
+        effective_mae = imputed_mae if mae is None else float(mae)
+        component["mae_imputed"] = mae is None
+        component["effective_mae_c"] = round(effective_mae, 4)
+        quality = 1.0 / max(effective_mae, 0.05)
         scored.append((component, prior * quality))
     total = sum(score for _component, score in scored) or 1.0
     for component, score in scored:
@@ -997,6 +1065,19 @@ def _apply_mae_adjusted_weights(components: list[dict[str, Any]]) -> None:
         component["weight_raw"] = score
         component["weight"] = weight
         component["weight_after_mae"] = weight
+
+
+def _normalize_component_weights(components: list[dict[str, Any]], algo: str) -> None:
+    if algo == POLYWX_ALIGNED_ALGO:
+        _apply_mae_adjusted_weights(components)
+        return
+    total = sum(max(0.0, float(component.get("weight_prior") or component.get("weight_raw") or 0.0)) for component in components) or 1.0
+    for component in components:
+        weight = max(0.0, float(component.get("weight_prior") or component.get("weight_raw") or 0.0)) / total
+        component["weight"] = weight
+        component["weight_after_mae"] = weight
+        component["mae_imputed"] = _first_number(component.get("mae_7d")) is None
+        component["effective_mae_c"] = _first_number(component.get("mae_7d")) or UNCALIBRATED_SIGMA_C
 
 
 def _source_warnings(components: list[dict[str, Any]], algo: str) -> list[str]:

@@ -85,7 +85,13 @@ class EnsembleProbabilityTests(unittest.TestCase):
                 [_member("deterministic", [33.6, 34.2, 34.0])],
             )
 
-            prediction = build_ensemble_prediction("beijing", "2026-07-05", path=db_path, bias_table=[])
+            prediction = build_ensemble_prediction(
+                "beijing",
+                "2026-07-05",
+                issued_at="2026-07-05T12:00:00+00:00",
+                path=db_path,
+                bias_table=[],
+            )
 
         self.assertTrue(prediction["ok"], prediction)
         self.assertEqual(prediction["forecast_algo"], ALGO)
@@ -94,7 +100,7 @@ class EnsembleProbabilityTests(unittest.TestCase):
         self.assertLess(prediction["mu"], 34.5)
         self.assertEqual(prediction["sigma_from_history"], 1.2)
         self.assertGreaterEqual(prediction["sigma"], 1.2)
-        self.assertIn("uncalibrated_sigma_default", prediction["build_warnings"])
+        self.assertIn("mae_imputed_for_uncalibrated_sources", prediction["build_warnings"])
 
     def test_ensemble_prediction_reports_weighted_runtime_bias(self):
         db_path = test_db_path("ensemble_weighted_bias")
@@ -115,6 +121,7 @@ class EnsembleProbabilityTests(unittest.TestCase):
             prediction = build_ensemble_prediction(
                 "beijing",
                 "2026-07-05",
+                issued_at="2026-07-05T12:00:00+00:00",
                 path=db_path,
                 bias_table=[
                     {"icao": "ZBAA", "model": "ecmwf", "sample_count": 30, "additive_bias_c": 1.0},
@@ -131,8 +138,8 @@ class EnsembleProbabilityTests(unittest.TestCase):
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
             init_v3_db(db_path)
             for label, run_at, high in (
-                ("before", "2026-07-04T00:00:00+00:00", 30.0),
-                ("after", "2026-07-06T00:00:00+00:00", 45.0),
+                ("before", "2026-07-05T06:00:00+00:00", 30.0),
+                ("after", "2026-07-05T10:00:00+00:00", 45.0),
             ):
                 run = _run("beijing", "2026-07-05", "openmeteo_gfs_seamless", high)
                 run.update({
@@ -149,13 +156,22 @@ class EnsembleProbabilityTests(unittest.TestCase):
             prediction = build_ensemble_prediction(
                 "beijing",
                 "2026-07-05",
-                issued_at="2026-07-05T12:00:00+00:00",
+                issued_at="2026-07-05T08:00:00+00:00",
                 path=db_path,
                 bias_table=[],
             )
 
         self.assertTrue(prediction["ok"], prediction)
         self.assertAlmostEqual(float(prediction["mu"]), 30.0, places=4)
+
+    def test_historical_ensemble_build_requires_explicit_issued_at(self):
+        db_path = test_db_path("ensemble_historical_cutoff_required")
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db(db_path)
+            prediction = build_ensemble_prediction("beijing", "2026-07-05", path=db_path, bias_table=[])
+
+        self.assertFalse(prediction["ok"])
+        self.assertEqual(prediction["reasons"], ["historical_build_requires_explicit_issued_at"])
 
     def test_signal_distribution_can_use_ensemble_samples(self):
         prediction = {

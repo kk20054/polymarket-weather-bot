@@ -44,7 +44,7 @@ import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
 import { useT, type I18nLanguage } from './i18n/useT'
-import type { BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommendationItem, DataReadiness, PaperValidationStatus, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerStatus } from './types'
+import type { BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommendationItem, DataReadiness, Layer7QueryState, Layer7ResourceState, PaperValidationStatus, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerStatus } from './types'
 
 type TradeMode = 'paper' | 'live'
 type UiLanguage = 'zh' | 'en'
@@ -270,6 +270,51 @@ function RecommendationCard({
       </div>
     </div>
   )
+}
+
+type Layer7ResourceInput = {
+  enabled: boolean
+  hasPayload: boolean
+  empty: boolean
+  loading: boolean
+  fetching: boolean
+  requestError: unknown
+  semanticError?: string
+}
+
+function requestErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message.trim()) return error.message.trim()
+  const text = String(error ?? '').trim()
+  return text && text !== '[object Object]' ? text : fallback
+}
+
+function layer7ResourceState(input: Layer7ResourceInput, fallbackError: string): Layer7ResourceState {
+  const requestError = input.requestError
+    ? requestErrorMessage(input.requestError, fallbackError)
+    : ''
+  const effectiveError = input.semanticError || requestError
+
+  if (!input.enabled) return { status: 'idle' }
+  if (!input.hasPayload && (input.loading || input.fetching)) {
+    return { status: 'loading', refreshing: input.fetching }
+  }
+  if (!input.hasPayload && effectiveError) {
+    return { status: 'error', error: effectiveError }
+  }
+
+  const refreshError = input.hasPayload && effectiveError ? effectiveError : undefined
+  if (input.empty) {
+    return {
+      status: 'empty',
+      refreshing: input.fetching,
+      refresh_error: refreshError,
+    }
+  }
+  return {
+    status: 'ready',
+    refreshing: input.fetching,
+    refresh_error: refreshError,
+  }
 }
 
 function reasonLabel(reason: string) {
@@ -804,12 +849,10 @@ function App() {
     retry: 1,
   })
 
-  const hourlyEvidenceSettled = hourlyConsensusQuery.isSuccess || hourlyConsensusQuery.isError
-
   const marketBucketsQuery = useQuery({
     queryKey: ['market-buckets', selectedCity, selectedDate],
     queryFn: () => fetchMarketBuckets(selectedCity, selectedDate, 120),
-    enabled: selectedEvidenceReadyForLayer7 && hourlyEvidenceSettled,
+    enabled: selectedEvidenceReadyForLayer7,
     refetchInterval: 30000,
     retry: 1,
   })
@@ -817,7 +860,7 @@ function App() {
   const signalDecisionsQuery = useQuery({
     queryKey: ['signal-decisions', selectedCity, selectedDate],
     queryFn: () => fetchSignalDecisions(selectedCity, selectedDate, 120),
-    enabled: selectedEvidenceReadyForLayer7 && hourlyEvidenceSettled,
+    enabled: selectedEvidenceReadyForLayer7,
     refetchInterval: 30000,
     retry: 1,
   })
@@ -825,15 +868,54 @@ function App() {
   const dailyMaxPredictionQuery = useQuery({
     queryKey: ['daily-max-predictions', selectedCity, selectedDate],
     queryFn: () => fetchDailyMaxPredictions(selectedCity, selectedDate),
-    enabled: selectedEvidenceReadyForLayer7 && hourlyEvidenceSettled,
+    enabled: selectedEvidenceReadyForLayer7,
     refetchInterval: 60000,
     retry: 1,
   })
 
+  const debQualityError = dailyMaxPredictionQuery.data?.quality_ok === false
+    ? (dailyMaxPredictionQuery.data.quality_reasons ?? ['DEB source cohort invalid']).join(', ')
+    : ''
+  const layer7QueryState: Layer7QueryState = {
+    deb: layer7ResourceState({
+      enabled: selectedEvidenceReadyForLayer7,
+      hasPayload: Boolean(dailyMaxPredictionQuery.data?.latest),
+      empty: Boolean(dailyMaxPredictionQuery.data && !dailyMaxPredictionQuery.data.latest && !debQualityError),
+      loading: dailyMaxPredictionQuery.isLoading,
+      fetching: dailyMaxPredictionQuery.isFetching,
+      requestError: dailyMaxPredictionQuery.isError ? dailyMaxPredictionQuery.error : null,
+      semanticError: debQualityError,
+    }, 'DEB request failed'),
+    buckets: layer7ResourceState({
+      enabled: selectedEvidenceReadyForLayer7,
+      hasPayload: Boolean(marketBucketsQuery.data),
+      empty: Boolean(marketBucketsQuery.data && (marketBucketsQuery.data.latest?.length ?? 0) === 0),
+      loading: marketBucketsQuery.isLoading,
+      fetching: marketBucketsQuery.isFetching,
+      requestError: marketBucketsQuery.isError ? marketBucketsQuery.error : null,
+    }, 'Market buckets request failed'),
+    signals: layer7ResourceState({
+      enabled: selectedEvidenceReadyForLayer7,
+      hasPayload: Boolean(signalDecisionsQuery.data),
+      empty: Boolean(signalDecisionsQuery.data && (signalDecisionsQuery.data.decisions?.length ?? 0) === 0),
+      loading: signalDecisionsQuery.isLoading,
+      fetching: signalDecisionsQuery.isFetching,
+      requestError: signalDecisionsQuery.isError ? signalDecisionsQuery.error : null,
+    }, 'Signal decisions request failed'),
+  }
+  const layer7Failures = [
+    ['DEB', layer7QueryState.deb.error ?? layer7QueryState.deb.refresh_error],
+    ['市场桶', layer7QueryState.buckets.error ?? layer7QueryState.buckets.refresh_error],
+    ['信号决策', layer7QueryState.signals.error ?? layer7QueryState.signals.refresh_error],
+  ].filter((entry): entry is [string, string] => Boolean(entry[1]))
+  layer7QueryState.aggregate_error = layer7Failures.length > 0
+    ? layer7Failures.map(([source, message]) => `${source}: ${message}`).join('；')
+    : undefined
+
   const modelRepriceEventsQuery = useQuery({
     queryKey: ['model-reprice-events', selectedCity, selectedDate],
     queryFn: () => fetchModelRepriceEvents(selectedCity || '', selectedDate || '', true, 200),
-    enabled: selectedEvidenceReadyForLayer7 && hourlyEvidenceSettled,
+    enabled: selectedEvidenceReadyForLayer7,
     refetchInterval: 30000,
     retry: 1,
   })
@@ -1625,7 +1707,7 @@ function App() {
               hourlySourceSeries={hourlyConsensusQuery.data?.series ?? null}
               forecastPeakMarker={hourlyConsensusQuery.data?.forecast_peak_marker ?? null}
               hourlySourceLoading={hourlyConsensusQuery.isLoading || (hourlyConsensusQuery.isFetching && !hourlyConsensusQuery.data)}
-              layer7Loading={marketBucketsQuery.isFetching || signalDecisionsQuery.isFetching || dailyMaxPredictionQuery.isFetching}
+              layer7QueryState={layer7QueryState}
               selectedCity={selectedCity}
               onSelectedCity={setSelectedCity}
               selectedDate={selectedDate}

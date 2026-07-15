@@ -15,7 +15,12 @@ except Exception:  # pragma: no cover - Python always provides zoneinfo in suppo
 
 from .db import connect, init_v3_db, list_daily_max_predictions, list_market_buckets, upsert_daily_max_prediction
 from .env_utils import env_value
-from .forecast_time import assess_forecast_run
+from .forecast_time import (
+    apply_forecast_component_cohort,
+    assess_forecast_run,
+    forecast_component_cohort_as_of,
+    historical_build_requires_explicit_as_of,
+)
 from .registry import forecast_source_matches_profile_location, get_city_profile
 
 
@@ -93,8 +98,10 @@ def bucket_probabilities(
             "yes_token_id": bucket.get("yes_token_id") or "",
             "bucket_label": bucket.get("bucket_label") or bucket.get("outcome_name") or "",
             "bucket_direction": bucket.get("bucket_direction") or "",
-            "bucket_low": low,
-            "bucket_high": high,
+            # Keep infinite bounds internal to the CDF. JSON represents open
+            # tails with null so strict API serializers never emit Infinity.
+            "bucket_low": None if math.isinf(low) and low < 0 else low,
+            "bucket_high": None if math.isinf(high) and high > 0 else high,
             "bucket_unit": prediction_unit,
             "probability_raw": probability,
             "probability": probability,
@@ -157,6 +164,28 @@ def build_daily_max_prediction(
     profile = get_city_profile(city_key)
     unit = _clean_unit(profile.unit if profile else "C")
     sigma_floor = sigma_floor_for_unit(unit) if sigma_floor_c == DEFAULT_SIGMA_FLOOR_C else convert_sigma(float(sigma_floor_c), "C", unit)
+    aligned_mode = env_value("DEB_WEIGHT_MODE", "polywx_aligned").strip().lower() in {
+        "polywx",
+        "polywx_aligned",
+        "polywx_aligned_deb_v1",
+    }
+    if issued_at is None and historical_build_requires_explicit_as_of(
+        target_date,
+        profile.timezone if profile else "UTC",
+    ):
+        method = "polywx_aligned_deb_v1" if aligned_mode else METHOD
+        return {
+            "ok": False,
+            "city_key": city_key,
+            "target_date": target_date,
+            "issued_at": "",
+            "unit": unit,
+            "method": method,
+            "deb_version": method,
+            "sigma_floor": sigma_floor,
+            "mu_observed_floor_applied": False,
+            "reasons": ["historical_build_requires_explicit_issued_at"],
+        }
     issued = _normalize_issued_at(issued_at)
 
     if os.getenv("WEATHERBOT_ENSEMBLE_DEB_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}:
@@ -208,6 +237,22 @@ def build_daily_max_prediction(
                 "build_warnings": build_warnings,
             })
             return ensemble
+        ensemble_reasons = [str(reason) for reason in (ensemble.get("reasons") or [])]
+        if aligned_mode:
+            return {
+                "ok": False,
+                "city_key": city_key,
+                "target_date": target_date,
+                "issued_at": issued,
+                "unit": unit,
+                "method": "polywx_aligned_deb_v1",
+                "deb_version": "polywx_aligned_deb_v1",
+                "sigma_floor": sigma_floor,
+                "mu_observed_floor_applied": False,
+                "reasons": ensemble_reasons,
+                "excluded_components": ensemble.get("excluded_components") or [],
+                "cohort_as_of": ensemble.get("cohort_as_of") or issued,
+            }
 
     forecast_components, component_meta = _forecast_components(
         city_key,
@@ -395,7 +440,7 @@ def latest_bucket_probabilities(
             "reasons": ["missing_daily_max_prediction"],
             "items": [],
         }
-    buckets = list_market_buckets(city=city_key, target_date=target_date, limit=1000)
+    buckets = list_market_buckets(city=city_key, target_date=target_date, limit=1000, path=path)
     if not buckets:
         return {
             "ok": False,
@@ -406,6 +451,15 @@ def latest_bucket_probabilities(
             "items": [],
         }
     prediction = predictions[0]
+    cohort_contract = prediction.get("cohort_contract") or {}
+    if not cohort_contract.get("ok", True):
+        return {
+            "ok": False,
+            "city_key": city_key,
+            "target_date": target_date,
+            "reasons": list(cohort_contract.get("reasons") or ["prediction_source_cohort_invalid"]),
+            "items": [],
+        }
     distribution = bucket_probabilities(
         float(prediction["mu"]),
         float(prediction["sigma"]),
@@ -559,6 +613,7 @@ def _forecast_components(
         if not assessment["ok"]:
             rejected_reasons.add(str(assessment.get("reason") or "forecast_rejected"))
             continue
+        run["available_at"] = assessment.get("available_at") or run.get("available_at") or run.get("retrieved_at")
         source = str(run.get("source") or run.get("provider") or run.get("model") or "unknown")
         if source == "polywx_forecast":
             continue
@@ -584,7 +639,13 @@ def _forecast_components(
                 member_daily_highs = [convert_temp(mean_high, run_unit, unit)]
         if not member_daily_highs:
             continue
-        bucket = grouped.setdefault(source, {"source": source, "values": [], "run_ids": [], "run_keys": []})
+        bucket = grouped.setdefault(source, {
+            "source": source,
+            "values": [],
+            "run_ids": [],
+            "run_keys": [],
+            "available_at": str(run.get("available_at") or run.get("retrieved_at") or ""),
+        })
         bucket["values"].extend(member_daily_highs)
         bucket["run_ids"].append(int(run["id"]))
         bucket["run_keys"].append(str(run.get("run_key") or ""))
@@ -603,8 +664,24 @@ def _forecast_components(
             "weight_raw": float(source_weights.get(source, 0.01)),
             "run_ids": bucket["run_ids"],
             "run_keys": bucket["run_keys"][:10],
+            "available_at": bucket["available_at"],
+            "effective_available_at": bucket["available_at"],
         })
-    return components, {"warnings": warnings}
+    cohort_as_of, historical_rebase = forecast_component_cohort_as_of(
+        components,
+        requested_as_of=issued_at,
+        target_date=target_date,
+        timezone_name=profile.timezone if profile else "UTC",
+    )
+    cohort = apply_forecast_component_cohort(components, as_of=cohort_as_of)
+    warnings.extend(cohort.get("warnings") or [])
+    if historical_rebase:
+        warnings.append("historical_cohort_rebased")
+    return list(cohort.get("components") or []), {
+        "warnings": sorted(set(warnings)),
+        "excluded_components": cohort.get("excluded") or [],
+        "cohort_as_of": cohort.get("cohort_as_of") or issued_at,
+    }
 
 
 def _deb_weights_for_profile(profile) -> dict[str, float]:

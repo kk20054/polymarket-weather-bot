@@ -4,6 +4,7 @@ ensure_test_environment()
 
 import json
 import math
+import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,6 +63,9 @@ class DebGaussianTests(unittest.TestCase):
 
         self.assertTrue(result["normalized"])
         self.assertAlmostEqual(result["sum_probability"], 1.0, places=6)
+        self.assertIsNone(result["items"][0]["bucket_low"])
+        self.assertIsNone(result["items"][-1]["bucket_high"])
+        json.dumps(result, allow_nan=False)
 
     def test_sigma_floor_prevents_nan(self):
         result = bucket_probabilities(
@@ -80,7 +84,9 @@ class DebGaussianTests(unittest.TestCase):
 
     def test_daily_max_prediction_applies_observed_temperature_floor(self):
         path = test_db_path("deb_observed_floor")
-        with patch("weatherbot_v3.db.load_config", return_value=SimpleNamespace(v3_db_path=path)):
+        with patch("weatherbot_v3.db.load_config", return_value=SimpleNamespace(v3_db_path=path)), patch.dict(
+            os.environ, {"WEATHERBOT_ENSEMBLE_DEB_ENABLED": "false"}, clear=False
+        ):
             init_v3_db(path)
             insert_forecast_run(
                 {
@@ -110,7 +116,9 @@ class DebGaussianTests(unittest.TestCase):
                 "raw_text": "METAR LFPB 021200Z AUTO 00000KT CAVOK 28/16 Q1015",
             })
 
-            prediction = build_and_store_daily_max_prediction("paris", "2026-07-02", path=path)
+            prediction = build_and_store_daily_max_prediction(
+                "paris", "2026-07-02", issued_at="2026-07-02T12:30:00Z", path=path
+            )
 
             self.assertTrue(prediction["ok"])
             self.assertTrue(prediction["mu_observed_floor_applied"])
@@ -119,7 +127,9 @@ class DebGaussianTests(unittest.TestCase):
 
     def test_tokyo_observed_floor_keeps_deb_above_intraday_max_minus_half_c(self):
         path = test_db_path("deb_tokyo_observed_floor")
-        with patch("weatherbot_v3.db.load_config", return_value=SimpleNamespace(v3_db_path=path)):
+        with patch("weatherbot_v3.db.load_config", return_value=SimpleNamespace(v3_db_path=path)), patch.dict(
+            os.environ, {"WEATHERBOT_ENSEMBLE_DEB_ENABLED": "false"}, clear=False
+        ):
             init_v3_db(path)
             insert_forecast_run(
                 {
@@ -150,7 +160,9 @@ class DebGaussianTests(unittest.TestCase):
                 "raw_text": "RJTT 050014Z 18008KT 9999 FEW020 26/21 Q1009",
             })
 
-            prediction = build_and_store_daily_max_prediction("tokyo", "2026-07-05", path=path)
+            prediction = build_and_store_daily_max_prediction(
+                "tokyo", "2026-07-05", issued_at="2026-07-05T01:00:00Z", path=path
+            )
 
             self.assertTrue(prediction["ok"])
             self.assertTrue(prediction["mu_observed_floor_applied"])
@@ -158,7 +170,9 @@ class DebGaussianTests(unittest.TestCase):
 
     def test_chicago_fahrenheit_forecast_is_not_double_converted(self):
         path = test_db_path("deb_chicago_unit_regression")
-        with patch("weatherbot_v3.db.load_config", return_value=SimpleNamespace(v3_db_path=path)):
+        with patch("weatherbot_v3.db.load_config", return_value=SimpleNamespace(v3_db_path=path)), patch.dict(
+            os.environ, {"WEATHERBOT_ENSEMBLE_DEB_ENABLED": "false"}, clear=False
+        ):
             init_v3_db(path)
             insert_forecast_run(
                 {
@@ -180,7 +194,9 @@ class DebGaussianTests(unittest.TestCase):
                 [{"member_id": "m0", "high_temp": 94.9}],
             )
 
-            prediction = build_and_store_daily_max_prediction("chicago", "2026-07-04", path=path)
+            prediction = build_and_store_daily_max_prediction(
+                "chicago", "2026-07-04", issued_at="2026-07-04T20:30:00Z", path=path
+            )
 
             self.assertTrue(prediction["ok"])
             self.assertEqual(prediction["unit"], "F")

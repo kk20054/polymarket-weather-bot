@@ -13,7 +13,7 @@ import dashboard_server
 
 class DashboardAsyncReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_hourly_consensus_does_not_block_event_loop(self):
-        def slow_summary(_city, _target_date):
+        def slow_summary(_city, _target_date, **_kwargs):
             time.sleep(0.12)
             return {"ok": True, "series": {"forecast": []}}
 
@@ -31,6 +31,7 @@ class DashboardAsyncReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertLess(heartbeat_at - started, 0.08)
         self.assertTrue(payload["ok"])
+        self.assertIn("ensure_schema=False", inspect.getsource(dashboard_server.hourly_consensus))
 
     async def test_layer7_read_routes_delegate_to_thread_pool(self):
         for route in (
@@ -41,6 +42,7 @@ class DashboardAsyncReadTests(unittest.IsolatedAsyncioTestCase):
             dashboard_server.forecasts,
             dashboard_server.hourly_consensus,
             dashboard_server.market_buckets,
+            dashboard_server.bucket_probabilities_api,
             dashboard_server.daily_max_predictions,
             dashboard_server.signal_decisions,
             dashboard_server.model_reprice_events,

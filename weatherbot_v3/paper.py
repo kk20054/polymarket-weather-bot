@@ -17,6 +17,8 @@ from .db import (
     open_paper_order_for_token,
     paper_execution_summary,
     persist_paper_order_fill_group,
+    signal_decision_prediction_cohort_status,
+    signal_decision_prediction_cohort_statuses,
     upsert_paper_order_record,
 )
 from .polymarket import price_matches_tick
@@ -32,6 +34,7 @@ def execute_paper_decision(
     amount: float | None = None,
     dry_run: bool = False,
     path: Path | None = None,
+    cohort_run_id: str = "",
 ) -> dict[str, Any]:
     decision_key = str(decision_id or "").strip()
     if not decision_key:
@@ -44,7 +47,13 @@ def execute_paper_decision(
             "reason": "signal_decision_not_found",
             "decision_id": decision_key,
         }
-    return execute_paper_decision_record(rows[0], amount=amount, dry_run=dry_run, path=path)
+    return execute_paper_decision_record(
+        rows[0],
+        amount=amount,
+        dry_run=dry_run,
+        path=path,
+        cohort_run_id=cohort_run_id,
+    )
 
 
 def execute_paper_decision_record(
@@ -59,6 +68,22 @@ def execute_paper_decision_record(
     max_book_age_seconds: float | None = None,
     max_spread_bps: float | None = None,
 ) -> dict[str, Any]:
+    if not dry_run and not str(cohort_run_id or "").strip():
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "paper_validation_run_required",
+            "decision_id": decision.get("decision_id"),
+        }
+    cohort_contract = signal_decision_prediction_cohort_status(decision, path=path)
+    if not cohort_contract.get("ok", True):
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "prediction_source_cohort_invalid",
+            "gate_reasons": list(cohort_contract.get("reasons") or []),
+            "decision_id": decision.get("decision_id"),
+        }
     ladder_group_id = str(decision.get("ladder_group_id") or "").strip()
     if ladder_group_id:
         return execute_paper_ladder_group(
@@ -211,10 +236,34 @@ def execute_paper_decisions(
     dry_run: bool = True,
     path: Path | None = None,
 ) -> dict[str, Any]:
+    if not dry_run:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "paper_validation_run_required",
+            "dry_run": False,
+            "execution_version": PAPER_EXECUTION_VERSION,
+            "requested": 0,
+            "executed": 0,
+            "duplicates": 0,
+            "rejected": 0,
+            "blocked": 0,
+            "blocked_reasons": {},
+            "results": [],
+            "summary": paper_execution_summary(city_key=city_key, target_date=target_date, path=path),
+        }
     allowed_strategies = set(strategies or [])
     selected: list[dict[str, Any]] = []
+    blocked_reasons: dict[str, int] = {}
     seen_ladder_groups: set[str] = set()
-    for row in list_signal_decisions(city_key=city_key, target_date=target_date, limit=limit, path=path):
+    candidate_rows = list_signal_decisions(city_key=city_key, target_date=target_date, limit=limit, path=path)
+    candidate_contracts = signal_decision_prediction_cohort_statuses(candidate_rows, path=path)
+    for row, contract in zip(candidate_rows, candidate_contracts):
+        if not contract.get("ok", True):
+            for reason in contract.get("reasons") or ["prediction_source_cohort_invalid"]:
+                key = str(reason)
+                blocked_reasons[key] = blocked_reasons.get(key, 0) + 1
+            continue
         if strategy_revision_id and str(row.get("strategy_revision_id") or "") != str(strategy_revision_id):
             continue
         if decision_batch_issued_at and str(row.get("issued_at") or "") != str(decision_batch_issued_at):
@@ -235,7 +284,9 @@ def execute_paper_decisions(
         for row in rows[: max(1, min(int(limit or 20), 100))]
     ]
     return {
-        "ok": all(item.get("ok") or item.get("status") == "duplicate" for item in results),
+        "ok": bool(results) and all(item.get("ok") or item.get("status") == "duplicate" for item in results),
+        "status": "dry_run" if results else ("blocked" if blocked_reasons else "no_candidates"),
+        "reason": next(iter(blocked_reasons), None) if not results else None,
         "dry_run": dry_run,
         "execution_version": PAPER_EXECUTION_VERSION,
         "strategy_revision_id": strategy_revision_id,
@@ -244,6 +295,8 @@ def execute_paper_decisions(
         "executed": sum(1 for item in results if item.get("ok") and item.get("status") != "duplicate"),
         "duplicates": sum(1 for item in results if item.get("status") == "duplicate"),
         "rejected": sum(1 for item in results if item.get("status") == "rejected"),
+        "blocked": sum(blocked_reasons.values()),
+        "blocked_reasons": blocked_reasons,
         "results": results,
         "summary": paper_execution_summary(city_key=city_key, target_date=target_date, path=path),
     }
@@ -281,6 +334,39 @@ def execute_paper_ladder_group(
             "dry_run": dry_run,
             "ladder_group_id": group_id,
             "group_size": len(rows),
+        }
+    invalid_contracts = [
+        contract
+        for contract in signal_decision_prediction_cohort_statuses(rows, path=path)
+        if not contract.get("ok", True)
+    ]
+    if invalid_contracts:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "prediction_source_cohort_invalid",
+            "gate_reasons": sorted({
+                str(reason)
+                for contract in invalid_contracts
+                for reason in (contract.get("reasons") or [])
+            }),
+            "ladder_group_id": group_id,
+        }
+
+    group_contract = {
+        (
+            str(row.get("strategy_revision_id") or ""),
+            str(row.get("issued_at") or ""),
+            int((row.get("evidence_links") or {}).get("daily_max_prediction_id") or 0),
+        )
+        for row in rows
+    }
+    if len(group_contract) != 1:
+        return {
+            "ok": False,
+            "status": "blocked",
+            "reason": "ladder_group_decision_cohort_mismatch",
+            "ladder_group_id": group_id,
         }
 
     cfg = load_config()

@@ -6,9 +6,14 @@ from datetime import datetime, time, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .env_utils import env_value
+
 
 ONLINE_AVAILABILITY_BASIS = "retrieved_at"
 ARCHIVE_AVAILABILITY_BASIS = "archive_run_at"
+DEFAULT_COMPONENT_MAX_AGE_HOURS = 18.0
+DEFAULT_COMPONENT_MAX_SKEW_HOURS = 12.0
+FORECAST_COMPONENT_COHORT_VERSION = "forecast-component-cohort-v1"
 
 
 def parse_utc(value: Any) -> datetime | None:
@@ -140,6 +145,187 @@ def prepare_forecast_snapshot(
     return prepared
 
 
+def apply_forecast_component_cohort(
+    components: list[dict[str, Any]],
+    *,
+    as_of: str | datetime,
+    max_age_hours: float | None = None,
+    max_skew_hours: float | None = None,
+) -> dict[str, Any]:
+    """Fail closed when a DEB mixes stale or asynchronous source evidence."""
+
+    cutoff = as_of if isinstance(as_of, datetime) else parse_utc(as_of)
+    if cutoff is None:
+        return {
+            "components": [],
+            "excluded": [dict(component) for component in components],
+            "warnings": ["forecast_component_as_of_invalid"],
+            "cohort_as_of": "",
+        }
+    cutoff = cutoff.astimezone(timezone.utc)
+    age_limit = _positive_float(
+        max_age_hours,
+        env_value("DEB_COMPONENT_MAX_AGE_HOURS", str(DEFAULT_COMPONENT_MAX_AGE_HOURS)),
+        DEFAULT_COMPONENT_MAX_AGE_HOURS,
+    )
+    skew_limit = _positive_float(
+        max_skew_hours,
+        env_value("DEB_COMPONENT_MAX_SKEW_HOURS", str(DEFAULT_COMPONENT_MAX_SKEW_HOURS)),
+        DEFAULT_COMPONENT_MAX_SKEW_HOURS,
+    )
+
+    prepared: list[tuple[dict[str, Any], datetime]] = []
+    excluded: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for source_component in components:
+        component = dict(source_component)
+        source = str(component.get("family") or component.get("source") or "unknown")
+        available_at = parse_utc(
+            component.get("effective_available_at")
+            or component.get("peak_available_at")
+            or component.get("available_at")
+            or component.get("retrieved_at")
+        )
+        if available_at is None:
+            component["cohort_exclusion_reason"] = "forecast_component_available_at_missing"
+            excluded.append(component)
+            warnings.append(f"forecast_component_available_at_missing:{source}")
+            continue
+        age_hours = (cutoff - available_at).total_seconds() / 3600.0
+        component.update({
+            "cohort_as_of": cutoff.isoformat(),
+            "effective_available_at": available_at.isoformat(),
+            "source_age_hours": round(age_hours, 4),
+            "max_source_age_hours": age_limit,
+        })
+        if age_hours < -1e-6:
+            component["source_age_ok"] = False
+            component["cohort_exclusion_reason"] = "forecast_component_after_as_of"
+            excluded.append(component)
+            warnings.append(f"forecast_component_after_as_of:{source}")
+            continue
+        if age_hours > age_limit:
+            component["source_age_ok"] = False
+            component["cohort_exclusion_reason"] = "forecast_component_stale"
+            excluded.append(component)
+            warnings.append(f"forecast_component_stale:{source}:{age_hours:.1f}h")
+            continue
+        component["source_age_ok"] = True
+        prepared.append((component, available_at))
+
+    newest = max((available_at for _component, available_at in prepared), default=None)
+    kept: list[dict[str, Any]] = []
+    for component, available_at in prepared:
+        source = str(component.get("family") or component.get("source") or "unknown")
+        skew_hours = (newest - available_at).total_seconds() / 3600.0 if newest else 0.0
+        component.update({
+            "source_skew_hours": round(skew_hours, 4),
+            "max_source_skew_hours": skew_limit,
+            "source_skew_ok": skew_hours <= skew_limit,
+        })
+        if skew_hours > skew_limit:
+            component["cohort_exclusion_reason"] = "forecast_component_skew_exceeded"
+            excluded.append(component)
+            warnings.append(f"forecast_component_skew_exceeded:{source}:{skew_hours:.1f}h")
+            continue
+        kept.append(component)
+
+    return {
+        "components": kept,
+        "excluded": excluded,
+        "warnings": sorted(set(warnings)),
+        "cohort_as_of": cutoff.isoformat(),
+        "max_age_hours": age_limit,
+        "max_skew_hours": skew_limit,
+    }
+
+
+def forecast_component_cohort_as_of(
+    components: list[dict[str, Any]],
+    *,
+    requested_as_of: str | datetime,
+    target_date: str,
+    timezone_name: str,
+) -> tuple[str | datetime, bool]:
+    """Preserve the caller's cutoff; historical replay must never rebase itself."""
+
+    del components, target_date, timezone_name
+    cutoff = requested_as_of if isinstance(requested_as_of, datetime) else parse_utc(requested_as_of)
+    return (cutoff if cutoff is not None else requested_as_of), False
+
+
+def historical_build_requires_explicit_as_of(
+    target_date: str,
+    timezone_name: str,
+    *,
+    reference: str | datetime | None = None,
+) -> bool:
+    """Return true when rebuilding a completed local day needs an explicit cutoff."""
+
+    current = reference if isinstance(reference, datetime) else parse_utc(reference)
+    current = current or datetime.now(timezone.utc)
+    try:
+        target = datetime.strptime(str(target_date), "%Y-%m-%d").date()
+        local_today = current.astimezone(ZoneInfo(timezone_name)).date()
+    except (ValueError, ZoneInfoNotFoundError):
+        return False
+    return target < local_today
+
+
+def persisted_prediction_cohort_status(prediction: dict[str, Any]) -> dict[str, Any]:
+    """Validate the source-cohort contract on a persisted DEB prediction."""
+    raw = prediction.get("raw") if isinstance(prediction.get("raw"), dict) else {}
+    algorithm = str(
+        prediction.get("forecast_algo")
+        or prediction.get("method")
+        or prediction.get("deb_version")
+        or raw.get("forecast_algo")
+        or raw.get("algo")
+        or ""
+    ).strip().lower()
+    if algorithm not in {"polywx_aligned_deb_v1", "polywx", "polywx_aligned"}:
+        return {"ok": True, "applicable": False, "version": "", "reasons": []}
+
+    version = str(
+        prediction.get("cohort_contract_version")
+        or raw.get("cohort_contract_version")
+        or ""
+    ).strip()
+    cohort_as_of = str(
+        prediction.get("cohort_as_of")
+        or raw.get("cohort_as_of")
+        or ""
+    ).strip()
+    components = prediction.get("components")
+    if not isinstance(components, list):
+        components = raw.get("components") if isinstance(raw.get("components"), list) else []
+
+    reasons: list[str] = []
+    if version != FORECAST_COMPONENT_COHORT_VERSION:
+        reasons.append("prediction_missing_source_cohort_contract")
+    if not parse_utc(cohort_as_of):
+        reasons.append("prediction_cohort_as_of_missing")
+    if not components:
+        reasons.append("prediction_components_missing")
+    for component in components:
+        if not isinstance(component, dict):
+            reasons.append("prediction_component_invalid")
+            continue
+        source = str(component.get("source") or "unknown")
+        if component.get("source_age_ok") is not True:
+            reasons.append(f"prediction_component_age_unverified:{source}")
+        if component.get("source_skew_ok") is not True:
+            reasons.append(f"prediction_component_skew_unverified:{source}")
+
+    return {
+        "ok": not reasons,
+        "applicable": True,
+        "version": version,
+        "cohort_as_of": cohort_as_of,
+        "reasons": list(dict.fromkeys(reasons)),
+    }
+
+
 def _trusted_archive(run: dict[str, Any]) -> bool:
     flags = _list_value(run.get("quality_flags"))
     if "trusted_forecast_archive" in flags:
@@ -262,6 +448,17 @@ def _number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _positive_float(value: Any, fallback: Any, default: float) -> float:
+    for candidate in (value, fallback, default):
+        try:
+            parsed = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return float(default)
 
 
 def _truthy(value: Any) -> bool:

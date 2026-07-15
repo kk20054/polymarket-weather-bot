@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DATA_DIR, load_config
+from .forecast_time import persisted_prediction_cohort_status
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -1991,19 +1992,104 @@ def list_daily_max_predictions(
             row["ensemble_samples"] = raw_payload.get("ensemble_samples") or []
         if "ensemble_sample_weights" in raw_payload:
             row["ensemble_sample_weights"] = raw_payload.get("ensemble_sample_weights") or []
+        row["cohort_contract"] = persisted_prediction_cohort_status(row)
     return rows
 
 
 def daily_max_prediction_summary(city_key: str | None = None, target_date: str | None = None) -> dict[str, Any]:
     rows = list_daily_max_predictions(city_key=city_key, target_date=target_date, limit=100)
-    latest = rows[0] if rows else None
+    candidate = rows[0] if rows else None
+    cohort_contract = candidate.get("cohort_contract") if candidate else None
+    quality_ok = bool(candidate) and bool((cohort_contract or {}).get("ok", True))
+    latest = candidate if quality_ok else None
     return {
         "ok": True,
         "city_key": city_key or "",
         "target_date": target_date or "",
         "count": len(rows),
         "latest": latest,
+        "quality_ok": quality_ok,
+        "quality_reasons": list((cohort_contract or {}).get("reasons") or []),
+        "rejected_latest_id": candidate.get("id") if candidate and not quality_ok else None,
     }
+
+
+def signal_decision_prediction_cohort_status(
+    decision: dict[str, Any],
+    path: Path | None = None,
+) -> dict[str, Any]:
+    return signal_decision_prediction_cohort_statuses([decision], path=path)[0]
+
+
+def signal_decision_prediction_cohort_statuses(
+    decisions: list[dict[str, Any]],
+    path: Path | None = None,
+) -> list[dict[str, Any]]:
+    aligned_algorithms = {"polywx_aligned_deb_v1", "polywx", "polywx_aligned"}
+    prediction_ids: set[int] = set()
+    decision_prediction_ids: list[int] = []
+    applicable: list[bool] = []
+    for decision in decisions:
+        forecast_algo = str(decision.get("forecast_algo") or decision.get("deb_version") or "").strip().lower()
+        is_applicable = forecast_algo in aligned_algorithms
+        applicable.append(is_applicable)
+        evidence = decision.get("evidence_links")
+        if not isinstance(evidence, dict):
+            evidence = _loads_obj(decision.get("evidence_links_json"))
+        prediction_id = int(evidence.get("daily_max_prediction_id") or 0)
+        decision_prediction_ids.append(prediction_id)
+        if prediction_id > 0:
+            prediction_ids.add(prediction_id)
+
+    contracts_by_prediction_id: dict[int, dict[str, Any]] = {}
+    if prediction_ids:
+        placeholders = ",".join("?" for _ in prediction_ids)
+        with connect(path) as conn:
+            prediction_rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT id, method, deb_version, components_json, raw_json
+                    FROM daily_max_predictions
+                    WHERE id IN ({placeholders})
+                    """,
+                    tuple(sorted(prediction_ids)),
+                ).fetchall()
+            ]
+        for prediction in prediction_rows:
+            prediction["components"] = _loads_list(prediction.get("components_json"))
+            prediction["raw"] = _loads_obj(prediction.get("raw_json"))
+            prediction["forecast_algo"] = (
+                prediction["raw"].get("forecast_algo")
+                or prediction["raw"].get("algo")
+                or prediction.get("method")
+            )
+            contracts_by_prediction_id[int(prediction["id"])] = persisted_prediction_cohort_status(prediction)
+
+    statuses: list[dict[str, Any]] = []
+    for is_applicable, prediction_id in zip(applicable, decision_prediction_ids):
+        if not is_applicable:
+            statuses.append({
+                "ok": False,
+                "applicable": False,
+                "version": "",
+                "reasons": ["decision_forecast_algo_unverified"],
+            })
+        elif prediction_id <= 0:
+            statuses.append({
+                "ok": False,
+                "applicable": True,
+                "version": "",
+                "reasons": ["decision_daily_max_prediction_missing"],
+            })
+        else:
+            statuses.append(dict(contracts_by_prediction_id.get(prediction_id) or {
+                "ok": False,
+                "applicable": True,
+                "version": "",
+                "reasons": ["decision_daily_max_prediction_not_found"],
+            }))
+    return statuses
 
 
 def _loads_list(raw: Any) -> list[Any]:

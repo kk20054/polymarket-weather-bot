@@ -6,7 +6,14 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from weatherbot_v3.db import init_v3_db, insert_orderbook, list_paper_orders, upsert_signal_decision_record
+from weatherbot_v3.db import (
+    init_v3_db,
+    insert_orderbook,
+    list_paper_orders,
+    upsert_daily_max_prediction,
+    upsert_signal_decision_record as _db_upsert_signal_decision_record,
+)
+from weatherbot_v3.forecast_time import FORECAST_COMPONENT_COHORT_VERSION
 from weatherbot_v3.paper_validation import (
     paper_validation_status,
     run_paper_validation_tick,
@@ -26,6 +33,37 @@ def test_db_path(name: str) -> Path:
     path = TEST_DB_DIR / f"{name}.db"
     path.unlink(missing_ok=True)
     return path
+
+
+def upsert_signal_decision_record(decision: dict, path: Path | None = None) -> int:
+    issued_at = str(decision.get("issued_at") or datetime.now(timezone.utc).isoformat())
+    prediction_id = upsert_daily_max_prediction({
+        "city_key": decision.get("city_key") or "chicago",
+        "target_date": decision.get("target_date") or issued_at[:10],
+        "issued_at": issued_at,
+        "mu": 82.0,
+        "sigma": 1.5,
+        "unit": "F",
+        "method": "polywx_aligned_deb_v1",
+        "forecast_algo": "polywx_aligned_deb_v1",
+        "cohort_contract_version": FORECAST_COMPONENT_COHORT_VERSION,
+        "cohort_as_of": issued_at,
+        "components": [{
+            "source": "fixture_forecast",
+            "source_age_ok": True,
+            "source_skew_ok": True,
+        }],
+    }, path=path)
+    payload = {
+        **decision,
+        "forecast_algo": "polywx_aligned_deb_v1",
+        "deb_version": "polywx_aligned_deb_v1",
+        "evidence_links": {
+            **(decision.get("evidence_links") or {}),
+            "daily_max_prediction_id": prediction_id,
+        },
+    }
+    return _db_upsert_signal_decision_record(payload, path=path)
 
 
 class PaperValidationTests(unittest.TestCase):

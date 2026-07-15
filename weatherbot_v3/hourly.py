@@ -336,9 +336,12 @@ def build_hourly_consensus(
 def hourly_consensus_points(
     targets: dict[str, set[str]] | None = None,
     db_path: Path | None = None,
+    *,
+    ensure_schema: bool = True,
 ) -> dict[str, list[dict[str, Any]]]:
     """Read persisted hourly consensus rows in the dashboard point shape."""
-    init_v3_db(db_path)
+    if ensure_schema:
+        init_v3_db(db_path)
     normalized_targets = {
         str(city or "").strip().lower(): {str(date) for date in dates if date}
         for city, dates in (targets or {}).items()
@@ -459,8 +462,11 @@ def hourly_consensus_summary(
     city: str | None = None,
     target_date: str | None = None,
     db_path: Path | None = None,
+    *,
+    ensure_schema: bool = True,
 ) -> dict[str, Any]:
-    init_v3_db(db_path)
+    if ensure_schema:
+        init_v3_db(db_path)
     targets = {str(city).strip().lower(): {str(target_date)}} if city and target_date else None
     if city and not target_date:
         with connect(db_path) as conn:
@@ -473,12 +479,16 @@ def hourly_consensus_summary(
                 if row["target_date"]
             }
         targets = {str(city).strip().lower(): dates}
-    points = hourly_consensus_points(targets, db_path=db_path)
+    points = hourly_consensus_points(targets, db_path=db_path, ensure_schema=False)
     selected = points.get(str(city).strip().lower(), []) if city else [point for rows in points.values() for point in rows]
     source = "hourly_consensus"
     if city and target_date and not selected:
         city_key = str(city).strip().lower()
-        forecast_points = forecast_hourly_points({city_key: {str(target_date)}}, db_path=db_path)
+        forecast_points = forecast_hourly_points(
+            {city_key: {str(target_date)}},
+            db_path=db_path,
+            ensure_schema=False,
+        )
         selected = [
             {
                 **point,
@@ -490,7 +500,11 @@ def hourly_consensus_summary(
         ]
         if selected:
             source = "forecast_members_transient"
-    series = source_series_summary(str(city), str(target_date), db_path=db_path) if city and target_date else {}
+    series = (
+        source_series_summary(str(city), str(target_date), db_path=db_path, ensure_schema=False)
+        if city and target_date
+        else {}
+    )
     peak_marker = (
         forecast_revision_peak_marker(str(city), str(target_date), db_path=db_path)
         if city and target_date
@@ -665,6 +679,7 @@ def source_series_summary(
     target_date: str,
     *,
     db_path: Path | None = None,
+    ensure_schema: bool = True,
 ) -> dict[str, list[dict[str, Any]]]:
     """Return independent, native-frequency evidence series for the chart."""
     city_key = str(city or "").strip().lower()
@@ -702,7 +717,7 @@ def source_series_summary(
             dict(row) for row in conn.execute(
                 """
                 SELECT * FROM truth_wunderground_hourly
-                WHERE UPPER(icao) = ? AND date_local = ?
+                WHERE icao = ? AND date_local = ?
                 ORDER BY observed_at_utc
                 """,
                 (str(profile.station_id or "").upper(), str(target_date)),
@@ -710,7 +725,11 @@ def source_series_summary(
         ]
 
     series: dict[str, list[dict[str, Any]]] = {
-        "forecast": list(forecast_hourly_points({city_key: {str(target_date)}}, db_path=db_path).get(city_key) or []),
+        "forecast": list(forecast_hourly_points(
+            {city_key: {str(target_date)}},
+            db_path=db_path,
+            ensure_schema=ensure_schema,
+        ).get(city_key) or []),
         "metar": [],
         "historical": [],
         "china_live": [],
@@ -1063,6 +1082,7 @@ def forecast_hourly_points(
     max_sources_per_target: int = 4,
     *,
     require_training: bool = False,
+    ensure_schema: bool = True,
 ) -> dict[str, list[dict[str, Any]]]:
     """Aggregate archived forecast member hourly data for dashboard use.
 
@@ -1070,7 +1090,8 @@ def forecast_hourly_points(
     dashboard we keep only the latest run for each source/provider/model so
     old snapshots do not masquerade as independent hourly evidence.
     """
-    init_v3_db(db_path)
+    if ensure_schema:
+        init_v3_db(db_path)
     normalized_targets = {
         str(city or "").strip().lower(): {str(date) for date in dates if date}
         for city, dates in (targets or {}).items()
@@ -1144,10 +1165,13 @@ def forecast_hourly_points(
             dict(row)
             for row in conn.execute(
                 f"""
-                SELECT *
-                FROM forecast_members
-                WHERE run_id IN ({placeholders})
-                ORDER BY run_id DESC, member_id
+                SELECT fm.*
+                FROM forecast_members fm
+                JOIN forecast_runs fr ON fr.id = fm.run_id
+                WHERE fm.run_id IN ({placeholders})
+                ORDER BY COALESCE(fr.available_at, fr.retrieved_at, fr.created_at) DESC,
+                         fr.id DESC,
+                         fm.member_id
                 """,
                 run_ids,
             ).fetchall()

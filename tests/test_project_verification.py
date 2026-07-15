@@ -216,6 +216,10 @@ class ExecutionBoundaryTests(unittest.TestCase):
         ]
         with (
             patch("weatherbot_v3.paper.list_signal_decisions", return_value=decisions),
+            patch(
+                "weatherbot_v3.paper.signal_decision_prediction_cohort_statuses",
+                return_value=[{"ok": True}] * len(decisions),
+            ),
             patch("weatherbot_v3.paper.execute_paper_decision_record", side_effect=lambda row, **_: {"ok": True, "status": "paper_filled", "decision_id": row["decision_id"]}),
             patch("weatherbot_v3.paper.paper_execution_summary", return_value={"count": 0}),
         ):

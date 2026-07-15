@@ -14,7 +14,7 @@ import {
 import { ExternalLink, History } from 'lucide-react'
 import { HourlyTemperatureChart, type HourlyChartRow } from './HourlyTemperatureChart'
 import { ForecastRevisionDialog } from './ForecastRevisionDialog'
-import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlyConsensusSummary, HourlySourcePoint, HourlySourceSeries, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlyConsensusSummary, HourlySourcePoint, HourlySourceSeries, Layer7QueryState, Layer7ResourceState, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -30,7 +30,7 @@ interface Props {
   forecastPeakMarker?: HourlyConsensusSummary['forecast_peak_marker']
   hourlySourceLoading?: boolean
   alphaEvents?: ModelRepriceEvent[]
-  layer7Loading?: boolean
+  layer7QueryState?: Layer7QueryState
   selectedCity?: string
   onSelectedCity?: (cityKey: string) => void
   selectedDate?: string
@@ -47,6 +47,8 @@ interface Props {
 }
 
 type EvidenceStatus = 'fresh' | 'stale' | 'missing'
+
+const IDLE_LAYER7_RESOURCE: Layer7ResourceState = { status: 'idle' }
 
 type WeatherChartRow = {
   date: string
@@ -1021,7 +1023,7 @@ export function WeatherPanel({
   forecastPeakMarker,
   hourlySourceLoading = false,
   alphaEvents = [],
-  layer7Loading = false,
+  layer7QueryState,
   selectedCity,
   onSelectedCity,
   selectedDate: controlledSelectedDate,
@@ -1089,8 +1091,17 @@ export function WeatherPanel({
       .slice(0, 18)
   }, [distributionSignal])
   const layerDecision = useMemo(() => bestLayerDecision(signalDecisions), [signalDecisions])
-  const layerDistributionItems = useMemo(() => buildLayerDistributionItems(marketBuckets, signalDecisions), [marketBuckets, signalDecisions])
-  const probabilityItems = layerDistributionItems.length > 0 ? layerDistributionItems : distributionChartItems
+  const layerDistributionItems = useMemo(
+    () => (signalDecisions?.decisions?.length ?? 0) > 0
+      ? buildLayerDistributionItems(marketBuckets, signalDecisions)
+      : [],
+    [marketBuckets, signalDecisions],
+  )
+  const probabilityItems = layer7QueryState
+    ? layerDistributionItems
+    : layerDistributionItems.length > 0
+      ? layerDistributionItems
+      : distributionChartItems
   const latestHistory = latestBy<HistoricalWeatherPoint>(
     series?.history_points ?? [],
     point => point.actual_high !== null && point.actual_high !== undefined,
@@ -1353,7 +1364,7 @@ export function WeatherPanel({
               cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
               dailyMaxPrediction={dailyMaxPrediction}
               alphaEvents={alphaEvents}
-              loading={layer7Loading}
+              queryState={layer7QueryState}
             />
             <ForecastDataTable rows={forecastTableRows} unit={unit} selectedDate={selectedDate} city={cityKey} />
           </div>
@@ -2554,7 +2565,7 @@ function TemperatureDistributionPanel({
   cityName,
   dailyMaxPrediction,
   alphaEvents = [],
-  loading = false,
+  queryState,
 }: {
   signal?: WeatherSignal
   decision?: SignalDecisionRecord
@@ -2566,7 +2577,7 @@ function TemperatureDistributionPanel({
   cityName?: string
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
   alphaEvents?: ModelRepriceEvent[]
-  loading?: boolean
+  queryState?: Layer7QueryState
 }) {
   const distribution = signal?.distribution
   const deb = dailyMaxPrediction?.latest
@@ -2628,6 +2639,26 @@ function TemperatureDistributionPanel({
   const buildWarnings = deb?.build_warnings ?? []
   const peakLock = deb?.peak_lock_candidate as Record<string, unknown> | undefined
   const peakLockCandidate = Boolean(peakLock?.candidate)
+  const debState = queryState?.deb ?? IDLE_LAYER7_RESOURCE
+  const bucketState = queryState?.buckets ?? IDLE_LAYER7_RESOURCE
+  const signalState = queryState?.signals ?? IDLE_LAYER7_RESOURCE
+  const hasBlockingError = [debState, bucketState, signalState].some(state => state.status === 'error')
+  const debEmptyLabel = debState.status === 'loading'
+    ? '正在读取 DEB…'
+    : debState.status === 'error'
+      ? 'DEB 读取失败'
+      : debState.status === 'idle'
+        ? '等待城市和日期'
+        : '暂无 DEB'
+  const resourceLabel = (label: string, state: Layer7ResourceState) => {
+    if (state.status === 'loading') return `${label}：加载中`
+    if (state.status === 'error') return `${label}：失败`
+    if (state.status === 'empty') return `${label}：暂无`
+    if (state.status === 'idle') return `${label}：等待`
+    if (state.refresh_error) return `${label}：缓存`
+    if (state.refreshing) return `${label}：刷新中`
+    return `${label}：就绪`
+  }
 
   return (
     <section className="border border-[#2C3445] bg-[#161A22]" aria-label="当日最高温概率分布">
@@ -2636,9 +2667,17 @@ function TemperatureDistributionPanel({
           <div className="min-w-0">
             <div className="text-[10px] text-[#7D8694]">Daily Max Prediction (DEB)</div>
             <div className="mt-1 text-sm font-semibold text-[#F8FAFC]">
-              μ ± σ <span className="tabular-nums">{fmtDualTemp(forecastValue, unit)}</span>{' '}
-              <span className="mx-1 text-[#7D8694]">±</span>
-              <span className="tabular-nums">{fmtDualDelta(sigmaValue, unit)}</span>
+              {deb ? (
+                <>
+                  μ ± σ <span className="tabular-nums">{fmtDualTemp(forecastValue, unit)}</span>{' '}
+                  <span className="mx-1 text-[#7D8694]">±</span>
+                  <span className="tabular-nums">{fmtDualDelta(sigmaValue, unit)}</span>
+                </>
+              ) : (
+                <span className={debState.status === 'error' ? 'text-red-300' : 'text-[#9AA4B2]'} title={debState.error}>
+                  {debEmptyLabel}
+                </span>
+              )}
             </div>
             <div className="mt-0.5 truncate text-[10px] text-[#7D8694]" title={observedLabel}>
               {cityName || signal?.city_name || '等待信号'} · {longDate(decision?.target_date ?? signal?.target_date ?? selectedDate)} · {observedLabel}
@@ -2646,9 +2685,23 @@ function TemperatureDistributionPanel({
           </div>
           <div className="shrink-0 text-right">
             <div className="text-[10px] text-[#CBD2DC]">{debVersionLabel}</div>
-            <div className="text-[9px] text-[#7D8694]">更新 {debUpdatedLabel}</div>
+            {deb && debState.refresh_error ? (
+              <div className="text-[9px] text-amber-300" title={debState.refresh_error}>刷新失败 · 显示缓存</div>
+            ) : deb && debState.refreshing ? (
+              <div className="text-[9px] text-cyan-300">刷新中 · 显示缓存</div>
+            ) : (
+              <div className="text-[9px] text-[#7D8694]">更新 {debUpdatedLabel}</div>
+            )}
           </div>
         </div>
+        {queryState?.aggregate_error && (
+          <div
+            className={`mt-1 truncate text-[9px] ${hasBlockingError ? 'text-red-300' : 'text-amber-300'}`}
+            title={queryState.aggregate_error}
+          >
+            {hasBlockingError ? '读取异常' : '刷新异常'}：{queryState.aggregate_error}
+          </div>
+        )}
         {(peakLockCandidate || buildWarnings.length > 0) && (
           <div className="mt-1 flex flex-wrap gap-1 text-[9px]">
             {peakLockCandidate && <span className="border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-amber-200">PWS peak-lock</span>}
@@ -2661,13 +2714,25 @@ function TemperatureDistributionPanel({
       <div className="border-b border-[#2C3445] px-2 py-1.5">
         <div className="flex items-center justify-between gap-2">
           <div className="text-[10px] text-[#7D8694]">Probability buckets (Gaussian)</div>
-          {fallbackMode && <div className="text-[9px] text-amber-300">暂无匹配市场桶 · 模型分布</div>}
+          <div className="flex items-center gap-2 text-[9px] text-[#7D8694]">
+            <span className={bucketState.status === 'error' ? 'text-red-300' : bucketState.refresh_error ? 'text-amber-300' : ''} title={bucketState.error ?? bucketState.refresh_error}>
+              {resourceLabel('市场桶', bucketState)}
+            </span>
+            <span className={signalState.status === 'error' ? 'text-red-300' : signalState.refresh_error ? 'text-amber-300' : ''} title={signalState.error ?? signalState.refresh_error}>
+              {resourceLabel('信号', signalState)}
+            </span>
+            {fallbackMode && <span className="text-amber-300">模型分布</span>}
+          </div>
         </div>
       </div>
 
       {chartRows.length === 0 ? (
         <div className="flex min-h-[220px] items-center justify-center px-3 text-center text-[10px] leading-relaxed text-neutral-600">
-          {loading ? '正在加载 DEB / 市场桶...' : 'No probability buckets for this date.'}
+          {hasBlockingError
+            ? `读取失败：${queryState?.aggregate_error ?? debState.error ?? bucketState.error ?? signalState.error}`
+            : [debState, bucketState, signalState].some(state => state.status === 'loading')
+              ? '正在读取 DEB、市场桶和信号决策…'
+              : '该日期暂无概率分布。'}
         </div>
       ) : (
         <div className="grid gap-2 p-2">

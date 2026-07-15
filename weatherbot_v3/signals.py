@@ -13,6 +13,7 @@ from .db import (
     init_v3_db,
     list_daily_max_predictions,
     list_signal_decisions,
+    signal_decision_prediction_cohort_statuses,
     upsert_signal_decision_record,
 )
 from .deb import bucket_probabilities
@@ -198,6 +199,18 @@ def signal_decisions_summary(
     path: Path | None = None,
 ) -> dict[str, Any]:
     rows = list_signal_decisions(city_key=city_key, target_date=target_date, limit=limit, path=path)
+    suppressed_reasons: dict[str, int] = {}
+    visible_rows: list[dict[str, Any]] = []
+    contracts = signal_decision_prediction_cohort_statuses(rows, path=path)
+    for row, contract in zip(rows, contracts):
+        row["prediction_cohort_contract"] = contract
+        if not contract.get("ok", True):
+            for reason in contract.get("reasons") or ["prediction_source_cohort_invalid"]:
+                suppressed_reasons[str(reason)] = suppressed_reasons.get(str(reason), 0) + 1
+            continue
+        visible_rows.append(row)
+    suppressed_count = len(rows) - len(visible_rows)
+    rows = visible_rows
     bucket_keys = [str(row.get("bucket_key") or "") for row in rows if row.get("bucket_key")]
     event_url_by_bucket: dict[str, str] = {}
     if bucket_keys:
@@ -232,6 +245,8 @@ def signal_decisions_summary(
         "city_key": city_key or "",
         "target_date": target_date or "",
         "count": len(rows),
+        "suppressed_count": suppressed_count,
+        "suppressed_reasons": suppressed_reasons,
         "status_counts": status_counts,
         "paper_counts": paper_counts,
         "live_counts": live_counts,
@@ -313,15 +328,20 @@ def _list_market_buckets(city: str, target_date: str, *, limit: int, path: Path 
 
 
 def _select_prediction(predictions: list[dict[str, Any]], issued_at_hour: str | None) -> dict[str, Any] | None:
-    if not predictions:
+    eligible = [
+        prediction
+        for prediction in predictions
+        if (prediction.get("cohort_contract") or {}).get("ok", True)
+    ]
+    if not eligible:
         return None
     if not issued_at_hour:
-        return predictions[0]
+        return eligible[0]
     target = _hour_key(issued_at_hour)
-    for prediction in predictions:
+    for prediction in eligible:
         if _hour_key(prediction.get("issued_at")) == target:
             return prediction
-    return predictions[0]
+    return eligible[0]
 
 
 def _evidence_links(

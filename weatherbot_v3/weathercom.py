@@ -22,9 +22,15 @@ WEATHERCOM_FORECAST_URL = os.getenv(
     "WEATHER_COM_FORECAST_URL",
     "https://api.weather.com/v3/wx/forecast/hourly/15day",
 )
-WEATHERCOM_PARSER_VERSION = "weathercom-v3-hourly-forecast-v2"
+WEATHERCOM_PARSER_VERSION = "weathercom-v3-hourly-forecast-v3"
 WEATHERCOM_SOURCE = "weathercom_v3_forecast"
 DEFAULT_USER_AGENT = "WeatherBot/2.5 (weather.com v3 forecast probe)"
+
+
+def weathercom_request_units(profile: CitySettlementProfile) -> tuple[str, str]:
+    """Match Weather.com's displayed precision to the settlement unit."""
+
+    return ("e", "F") if str(profile.unit or "C").upper() == "F" else ("m", "C")
 
 
 def fetch_weathercom_forecasts(
@@ -90,13 +96,14 @@ def fetch_weathercom_forecast_city(
 
     client = session or requests.Session()
     retrieved = _parse_time(retrieved_at) or datetime.now(timezone.utc)
+    request_units, source_unit = weathercom_request_units(profile)
     params = {
         "geocode": f"{profile.latitude},{profile.longitude}",
         "format": "json",
-        # Weather.com metric temperatures are integer Celsius values. Request
-        # imperial data to preserve the provider's native 1 F precision, then
-        # convert every unit at the ingestion boundary.
-        "units": "e",
+        # PolyWX renders the provider in the city's settlement unit. Request
+        # that same native unit so a Celsius city is not placed on a synthetic
+        # 5/9-degree grid after an imperial round trip.
+        "units": request_units,
         "language": "en-US",
         "apiKey": api_key,
     }
@@ -126,7 +133,7 @@ def fetch_weathercom_forecast_city(
             source_url=_strip_api_key(str(getattr(response, "url", source_url))),
             retrieved_at=retrieved.isoformat(),
             forecast_days=forecast_days,
-            source_unit="F",
+            source_unit=source_unit,
         )
         run_ids: list[int] = []
         if not dry_run:
@@ -236,6 +243,7 @@ def weathercom_runs_from_response(
                 "role": "weathercom_v3_forecast",
                 "retrieved_hour": retrieved_hour,
                 "raw_temperature_unit": source_unit,
+                "request_units": "e" if source_unit == "F" else "m",
                 "temperature_storage": "converted_to_city_unit",
                 "weather_fields_storage": "wind_kph_pressure_hpa_precip_mm",
             },
@@ -251,6 +259,7 @@ def weathercom_runs_from_response(
             "hourly": day_rows,
             "parser_version": WEATHERCOM_PARSER_VERSION,
             "source_unit": source_unit,
+            "request_units": "e" if source_unit == "F" else "m",
         }
         runs.append(run)
         members_by_run.append([member])
@@ -292,6 +301,9 @@ def _hourly_rows_from_payload(
             "local_hour": local.strftime("%H:00"),
             "temperature_2m": round(convert_temperature(raw_temp, source_unit, profile.unit), 3),
             "temperature_2m_c": round(float(temp_c), 3),
+            "temperature_raw": raw_temp,
+            "raw_temperature_unit": source_unit,
+            "request_units": "e" if source_unit == "F" else "m",
             "relative_humidity_2m": _number(_at(humidity, index)),
             "dew_point_2m": _convert_optional(_at(dew, index), source_unit, profile.unit),
             "dew_point_2m_c": _convert_optional(_at(dew, index), source_unit, "C"),
