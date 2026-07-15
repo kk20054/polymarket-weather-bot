@@ -11,8 +11,9 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { ExternalLink } from 'lucide-react'
+import { ExternalLink, History } from 'lucide-react'
 import { HourlyTemperatureChart, type HourlyChartRow } from './HourlyTemperatureChart'
+import { ForecastRevisionDialog } from './ForecastRevisionDialog'
 import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlyConsensusSummary, HourlySourcePoint, HourlySourceSeries, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
@@ -93,6 +94,8 @@ type HourlyWeatherRow = {
   archive?: boolean
   fetched_at?: string | null
   revision_count?: number
+  snapshot_count?: number
+  distinct_count?: number
   raw_text?: string | null
 }
 
@@ -912,6 +915,8 @@ function forecastTableRowsFromSeries(points: HourlySourcePoint[] | undefined, fa
     archive: Boolean(point.archive),
     fetched_at: point.retrieved_at ?? null,
     revision_count: point.revision_count,
+    snapshot_count: point.snapshot_count,
+    distinct_count: point.distinct_count,
   }))
 }
 
@@ -1350,7 +1355,7 @@ export function WeatherPanel({
               alphaEvents={alphaEvents}
               loading={layer7Loading}
             />
-            <ForecastDataTable rows={forecastTableRows} unit={unit} selectedDate={selectedDate} />
+            <ForecastDataTable rows={forecastTableRows} unit={unit} selectedDate={selectedDate} city={cityKey} />
           </div>
         )}
 
@@ -1477,8 +1482,10 @@ function WorkbenchTabButton({
   )
 }
 
-function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRow[]; unit: string; selectedDate: string }) {
+function ForecastDataTable({ rows, unit, selectedDate, city }: { rows: HourlyWeatherRow[]; unit: string; selectedDate: string; city: string }) {
+  const [revisionRow, setRevisionRow] = useState<HourlyWeatherRow | null>(null)
   return (
+    <>
     <section className="border border-neutral-800 bg-black">
       <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
         <div>
@@ -1528,7 +1535,21 @@ function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRo
                   </td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-400">{row.revision_count ? `↻ ${row.revision_count}` : row.archive ? 'archive' : row.member_count ? `n ${row.member_count}` : '--'}</td>
+                  <td className="px-2 py-1 tabular-nums text-neutral-400">
+                    {(row.snapshot_count ?? 0) > 1 && (row.revision_count ?? 0) > 0 ? (
+                      <button
+                        type="button"
+                        className="inline-flex min-h-6 items-center gap-1 border border-amber-500/25 bg-amber-500/10 px-1.5 text-[10px] text-amber-300 hover:border-amber-400/50 hover:bg-amber-500/15"
+                        title={`${row.snapshot_count} 次快照 · ${row.revision_count ?? 0} 次修订`}
+                        onClick={() => setRevisionRow(row)}
+                      >
+                        <History className="h-3 w-3" aria-hidden="true" />
+                        {row.revision_count ?? 0}
+                      </button>
+                    ) : (row.snapshot_count ?? 0) > 1 ? (
+                      <span title={`${row.snapshot_count} 次快照 · 无温度修订`}>--</span>
+                    ) : row.archive ? 'archive' : row.member_count ? `n ${row.member_count}` : '--'}
+                  </td>
                   <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.fetched_at)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-500">{shortHour(row.fetched_at)}</td>
                 </tr>
@@ -1538,6 +1559,16 @@ function ForecastDataTable({ rows, unit, selectedDate }: { rows: HourlyWeatherRo
         </div>
       )}
     </section>
+    {revisionRow && (
+      <ForecastRevisionDialog
+        city={city}
+        targetDate={selectedDate}
+        localHour={revisionRow.label}
+        unit={unit}
+        onClose={() => setRevisionRow(null)}
+      />
+    )}
+    </>
   )
 }
 

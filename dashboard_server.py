@@ -52,7 +52,7 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LIVE_EXECUTION_PRODUCTION_READY, LiveExecutor, PaperExecutor
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
-from weatherbot_v3.hourly import forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary
+from weatherbot_v3.hourly import forecast_hourly_points, forecast_revision_history, hourly_consensus_points, hourly_consensus_summary
 from weatherbot_v3.migration import migrate_legacy_signals
 from weatherbot_v3.model_dataset import build_model_dataset_audit
 from weatherbot_v3.notifier import FeishuNotifier
@@ -4768,6 +4768,16 @@ async def forecasts(city: str = "", target_date: str = ""):
 @app.get("/api/hourly-consensus")
 async def hourly_consensus(city: str = "", target_date: str = ""):
     return await asyncio.to_thread(hourly_consensus_summary, city or None, target_date or None)
+
+
+@app.get("/api/forecast-history")
+async def forecast_history(city: str = "", target_date: str = "", hour: str = ""):
+    return await asyncio.to_thread(
+        forecast_revision_history,
+        city,
+        target_date,
+        hour,
+    )
 
 
 @app.get("/api/market-buckets")

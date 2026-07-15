@@ -1028,9 +1028,41 @@ export interface HourlySourcePoint extends WeatherCityPoint {
   local_time?: string
   temperature?: number | null
   revision_count?: number
+  snapshot_count?: number
+  distinct_count?: number
   retrieved_at?: string | null
   raw_text?: string | null
   raw?: Record<string, unknown>
+}
+
+export interface ForecastRevisionItem {
+  run_id: number
+  snapshot_key?: string
+  fetched_at: string
+  fetched_at_local: string
+  valid_at: string
+  temperature: number
+  display_temperature: number
+  delta_from_previous?: number | null
+  source_unit?: string
+  parser_version?: string
+}
+
+export interface ForecastRevisionHistory {
+  ok: boolean
+  city: string
+  target_date: string
+  local_hour: string
+  timezone?: string
+  unit?: string
+  reason?: string
+  snapshot_count: number
+  revision_count: number
+  distinct_count: number
+  unchanged_snapshot_count: number
+  latest_temperature?: number | null
+  latest_fetched_at?: string | null
+  revisions: ForecastRevisionItem[]
 }
 
 export interface HourlySourceSeries {

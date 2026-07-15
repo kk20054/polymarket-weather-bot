@@ -1,5 +1,13 @@
 # WeatherBot 项目进度台账
 
+### 2026-07-15：Layer 3/7 逐小时预报修订审计与 PolyWX 弹窗
+- Layer：只扩展 Layer 3 已持久化 Weather.com v3 快照的只读审计能力及其直接 Layer 7 展示消费者；没有改模型概率、策略、模拟执行或实盘路径。
+- 改动：新增逐小时 forecast revision history 计算与 `/api/forecast-history` 只读接口，按站点本地 valid hour 汇总全部已保存快照；同时区分 `snapshot_count`、整数显示口径下的真实 `revision_count` 与 `distinct_count`，相同值快照折叠。预报明细仅在真实修订数大于零时显示历史入口，无修订小时显示 `--`；新增按需加载的 PolyWX 风格弹窗，展示 UTC/本地抓取时间、温度和相对前值，并支持关闭按钮与 Escape。
+- 验证：生产库 Shanghai 2026-07-14 15:00 为 12 次快照、1 次有效修订、2 个整数温度值；保留行是 34°C 与 35°C，未把 `34.0 -> 34.444` 的精度/解析器变化误算成业务修订。`python -m unittest tests.test_polywx_contract tests.test_v3_core` 243/243 通过，`npm run build` 通过，`git diff --check` 通过。内置浏览器在 1280x720 验证弹窗、关闭/Escape、零修订空态、console error/warn=0 和页面无横向溢出；设计证据见 `design-qa.md` 与本地忽略目录 `audits/revision-dialog-2026-07-15/`。
+- 结论：PolyWX 的“变更”会反映到该小时的最新预报值；WeatherBot 现在既在计算链使用每小时最新快照，也能审计具体修订。但本地只从持续采集开始拥有 12 个快照，不能伪造 PolyWX 的 150 个历史快照。三名定向审计代理同时确认：forecast revision 数据链已闭合；实盘仍结构性锁定；架构没有新增 P0 数据损坏。
+- 阻塞/下一步：审计发现 CLI/core paper executor 对空 cohort 的约束仍弱于 dashboard 路径，这是启动 14-30 天 cohort 前的首要安全修复；`.env` 的 UTF-8 BOM 还会导致 `WUNDERGROUND_API_KEY` 识别失败。其后才做一次受控新鲜 METAR/模型/盘口刷新并启动 revision-bound paper cohort。scheduler、auto simulation、paper validation 均保持关闭，`LIVE_TRADING=false`。
+- 相关提交：本条所在提交。
+
 ### 2026-07-14：WU Historical、V3 预报修订与高斯桶概率口径修复
 - Layer：修复 Layer 2/3/4/6 数据链及其直接 Layer 7 展示消费者；未启动 scheduler、paper cohort 或 live。
 - 改动：WU Historical 调度写入改为单写者并避免每城重复同步 station registry；主图、统计和历史观测表统一读取 exact-date 原生 WU series。Weather.com v3 不再把最新的晚间残缺 run 当作全天预报，而是按本地 valid hour 选择最新已知快照并用旧快照补齐已过去小时，保留 revision run ids、快照数和覆盖小时数。高斯诊断图改为摄氏 0.5°C/华氏 1°F 的 18 个固定桶，不再动态放大桶宽。`polywx_aligned_deb_v1` 的市场桶概率改用 μ/σ 高斯 CDF 积分，不再把六个模型家族均值误当作独立 ensemble members。

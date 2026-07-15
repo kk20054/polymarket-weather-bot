@@ -717,6 +717,24 @@ def source_series_summary(
         "pws": [],
         "historical_fallback": [],
     }
+    revision_summary = forecast_revision_history(
+        city_key,
+        str(target_date),
+        db_path=db_path,
+        include_rows=False,
+    )
+    revisions_by_hour = {
+        str(item.get("local_hour") or ""): item
+        for item in revision_summary.get("hours", [])
+        if isinstance(item, dict)
+    }
+    for point in series["forecast"]:
+        summary = revisions_by_hour.get(str(point.get("local_hour") or ""))
+        if not summary:
+            continue
+        point["snapshot_count"] = int(summary.get("snapshot_count") or 0)
+        point["revision_count"] = int(summary.get("revision_count") or 0)
+        point["distinct_count"] = int(summary.get("distinct_count") or 0)
     for row in metar_rows:
         point = _observation_point(
             profile,
@@ -792,6 +810,233 @@ def source_series_summary(
         key = "pws" if network == "wunderground_pws" else ("historical_fallback" if network == "open_meteo_historical" else network)
         series.setdefault(key, []).append(_native_series_point(point, row.get("observed_at"), profile))
     return series
+
+
+def forecast_revision_history(
+    city: str,
+    target_date: str,
+    local_hour: str = "",
+    *,
+    db_path: Path | None = None,
+    include_rows: bool = True,
+) -> dict[str, Any]:
+    """Return Weather.com forecast snapshots grouped by station-local valid hour.
+
+    The hourly dashboard intentionally loads only the current value. This
+    function is the on-demand audit path: it reads every persisted Weather.com
+    snapshot for the requested date, hides unchanged snapshots, and reports
+    temperature revisions using the integer display precision exposed by the
+    upstream product.
+    """
+    city_key = str(city or "").strip().lower()
+    date_text = str(target_date or "").strip()
+    hour_text = _normalized_local_hour(local_hour)
+    profile = SETTLEMENT_REGISTRY.get(city_key)
+    if not profile or not date_text:
+        return {
+            "ok": False,
+            "city": city_key,
+            "target_date": date_text,
+            "local_hour": hour_text,
+            "reason": "unknown_city_or_target_date",
+            "hours": [],
+        }
+    if local_hour and not hour_text:
+        return {
+            "ok": False,
+            "city": city_key,
+            "target_date": date_text,
+            "local_hour": "",
+            "reason": "invalid_local_hour",
+            "hours": [],
+        }
+
+    with connect(db_path) as conn:
+        runs = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT id, retrieved_at, run_at, available_at, created_at,
+                       source_url, unit, source_unit, parser_version,
+                       snapshot_key, training_eligible
+                FROM forecast_runs
+                WHERE city = ? AND target_date = ? AND source = ?
+                  AND COALESCE(parse_status, 'parsed') = 'parsed'
+                ORDER BY COALESCE(available_at, retrieved_at, created_at), id
+                """,
+                (city_key, date_text, WEATHERCOM_SOURCE),
+            ).fetchall()
+        ]
+        runs = [
+            row
+            for row in runs
+            if _is_training_eligible(row)
+            and forecast_source_matches_profile_location(row.get("source_url"), profile)
+        ]
+        if not runs:
+            return {
+                "ok": True,
+                "city": city_key,
+                "target_date": date_text,
+                "local_hour": hour_text,
+                "timezone": profile.timezone,
+                "unit": profile.unit,
+                "hours": [],
+                "snapshot_count": 0,
+                "revision_count": 0,
+                "distinct_count": 0,
+                "revisions": [],
+            }
+        run_ids = [int(row["id"]) for row in runs]
+        placeholders = ",".join("?" for _ in run_ids)
+        members = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT run_id, member_id, hourly_json
+                FROM forecast_members
+                WHERE run_id IN ({placeholders})
+                ORDER BY run_id, member_id
+                """,
+                run_ids,
+            ).fetchall()
+        ]
+
+    runs_by_id = {int(row["id"]): row for row in runs}
+    snapshots_by_hour: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    seen: set[tuple[int, str]] = set()
+    for member in members:
+        run_id = int(member.get("run_id") or 0)
+        run = runs_by_id.get(run_id)
+        if not run:
+            continue
+        retrieved_at = run.get("available_at") or run.get("retrieved_at") or run.get("created_at")
+        retrieved = _parse_report_time(retrieved_at)
+        if retrieved is None:
+            continue
+        hourly = _loads(member.get("hourly_json"), [])
+        for item in hourly if isinstance(hourly, list) else []:
+            if not isinstance(item, dict):
+                continue
+            valid_at = str(item.get("valid_at") or item.get("time") or item.get("timestamp") or "").strip()
+            parts = _forecast_local_parts(profile, date_text, valid_at)
+            if not parts or parts[0] != date_text or (hour_text and parts[1] != hour_text):
+                continue
+            temperature = _temperature_value(item)
+            if temperature is None:
+                continue
+            identity = (run_id, valid_at)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            display_temperature = float(round(float(temperature)))
+            snapshots_by_hour[parts[1]].append({
+                "run_id": run_id,
+                "snapshot_key": str(run.get("snapshot_key") or ""),
+                "fetched_at": retrieved.astimezone(timezone.utc).isoformat(),
+                "fetched_at_local": retrieved.astimezone(ZoneInfo(profile.timezone)).isoformat(),
+                "valid_at": valid_at,
+                "temperature": float(temperature),
+                "display_temperature": display_temperature,
+                "source_unit": str(run.get("source_unit") or run.get("unit") or profile.unit),
+                "parser_version": str(run.get("parser_version") or ""),
+            })
+
+    summaries = [
+        _forecast_revision_summary(
+            city_key,
+            date_text,
+            hour,
+            snapshots,
+            timezone_name=profile.timezone,
+            unit=profile.unit,
+            include_rows=include_rows,
+        )
+        for hour, snapshots in sorted(snapshots_by_hour.items())
+    ]
+    if hour_text:
+        selected = next((item for item in summaries if item["local_hour"] == hour_text), None)
+        if selected:
+            return {"ok": True, **selected}
+        return {
+            "ok": True,
+            "city": city_key,
+            "target_date": date_text,
+            "local_hour": hour_text,
+            "timezone": profile.timezone,
+            "unit": profile.unit,
+            "snapshot_count": 0,
+            "revision_count": 0,
+            "distinct_count": 0,
+            "unchanged_snapshot_count": 0,
+            "latest_temperature": None,
+            "revisions": [],
+        }
+    return {
+        "ok": True,
+        "city": city_key,
+        "target_date": date_text,
+        "local_hour": "",
+        "timezone": profile.timezone,
+        "unit": profile.unit,
+        "hours": summaries,
+    }
+
+
+def _forecast_revision_summary(
+    city: str,
+    target_date: str,
+    local_hour: str,
+    snapshots: list[dict[str, Any]],
+    *,
+    timezone_name: str,
+    unit: str,
+    include_rows: bool,
+) -> dict[str, Any]:
+    ordered = sorted(
+        snapshots,
+        key=lambda row: (str(row.get("fetched_at") or ""), int(row.get("run_id") or 0)),
+    )
+    changes: list[dict[str, Any]] = []
+    previous: float | None = None
+    display_values: set[float] = set()
+    for snapshot in ordered:
+        value = float(snapshot["display_temperature"])
+        display_values.add(value)
+        if previous is not None and math.isclose(value, previous, abs_tol=1e-9):
+            continue
+        row = dict(snapshot)
+        row["delta_from_previous"] = None if previous is None else value - previous
+        changes.append(row)
+        previous = value
+    return {
+        "city": city,
+        "target_date": target_date,
+        "local_hour": local_hour,
+        "timezone": timezone_name,
+        "unit": unit,
+        "snapshot_count": len(ordered),
+        "revision_count": max(0, len(changes) - 1),
+        "distinct_count": len(display_values),
+        "unchanged_snapshot_count": max(0, len(ordered) - len(changes)),
+        "latest_temperature": float(ordered[-1]["display_temperature"]) if ordered else None,
+        "latest_fetched_at": ordered[-1].get("fetched_at") if ordered else None,
+        "revisions": changes if include_rows else [],
+    }
+
+
+def _normalized_local_hour(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?", text)
+    if not match:
+        return ""
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    if hour < 0 or hour > 23 or minute != 0:
+        return ""
+    return f"{hour:02d}:00"
 
 
 def _native_series_point(

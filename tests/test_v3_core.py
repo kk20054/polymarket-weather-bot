@@ -26,7 +26,7 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
 from weatherbot_v3.forecast import ingest_polywx_forecasts, forecast_run_from_polywx_rows
 from weatherbot_v3.history import fetch_open_meteo_historical_backfill, open_meteo_historical_rows_from_response
-from weatherbot_v3.hourly import _forecast_peak_marker, _peak_marker_from_forecast_revisions, build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, hourly_consensus_points, hourly_consensus_summary, source_series_summary
+from weatherbot_v3.hourly import _forecast_peak_marker, _peak_marker_from_forecast_revisions, build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, forecast_revision_history, hourly_consensus_points, hourly_consensus_summary, source_series_summary
 from weatherbot_v3.deb import bucket_probabilities, build_and_store_daily_max_prediction, build_daily_max_prediction
 from weatherbot_v3.market_buckets import ingest_market_buckets, market_bucket_from_payload, parse_temperature_bucket, sync_active_weather_market_buckets
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
@@ -5504,6 +5504,68 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(v3_component["archive_hour_count"], 4)
         self.assertEqual(v3_component["daily_high_basis"], "latest_snapshot_per_local_hour")
         self.assertGreaterEqual(v3_component["snapshot_count"], 2)
+
+    def test_weathercom_forecast_history_separates_snapshots_from_integer_revisions(self):
+        db_path = test_db_path("weathercom_v3_forecast_history")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        profile = SETTLEMENT_REGISTRY["shanghai"]
+
+        def epoch(local_value: str) -> int:
+            return int(datetime.fromisoformat(local_value).timestamp())
+
+        snapshots = [
+            ("2026-07-12T00:00:00+00:00", 34.0),
+            ("2026-07-12T01:00:00+00:00", 34.444),
+            ("2026-07-12T02:00:00+00:00", 35.0),
+        ]
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            for retrieved_at, value in snapshots:
+                runs, members_by_run = weathercom_runs_from_response(
+                    profile,
+                    {
+                        "validTimeUtc": [epoch("2026-07-14T15:00:00+08:00")],
+                        "temperature": [value],
+                    },
+                    source_url="https://api.weather.com/v3/wx/forecast/hourly/15day?apiKey=***",
+                    retrieved_at=retrieved_at,
+                    forecast_days=3,
+                )
+                for run, members in zip(runs, members_by_run):
+                    insert_forecast_run(run, members)
+
+            partial_runs, partial_members = weathercom_runs_from_response(
+                profile,
+                {
+                    "validTimeUtc": [epoch("2026-07-14T20:00:00+08:00")],
+                    "temperature": [30.0],
+                },
+                source_url="https://api.weather.com/v3/wx/forecast/hourly/15day?apiKey=***",
+                retrieved_at="2026-07-14T12:00:00+00:00",
+                forecast_days=1,
+            )
+            for run, members in zip(partial_runs, partial_members):
+                insert_forecast_run(run, members)
+
+            history = forecast_revision_history(
+                "shanghai",
+                "2026-07-14",
+                "15:00",
+                db_path=db_path,
+            )
+            source_series = source_series_summary("shanghai", "2026-07-14", db_path=db_path)
+
+        self.assertTrue(history["ok"])
+        self.assertEqual(history["snapshot_count"], 3)
+        self.assertEqual(history["revision_count"], 1)
+        self.assertEqual(history["distinct_count"], 2)
+        self.assertEqual(history["unchanged_snapshot_count"], 1)
+        self.assertEqual([row["display_temperature"] for row in history["revisions"]], [34.0, 35.0])
+        self.assertEqual(history["revisions"][1]["delta_from_previous"], 1.0)
+        self.assertTrue(history["revisions"][0]["fetched_at_local"].endswith("+08:00"))
+        point = next(row for row in source_series["forecast"] if row["local_hour"] == "15:00")
+        self.assertEqual(point["snapshot_count"], 3)
+        self.assertEqual(point["revision_count"], 1)
+        self.assertEqual(point["distinct_count"], 2)
 
     def test_weathercom_forecast_fields_survive_hourly_consensus(self):
         db_path = test_db_path("weathercom_v3_hourly_consensus_fields")

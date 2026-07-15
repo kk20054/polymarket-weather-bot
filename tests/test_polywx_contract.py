@@ -165,6 +165,28 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertNotIn("series.historical_fallback ?? []) put(point, 'historical_value'", panel)
         self.assertNotIn("点击“自动抓取”后，这里会按抓取时间展示", panel)
 
+    def test_forecast_revision_history_matches_polywx_audit_contract(self):
+        panel = read_text("frontend/src/components/WeatherPanel.tsx")
+        dialog = read_text("frontend/src/components/ForecastRevisionDialog.tsx")
+        api = read_text("frontend/src/api.ts")
+        types = read_text("frontend/src/types.ts")
+        server = read_text("dashboard_server.py")
+        hourly = read_text("weatherbot_v3/hourly.py")
+
+        self.assertIn('@app.get("/api/forecast-history")', server)
+        self.assertIn("def forecast_revision_history", hourly)
+        self.assertIn('"snapshot_count"', hourly)
+        self.assertIn('"revision_count"', hourly)
+        self.assertIn('"distinct_count"', hourly)
+        self.assertIn("fetchForecastHistory", api)
+        self.assertIn("ForecastRevisionHistory", types)
+        self.assertIn("ForecastRevisionDialog", panel)
+        self.assertIn("预报历史 —", dialog)
+        self.assertIn("未变化行已隐藏", dialog)
+        self.assertIn("aria-modal=\"true\"", dialog)
+        self.assertIn("event.key === 'Escape'", dialog)
+        self.assertIn("row.snapshot_count", panel)
+
     def test_layer7_visual_alignment_matches_polywx_priority(self):
         panel = read_text("frontend/src/components/WeatherPanel.tsx")
         app = read_text("frontend/src/App.tsx")

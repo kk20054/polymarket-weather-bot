@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { ApiSettingsResponse, ApiSettingTestResult, AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary, SchedulerStatus, SourceHealthMatrix, PaperValidationStatus, PaperValidationStartOptions, PaperExecutionSummary, PaperExecutionResult, WeatherCitySeries, TruthDeltaAuditSummary, ModelRepriceEventSummary, HourlyConsensusSummary, StrategyProfileParameters, StrategyProfileRevision, StrategyProfilesResponse } from './types'
+import type { ApiSettingsResponse, ApiSettingTestResult, AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary, SchedulerStatus, SourceHealthMatrix, PaperValidationStatus, PaperValidationStartOptions, PaperExecutionSummary, PaperExecutionResult, WeatherCitySeries, TruthDeltaAuditSummary, ModelRepriceEventSummary, HourlyConsensusSummary, ForecastRevisionHistory, StrategyProfileParameters, StrategyProfileRevision, StrategyProfilesResponse } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -295,6 +295,13 @@ export async function fetchDailyMaxPredictions(city: string, targetDate: string)
 export async function fetchHourlyConsensus(city: string, targetDate: string): Promise<HourlyConsensusSummary> {
   const { data } = await api.get<HourlyConsensusSummary>('/hourly-consensus', {
     params: { city, target_date: targetDate },
+  })
+  return data
+}
+
+export async function fetchForecastHistory(city: string, targetDate: string, localHour: string): Promise<ForecastRevisionHistory> {
+  const { data } = await api.get<ForecastRevisionHistory>('/forecast-history', {
+    params: { city, target_date: targetDate, hour: localHour },
   })
   return data
 }
