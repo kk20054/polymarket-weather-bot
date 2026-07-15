@@ -14,7 +14,7 @@ import {
 import { ExternalLink, History } from 'lucide-react'
 import { HourlyTemperatureChart, type HourlyChartRow } from './HourlyTemperatureChart'
 import { ForecastRevisionDialog } from './ForecastRevisionDialog'
-import type { CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlyConsensusSummary, HourlySourcePoint, HourlySourceSeries, Layer7QueryState, Layer7ResourceState, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { BucketProbabilitySummary, CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlyConsensusSummary, HourlySourcePoint, HourlySourceSeries, Layer7QueryState, Layer7ResourceState, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -24,6 +24,7 @@ interface Props {
   fetchLog?: FetchLogRow[]
   productionRefresh?: ProductionRefreshResult | null
   marketBuckets?: MarketBucketSummary | null
+  bucketProbabilities?: BucketProbabilitySummary | null
   signalDecisions?: SignalDecisionSummary | null
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
   hourlySourceSeries?: HourlySourceSeries | null
@@ -118,6 +119,8 @@ type LayerDistributionItem = DistributionItem & {
   quote_timestamp?: string | null
   quote_valid?: boolean
   diagnostic_label?: string
+  probability_before_observed_floor?: number | null
+  observed_floor_excluded?: boolean
 }
 
 type EvidenceCardTone = 'green' | 'amber' | 'red' | 'cyan' | 'neutral'
@@ -700,10 +703,6 @@ function overlapPill(rows: Array<Record<string, unknown>>) {
   return `${Math.round((paired.length / historicalRows.length) * 100)}% (${paired.length}/${historicalRows.length} pts, up to ${upTo})`
 }
 
-function decisionBucket(decision?: SignalDecisionRecord) {
-  return decision?.model_bucket_probs ?? {}
-}
-
 function layerDecisionRank(decision: SignalDecisionRecord) {
   const paper = decision.paper_allowed ? 1000 : 0
   const edge = asNumber(decision.edge) ?? asNumber(decision.model_bucket_probs?.edge) ?? -999
@@ -723,66 +722,72 @@ function bestLayerDecision(summary?: SignalDecisionSummary | null) {
   return latestDecisionBatch(summary?.decisions ?? []).sort((a, b) => layerDecisionRank(b) - layerDecisionRank(a))[0]
 }
 
-function buildLayerDistributionItems(buckets?: MarketBucketSummary | null, decisions?: SignalDecisionSummary | null): LayerDistributionItem[] {
+function buildAuthoritativeDistributionItems(
+  probabilities?: BucketProbabilitySummary | null,
+  buckets?: MarketBucketSummary | null,
+  decisions?: SignalDecisionSummary | null,
+): LayerDistributionItem[] {
+  if (!probabilities?.ok || probabilities.items.length === 0) return []
+  const bucketByMarket = new Map((buckets?.latest ?? []).map(bucket => [String(bucket.market_id), bucket]))
+  const bucketByKey = new Map((buckets?.latest ?? []).map(bucket => [String(bucket.bucket_key ?? ''), bucket]))
+  const predictionId = Number(probabilities.prediction?.id ?? 0)
   const decisionByMarket = new Map<string, SignalDecisionRecord>()
   const decisionByBucket = new Map<string, SignalDecisionRecord>()
-  for (const decision of latestDecisionBatch(decisions?.decisions ?? [])) {
-    if (decision.market_id) decisionByMarket.set(String(decision.market_id), decision)
-    const bucketKey = decision.model_bucket_probs?.bucket_key ?? decision.bucket_key
-    if (bucketKey) decisionByBucket.set(String(bucketKey), decision)
+  for (const decision of decisions?.decisions ?? []) {
+    const linkedPredictionId = Number(decision.evidence_links?.daily_max_prediction_id ?? 0)
+    if (predictionId > 0 && linkedPredictionId !== predictionId) continue
+    const marketKey = String(decision.market_id ?? '')
+    const bucketKey = String(decision.model_bucket_probs?.bucket_key ?? decision.bucket_key ?? '')
+    const current = decisionByMarket.get(marketKey) ?? decisionByBucket.get(bucketKey)
+    if (current && layerDecisionRank(current) >= layerDecisionRank(decision)) continue
+    if (marketKey) decisionByMarket.set(marketKey, decision)
+    if (bucketKey) decisionByBucket.set(bucketKey, decision)
   }
 
-  return [...(buckets?.latest ?? [])]
-    .sort((a, b) => {
-      const low = Number(a.bucket_low ?? -999) - Number(b.bucket_low ?? -999)
-      if (low !== 0) return low
-      return Number(a.bucket_high ?? 999) - Number(b.bucket_high ?? 999)
-    })
-    .map(bucket => {
-      const decision = decisionByMarket.get(String(bucket.market_id)) ?? decisionByBucket.get(String(bucket.bucket_key ?? ''))
-      const modelBucket = decisionBucket(decision)
-      const probability = asNumber(modelBucket.probability) ?? asNumber(decision?.model_probability) ?? 0
-      const rawAsk = asNumber(bucket.best_ask) ?? asNumber(modelBucket.best_ask) ?? asNumber(bucket.price)
-      const rawBid = asNumber(bucket.best_bid) ?? asNumber(modelBucket.best_bid)
-      const quoteValid = quoteIsFresh(bucket.quote_timestamp)
-        && rawAsk !== null && rawAsk > 0 && rawAsk < 1
-        && rawBid !== null && rawBid >= 0 && rawBid <= rawAsk
-      const ask = rawAsk ?? 0
-      const bid = rawBid ?? 0
-      const spread = asNumber(bucket.spread) ?? Math.max(0, ask - bid)
-      const edge = quoteValid
-        ? asNumber(decision?.edge) ?? asNumber(modelBucket.edge) ?? (probability - ask)
-        : 0
-      return {
-        market_id: String(bucket.market_id),
-        bucket_key: bucket.bucket_key ?? modelBucket.bucket_key,
-        question: bucket.question ?? '',
-        bucket_low: asNumber(bucket.bucket_low) ?? asNumber(modelBucket.bucket_low) ?? -999,
-        bucket_high: asNumber(bucket.bucket_high) ?? asNumber(modelBucket.bucket_high) ?? 999,
-        probability_raw: asNumber(modelBucket.probability_raw) ?? probability,
-        probability,
-        ask,
-        bid,
-        spread,
-        probability_edge: edge,
-        ev: edge,
-        is_signal: Boolean(quoteValid && decision?.paper_allowed),
-        bucket_label: bucket.bucket_label ?? modelBucket.bucket_label,
-        bucket_direction: bucket.bucket_direction ?? modelBucket.bucket_direction,
-        event_url: bucket.event_url ?? null,
-        yes_token_id: bucket.yes_token_id ?? modelBucket.yes_token_id,
-        order_min_size: bucket.order_min_size ?? decision?.order_min_size,
-        tick_size: bucket.tick_size ?? decision?.tick_size,
-        bid_depth: bucket.bid_depth,
-        ask_depth: bucket.ask_depth,
-        gate_status: decision?.gate_status,
-        gate_reasons: decision?.gate_reasons ?? decision?.reasons ?? [],
-        paper_allowed: decision?.paper_allowed,
-        live_allowed: decision?.live_allowed,
-        quote_timestamp: bucket.quote_timestamp,
-        quote_valid: quoteValid,
-      }
-    })
+  return probabilities.items.map(item => {
+    const marketKey = String(item.market_id ?? '')
+    const bucketKey = String(item.bucket_key ?? '')
+    const bucket = bucketByMarket.get(marketKey) ?? bucketByKey.get(bucketKey)
+    const decision = decisionByMarket.get(marketKey) ?? decisionByBucket.get(bucketKey)
+    const probability = asNumber(item.probability) ?? 0
+    const ask = asNumber(item.best_ask) ?? asNumber(bucket?.best_ask) ?? asNumber(item.price) ?? 0
+    const bid = asNumber(item.best_bid) ?? asNumber(bucket?.best_bid) ?? 0
+    const quoteValid = quoteIsFresh(bucket?.quote_timestamp)
+      && ask > 0 && ask < 1
+      && bid >= 0 && bid <= ask
+    const edge = quoteValid ? probability - ask : 0
+    return {
+      market_id: marketKey,
+      bucket_key: item.bucket_key,
+      question: bucket?.question ?? item.bucket_label ?? '',
+      bucket_low: asNumber(item.bucket_low) ?? -999,
+      bucket_high: asNumber(item.bucket_high) ?? 999,
+      probability_raw: asNumber(item.probability_raw) ?? probability,
+      probability,
+      probability_before_observed_floor: asNumber(item.probability_before_observed_floor),
+      observed_floor_excluded: Boolean(item.observed_floor_excluded),
+      ask,
+      bid,
+      spread: Math.max(0, ask - bid),
+      probability_edge: edge,
+      ev: edge,
+      is_signal: Boolean(quoteValid && decision?.paper_allowed),
+      bucket_label: item.bucket_label,
+      bucket_direction: item.bucket_direction,
+      event_url: bucket?.event_url ?? null,
+      yes_token_id: item.yes_token_id ?? bucket?.yes_token_id,
+      order_min_size: bucket?.order_min_size,
+      tick_size: bucket?.tick_size,
+      bid_depth: bucket?.bid_depth,
+      ask_depth: bucket?.ask_depth,
+      gate_status: decision?.gate_status,
+      gate_reasons: decision?.gate_reasons ?? decision?.reasons ?? [],
+      paper_allowed: decision?.paper_allowed,
+      live_allowed: decision?.live_allowed,
+      quote_timestamp: bucket?.quote_timestamp,
+      quote_valid: quoteValid,
+    }
+  })
 }
 
 function erfApprox(value: number) {
@@ -1017,6 +1022,7 @@ export function WeatherPanel({
   fetchLog = [],
   productionRefresh = null,
   marketBuckets,
+  bucketProbabilities,
   signalDecisions,
   dailyMaxPrediction,
   hourlySourceSeries,
@@ -1092,10 +1098,8 @@ export function WeatherPanel({
   }, [distributionSignal])
   const layerDecision = useMemo(() => bestLayerDecision(signalDecisions), [signalDecisions])
   const layerDistributionItems = useMemo(
-    () => (signalDecisions?.decisions?.length ?? 0) > 0
-      ? buildLayerDistributionItems(marketBuckets, signalDecisions)
-      : [],
-    [marketBuckets, signalDecisions],
+    () => buildAuthoritativeDistributionItems(bucketProbabilities, marketBuckets, signalDecisions),
+    [bucketProbabilities, marketBuckets, signalDecisions],
   )
   const probabilityItems = layer7QueryState
     ? layerDistributionItems
@@ -1363,6 +1367,7 @@ export function WeatherPanel({
               observedSampleCount={metarTableRows.length}
               cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
               dailyMaxPrediction={dailyMaxPrediction}
+              bucketProbabilities={bucketProbabilities}
               alphaEvents={alphaEvents}
               queryState={layer7QueryState}
             />
@@ -2564,6 +2569,7 @@ function TemperatureDistributionPanel({
   observedSampleCount = 0,
   cityName,
   dailyMaxPrediction,
+  bucketProbabilities,
   alphaEvents = [],
   queryState,
 }: {
@@ -2576,14 +2582,17 @@ function TemperatureDistributionPanel({
   observedSampleCount?: number
   cityName?: string
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
+  bucketProbabilities?: BucketProbabilitySummary | null
   alphaEvents?: ModelRepriceEvent[]
   queryState?: Layer7QueryState
 }) {
   const distribution = signal?.distribution
   const deb = dailyMaxPrediction?.latest
   const debUnit = deb?.unit || unit
-  const forecastValue = deb?.mu !== null && deb?.mu !== undefined
-    ? convertTempUnit(Number(deb.mu), debUnit, unit)
+  const modelMu = deb?.model_mu ?? deb?.mu
+  const effectiveMu = deb?.effective_mu ?? deb?.mu
+  const forecastValue = modelMu !== null && modelMu !== undefined
+    ? convertTempUnit(Number(modelMu), debUnit, unit)
     : distribution?.forecast_f === null || distribution?.forecast_f === undefined
     ? null
     : unit === 'C'
@@ -2641,10 +2650,15 @@ function TemperatureDistributionPanel({
   const peakLockCandidate = Boolean(peakLock?.candidate)
   const debState = queryState?.deb ?? IDLE_LAYER7_RESOURCE
   const bucketState = queryState?.buckets ?? IDLE_LAYER7_RESOURCE
+  const probabilityState = queryState?.probabilities ?? IDLE_LAYER7_RESOURCE
   const signalState = queryState?.signals ?? IDLE_LAYER7_RESOURCE
-  const hasBlockingError = [debState, bucketState, signalState].some(state => state.status === 'error')
+  const hasBlockingError = [debState, bucketState, probabilityState, signalState].some(state => state.status === 'error')
+  const qualityReasons = dailyMaxPrediction?.quality_reasons ?? []
+  const rejectedLegacyPrediction = !deb && qualityReasons.length > 0
   const debEmptyLabel = debState.status === 'loading'
     ? '正在读取 DEB…'
+    : rejectedLegacyPrediction
+      ? '该日期预测不可审计'
     : debState.status === 'error'
       ? 'DEB 读取失败'
       : debState.status === 'idle'
@@ -2682,6 +2696,11 @@ function TemperatureDistributionPanel({
             <div className="mt-0.5 truncate text-[10px] text-[#7D8694]" title={observedLabel}>
               {cityName || signal?.city_name || '等待信号'} · {longDate(decision?.target_date ?? signal?.target_date ?? selectedDate)} · {observedLabel}
             </div>
+            {deb?.mu_observed_floor_applied && effectiveMu !== null && effectiveMu !== undefined && (
+              <div className="mt-0.5 text-[9px] text-amber-300" title="交易概率已按当日实测最高温排除不可能结果。">
+                交易约束中心 {fmtDualTemp(convertTempUnit(Number(effectiveMu), debUnit, unit), unit)} · 已应用实测最高温下限
+              </div>
+            )}
           </div>
           <div className="shrink-0 text-right">
             <div className="text-[10px] text-[#CBD2DC]">{debVersionLabel}</div>
@@ -2702,6 +2721,11 @@ function TemperatureDistributionPanel({
             {hasBlockingError ? '读取异常' : '刷新异常'}：{queryState.aggregate_error}
           </div>
         )}
+        {rejectedLegacyPrediction && (
+          <div className="mt-1 text-[9px] text-amber-300" title={qualityReasons.join(', ')}>
+            旧版预测缺少可审计的模型批次，已安全拒绝展示。
+          </div>
+        )}
         {(peakLockCandidate || buildWarnings.length > 0) && (
           <div className="mt-1 flex flex-wrap gap-1 text-[9px]">
             {peakLockCandidate && <span className="border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-amber-200">PWS peak-lock</span>}
@@ -2713,13 +2737,16 @@ function TemperatureDistributionPanel({
       </div>
       <div className="border-b border-[#2C3445] px-2 py-1.5">
         <div className="flex items-center justify-between gap-2">
-          <div className="text-[10px] text-[#7D8694]">Probability buckets (Gaussian)</div>
+          <div className="text-[10px] text-[#7D8694]">模型分布（高斯） / 结算概率（实况约束）</div>
           <div className="flex items-center gap-2 text-[9px] text-[#7D8694]">
             <span className={bucketState.status === 'error' ? 'text-red-300' : bucketState.refresh_error ? 'text-amber-300' : ''} title={bucketState.error ?? bucketState.refresh_error}>
               {resourceLabel('市场桶', bucketState)}
             </span>
             <span className={signalState.status === 'error' ? 'text-red-300' : signalState.refresh_error ? 'text-amber-300' : ''} title={signalState.error ?? signalState.refresh_error}>
               {resourceLabel('信号', signalState)}
+            </span>
+            <span className={probabilityState.status === 'error' ? 'text-red-300' : probabilityState.refresh_error ? 'text-amber-300' : ''} title={probabilityState.error ?? probabilityState.refresh_error}>
+              {resourceLabel('结算概率', probabilityState)}
             </span>
             {fallbackMode && <span className="text-amber-300">模型分布</span>}
           </div>
@@ -2730,7 +2757,9 @@ function TemperatureDistributionPanel({
         <div className="flex min-h-[220px] items-center justify-center px-3 text-center text-[10px] leading-relaxed text-neutral-600">
           {hasBlockingError
             ? `读取失败：${queryState?.aggregate_error ?? debState.error ?? bucketState.error ?? signalState.error}`
-            : [debState, bucketState, signalState].some(state => state.status === 'loading')
+            : rejectedLegacyPrediction
+              ? '旧版预测缺少可审计的模型批次，无法生成可信概率分布。'
+            : [debState, bucketState, probabilityState, signalState].some(state => state.status === 'loading')
               ? '正在读取 DEB、市场桶和信号决策…'
               : '该日期暂无概率分布。'}
         </div>
@@ -2792,6 +2821,11 @@ function TemperatureDistributionPanel({
           </div>
 
           <aside className="border border-[#2C3445] bg-[#161A22]">
+            {bucketProbabilities?.observed_floor_applied_to_distribution && (
+              <div className="border-b border-amber-500/20 bg-amber-500/5 px-2 py-1.5 text-[9px] text-amber-200">
+                已按实测最高温排除 {bucketProbabilities.observed_floor_excluded_bucket_count ?? 0} 个不可能温度桶
+              </div>
+            )}
             <div className={`grid gap-1 p-2 text-[10px] ${bucketGridClass(displayItems.length)}`}>
               {displayItems.map((item, index) => {
                 const edge = item.quote_valid === false ? null : Number(item.probability_edge ?? item.ev ?? 0)

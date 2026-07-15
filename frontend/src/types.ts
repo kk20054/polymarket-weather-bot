@@ -483,6 +483,9 @@ export interface DailyMaxPrediction {
   target_date: string
   issued_at?: string | null
   mu?: number | null
+  model_mu?: number | null
+  effective_mu?: number | null
+  mu_basis?: 'model_distribution' | 'observed_floor_adjusted' | string
   sigma?: number | null
   unit?: string
   method?: string
@@ -517,6 +520,45 @@ export interface DailyMaxPredictionSummary {
   rejected_latest_id?: number | null
 }
 
+export interface BucketProbabilityItem {
+  bucket_key?: string | null
+  market_id?: string | null
+  yes_token_id?: string | null
+  bucket_label?: string | null
+  bucket_direction?: string | null
+  bucket_low?: number | null
+  bucket_high?: number | null
+  bucket_unit?: string | null
+  probability_before_observed_floor?: number | null
+  observed_floor_excluded?: boolean
+  probability_raw?: number | null
+  probability?: number | null
+  market_probability?: number | null
+  edge?: number | null
+  best_bid?: number | null
+  best_ask?: number | null
+  price?: number | null
+}
+
+export interface BucketProbabilitySummary {
+  ok: boolean
+  city_key?: string
+  target_date?: string
+  method?: string
+  mu?: number | null
+  sigma?: number | null
+  unit?: string
+  observed_floor?: number | null
+  observed_floor_applied_to_distribution?: boolean
+  observed_floor_excluded_bucket_count?: number
+  normalized?: boolean
+  sum_probability?: number | null
+  reasons?: string[]
+  notes?: string[]
+  items: BucketProbabilityItem[]
+  prediction?: DailyMaxPrediction | null
+}
+
 export type Layer7ResourceStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'error'
 
 export interface Layer7ResourceState {
@@ -529,6 +571,7 @@ export interface Layer7ResourceState {
 export interface Layer7QueryState {
   deb: Layer7ResourceState
   buckets: Layer7ResourceState
+  probabilities?: Layer7ResourceState
   signals: Layer7ResourceState
   aggregate_error?: string
 }

@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { ApiSettingsResponse, ApiSettingTestResult, AutoSimulationStatus, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary, SchedulerStatus, SourceHealthMatrix, PaperValidationStatus, PaperValidationStartOptions, PaperExecutionSummary, PaperExecutionResult, WeatherCitySeries, TruthDeltaAuditSummary, ModelRepriceEventSummary, HourlyConsensusSummary, ForecastRevisionHistory, StrategyProfileParameters, StrategyProfileRevision, StrategyProfilesResponse } from './types'
+import type { ApiSettingsResponse, ApiSettingTestResult, AutoSimulationStatus, BucketProbabilitySummary, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary, SchedulerStatus, SourceHealthMatrix, PaperValidationStatus, PaperValidationStartOptions, PaperExecutionSummary, PaperExecutionResult, WeatherCitySeries, TruthDeltaAuditSummary, ModelRepriceEventSummary, HourlyConsensusSummary, ForecastRevisionHistory, StrategyProfileParameters, StrategyProfileRevision, StrategyProfilesResponse } from './types'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -287,6 +287,13 @@ export async function executePaperOrders(options: {
 
 export async function fetchDailyMaxPredictions(city: string, targetDate: string): Promise<DailyMaxPredictionSummary> {
   const { data } = await api.get<DailyMaxPredictionSummary>('/daily-max-predictions', {
+    params: { city, target_date: targetDate },
+  })
+  return data
+}
+
+export async function fetchBucketProbabilities(city: string, targetDate: string): Promise<BucketProbabilitySummary> {
+  const { data } = await api.get<BucketProbabilitySummary>('/bucket-probabilities', {
     params: { city, target_date: targetDate },
   })
   return data

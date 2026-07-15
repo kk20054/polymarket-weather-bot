@@ -1987,6 +1987,31 @@ def list_daily_max_predictions(
         row["mu_observed_floor_applied"] = bool(row.get("mu_observed_floor_applied"))
         raw_payload = _loads_obj(row.get("raw_json"))
         row["raw"] = raw_payload
+        model_mu = _nullable_num(raw_payload.get("model_mu"))
+        if model_mu is None:
+            model_mu = _nullable_num(raw_payload.get("mu_bias_adjusted"))
+        if model_mu is None:
+            samples = raw_payload.get("ensemble_samples") or []
+            weighted_samples = [
+                (_nullable_num(item.get("value")), _nullable_num(item.get("weight")))
+                for item in samples
+                if isinstance(item, dict)
+            ]
+            weighted_samples = [
+                (value, weight)
+                for value, weight in weighted_samples
+                if value is not None and weight is not None and weight > 0
+            ]
+            weight_sum = sum(weight for _value, weight in weighted_samples)
+            if weight_sum > 0:
+                model_mu = sum(value * weight for value, weight in weighted_samples) / weight_sum
+        row["model_mu"] = model_mu if model_mu is not None else _nullable_num(row.get("mu"))
+        row["effective_mu"] = _nullable_num(raw_payload.get("effective_mu"))
+        if row["effective_mu"] is None:
+            row["effective_mu"] = _nullable_num(row.get("mu"))
+        row["mu_basis"] = str(raw_payload.get("mu_basis") or (
+            "observed_floor_adjusted" if row.get("mu_observed_floor_applied") else "model_distribution"
+        ))
         row["forecast_algo"] = row.get("forecast_algo") or raw_payload.get("forecast_algo") or raw_payload.get("algo") or row.get("method")
         if "ensemble_samples" in raw_payload:
             row["ensemble_samples"] = raw_payload.get("ensemble_samples") or []

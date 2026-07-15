@@ -14,6 +14,7 @@ from weatherbot_v3.db import (
     connect,
     init_v3_db,
     insert_forecast_run,
+    list_daily_max_predictions,
     upsert_metar_report,
     upsert_signal_decision,
 )
@@ -165,8 +166,14 @@ class DebGaussianTests(unittest.TestCase):
 
             self.assertTrue(prediction["ok"])
             self.assertTrue(prediction["mu_observed_floor_applied"])
+            self.assertAlmostEqual(prediction["model_mu"], 25.0, places=6)
+            self.assertEqual(prediction["effective_mu"], prediction["mu"])
             self.assertGreaterEqual(prediction["mu"], 27.5)
             self.assertGreaterEqual(prediction["sigma"], prediction["sigma_floor"])
+            stored = list_daily_max_predictions(city_key="paris", target_date="2026-07-02", path=path)[0]
+            self.assertAlmostEqual(stored["model_mu"], 25.0, places=6)
+            self.assertEqual(stored["effective_mu"], stored["mu"])
+            self.assertEqual(stored["mu_basis"], "observed_floor_adjusted")
 
     def test_tokyo_observed_floor_keeps_deb_above_intraday_max_minus_half_c(self):
         path = test_db_path("deb_tokyo_observed_floor")

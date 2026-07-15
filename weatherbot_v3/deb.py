@@ -238,12 +238,14 @@ def build_daily_max_prediction(
         except Exception as exc:
             ensemble = {"ok": False, "reasons": [f"ensemble_error:{exc}"]}
         if ensemble.get("ok"):
+            model_mu = float(ensemble.get("mu") or 0.0)
             observed_floor = _observed_floor(city_key, target_date, unit, path, issued_at=issued)
             mu_floor = _observed_mu_floor(observed_floor, unit)
             floor_applied = False
-            if mu_floor is not None and mu_floor > float(ensemble.get("mu") or -999):
+            if mu_floor is not None and mu_floor > model_mu:
                 ensemble["mu"] = mu_floor
                 floor_applied = True
+            effective_mu = float(ensemble.get("mu") or model_mu)
             mixed_peak = _mixed_curve_peak(
                 city_key,
                 target_date,
@@ -263,6 +265,9 @@ def build_daily_max_prediction(
             if peak_lock.get("candidate"):
                 build_warnings.append("pws_peak_lock_candidate")
             ensemble.update({
+                "model_mu": model_mu,
+                "effective_mu": effective_mu,
+                "mu_basis": "observed_floor_adjusted" if floor_applied else "model_distribution",
                 "observed_floor": observed_floor,
                 "mu_observed_floor_applied": floor_applied,
                 "peak_hour": mixed_peak.get("peak_hour") or ensemble.get("peak_hour") or "",
@@ -368,6 +373,9 @@ def build_daily_max_prediction(
         "target_date": target_date,
         "issued_at": issued,
         "mu": mu,
+        "model_mu": mu_bias_adjusted,
+        "effective_mu": mu,
+        "mu_basis": "observed_floor_adjusted" if floor_applied else "model_distribution",
         "sigma": sigma,
         "unit": unit,
         "method": METHOD,

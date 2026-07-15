@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import {
   backfillWeatherHistory,
+  fetchBucketProbabilities,
   fetchDashboard,
   fetchDailyMaxPredictions,
   fetchForecastArchiveManifest,
@@ -873,18 +874,22 @@ function App() {
     retry: 1,
   })
 
-  const debQualityError = dailyMaxPredictionQuery.data?.quality_ok === false
-    ? (dailyMaxPredictionQuery.data.quality_reasons ?? ['DEB source cohort invalid']).join(', ')
-    : ''
+  const bucketProbabilitiesQuery = useQuery({
+    queryKey: ['bucket-probabilities', selectedCity, selectedDate],
+    queryFn: () => fetchBucketProbabilities(selectedCity, selectedDate),
+    enabled: selectedEvidenceReadyForLayer7,
+    refetchInterval: 30000,
+    retry: 1,
+  })
+
   const layer7QueryState: Layer7QueryState = {
     deb: layer7ResourceState({
       enabled: selectedEvidenceReadyForLayer7,
       hasPayload: Boolean(dailyMaxPredictionQuery.data?.latest),
-      empty: Boolean(dailyMaxPredictionQuery.data && !dailyMaxPredictionQuery.data.latest && !debQualityError),
+      empty: Boolean(dailyMaxPredictionQuery.data && !dailyMaxPredictionQuery.data.latest),
       loading: dailyMaxPredictionQuery.isLoading,
       fetching: dailyMaxPredictionQuery.isFetching,
       requestError: dailyMaxPredictionQuery.isError ? dailyMaxPredictionQuery.error : null,
-      semanticError: debQualityError,
     }, 'DEB request failed'),
     buckets: layer7ResourceState({
       enabled: selectedEvidenceReadyForLayer7,
@@ -894,6 +899,14 @@ function App() {
       fetching: marketBucketsQuery.isFetching,
       requestError: marketBucketsQuery.isError ? marketBucketsQuery.error : null,
     }, 'Market buckets request failed'),
+    probabilities: layer7ResourceState({
+      enabled: selectedEvidenceReadyForLayer7,
+      hasPayload: Boolean(bucketProbabilitiesQuery.data?.ok && bucketProbabilitiesQuery.data.items.length > 0),
+      empty: Boolean(bucketProbabilitiesQuery.data && (!bucketProbabilitiesQuery.data.ok || bucketProbabilitiesQuery.data.items.length === 0)),
+      loading: bucketProbabilitiesQuery.isLoading,
+      fetching: bucketProbabilitiesQuery.isFetching,
+      requestError: bucketProbabilitiesQuery.isError ? bucketProbabilitiesQuery.error : null,
+    }, 'Bucket probabilities request failed'),
     signals: layer7ResourceState({
       enabled: selectedEvidenceReadyForLayer7,
       hasPayload: Boolean(signalDecisionsQuery.data),
@@ -906,6 +919,7 @@ function App() {
   const layer7Failures = [
     ['DEB', layer7QueryState.deb.error ?? layer7QueryState.deb.refresh_error],
     ['市场桶', layer7QueryState.buckets.error ?? layer7QueryState.buckets.refresh_error],
+    ['结算概率', layer7QueryState.probabilities?.error ?? layer7QueryState.probabilities?.refresh_error],
     ['信号决策', layer7QueryState.signals.error ?? layer7QueryState.signals.refresh_error],
   ].filter((entry): entry is [string, string] => Boolean(entry[1]))
   layer7QueryState.aggregate_error = layer7Failures.length > 0
@@ -986,6 +1000,7 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['market-buckets'] })
       queryClient.invalidateQueries({ queryKey: ['signal-decisions'] })
       queryClient.invalidateQueries({ queryKey: ['daily-max-predictions'] })
+      queryClient.invalidateQueries({ queryKey: ['bucket-probabilities'] })
     },
   })
 
@@ -1029,6 +1044,7 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['market-buckets'] })
       queryClient.invalidateQueries({ queryKey: ['signal-decisions'] })
       queryClient.invalidateQueries({ queryKey: ['daily-max-predictions'] })
+      queryClient.invalidateQueries({ queryKey: ['bucket-probabilities'] })
       queryClient.invalidateQueries({ queryKey: ['production-refresh-status'] })
       const notice = productionRefreshNotice(result, uiLanguage)
       showRefreshNotice(notice, result.ok ? 7000 : 14000)
@@ -1063,6 +1079,7 @@ function App() {
         queryClient.invalidateQueries({ queryKey: ['market-buckets'] })
         queryClient.invalidateQueries({ queryKey: ['signal-decisions'] })
         queryClient.invalidateQueries({ queryKey: ['daily-max-predictions'] })
+        queryClient.invalidateQueries({ queryKey: ['bucket-probabilities'] })
       }
     },
   })
@@ -1297,6 +1314,7 @@ function App() {
       queryClient.invalidateQueries({ queryKey: ['market-buckets'] })
       queryClient.invalidateQueries({ queryKey: ['signal-decisions'] })
       queryClient.invalidateQueries({ queryKey: ['daily-max-predictions'] })
+      queryClient.invalidateQueries({ queryKey: ['bucket-probabilities'] })
       queryClient.invalidateQueries({ queryKey: ['model-reprice-events'] })
       queryClient.invalidateQueries({ queryKey: ['hourly-consensus'] })
     }
@@ -1702,6 +1720,7 @@ function App() {
               fetchLog={fetchLog}
               productionRefresh={productionRefresh}
               marketBuckets={marketBucketsQuery.data ?? null}
+              bucketProbabilities={bucketProbabilitiesQuery.data ?? null}
               signalDecisions={signalDecisionsQuery.data ?? null}
               dailyMaxPrediction={dailyMaxPredictionQuery.data ?? null}
               hourlySourceSeries={hourlyConsensusQuery.data?.series ?? null}
