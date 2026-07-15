@@ -85,7 +85,7 @@ Use external repositories as design inputs, not code to copy blindly. Every borr
 - Scope lock: files outside the current layer are read-only unless the user names them. The right-column trading workbench and `legacy/` are always read-only unless the task title mentions them.
 - Ask before deleting or rewriting existing collectors, tables, or components.
 - Ask before broad refactors, renames, or moves outside the current layer.
-- Verification is mandatory. A turn without a ledger entry and verification note is incomplete.
+- Verification is mandatory. Report it in the final response; update `docs/CURRENT_STATE.md` only when durable project facts changed.
 
 ## UI Rules
 
@@ -151,18 +151,10 @@ Use external repositories as design inputs, not code to copy blindly. Every borr
 - Check status before editing and before committing.
 - Do not stage unrelated user changes.
 - Do not commit `audits/`, `data/`, `.env`, `config.json`, `.venv/`, `frontend/dist/`, `node_modules/`, or secrets.
-- Prefer explicit staging:
+- Prefer explicit staging of only the files named by the task:
 
 ```powershell
-git -c safe.directory=C:/Users/Administrator/Documents/polymarket/weatherbot add -- AGENTS.md PROJECT_PROGRESS_CN.md
+git -c safe.directory=C:/Users/Administrator/Documents/polymarket/weatherbot add -- <intended-files>
 ```
 
 - Before push, confirm the diff contains only intended files.
-
-## Next Goal Template
-
-Use this as the next Codex goal when starting the production validation and dashboard pass:
-
-```text
-Continue WeatherBot v6 production validation and dashboard remediation. Follow AGENTS.md. Start by reading PROJECT_PROGRESS_CN.md and the latest PolyWX MANIFEST instead of repeating prior crawls. The project goal is real data foundation -> leakage-free probability model -> realistic paper execution -> production dashboard -> 14-30 day validation -> small live canary. Continue one Build Order layer at a time. Keep backend startup lightweight: no auto fetch, no auto simulation resume, no legacy scan. After each change, update PROJECT_PROGRESS_CN.md with usability, verification, blockers, and next step. Before commit, confirm no data/config/.env/.venv/audits artifacts are staged.
-```

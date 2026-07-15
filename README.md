@@ -29,6 +29,7 @@
 | `data/weatherbot.db` | legacy `weatherbet.py` 旧库/旧状态，不是当前主路径。 |
 | `audits/` | 本地审计和验证报告，不提交 Git。 |
 | `docs/CURRENT_STATE.md` | 当前进度摘要，开发前优先阅读。 |
+| `docs/IMPLEMENTATION_LOGIC_CN.md` | 当前 Layer 0-9 数据流和执行边界。 |
 | `AGENTS.md` | 本项目开发规则和安全红线。 |
 | `legacy/`、`weatherbet.py` | 旧版单体 bot，仅作参考，不作为 v6 主运行入口。 |
 

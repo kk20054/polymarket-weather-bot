@@ -12,17 +12,18 @@ real data foundation -> leakage-free probability model -> realistic paper execut
 
 Do not claim stable profitability until paper-trading and validation gates prove it. Current status remains usable for observation and controlled simulation, not unattended live trading.
 
-## Progress Files
+## Canonical Documentation
 
-- Start every turn from `docs/CURRENT_STATE.md`.
-- Active ledger: `PROJECT_PROGRESS_CN.md`.
-- Older history: `docs/PROGRESS_ARCHIVE_CN.md`.
-- Detailed project rules: `docs/AGENTS_DETAIL_CN.md`.
-- Local evidence under `audits/` is not committed and is not a default Turn Start dependency.
+- `README.md`: local startup and operator guide.
+- `docs/CURRENT_STATE.md`: the only default turn-start context.
+- `docs/IMPLEMENTATION_LOGIC_CN.md`: stable layer and data-flow architecture.
+- `docs/AGENTS_DETAIL_CN.md`: detailed PolyWX, UI, data, algorithm, naming, and Git rules; read only the section needed for the task.
+- Git history is the project ledger. Do not maintain a second chronological progress log.
+- Local evidence under `audits/` is ignored and is never a default context source.
 
 ## Turn Start Protocol
 
-1. Read only `docs/CURRENT_STATE.md`; do not read archives unless the task explicitly involves historical decisions.
+1. Read only `docs/CURRENT_STATE.md`; do not scan old Markdown or Git history unless the task explicitly needs a historical decision.
 2. Run `git status --short --branch` before editing.
 3. If the task names a layer, confirm the current layer and blockers from `docs/CURRENT_STATE.md`.
 4. Reuse existing evidence; do not run Firecrawl unless the user explicitly asks or current evidence is insufficient for the named task.
@@ -30,11 +31,11 @@ Do not claim stable profitability until paper-trading and validation gates prove
 
 ## Turn End Protocol
 
-1. Append a concise ledger entry to `PROJECT_PROGRESS_CN.md` for every non-trivial turn.
-2. Update `docs/CURRENT_STATE.md` so the next turn can start without reading long archives.
-3. Record changed files, checks run, usability conclusion, blockers, and next step.
-4. If Firecrawl was used, record ids, URLs, coverage, failures, and whether the result changed architecture or code.
-5. If a commit is made, record the final commit hash.
+1. Update `docs/CURRENT_STATE.md` only when durable project facts, blockers, or the single next task changed.
+2. Keep `docs/CURRENT_STATE.md` under 40 lines: phase/usability, at most three blockers, and one next task.
+3. Do not create per-turn ledgers, QA Markdown, audit indexes, or recap documents unless the user explicitly requests an artifact.
+4. Put temporary evidence under ignored `audits/`; rely on tests and Git commits for durable history.
+5. Report changed files, checks, usability, and remaining blocker in the final response instead of duplicating them in a ledger.
 
 ## Build Order
 

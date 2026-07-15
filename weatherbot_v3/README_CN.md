@@ -47,9 +47,9 @@ $env:LIVE_DAILY_MAX_USD="10"
 
 实盘需要额外配置 Polymarket CLOB 私钥和 API 凭证。第一版默认 dry-run，不会真实下单。
 
-## v6 审计文档
+## 当前文档
 
-- `WEATHERBOT_V6_PRODUCTION_REMEDIATION_PLAN_CN.md`：生产化整改总蓝图。
-- `PHASE0_DATA_FOUNDATION_AUDIT_CN.md`：数据基座初始审计。
-- `PHASE1_FORECAST_ORDERBOOK_AUDIT_CN.md`：预测运行档案与真实 CLOB 盘口审计。
-- `PHASE1_CONTRACT_TRUTH_AUDIT_CN.md`：结算合同、bucket 规则主键与 truth 版本化审计。
+- `../README.md`：本地启动与人工操作。
+- `../docs/CURRENT_STATE.md`：当前可用性、阻塞项与下一项任务。
+- `../docs/IMPLEMENTATION_LOGIC_CN.md`：Layer 0-9 数据流与执行边界。
+- `../AGENTS.md`：开发流程与安全红线。

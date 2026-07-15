@@ -21,8 +21,10 @@ class PolyWXDashboardContractTests(unittest.TestCase):
 
         self.assertIn("docs/CURRENT_STATE.md", agents)
         self.assertIn("docs/AGENTS_DETAIL_CN.md", agents)
-        self.assertIn("docs/PROGRESS_ARCHIVE_CN.md", agents)
         self.assertIn("Read only `docs/CURRENT_STATE.md`", agents)
+        self.assertIn("Git history is the project ledger", agents)
+        self.assertNotIn("PROJECT_PROGRESS_CN.md", agents)
+        self.assertNotIn("PROGRESS_ARCHIVE_CN.md", agents)
         self.assertIn("state-print", cli)
         self.assertIn("print_current_state", cli)
         self.assertIn("PolyWX Workbench Theme Contract", detail)
