@@ -2086,9 +2086,12 @@ function HourlyEvidencePanel({
     || row.pws_value !== null
     || row.cloud_pct !== null
   )
-  const metarStats = sourceStats(chartRows, 'metar_value')
-  const historicalStats = sourceStats(chartRows, 'historical_value')
-  const overlapStats = overlapPill(chartRows)
+  // Keep native-frequency points for the chart, but compute comparisons from
+  // the backend's station-local hourly buckets. A :51 METAR/WU observation
+  // belongs to that local hour and must not be discarded by an exact-minute join.
+  const metarStats = sourceStats(hourlyChartRows, 'metar_value')
+  const historicalStats = sourceStats(hourlyChartRows, 'historical_value')
+  const overlapStats = overlapPill(hourlyChartRows)
   const hasHistorical = historicalValues.length > 0
   const hasChinaLive = chinaLiveValues.length > 0
   const hasPws = pwsValues.length > 0
