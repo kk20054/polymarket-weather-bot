@@ -5604,8 +5604,129 @@ class V3CoreTests(unittest.TestCase):
         v3_component = next(component for component in prediction["components"] if component["family"] == "weathercom_v3")
         self.assertAlmostEqual(v3_component["model_daily_high_c"], 35.0, places=2)
         self.assertEqual(v3_component["archive_hour_count"], 4)
-        self.assertEqual(v3_component["daily_high_basis"], "latest_snapshot_per_local_hour")
+        self.assertEqual(v3_component["daily_high_basis"], "latest_snapshot_per_member_valid_hour_as_of")
         self.assertGreaterEqual(v3_component["snapshot_count"], 2)
+
+    def test_openmeteo_d0_stitches_latest_hour_per_member_without_future_leakage(self):
+        db_path = test_db_path("openmeteo_d0_member_snapshot_stitch")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        target_date = "2026-07-15"
+        model = "gfs_seamless"
+        times = [
+            "2026-07-15T12:00:00Z",
+            "2026-07-15T18:00:00Z",
+            "2026-07-15T23:00:00Z",
+        ]
+
+        def payload(values_by_member: list[list[float]], selected_times: list[str]) -> dict:
+            hourly = {"time": selected_times}
+            for index, values in enumerate(values_by_member, start=1):
+                hourly[f"temperature_2m_member{index:02d}"] = values
+            return {"hourly": hourly}
+
+        old_values = [
+            [25.0 + offset, 35.0 + offset, 40.0 + offset]
+            for offset in (0.0, 0.1, 0.2, 0.3, 0.4)
+        ]
+        new_values = [
+            [30.0 + offset]
+            for offset in (0.0, 0.1, 0.2, 0.3, 0.4)
+        ]
+        future_values = [[50.0 + offset] for offset in (0.0, 0.1, 0.2, 0.3, 0.4)]
+
+        def persist(snapshot_payload: dict, retrieved_at: str) -> int:
+            runs, members_by_run = openmeteo_runs_from_response(
+                "chicago",
+                model,
+                snapshot_payload,
+                source_url="https://ensemble-api.open-meteo.com/v1/ensemble",
+                retrieved_at=retrieved_at,
+                endpoint_kind="ensemble",
+            )
+            for run, members in zip(runs, members_by_run):
+                if run["target_date"] == target_date:
+                    return insert_forecast_run(run, members, path=db_path)
+            self.fail("target date run was not produced")
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
+            old_id = persist(payload(old_values, times), "2026-07-15T14:00:00Z")
+            new_id = persist(payload(new_values, [times[-1]]), "2026-07-15T21:00:00Z")
+            future_id = persist(payload(future_values, [times[1]]), "2026-07-15T23:00:00Z")
+            prediction = build_daily_max_prediction(
+                "chicago",
+                target_date,
+                issued_at="2026-07-15T22:00:00Z",
+                path=db_path,
+                bias_table=[],
+            )
+
+        self.assertTrue(prediction["ok"])
+        self.assertEqual(prediction["snapshot_selection_mode"], "stitch_local_day")
+        component = next(component for component in prediction["components"] if component["family"] == "gfs")
+        self.assertEqual(component["daily_high_basis"], "latest_snapshot_per_member_valid_hour_as_of")
+        self.assertEqual(component["archive_hour_count"], 3)
+        self.assertEqual(component["archive_member_hour_count"], 15)
+        self.assertEqual(component["archive_member_ids"], ["member01", "member02", "member03", "member04", "member05"])
+        self.assertEqual(component["member_count"], 5)
+        self.assertEqual(component["snapshot_count"], 2)
+        self.assertEqual(component["source_run_ids"], [old_id, new_id])
+        self.assertNotIn(future_id, component["source_run_ids"])
+        self.assertEqual(component["effective_available_at"], "2026-07-15T21:00:00+00:00")
+        self.assertEqual(component["peak_available_at"], "2026-07-15T14:00:00+00:00")
+        self.assertEqual(component["peak_run_id"], old_id)
+        self.assertEqual(component["peak_member_id"], "member05")
+        self.assertEqual(component["raw_daily_highs_c"], [35.0, 35.1, 35.2, 35.3, 35.4])
+        self.assertEqual(len(component["snapshot_selection_hash"]), 64)
+        self.assertLess(max(component["raw_daily_highs_c"]), 40.0)
+        self.assertTrue(component["source_age_ok"])
+
+    def test_openmeteo_d1_uses_latest_run_without_stitching(self):
+        db_path = test_db_path("openmeteo_d1_latest_run")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        target_date = "2026-07-16"
+        model = "gfs_seamless"
+        times = ["2026-07-16T12:00:00Z", "2026-07-16T18:00:00Z"]
+
+        def payload(high: float) -> dict:
+            hourly = {"time": times}
+            for index in range(1, 6):
+                hourly[f"temperature_2m_member{index:02d}"] = [high - 1.0, high]
+            return {"hourly": hourly}
+
+        def persist(snapshot_payload: dict, retrieved_at: str) -> int:
+            runs, members_by_run = openmeteo_runs_from_response(
+                "chicago",
+                model,
+                snapshot_payload,
+                source_url="https://ensemble-api.open-meteo.com/v1/ensemble",
+                retrieved_at=retrieved_at,
+                endpoint_kind="ensemble",
+            )
+            for run, members in zip(runs, members_by_run):
+                if run["target_date"] == target_date:
+                    return insert_forecast_run(run, members, path=db_path)
+            self.fail("target date run was not produced")
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
+            old_id = persist(payload(45.0), "2026-07-14T12:00:00Z")
+            new_id = persist(payload(31.0), "2026-07-15T10:00:00Z")
+            prediction = build_daily_max_prediction(
+                "chicago",
+                target_date,
+                issued_at="2026-07-15T12:00:00Z",
+                path=db_path,
+                bias_table=[],
+            )
+
+        self.assertTrue(prediction["ok"])
+        self.assertEqual(prediction["snapshot_selection_mode"], "latest_run")
+        component = next(component for component in prediction["components"] if component["family"] == "gfs")
+        self.assertEqual(component["daily_high_basis"], "latest_forecast_run")
+        self.assertEqual(component["archive_hour_count"], 0)
+        self.assertEqual(component["snapshot_count"], 1)
+        self.assertEqual(component["source_run_ids"], [new_id])
+        self.assertNotIn(old_id, component["source_run_ids"])
+        self.assertAlmostEqual(component["model_daily_high_c"], 31.0, places=2)
 
     def test_polywx_deb_does_not_fall_back_when_all_components_are_stale(self):
         db_path = test_db_path("polywx_stale_components_fail_closed")

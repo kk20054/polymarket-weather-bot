@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import statistics
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,6 +18,7 @@ from ..forecast_time import (
     apply_forecast_component_cohort,
     assess_forecast_run,
     forecast_component_cohort_as_of,
+    forecast_snapshot_selection_mode,
     historical_build_requires_explicit_as_of,
 )
 from ..registry import CitySettlementProfile, forecast_source_matches_profile_location, get_city_profile
@@ -30,6 +32,7 @@ MIN_MEMBER_COUNT_FOR_SINGLE_FAMILY = 5
 SIGMA_FLOOR_C = 0.5
 UNCALIBRATED_SIGMA_C = 1.2
 BIAS_MIN_SAMPLE_COUNT = 20
+FORECAST_SNAPSHOT_SELECTION_VERSION = "forecast-snapshot-selection-v2"
 
 REGION_MODEL_WEIGHTS = {
     "us": {"gfs": 0.40, "ecmwf": 0.50, "hrrr": 0.10},
@@ -216,9 +219,34 @@ def build_ensemble_prediction(
         }
     init_v3_db(path)
     algo = _deb_algo()
-    rows = _latest_forecast_members(profile, target_date, path, as_of=issued_at)
-    components = _components_from_rows(profile, rows, bias_table if bias_table is not None else load_bias_table(), path, target_date=target_date)
     requested_as_of = issued_at or utc_now()
+    selection_mode = forecast_snapshot_selection_mode(
+        target_date,
+        profile.timezone,
+        as_of=requested_as_of,
+    )
+    if selection_mode == "invalid":
+        return {
+            "ok": False,
+            "city_key": city_key,
+            "target_date": target_date,
+            "reasons": ["forecast_as_of_invalid"],
+        }
+    rows = _latest_forecast_members(
+        profile,
+        target_date,
+        path,
+        as_of=requested_as_of,
+        selection_mode=selection_mode,
+    )
+    components = _components_from_rows(
+        profile,
+        rows,
+        bias_table if bias_table is not None else load_bias_table(),
+        path,
+        target_date=target_date,
+        selection_mode=selection_mode,
+    )
     cohort_as_of, _historical_rebase = forecast_component_cohort_as_of(
         components,
         requested_as_of=requested_as_of,
@@ -271,7 +299,7 @@ def build_ensemble_prediction(
     sigma_c = math.sqrt(sigma_from_spread_c ** 2 + sigma_from_history_c ** 2)
     sigma_floor = convert_temperature_delta(SIGMA_FLOOR_C, "C", profile.unit)
     sigma = sigma_with_floor(sigma_c if profile.unit == "C" else convert_temperature_delta(sigma_c, "C", profile.unit), sigma_floor)
-    issued = issued_at or utc_now()
+    issued = requested_as_of
     samples_unit = [
         {
             "value": round(convert_temperature(value, "C", profile.unit), 4),
@@ -308,6 +336,8 @@ def build_ensemble_prediction(
         "excluded_components": cohort.get("excluded") or [],
         "cohort_as_of": cohort.get("cohort_as_of") or issued,
         "cohort_contract_version": FORECAST_COMPONENT_COHORT_VERSION,
+        "snapshot_selection_mode": selection_mode,
+        "snapshot_selection_version": FORECAST_SNAPSHOT_SELECTION_VERSION,
         "calibration_coverage_weight": round(calibration_coverage_weight, 6),
         "source_run_ids": sorted({
             int(run_id)
@@ -669,16 +699,19 @@ def _latest_forecast_members(
     path: Path | None,
     *,
     as_of: str | None = None,
+    selection_mode: str = "latest_run",
 ) -> list[dict[str, Any]]:
     with connect(path) as conn:
         rows = [
             dict(row)
             for row in conn.execute(
                 """
-                SELECT fr.id AS run_id, fr.city, fr.target_date, fr.source, fr.provider,
-                       fr.model, fr.run_at, fr.retrieved_at, fr.available_at,
+                SELECT fr.id AS run_id, fr.city, fr.target_date, fr.station_id,
+                       fr.source, fr.provider, fr.model, fr.model_version,
+                       fr.run_at, fr.retrieved_at, fr.available_at,
                        fr.availability_basis, fr.valid_at, fr.horizon, fr.lead_hours,
                        fr.timezone, fr.training_eligible, fr.parse_status,
+                       fr.parser_version, fr.snapshot_key, fr.raw_response_hash,
                        fr.unit, fr.mean_high,
                        fr.std_high, fr.member_count, fr.source_url, fm.member_id, fm.high_temp,
                        fm.hourly_json
@@ -686,12 +719,13 @@ def _latest_forecast_members(
                 JOIN forecast_members fm ON fm.run_id = fr.id
                 WHERE fr.city = ?
                   AND fr.target_date = ?
+                  AND UPPER(COALESCE(fr.station_id, '')) = ?
                   AND COALESCE(fr.training_eligible, 0) = 1
                   AND COALESCE(fr.parse_status, 'parsed') = 'parsed'
                   AND (fr.source LIKE 'openmeteo_%' OR fr.source = 'weathercom_v3_forecast')
                 ORDER BY COALESCE(fr.available_at, fr.retrieved_at) DESC, fr.id DESC, fm.member_id
                 """,
-                (profile.city, target_date),
+                (profile.city, target_date, profile.station_id.upper()),
             ).fetchall()
         ]
     eligible_rows = []
@@ -706,6 +740,7 @@ def _latest_forecast_members(
         if assessment["ok"]:
             row["available_at"] = assessment["available_at"]
             row["availability_basis"] = assessment["availability_basis"]
+            row["assessed_horizon"] = assessment["horizon_bucket"]
             eligible_rows.append(row)
     rows = eligible_rows
     rows = [
@@ -713,6 +748,8 @@ def _latest_forecast_members(
         for row in rows
         if forecast_source_matches_profile_location(row.get("source_url"), profile)
     ]
+    if selection_mode == "stitch_local_day":
+        return rows
     latest_by_source: dict[str, int] = {}
     for row in rows:
         source = str(row.get("source") or "")
@@ -720,8 +757,7 @@ def _latest_forecast_members(
     return [
         row
         for row in rows
-        if str(row.get("source") or "") == "weathercom_v3_forecast"
-        or latest_by_source.get(str(row.get("source") or "")) == int(row.get("run_id") or 0)
+        if latest_by_source.get(str(row.get("source") or "")) == int(row.get("run_id") or 0)
     ]
 
 
@@ -732,6 +768,7 @@ def _components_from_rows(
     path: Path | None,
     *,
     target_date: str,
+    selection_mode: str,
 ) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -749,14 +786,14 @@ def _components_from_rows(
         unit = str(first.get("unit") or profile.unit or "C").upper()
         bias_c, sample_count = _bias_for(bias_table, profile.station_id, family, profile=profile)
         bias_unit = convert_temperature_delta(bias_c, "C", unit)
-        weathercom_archive = (
-            _weathercom_archived_daily_high(best_source, profile, target_date)
-            if family == "weathercom_v3"
+        archive = (
+            _archived_daily_high(best_source, profile, target_date)
+            if selection_mode == "stitch_local_day"
             else {}
         )
-        if weathercom_archive:
-            highs_c = [float(weathercom_archive["high_c"])]
-            adjusted_c = [float(weathercom_archive["high_c"]) - float(bias_c)]
+        if archive:
+            highs_c = [float(value) for value in archive["member_highs_c"]]
+            adjusted_c = [float(value) - float(bias_c) for value in archive["member_highs_c"]]
         else:
             highs_unit = [_first_number(row.get("high_temp")) for row in best_source]
             highs_c = [
@@ -772,15 +809,15 @@ def _components_from_rows(
         if not adjusted_c:
             continue
         peak_hour = {
-            "peak_hour": weathercom_archive.get("peak_hour"),
+            "peak_hour": archive.get("peak_hour"),
             "peak_temp_c": (
-                float(weathercom_archive["peak_temp_c"]) - float(bias_c)
-                if weathercom_archive.get("peak_temp_c") is not None
+                float(archive["peak_temp_c"]) - float(bias_c)
+                if archive.get("peak_temp_c") is not None
                 else None
             ),
-        } if weathercom_archive else _peak_hour_from_members(best_source, unit, bias_unit, profile.timezone)
+        } if archive else _peak_hour_from_members(best_source, unit, bias_unit, profile.timezone)
         effective_available_at = (
-            weathercom_archive.get("peak_available_at")
+            archive.get("latest_contributing_available_at")
             or first.get("available_at")
             or first.get("retrieved_at")
             or ""
@@ -809,12 +846,27 @@ def _components_from_rows(
             "availability_basis": str(first.get("availability_basis") or ""),
             "peak_hour": peak_hour.get("peak_hour") or "",
             "peak_temp_c": peak_hour.get("peak_temp_c"),
-            "peak_run_id": int(weathercom_archive.get("peak_run_id") or first.get("run_id") or 0),
-            "peak_available_at": str(weathercom_archive.get("peak_available_at") or effective_available_at),
-            "source_run_ids": weathercom_archive.get("source_run_ids") or [int(first.get("run_id") or 0)],
-            "snapshot_count": int(weathercom_archive.get("snapshot_count") or 1),
-            "archive_hour_count": int(weathercom_archive.get("hour_count") or 0),
-            "daily_high_basis": weathercom_archive.get("basis") or "latest_forecast_run",
+            "peak_member_id": str(archive.get("peak_member_id") or first.get("member_id") or ""),
+            "peak_run_id": int(archive.get("peak_run_id") or first.get("run_id") or 0),
+            "peak_available_at": str(archive.get("peak_available_at") or effective_available_at),
+            "source_run_ids": archive.get("source_run_ids") or [int(first.get("run_id") or 0)],
+            "source_snapshot_keys": archive.get("source_snapshot_keys") or (
+                [str(first.get("snapshot_key"))] if first.get("snapshot_key") else []
+            ),
+            "snapshot_count": int(archive.get("snapshot_count") or 1),
+            "candidate_snapshot_count": int(archive.get("candidate_snapshot_count") or 1),
+            "archive_hour_count": int(archive.get("hour_count") or 0),
+            "archive_member_hour_count": int(archive.get("member_hour_count") or 0),
+            "archive_member_ids": archive.get("member_ids") or [],
+            "archive_expected_hour_count": int(archive.get("expected_hour_count") or 0),
+            "archive_coverage": archive.get("coverage"),
+            "snapshot_selection_hash": str(archive.get("selection_hash") or first.get("snapshot_key") or ""),
+            "archive_oldest_point_available_at": str(archive.get("oldest_contributing_available_at") or ""),
+            "archive_latest_snapshot_available_at": str(archive.get("latest_contributing_available_at") or ""),
+            "archive_run_hour_counts": archive.get("run_hour_counts") or {},
+            "snapshot_selection_mode": selection_mode,
+            "snapshot_selection_version": FORECAST_SNAPSHOT_SELECTION_VERSION,
+            "daily_high_basis": archive.get("basis") or "latest_forecast_run",
         })
     if _deb_algo() == POLYWX_ALIGNED_ALGO:
         _apply_mae_adjusted_weights(components)
@@ -830,37 +882,34 @@ def _best_source_group(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_source: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         by_source.setdefault(str(row.get("source") or ""), []).append(row)
-    return max(
-        by_source.values(),
-        key=lambda group: (len(group), str(group[0].get("available_at") or ""), int(group[0].get("run_id") or 0)),
-        default=[],
-    )
+    def source_rank(group: list[dict[str, Any]]) -> tuple[int, str, int]:
+        latest_run_id = int(group[0].get("run_id") or 0)
+        latest_member_count = sum(1 for row in group if int(row.get("run_id") or 0) == latest_run_id)
+        return latest_member_count, str(group[0].get("available_at") or ""), latest_run_id
+
+    return max(by_source.values(), key=source_rank, default=[])
 
 
-def _weathercom_archived_daily_high(
+def _archived_daily_high(
     rows: list[dict[str, Any]],
     profile: CitySettlementProfile,
     target_date: str,
 ) -> dict[str, Any]:
-    """Rebuild a full local-day v3 curve from the latest snapshot per hour.
+    """Rebuild an auditable local-day curve per member without future leakage."""
 
-    Weather.com removes elapsed hours from the current hourly response. Treating
-    the latest partial run's maximum as the daily forecast high can therefore
-    turn an afternoon 35 C forecast into an evening-only 30 C forecast. Rows
-    arrive newest first, so older snapshots only fill hours no longer present.
-    """
-
-    latest_by_hour: dict[str, dict[str, Any]] = {}
-    snapshot_run_ids = {
-        int(row.get("run_id") or 0)
-        for row in rows
-        if int(row.get("run_id") or 0) > 0
-    }
-    contributing_run_ids: set[int] = set()
+    latest_by_member_hour: dict[tuple[str, str], dict[str, Any]] = {}
+    candidate_run_ids: set[int] = set()
     zone = _zone(profile.timezone)
     for row in rows:
         row_unit = str(row.get("unit") or profile.unit or "C").upper()
         run_id = int(row.get("run_id") or 0)
+        if run_id > 0:
+            candidate_run_ids.add(run_id)
+        member_id = str(row.get("member_id") or "deterministic")
+        available_at = str(row.get("available_at") or row.get("retrieved_at") or "")
+        available = _parse_time(available_at)
+        if available is None:
+            continue
         hourly = _loads(row.get("hourly_json"), [])
         if not isinstance(hourly, list):
             continue
@@ -868,44 +917,112 @@ def _weathercom_archived_daily_high(
             if not isinstance(point, dict):
                 continue
             valid_at = _parse_time(str(point.get("valid_at") or point.get("time") or point.get("timestamp") or ""))
-            point_date = str(point.get("target_date") or "")
-            if valid_at is not None:
-                local_time = valid_at.astimezone(zone)
-                point_date = point_date or local_time.date().isoformat()
-                local_hour = str(point.get("local_hour") or local_time.strftime("%H:%M"))[:5]
-            else:
-                local_hour = str(point.get("local_hour") or "")[:5]
-            if point_date != target_date or not local_hour or local_hour in latest_by_hour:
+            if valid_at is None:
+                continue
+            local_time = valid_at.astimezone(zone)
+            if local_time.date().isoformat() != target_date:
                 continue
             temperature = _first_number(point.get("temperature_2m"), point.get("temperature"), point.get("temp"))
             if temperature is None or not math.isfinite(float(temperature)):
                 continue
             temperature_c = convert_temperature(float(temperature), row_unit, "C")
-            latest_by_hour[local_hour] = {
+            valid_hour_utc = valid_at.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+            key = (member_id, valid_hour_utc)
+            candidate = {
                 "temperature_c": temperature_c,
+                "member_id": member_id,
+                "valid_hour_utc": valid_hour_utc,
+                "local_hour": local_time.strftime("%H:%M"),
                 "run_id": run_id,
-                "available_at": str(row.get("available_at") or row.get("retrieved_at") or ""),
+                "snapshot_key": str(row.get("snapshot_key") or ""),
+                "available_at": available.isoformat(),
             }
-            if run_id > 0:
-                contributing_run_ids.add(run_id)
+            current = latest_by_member_hour.get(key)
+            if current is None or (available, run_id) > (
+                _parse_time(str(current.get("available_at") or "")) or datetime.min.replace(tzinfo=timezone.utc),
+                int(current.get("run_id") or 0),
+            ):
+                latest_by_member_hour[key] = candidate
 
-    if not latest_by_hour:
+    if not latest_by_member_hour:
         return {}
-    peak_hour, peak = max(
-        latest_by_hour.items(),
-        key=lambda item: (float(item[1]["temperature_c"]), item[0]),
+    by_member: dict[str, list[dict[str, Any]]] = {}
+    for point in latest_by_member_hour.values():
+        by_member.setdefault(str(point["member_id"]), []).append(point)
+    member_high_rows = [
+        max(points, key=lambda point: (float(point["temperature_c"]), str(point["valid_hour_utc"])))
+        for _member_id, points in sorted(by_member.items())
+        if points
+    ]
+    peak = max(
+        latest_by_member_hour.values(),
+        key=lambda point: (float(point["temperature_c"]), str(point["valid_hour_utc"])),
     )
+    contributing_run_ids = {
+        int(point["run_id"])
+        for point in latest_by_member_hour.values()
+        if int(point.get("run_id") or 0) > 0
+    }
+    snapshot_keys = sorted({
+        str(point.get("snapshot_key") or "")
+        for point in latest_by_member_hour.values()
+        if str(point.get("snapshot_key") or "")
+    })
+    available_times = [
+        _parse_time(str(point.get("available_at") or ""))
+        for point in latest_by_member_hour.values()
+    ]
+    available_times = [value for value in available_times if value is not None]
+    run_hour_counts: dict[str, int] = {}
+    for point in latest_by_member_hour.values():
+        key = str(int(point.get("run_id") or 0))
+        run_hour_counts[key] = run_hour_counts.get(key, 0) + 1
+    distinct_hours = {str(point["valid_hour_utc"]) for point in latest_by_member_hour.values()}
+    expected_hours = _expected_local_day_hours(target_date, zone)
+    selection_rows = sorted(
+        (
+            str(point["member_id"]),
+            str(point["valid_hour_utc"]),
+            int(point.get("run_id") or 0),
+            round(float(point["temperature_c"]), 6),
+        )
+        for point in latest_by_member_hour.values()
+    )
+    selection_hash = hashlib.sha256(
+        json.dumps(selection_rows, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     return {
-        "high_c": float(peak["temperature_c"]),
-        "peak_hour": peak_hour,
+        "member_highs_c": [float(point["temperature_c"]) for point in member_high_rows],
+        "member_ids": [str(point["member_id"]) for point in member_high_rows],
+        "peak_hour": str(peak["local_hour"]),
         "peak_temp_c": float(peak["temperature_c"]),
+        "peak_member_id": str(peak["member_id"]),
         "peak_run_id": int(peak.get("run_id") or 0),
         "peak_available_at": str(peak.get("available_at") or ""),
-        "hour_count": len(latest_by_hour),
-        "snapshot_count": len(snapshot_run_ids),
+        "hour_count": len(distinct_hours),
+        "member_hour_count": len(latest_by_member_hour),
+        "expected_hour_count": expected_hours,
+        "coverage": round(len(distinct_hours) / expected_hours, 6) if expected_hours else None,
+        "snapshot_count": len(contributing_run_ids),
+        "candidate_snapshot_count": len(candidate_run_ids),
         "source_run_ids": sorted(contributing_run_ids),
-        "basis": "latest_snapshot_per_local_hour",
+        "source_snapshot_keys": snapshot_keys,
+        "selection_hash": selection_hash,
+        "oldest_contributing_available_at": min(available_times).isoformat() if available_times else "",
+        "latest_contributing_available_at": max(available_times).isoformat() if available_times else "",
+        "run_hour_counts": run_hour_counts,
+        "basis": "latest_snapshot_per_member_valid_hour_as_of",
     }
+
+
+def _expected_local_day_hours(target_date: str, zone: ZoneInfo) -> int:
+    try:
+        local_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+    except ValueError:
+        return 0
+    start = datetime.combine(local_date, time.min, tzinfo=zone)
+    end = datetime.combine(local_date + timedelta(days=1), time.min, tzinfo=zone)
+    return int(round((end.astimezone(timezone.utc) - start.astimezone(timezone.utc)).total_seconds() / 3600.0))
 
 
 def _weighted_member_highs(profile: CitySettlementProfile, components: list[dict[str, Any]]) -> list[tuple[float, float, dict[str, Any]]]:

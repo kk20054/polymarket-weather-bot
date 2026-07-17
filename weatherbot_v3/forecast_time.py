@@ -254,6 +254,30 @@ def forecast_component_cohort_as_of(
     return (cutoff if cutoff is not None else requested_as_of), False
 
 
+def forecast_snapshot_selection_mode(
+    target_date: str,
+    timezone_name: str,
+    *,
+    as_of: str | datetime,
+) -> str:
+    """Choose archived local-day stitching only once the target day has begun.
+
+    A completed historical day uses the same stitching contract as D+0. Future
+    targets retain latest-run semantics so old forecast hours are never mixed
+    into a D+1/D+2 model run.
+    """
+
+    cutoff = as_of if isinstance(as_of, datetime) else parse_utc(as_of)
+    if cutoff is None:
+        return "invalid"
+    try:
+        target = datetime.strptime(str(target_date), "%Y-%m-%d").date()
+        local_cutoff_date = cutoff.astimezone(ZoneInfo(timezone_name)).date()
+    except (ValueError, ZoneInfoNotFoundError):
+        return "invalid"
+    return "stitch_local_day" if target <= local_cutoff_date else "latest_run"
+
+
 def historical_build_requires_explicit_as_of(
     target_date: str,
     timezone_name: str,
