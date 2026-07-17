@@ -711,6 +711,7 @@ def _latest_forecast_members(
                        fr.run_at, fr.retrieved_at, fr.available_at,
                        fr.availability_basis, fr.valid_at, fr.horizon, fr.lead_hours,
                        fr.timezone, fr.training_eligible, fr.parse_status,
+                       fr.ineligibility_reason,
                        fr.parser_version, fr.snapshot_key, fr.raw_response_hash,
                        fr.unit, fr.mean_high,
                        fr.std_high, fr.member_count, fr.source_url, fm.member_id, fm.high_temp,
@@ -720,7 +721,6 @@ def _latest_forecast_members(
                 WHERE fr.city = ?
                   AND fr.target_date = ?
                   AND UPPER(COALESCE(fr.station_id, '')) = ?
-                  AND COALESCE(fr.training_eligible, 0) = 1
                   AND COALESCE(fr.parse_status, 'parsed') = 'parsed'
                   AND (fr.source LIKE 'openmeteo_%' OR fr.source = 'weathercom_v3_forecast')
                 ORDER BY COALESCE(fr.available_at, fr.retrieved_at) DESC, fr.id DESC, fm.member_id
@@ -730,12 +730,21 @@ def _latest_forecast_members(
         ]
     eligible_rows = []
     for row in rows:
+        training_eligible = bool(row.get("training_eligible"))
+        ineligibility_reason = str(row.get("ineligibility_reason") or "")
+        if selection_mode == "stitch_local_day":
+            # A D+0 snapshot can have a negative aggregate lead once its
+            # predicted daily-high hour has passed. Keep the run for point-level
+            # stitching, where only hours still in the future at retrieval time
+            # are eligible. Other ineligibility reasons remain fail-closed.
+            if not training_eligible and ineligibility_reason != "forecast_lead_negative":
+                continue
         assessment = assess_forecast_run(
             row,
             as_of=as_of,
             target_date=target_date,
             timezone_name=profile.timezone,
-            require_training=True,
+            require_training=selection_mode != "stitch_local_day",
         )
         if assessment["ok"]:
             row["available_at"] = assessment["available_at"]
@@ -867,6 +876,11 @@ def _components_from_rows(
             "snapshot_selection_mode": selection_mode,
             "snapshot_selection_version": FORECAST_SNAPSHOT_SELECTION_VERSION,
             "daily_high_basis": archive.get("basis") or "latest_forecast_run",
+            "point_availability_contract": (
+                "valid_at_gte_snapshot_available_at"
+                if selection_mode == "stitch_local_day"
+                else "run_level_training_eligible"
+            ),
         })
     if _deb_algo() == POLYWX_ALIGNED_ALGO:
         _apply_mae_adjusted_weights(components)
@@ -918,6 +932,10 @@ def _archived_daily_high(
                 continue
             valid_at = _parse_time(str(point.get("valid_at") or point.get("time") or point.get("timestamp") or ""))
             if valid_at is None:
+                continue
+            if valid_at < available:
+                # A snapshot retrieved after an hour occurred is a revision, not
+                # a forecast that was knowable at that hour.
                 continue
             local_time = valid_at.astimezone(zone)
             if local_time.date().isoformat() != target_date:

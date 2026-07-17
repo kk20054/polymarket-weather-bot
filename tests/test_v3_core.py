@@ -5603,7 +5603,9 @@ class V3CoreTests(unittest.TestCase):
         self.assertTrue(prediction["ok"])
         v3_component = next(component for component in prediction["components"] if component["family"] == "weathercom_v3")
         self.assertAlmostEqual(v3_component["model_daily_high_c"], 35.0, places=2)
-        self.assertEqual(v3_component["archive_hour_count"], 4)
+        # The 00:00 point was already in the past when the first snapshot was
+        # retrieved, so it is a revision rather than knowable forecast input.
+        self.assertEqual(v3_component["archive_hour_count"], 3)
         self.assertEqual(v3_component["daily_high_basis"], "latest_snapshot_per_member_valid_hour_as_of")
         self.assertGreaterEqual(v3_component["snapshot_count"], 2)
 
@@ -5664,8 +5666,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(prediction["snapshot_selection_mode"], "stitch_local_day")
         component = next(component for component in prediction["components"] if component["family"] == "gfs")
         self.assertEqual(component["daily_high_basis"], "latest_snapshot_per_member_valid_hour_as_of")
-        self.assertEqual(component["archive_hour_count"], 3)
-        self.assertEqual(component["archive_member_hour_count"], 15)
+        self.assertEqual(component["archive_hour_count"], 2)
+        self.assertEqual(component["archive_member_hour_count"], 10)
         self.assertEqual(component["archive_member_ids"], ["member01", "member02", "member03", "member04", "member05"])
         self.assertEqual(component["member_count"], 5)
         self.assertEqual(component["snapshot_count"], 2)
@@ -5727,6 +5729,79 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(component["source_run_ids"], [new_id])
         self.assertNotIn(old_id, component["source_run_ids"])
         self.assertAlmostEqual(component["model_daily_high_c"], 31.0, places=2)
+
+    def test_openmeteo_d0_uses_future_points_from_negative_aggregate_lead_snapshot(self):
+        db_path = test_db_path("openmeteo_d0_negative_aggregate_lead")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        target_date = "2026-07-17"
+        model = "gfs_seamless"
+        old_times = [
+            "2026-07-16T16:00:00Z",
+            "2026-07-17T04:00:00Z",
+            "2026-07-17T13:00:00Z",
+        ]
+
+        def payload(times: list[str], values_by_member: list[list[float]]) -> dict:
+            hourly = {"time": times}
+            for index, values in enumerate(values_by_member, start=1):
+                hourly[f"temperature_2m_member{index:02d}"] = values
+            return {"hourly": hourly}
+
+        def persist(snapshot_payload: dict, retrieved_at: str) -> int:
+            runs, members_by_run = openmeteo_runs_from_response(
+                "shanghai",
+                model,
+                snapshot_payload,
+                source_url="https://ensemble-api.open-meteo.com/v1/ensemble",
+                retrieved_at=retrieved_at,
+                endpoint_kind="ensemble",
+            )
+            for run, members in zip(runs, members_by_run):
+                if run["target_date"] == target_date:
+                    return insert_forecast_run(run, members, path=db_path)
+            self.fail("target date run was not produced")
+
+        old_values = [
+            [30.0 + offset, 34.0 + offset, 31.0 + offset]
+            for offset in (0.0, 0.1, 0.2, 0.3, 0.4)
+        ]
+        # The snapshot's hottest point is already in the past, so its aggregate
+        # run is training-ineligible. Its 13Z point is still a valid forecast and
+        # must refresh that hour without revising the past 04Z peak.
+        new_values = [
+            [38.0 + offset, 33.0 + offset]
+            for offset in (0.0, 0.1, 0.2, 0.3, 0.4)
+        ]
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
+            old_id = persist(payload(old_times, old_values), "2026-07-16T00:00:00Z")
+            new_id = persist(
+                payload([old_times[1], old_times[2]], new_values),
+                "2026-07-17T12:00:00Z",
+            )
+            with connect(db_path) as conn:
+                new_run = conn.execute(
+                    "SELECT training_eligible, ineligibility_reason FROM forecast_runs WHERE id = ?",
+                    (new_id,),
+                ).fetchone()
+            prediction = build_daily_max_prediction(
+                "shanghai",
+                target_date,
+                issued_at="2026-07-17T12:30:00Z",
+                path=db_path,
+                bias_table=[],
+            )
+
+        self.assertEqual(int(new_run["training_eligible"]), 0)
+        self.assertEqual(new_run["ineligibility_reason"], "forecast_lead_negative")
+        self.assertTrue(prediction["ok"])
+        component = next(component for component in prediction["components"] if component["family"] == "gfs")
+        self.assertEqual(component["source_run_ids"], [old_id, new_id])
+        self.assertEqual(component["effective_available_at"], "2026-07-17T12:00:00+00:00")
+        self.assertEqual(component["point_availability_contract"], "valid_at_gte_snapshot_available_at")
+        self.assertEqual(component["peak_run_id"], old_id)
+        self.assertEqual(component["raw_daily_highs_c"], [34.0, 34.1, 34.2, 34.3, 34.4])
+        self.assertLess(max(component["raw_daily_highs_c"]), 38.0)
 
     def test_polywx_deb_does_not_fall_back_when_all_components_are_stale(self):
         db_path = test_db_path("polywx_stale_components_fail_closed")

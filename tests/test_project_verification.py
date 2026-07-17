@@ -213,6 +213,78 @@ class ProjectVerificationTests(unittest.TestCase):
         self.assertEqual(checks["temporal_no_leak"]["status"], "pass")
         self.assertEqual(checks["prediction_math"]["status"], "pass")
 
+    def test_model_gate_accepts_negative_aggregate_lead_only_with_point_level_d0_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "weatherbot.db"
+            init_v3_db(path)
+            with connect(path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO stations (
+                        city_key, city_name, station_id, station_name, timezone,
+                        unit, enabled, updated_at
+                    ) VALUES ('shanghai', 'Shanghai', 'ZSPD', 'Pudong',
+                              'Asia/Shanghai', 'C', 1, '2026-07-17T12:00:00+00:00')
+                    """
+                )
+            run_id = insert_forecast_run(
+                {
+                    "city": "shanghai",
+                    "target_date": "2026-07-17",
+                    "source": "openmeteo_gfs_seamless",
+                    "provider": "open-meteo",
+                    "model": "gfs_seamless",
+                    "run_type": "forecast",
+                    "run_at": "",
+                    "retrieved_at": "2026-07-17T12:00:00+00:00",
+                    "available_at": "2026-07-17T12:00:00+00:00",
+                    "valid_at": "2026-07-17T04:00:00+00:00",
+                    "horizon": "D+0",
+                    "lead_hours": -8.0,
+                    "timezone": "Asia/Shanghai",
+                    "unit": "C",
+                    "parse_status": "parsed",
+                    "training_eligible": False,
+                    "ineligibility_reason": "forecast_lead_negative",
+                    "raw_response_hash": "b" * 64,
+                },
+                path=path,
+            )
+            upsert_daily_max_prediction(
+                {
+                    "city_key": "shanghai",
+                    "target_date": "2026-07-17",
+                    "issued_at": "2026-07-17T12:30:00+00:00",
+                    "mu": 36.0,
+                    "sigma": 1.5,
+                    "sigma_floor": 0.5,
+                    "model_weights": {"openmeteo_gfs_seamless": 1.0},
+                    "components": [{
+                        "source": "openmeteo_gfs_seamless",
+                        "source_run_ids": [run_id],
+                        "weight_after_mae": 1.0,
+                        "bias_sample_count": 10,
+                        "snapshot_selection_mode": "stitch_local_day",
+                        "snapshot_selection_version": "forecast-snapshot-selection-v2",
+                        "daily_high_basis": "latest_snapshot_per_member_valid_hour_as_of",
+                        "point_availability_contract": "valid_at_gte_snapshot_available_at",
+                    }],
+                    "source_run_ids": [run_id],
+                    "validity_status": "valid",
+                },
+                path=path,
+            )
+
+            report = build_project_verification_report(
+                path=path,
+                source_health={"sources": [], "city_matrix": []},
+                runtime={"probed": False, "available": None},
+            )
+
+        model_agent = next(agent for agent in report["agents"] if agent["key"] == "model_integrity")
+        checks = {check["id"]: check for check in model_agent["checks"]}
+        self.assertEqual(checks["temporal_no_leak"]["status"], "pass")
+
 
 class ExecutionBoundaryTests(unittest.TestCase):
     def test_legacy_scanner_start_endpoint_is_retired(self):

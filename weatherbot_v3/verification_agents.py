@@ -337,23 +337,14 @@ class ModelIntegrityVerificationAgent(VerificationAgent):
                     """
                 ).fetchall()
             ]
-            prediction_rows = [
-                dict(row)
-                for row in conn.execute(
-                    """
-                    SELECT id, city_key, target_date, issued_at, source_run_ids_json
-                    FROM daily_max_predictions
-                    WHERE COALESCE(validity_status, 'valid')='valid'
-                    """
-                ).fetchall()
-            ]
+            prediction_rows = rows
             forecast_by_id = {
                 int(row["id"]): dict(row)
                 for row in conn.execute(
                     """
                     SELECT id, city, target_date,
                            COALESCE(NULLIF(available_at, ''), NULLIF(retrieved_at, ''), created_at) AS available_at,
-                           training_eligible, quarantined_at
+                           training_eligible, ineligibility_reason, quarantined_at
                     FROM forecast_runs
                     """
                 ).fetchall()
@@ -410,16 +401,38 @@ class ModelIntegrityVerificationAgent(VerificationAgent):
         prediction_leaks: list[dict[str, Any]] = []
         for prediction in prediction_rows:
             issued_at = _parse_time(prediction.get("issued_at"))
+            component_by_run: dict[int, dict[str, Any]] = {}
+            for component in _json_list(prediction.get("components_json")):
+                if not isinstance(component, dict):
+                    continue
+                for component_run_id in component.get("source_run_ids") or []:
+                    try:
+                        component_by_run[int(component_run_id)] = component
+                    except (TypeError, ValueError):
+                        continue
             for run_id in _json_list(prediction.get("source_run_ids_json")):
                 try:
-                    forecast = forecast_by_id.get(int(run_id))
+                    numeric_run_id = int(run_id)
+                    forecast = forecast_by_id.get(numeric_run_id)
                 except (TypeError, ValueError):
+                    numeric_run_id = 0
                     forecast = None
                 available_at = _parse_time((forecast or {}).get("available_at"))
+                component = component_by_run.get(numeric_run_id) or {}
+                point_level_d0_contract = (
+                    str((forecast or {}).get("ineligibility_reason") or "") == "forecast_lead_negative"
+                    and str(component.get("snapshot_selection_mode") or "") == "stitch_local_day"
+                    and str(component.get("snapshot_selection_version") or "") == "forecast-snapshot-selection-v2"
+                    and str(component.get("daily_high_basis") or "") == "latest_snapshot_per_member_valid_hour_as_of"
+                    and str(component.get("point_availability_contract") or "") == "valid_at_gte_snapshot_available_at"
+                )
+                source_contract_ok = (
+                    bool((forecast or {}).get("training_eligible"))
+                    and not bool((forecast or {}).get("quarantined_at"))
+                ) or point_level_d0_contract
                 if (
                     not forecast
-                    or not bool(forecast.get("training_eligible"))
-                    or bool(forecast.get("quarantined_at"))
+                    or not source_contract_ok
                     or str(forecast.get("city") or "") != str(prediction.get("city_key") or "")
                     or str(forecast.get("target_date") or "") != str(prediction.get("target_date") or "")
                     or issued_at is None
