@@ -546,6 +546,9 @@ export interface BucketProbabilitySummary {
   target_date?: string
   method?: string
   mu?: number | null
+  model_mu?: number | null
+  effective_mu?: number | null
+  probability_mu_basis?: string | null
   sigma?: number | null
   unit?: string
   observed_floor?: number | null
@@ -628,6 +631,10 @@ export interface SignalDecisionRecord {
     normalized?: boolean
     sum_probability?: number | null
     item_count?: number
+    probability_mu_basis?: string | null
+    model_mu?: number | null
+    effective_mu?: number | null
+    observed_floor?: number | null
   }
   model_bucket_probs?: {
     bucket_key?: string

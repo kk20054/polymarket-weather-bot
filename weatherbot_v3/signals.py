@@ -16,7 +16,7 @@ from .db import (
     signal_decision_prediction_cohort_statuses,
     upsert_signal_decision_record,
 )
-from .deb import bucket_probabilities
+from .deb import bucket_probabilities, probability_mu_for_prediction
 from .forecasts.ensemble import (
     POLYWX_ALIGNED_ALGO,
     distribution_for_prediction as ensemble_distribution_for_prediction,
@@ -78,8 +78,9 @@ def build_signal_decisions(
     if forecast_algo != POLYWX_ALIGNED_ALGO:
         distribution = ensemble_distribution_for_prediction(prediction, buckets)
     if not distribution:
+        probability_mu, probability_mu_basis = probability_mu_for_prediction(prediction)
         distribution = bucket_probabilities(
-            float(prediction["mu"]),
+            probability_mu,
             float(prediction["sigma"]),
             buckets,
             unit=str(prediction.get("unit") or "C"),
@@ -87,6 +88,11 @@ def build_signal_decisions(
             observed_floor=_optional_float(prediction.get("observed_floor")),
             normalize=True,
         )
+        distribution.update({
+            "probability_mu_basis": probability_mu_basis,
+            "model_mu": _optional_float(prediction.get("model_mu")),
+            "effective_mu": _optional_float(prediction.get("effective_mu")) or _optional_float(prediction.get("mu")),
+        })
     probabilities = {
         str(item.get("bucket_key") or ""): item
         for item in distribution.get("items") or []
@@ -397,6 +403,10 @@ def _distribution_summary(distribution: dict[str, Any]) -> dict[str, Any]:
         "sum_probability": distribution.get("sum_probability"),
         "normalized": distribution.get("normalized"),
         "item_count": len(distribution.get("items") or []),
+        "probability_mu_basis": distribution.get("probability_mu_basis"),
+        "model_mu": distribution.get("model_mu"),
+        "effective_mu": distribution.get("effective_mu"),
+        "observed_floor": distribution.get("observed_floor"),
     }
 
 

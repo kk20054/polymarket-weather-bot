@@ -19,8 +19,10 @@ from weatherbot_v3.db import (
     upsert_signal_decision,
 )
 from weatherbot_v3.deb import (
+    _time_decay_factor,
     build_and_store_daily_max_prediction,
     bucket_probabilities,
+    probability_mu_for_prediction,
 )
 
 
@@ -35,6 +37,49 @@ def test_db_path(name: str) -> Path:
 
 
 class DebGaussianTests(unittest.TestCase):
+    def test_intraday_sigma_decay_uses_prediction_as_of_not_wall_clock(self):
+        self.assertEqual(
+            _time_decay_factor(
+                "2026-07-18",
+                "Asia/Shanghai",
+                True,
+                as_of="2026-07-18T09:00:00+00:00",
+            ),
+            0.5,
+        )
+        self.assertEqual(
+            _time_decay_factor(
+                "2026-07-19",
+                "Asia/Shanghai",
+                False,
+                as_of="2026-07-18T09:00:00+00:00",
+            ),
+            1.0,
+        )
+
+    def test_probability_distribution_does_not_apply_observed_floor_twice(self):
+        probability_mu, basis = probability_mu_for_prediction({
+            "mu": 36.5,
+            "effective_mu": 36.5,
+            "model_mu": 35.7,
+            "observed_floor": 37.0,
+            "mu_observed_floor_applied": True,
+        })
+
+        self.assertAlmostEqual(probability_mu, 35.7)
+        self.assertEqual(basis, "model_mu_conditioned_on_observed_floor")
+
+    def test_probability_distribution_uses_effective_mu_without_floor_adjustment(self):
+        probability_mu, basis = probability_mu_for_prediction({
+            "mu": 25.4,
+            "model_mu": 25.4,
+            "observed_floor": None,
+            "mu_observed_floor_applied": False,
+        })
+
+        self.assertAlmostEqual(probability_mu, 25.4)
+        self.assertEqual(basis, "effective_mu")
+
     def test_celsius_bucket_integral_uses_truncated_integer_interval(self):
         result = bucket_probabilities(
             25.0,

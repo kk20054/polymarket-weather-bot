@@ -150,6 +150,7 @@ function DecisionRow({
     && item.decisions.every(row => row.paper_allowed && row.paper_decision === 'buy')
   const suggested = item.decisions.reduce((sum, row) => sum + Number(row.position_size_usd ?? 0), 0)
   const reasons = [...new Set(item.decisions.flatMap(row => row.gate_reasons ?? row.reasons ?? []))]
+  const staleBook = item.decisions.some(row => (row.cautions ?? []).includes('stale_book') || Number(row.book_age_seconds ?? 0) > 300)
   const eventUrl = String(first.evidence_links?.event_url ?? '')
 
   return (
@@ -172,10 +173,10 @@ function DecisionRow({
           </span>
         </span>
         <span className="text-right">
-          <span className={`block tabular-nums text-[11px] ${Number(first.edge ?? 0) > 0 ? 'text-green-400' : 'text-neutral-500'}`}>
+          <span className={`block tabular-nums text-[11px] ${eligible && Number(first.edge ?? 0) > 0 ? 'text-green-400' : 'text-neutral-500'}`}>
             {percent(first.edge, true)}
           </span>
-          <span className="block text-[9px] text-neutral-600">Edge</span>
+          <span className="block text-[9px] text-neutral-600">{staleBook ? '旧价差' : '模型差'}</span>
         </span>
       </button>
       {expanded && (

@@ -115,10 +115,13 @@ type LayerDistributionItem = DistributionItem & {
   ask_depth?: number | null
   gate_status?: string | null
   gate_reasons?: string[]
+  blocked_reason_primary?: string | null
+  strategy_name?: string | null
   paper_allowed?: boolean
   live_allowed?: boolean
   quote_timestamp?: string | null
   quote_valid?: boolean
+  quote_fresh?: boolean
   diagnostic_label?: string
   probability_before_observed_floor?: number | null
   observed_floor_excluded?: boolean
@@ -151,16 +154,6 @@ function bucketGridClass(count: number) {
   if (count <= 6) return gridColsMap[6]
   if (count >= 12) return gridColsMap[12]
   return gridColsMap[count] ?? gridColsMap[6]
-}
-
-function marketMid(item: LayerDistributionItem) {
-  if (item.quote_valid === false) return null
-  const bid = item.bid === null || item.bid === undefined ? null : Number(item.bid)
-  const ask = item.ask === null || item.ask === undefined ? null : Number(item.ask)
-  if (bid !== null && ask !== null && Number.isFinite(bid) && Number.isFinite(ask)) return (bid + ask) / 2
-  if (ask !== null && Number.isFinite(ask)) return ask
-  if (bid !== null && Number.isFinite(bid)) return bid
-  return null
 }
 
 function alphaEventTitle(event?: ModelRepriceEvent) {
@@ -770,11 +763,14 @@ function buildAuthoritativeDistributionItems(
     const bucket = bucketByMarket.get(marketKey) ?? bucketByKey.get(bucketKey)
     const decision = decisionByMarket.get(marketKey) ?? decisionByBucket.get(bucketKey)
     const probability = asNumber(item.probability) ?? 0
-    const ask = asNumber(item.best_ask) ?? asNumber(bucket?.best_ask) ?? asNumber(item.price) ?? 0
-    const bid = asNumber(item.best_bid) ?? asNumber(bucket?.best_bid) ?? 0
-    const quoteValid = quoteIsFresh(bucket?.quote_timestamp)
-      && ask > 0 && ask < 1
+    const askValue = asNumber(item.best_ask) ?? asNumber(bucket?.best_ask) ?? asNumber(item.price)
+    const bidValue = asNumber(item.best_bid) ?? asNumber(bucket?.best_bid)
+    const ask = askValue ?? 0
+    const bid = bidValue ?? 0
+    const quoteValid = askValue !== null && bidValue !== null
+      && ask >= 0 && ask <= 1
       && bid >= 0 && bid <= ask
+    const quoteFresh = quoteValid && quoteIsFresh(bucket?.quote_timestamp)
     const edge = quoteValid ? probability - ask : 0
     return {
       market_id: marketKey,
@@ -791,7 +787,7 @@ function buildAuthoritativeDistributionItems(
       spread: Math.max(0, ask - bid),
       probability_edge: edge,
       ev: edge,
-      is_signal: Boolean(quoteValid && decision?.paper_allowed),
+      is_signal: Boolean(quoteFresh && decision?.paper_allowed),
       bucket_label: item.bucket_label,
       bucket_direction: item.bucket_direction,
       event_url: bucket?.event_url ?? null,
@@ -802,10 +798,13 @@ function buildAuthoritativeDistributionItems(
       ask_depth: bucket?.ask_depth,
       gate_status: decision?.gate_status,
       gate_reasons: decision?.gate_reasons ?? decision?.reasons ?? [],
+      blocked_reason_primary: decision?.blocked_reason_primary,
+      strategy_name: decision?.strategy_name,
       paper_allowed: decision?.paper_allowed,
       live_allowed: decision?.live_allowed,
       quote_timestamp: bucket?.quote_timestamp,
       quote_valid: quoteValid,
+      quote_fresh: quoteFresh,
     }
   })
 }
@@ -2708,6 +2707,14 @@ function TemperatureDistributionPanel({
     if (state.refreshing) return `${label}：刷新中`
     return `${label}：就绪`
   }
+  const completeSetLastCost = !fallbackMode
+    && displayItems.length > 1
+    && displayItems.every(item => item.quote_valid !== false && Number.isFinite(Number(item.ask)))
+      ? displayItems.reduce((sum, item) => sum + Number(item.ask), 0)
+      : null
+  const completeSetFresh = completeSetLastCost !== null && displayItems.every(item => item.quote_fresh !== false)
+  const completeSetCost = completeSetFresh ? completeSetLastCost : null
+  const completeSetGap = completeSetCost === null ? null : 1 - completeSetCost
 
   return (
     <section className="border border-[#2C3445] bg-[#161A22]" aria-label="当日最高温概率分布">
@@ -2861,29 +2868,63 @@ function TemperatureDistributionPanel({
                 已按实测最高温排除 {bucketProbabilities.observed_floor_excluded_bucket_count ?? 0} 个不可能温度桶
               </div>
             )}
+            <div className="flex items-center justify-between gap-2 border-b border-[#2C3445] px-2 py-1.5 text-[9px] text-[#9AA4B2]">
+              <span title="单桶模型概率减买一价是方向性模型差，不是无风险套利。">单桶显示模型差</span>
+              <span
+                className={completeSetGap !== null && completeSetGap > 0 ? 'text-amber-300' : 'text-[#7D8694]'}
+                title="同时买入全部互斥温度桶的毛成本；未扣费用，也未校验同等可成交深度。"
+              >
+                {completeSetCost === null
+                  ? completeSetLastCost === null
+                    ? '全桶成本 --'
+                    : `最近全桶成本 ${(completeSetLastCost * 100).toFixed(1)}¢ · 盘口已过期`
+                  : `全桶成本 ${(completeSetCost * 100).toFixed(1)}¢ · ${completeSetGap !== null && completeSetGap > 0 ? '毛价差候选' : '无完整集价差'}`}
+              </span>
+            </div>
             <div className={`grid gap-1 p-2 text-[10px] ${bucketGridClass(displayItems.length)}`}>
               {displayItems.map((item, index) => {
                 const edge = item.quote_valid === false ? null : Number(item.probability_edge ?? item.ev ?? 0)
                 const alpha = alphaForItem(item)
-                const mid = marketMid(item)
-                return (
-                  <div
-                    key={`${item.market_id || item.bucket_key || item.bucket_label || `${item.bucket_low}-${item.bucket_high}` || 'bucket'}-${index}`}
-                    className={`min-h-[112px] border p-2 ${item.is_signal ? 'border-cyan-500/40 bg-cyan-500/10' : 'border-[#2C3445] bg-[#1B212C]'} ${edge !== null && Math.abs(edge) > 0.08 ? 'animate-pulse shadow-[0_0_0_1px_rgba(34,197,94,0.25)]' : ''}`}
-                    title={`${item.question || fmtBucketAxisLabel(item, unit)} | bid/ask ${fallbackMode || item.quote_valid === false ? '--' : `${fmtPrice(item.bid)} / ${fmtPrice(item.ask)}`}`}
-                  >
+                const quoteFresh = item.quote_fresh !== false
+                const tradeCandidate = Boolean(item.quote_valid !== false && quoteFresh && item.paper_allowed)
+                const gateReason = item.blocked_reason_primary ?? item.gate_reasons?.[0] ?? ''
+                const title = [
+                  item.question || fmtBucketAxisLabel(item, unit),
+                  `bid/ask ${fallbackMode || item.quote_valid === false ? '--' : `${fmtPrice(item.bid)} / ${fmtPrice(item.ask)}`}`,
+                  tradeCandidate
+                    ? `paper 候选 · ${item.strategy_name || '策略通过'}`
+                    : `仅观察${quoteFresh ? '' : ' · 盘口已过期'}${gateReason ? ` · ${gateReason}` : ''}`,
+                ].join(' | ')
+                const card = (
+                  <>
                     <div className="flex items-start justify-between gap-1">
                       <span className="min-w-0 truncate font-semibold text-[#F8FAFC]">{fmtBucketAxisLabel(item, unit)}</span>
-                      {alpha ? <span title={alphaEventTitle(alpha)} className="shrink-0 text-amber-300">⚡</span> : null}
+                      <span className="flex shrink-0 items-center gap-1">
+                        {tradeCandidate
+                          ? <span className="text-[9px] text-cyan-300">候选</span>
+                          : <span className="text-[9px] text-[#7D8694]">{quoteFresh ? '观察' : '旧盘口'}</span>}
+                        {alpha ? <span title={alphaEventTitle(alpha)} className="text-amber-300">⚡</span> : null}
+                        {item.event_url ? <ExternalLink className="h-3 w-3 text-[#7D8694]" aria-hidden="true" /> : null}
+                      </span>
                     </div>
-                    <div className={`mt-2 text-lg font-semibold tabular-nums ${edge === null ? 'text-[#7D8694]' : edge >= 0 ? 'text-green-300' : 'text-red-300'}`}>
-                      {fallbackMode || edge === null ? '--' : fmtSignedPct(edge)}
+                    <div className={`mt-2 text-lg font-semibold tabular-nums ${edge === null ? 'text-[#7D8694]' : tradeCandidate ? 'text-cyan-200' : edge < 0 ? 'text-red-300' : 'text-[#9AA4B2]'}`}>
+                      {fallbackMode || edge === null ? '--' : `${quoteFresh ? '差' : '旧价差'} ${fmtSignedPct(edge)}`}
                     </div>
                     <div className="mt-1 flex justify-between gap-2 text-[10px] tabular-nums text-[#7D8694]">
                       <span>model {fmtProb(item.probability)}</span>
-                      <span>market {fallbackMode || item.quote_valid === false ? '--' : fmtPrice(mid)}</span>
+                      <span>ask {fallbackMode || item.quote_valid === false ? '--' : fmtPrice(item.ask)}</span>
                     </div>
-                  </div>
+                    {!tradeCandidate && gateReason ? <div className="mt-1 truncate text-[9px] text-[#697281]">{gateReason}</div> : null}
+                  </>
+                )
+                const key = `${item.market_id || item.bucket_key || item.bucket_label || `${item.bucket_low}-${item.bucket_high}` || 'bucket'}-${index}`
+                const className = `min-h-[112px] border p-2 transition-colors ${tradeCandidate ? 'border-cyan-500/50 bg-cyan-500/10 hover:border-cyan-300' : 'border-[#2C3445] bg-[#1B212C] hover:border-[#4B5563]'}`
+                return item.event_url ? (
+                  <a key={key} href={item.event_url} target="_blank" rel="noreferrer" className={className} title={title} aria-label={`打开 Polymarket：${item.question || fmtBucketAxisLabel(item, unit)}`}>
+                    {card}
+                  </a>
+                ) : (
+                  <div key={key} className={className} title={title}>{card}</div>
                 )
               })}
             </div>

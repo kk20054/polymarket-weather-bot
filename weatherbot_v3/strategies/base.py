@@ -260,6 +260,10 @@ def distribution_summary(distribution: dict[str, Any]) -> dict[str, Any]:
         "sum_probability": distribution.get("sum_probability"),
         "normalized": distribution.get("normalized"),
         "item_count": len(distribution.get("items") or []),
+        "probability_mu_basis": distribution.get("probability_mu_basis"),
+        "model_mu": distribution.get("model_mu"),
+        "effective_mu": distribution.get("effective_mu"),
+        "observed_floor": distribution.get("observed_floor"),
     }
 
 

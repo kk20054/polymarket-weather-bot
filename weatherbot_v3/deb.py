@@ -67,6 +67,27 @@ def sigma_with_floor(sigma: float | None, sigma_floor: float) -> float:
     return value
 
 
+def probability_mu_for_prediction(prediction: dict[str, Any]) -> tuple[float, str]:
+    """Return the Gaussian center used for bucket settlement probabilities.
+
+    When the effective mean was already lifted by the intraday observed
+    maximum, conditioning that lifted mean on the same floor would count the
+    observation twice. Condition the original model mean instead and retain
+    the effective mean as display metadata.
+    """
+    effective_mu = _optional_float(prediction.get("effective_mu"))
+    if effective_mu is None:
+        effective_mu = _optional_float(prediction.get("mu"))
+    model_mu = _optional_float(prediction.get("model_mu"))
+    observed_floor = _optional_float(prediction.get("observed_floor"))
+    floor_applied = bool(prediction.get("mu_observed_floor_applied")) and observed_floor is not None
+    if floor_applied and model_mu is not None:
+        return model_mu, "model_mu_conditioned_on_observed_floor"
+    if effective_mu is None:
+        raise ValueError("prediction_mu_missing")
+    return effective_mu, "effective_mu"
+
+
 def bucket_probabilities(
     mu: float,
     sigma: float,
@@ -241,6 +262,17 @@ def build_daily_max_prediction(
             model_mu = float(ensemble.get("mu") or 0.0)
             observed_floor = _observed_floor(city_key, target_date, unit, path, issued_at=issued)
             mu_floor = _observed_mu_floor(observed_floor, unit)
+            time_decay = _time_decay_factor(
+                target_date,
+                profile.timezone if profile else "UTC",
+                observed_floor is not None,
+                as_of=issued,
+            )
+            sigma_raw = float(ensemble.get("sigma") or 0.0)
+            sigma_floor_value = float(ensemble.get("sigma_floor") or sigma_floor)
+            ensemble["sigma_raw"] = sigma_raw
+            ensemble["sigma"] = round(sigma_with_floor(sigma_raw * time_decay, sigma_floor_value), 4)
+            ensemble["time_decay_factor"] = round(time_decay, 6)
             floor_applied = False
             if mu_floor is not None and mu_floor > model_mu:
                 ensemble["mu"] = mu_floor
@@ -340,7 +372,12 @@ def build_daily_max_prediction(
     sigma_raw = math.sqrt(sigma_from_spread**2 + sigma_from_history**2) / 2.0
     observed_floor = _observed_floor(city_key, target_date, unit, path, issued_at=issued)
     mu_floor = _observed_mu_floor(observed_floor, unit)
-    time_decay = _time_decay_factor(target_date, profile.timezone if profile else "UTC", observed_floor is not None)
+    time_decay = _time_decay_factor(
+        target_date,
+        profile.timezone if profile else "UTC",
+        observed_floor is not None,
+        as_of=issued,
+    )
     sigma = sigma_with_floor(sigma_raw * time_decay, sigma_floor)
     mixed_peak = _mixed_curve_peak(
         city_key,
@@ -518,8 +555,9 @@ def latest_bucket_probabilities(
             "reasons": list(cohort_contract.get("reasons") or ["prediction_source_cohort_invalid"]),
             "items": [],
         }
+    probability_mu, probability_mu_basis = probability_mu_for_prediction(prediction)
     distribution = bucket_probabilities(
-        float(prediction["mu"]),
+        probability_mu,
         float(prediction["sigma"]),
         buckets,
         unit=str(prediction.get("unit") or "C"),
@@ -531,6 +569,9 @@ def latest_bucket_probabilities(
         "city_key": city_key,
         "target_date": target_date,
         "prediction": prediction,
+        "probability_mu_basis": probability_mu_basis,
+        "model_mu": _optional_float(prediction.get("model_mu")),
+        "effective_mu": _optional_float(prediction.get("effective_mu")) or _optional_float(prediction.get("mu")),
     })
     return distribution
 
@@ -1245,14 +1286,21 @@ def _market_probability(bucket: dict[str, Any]) -> float | None:
     return None
 
 
-def _time_decay_factor(target_date: str, timezone_name: str, has_observed_floor: bool = False) -> float:
+def _time_decay_factor(
+    target_date: str,
+    timezone_name: str,
+    has_observed_floor: bool = False,
+    *,
+    as_of: str | datetime | None = None,
+) -> float:
     try:
         date_value = datetime.fromisoformat(str(target_date)).date()
     except Exception:
         return 1.0
     try:
         tz = ZoneInfo(timezone_name) if ZoneInfo else timezone.utc
-        now_local = datetime.now(tz)
+        parsed_as_of = _parse_datetime(as_of)
+        now_local = parsed_as_of.astimezone(tz) if parsed_as_of else datetime.now(tz)
     except Exception:
         now_local = datetime.now(timezone.utc)
     if date_value > now_local.date():
