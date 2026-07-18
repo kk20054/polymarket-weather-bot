@@ -63,6 +63,10 @@ class DashboardAsyncReadTests(unittest.IsolatedAsyncioTestCase):
         }
         with patch.object(dashboard_server, "dashboard_payload_cache", cached), patch(
             "dashboard_server._read_json", return_value=None
+        ), patch(
+            "dashboard_server._ensure_dashboard_refresh"
+        ), patch(
+            "dashboard_server._recommendations_payload", return_value={"focus_items": []}
         ):
             payload = await dashboard_server.dashboard("shanghai")
 
@@ -82,12 +86,39 @@ class DashboardAsyncReadTests(unittest.IsolatedAsyncioTestCase):
         }
         with patch.object(dashboard_server, "dashboard_payload_cache", cached), patch(
             "dashboard_server._read_json", return_value=None
+        ), patch(
+            "dashboard_server._ensure_dashboard_refresh"
+        ), patch(
+            "dashboard_server._recommendations_payload", return_value={"focus_items": []}
         ):
             payload = await dashboard_server.dashboard("")
 
         self.assertEqual(len(payload["weather_city_series"]), 2)
         self.assertTrue(all(row["hourly_points"] == [] for row in payload["weather_city_series"]))
         self.assertEqual(payload["city_evidence"], [])
+
+    async def test_dashboard_refreshes_presentation_cache_and_recomputes_focus_cards(self):
+        cached = {
+            "weather_city_series": [],
+            "city_evidence": [],
+            "recommendations": {"focus_items": [], "generated_at": "old"},
+        }
+        current = {
+            "focus_items": [{"city_key": "wellington", "type": "weather_focus"}],
+            "generated_at": "current",
+        }
+        with patch.object(dashboard_server, "dashboard_payload_cache", cached), patch(
+            "dashboard_server._read_json", return_value=None
+        ), patch(
+            "dashboard_server._ensure_dashboard_refresh"
+        ) as ensure_refresh, patch(
+            "dashboard_server._recommendations_payload", return_value=current
+        ) as recommendations:
+            payload = await dashboard_server.dashboard("")
+
+        ensure_refresh.assert_called_once_with()
+        recommendations.assert_called_once()
+        self.assertEqual(payload["recommendations"], current)
 
 
 if __name__ == "__main__":

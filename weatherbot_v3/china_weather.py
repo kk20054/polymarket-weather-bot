@@ -6,17 +6,20 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from .db import log_data_fetch, upsert_mesonet_observation, utc_now
+from .env_utils import env_value
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 
 
 CHINA_LIVE_NETWORK = "china_live"
-CHINA_LIVE_PARSER_VERSION = "china-live-v1"
+CHINA_LIVE_PARSER_VERSION = "china-live-v2"
 HKO_RHRREAD_URL = "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en"
-WEATHERCN_SK2D_URL_TEMPLATE = "http://d1.weather.com.cn/sk_2d/{station_code}.html?_={timestamp_ms}"
+WEATHERCN_SK2D_URL_TEMPLATE = "https://d1.weather.com.cn/sk_2d/{station_code}.html?_={timestamp_ms}"
+WEATHERCOM_CURRENT_URL = "https://api.weather.com/v3/wx/observations/current"
 DEFAULT_USER_AGENT = "WeatherBot/2.0 (contact: local-operator)"
 
 CHINA_LIVE_CITY_ALIASES = {
@@ -121,19 +124,28 @@ def fetch_china_weather_city(city: str, *, dry_run: bool = False) -> dict[str, A
             station_code=station_code,
             timestamp_ms=int(time.time() * 1000),
         )
-        raw = _http_get(
-            source_url,
-            headers={
-                "User-Agent": f"Mozilla/5.0 {DEFAULT_USER_AGENT}",
-                "Referer": "https://www.weather.com.cn/",
-            },
-        )
-        observation = weathercn_sk2d_observation(
-            raw,
-            profile,
-            station_code=station_code,
-            source_url=source_url,
-        )
+        try:
+            raw = _http_get(
+                source_url,
+                headers={
+                    "User-Agent": f"Mozilla/5.0 {DEFAULT_USER_AGENT}",
+                    "Referer": "https://www.weather.com.cn/",
+                },
+                timeout=8,
+            )
+            observation = weathercn_sk2d_observation(
+                raw,
+                profile,
+                station_code=station_code,
+                source_url=source_url,
+            )
+            if observation.get("parse_status") == "failed":
+                raise ValueError("weathercn_parse_failed")
+        except Exception as exc:
+            observation = _weathercom_current_observation(
+                profile,
+                primary_failure=_safe_failure_reason(exc),
+            )
     else:
         return {"ok": False, "city": city, "error": "unsupported_china_live_city", "rows_upserted": 0}
 
@@ -150,10 +162,78 @@ def fetch_china_weather_city(city: str, *, dry_run: bool = False) -> dict[str, A
         "humidity": observation.get("humidity"),
         "parse_status": status,
         "parse_warnings": observation.get("parse_warnings", []),
+        "provider": (observation.get("raw_json") or {}).get("provider"),
         "rows_upserted": 0 if dry_run else (1 if row_id else 0),
         "dry_run": dry_run,
         "source_url": observation.get("source_url"),
     }
+
+
+def _weathercom_current_observation(
+    profile: CitySettlementProfile,
+    *,
+    primary_failure: str,
+) -> dict[str, Any]:
+    """Use Weather.com current conditions when the China Weather feed is down.
+
+    This remains display-only evidence and records the provider explicitly; it
+    must never be treated as weather.com.cn or settlement truth.
+    """
+    api_key = str(env_value("WEATHER_COM_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError(f"weathercn_unavailable:{primary_failure};weathercom_key_missing")
+    public_params = {
+        "geocode": f"{profile.latitude},{profile.longitude}",
+        "format": "json",
+        "units": "m",
+        "language": "zh-CN",
+    }
+    request_url = f"{WEATHERCOM_CURRENT_URL}?{urlencode({**public_params, 'apiKey': api_key})}"
+    source_url = f"{WEATHERCOM_CURRENT_URL}?{urlencode(public_params)}&apiKey=***"
+    raw = _http_get(
+        request_url,
+        headers={"Accept": "application/json", "User-Agent": DEFAULT_USER_AGENT},
+        timeout=12,
+    )
+    payload = json.loads(raw)
+    valid_epoch = _float(payload.get("validTimeUtc"))
+    observed_at = (
+        datetime.fromtimestamp(valid_epoch, tz=timezone.utc)
+        if valid_epoch is not None
+        else datetime.now(timezone.utc)
+    )
+    warnings = [f"weathercn_primary_unavailable:{primary_failure}"]
+    temperature = _float(payload.get("temperature"))
+    if temperature is None:
+        warnings.append("missing_weathercom_current_temperature")
+    return _observation(
+        profile=profile,
+        station_id=profile.station_id,
+        station_name=f"Weather.com current near {profile.station_id}",
+        observed_at=observed_at,
+        temperature=temperature,
+        humidity=_float(payload.get("relativeHumidity")),
+        wind_speed=_float(payload.get("windSpeed")),
+        wind_direction=_float(payload.get("windDirection")),
+        pressure=_float(payload.get("pressureMeanSeaLevel")),
+        source_url=source_url,
+        raw_response=raw,
+        fetched_at=datetime.now(timezone.utc),
+        parse_warnings=warnings,
+        extra_raw={
+            "provider": "weathercom_v3_current",
+            "fallback_for": "weathercn_sk2d",
+            "primary_failure": primary_failure,
+            "payload": payload,
+        },
+    )
+
+
+def _safe_failure_reason(exc: Exception) -> str:
+    code = getattr(exc, "code", None)
+    if code is not None:
+        return f"http_{code}"
+    return type(exc).__name__
 
 
 def hko_rhrread_observation(

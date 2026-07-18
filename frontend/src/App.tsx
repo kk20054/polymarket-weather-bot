@@ -137,6 +137,7 @@ function resolveCityTradingStatus(
   if (configured === 'fully_active' || configured === 'paper_only' || configured === 'monitor_only' || configured === 'observation_only') return configured
   if (verificationStatus === 'settlement_mismatch') return 'paper_only'
   if (verificationStatus === 'no_active_market') return 'observation_only'
+  if (verificationStatus === 'verified' && cityScope === 'market_candidate') return 'fully_active'
   return 'observation_only'
 }
 

@@ -38,6 +38,7 @@ class WatchlistEnabledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(displayed_keys, all_keys)
         self.assertEqual(enabled_keys, expected)
         self.assertLessEqual(len(enabled_keys), len(DEFAULT_ENABLED_CITY_KEYS))
+        self.assertIn("wellington", enabled_keys)
         self.assertNotIn("manila", enabled_keys)
 
     async def test_station_enable_disable_cli_helper_updates_flags(self):

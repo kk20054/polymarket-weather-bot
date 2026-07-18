@@ -882,7 +882,13 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             continue
         unit = str(station.get("settlement_unit") or station.get("unit") or "C").upper()
         current_temp = _temperature_in_unit(live_row.get("temperature"), unit)
-        predicted_max = _temperature_in_unit(prediction.get("mu"), unit)
+        prediction_raw = _read_json_from_text(prediction.get("raw_json"), {})
+        model_mu = prediction_raw.get("model_mu")
+        predicted_max = _temperature_in_unit(
+            model_mu if model_mu is not None else prediction.get("mu"),
+            unit,
+        )
+        effective_mu = _temperature_in_unit(prediction.get("mu"), unit)
         if current_temp is None or predicted_max is None:
             skipped["focus_prediction_or_temperature_missing"] += 1
             continue
@@ -900,6 +906,7 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             "current_temp": current_temp,
             "current_temp_unit": unit,
             "deb_mu": predicted_max,
+            "deb_effective_mu": effective_mu,
             "deb_sigma": prediction.get("sigma"),
             "deb_unit": unit,
             "metar_age_seconds": observation_age,
@@ -4396,8 +4403,9 @@ async def index():
 
 @app.get("/api/dashboard")
 async def dashboard(city: str = ""):
-    if DASHBOARD_AUTO_BUILD:
-        _ensure_dashboard_refresh()
+    # HTTP reads may refresh the local presentation cache even when collector
+    # auto-start is disabled. This never starts a scanner or scheduler.
+    _ensure_dashboard_refresh()
     if dashboard_payload_cache is not None:
         payload = dict(dashboard_payload_cache)
     else:
@@ -4420,12 +4428,21 @@ async def dashboard(city: str = ""):
         payload["production_refresh"] = latest_refresh
     scheduler_payload = get_scheduler().status()
     payload["scheduler_status"] = scheduler_payload
-    payload.setdefault("recommendations", {
-        "items": [],
-        "trade_candidate_count": 0,
-        "observation_only_count": 0,
-        "message": "recommendation_cache_warming",
-    })
+    try:
+        payload["recommendations"] = await asyncio.to_thread(
+            _recommendations_payload,
+            scheduler_status=scheduler_payload,
+        )
+    except Exception as exc:
+        payload["recommendations"] = {
+            "items": [],
+            "focus_items": [],
+            "trade_candidate_count": 0,
+            "observation_only_count": 0,
+            "weather_focus_count": 0,
+            "empty_reason": "recommendation_read_failed",
+            "message": str(exc)[:160],
+        }
     return await asyncio.to_thread(_json_safe, payload)
 
 

@@ -24,6 +24,7 @@ DEFAULT_ENABLED_CITY_KEYS = {
     "taipei",
     "singapore",
     "seoul",
+    "wellington",
 }
 
 
