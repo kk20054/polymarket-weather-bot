@@ -140,22 +140,6 @@ type EvidenceCardItem = {
   details?: Array<{ label: string; value: string; wide?: boolean }>
 }
 
-const gridColsMap: Record<number, string> = {
-  6: 'grid-cols-6',
-  7: 'grid-cols-7',
-  8: 'grid-cols-8',
-  9: 'grid-cols-9',
-  10: 'grid-cols-10',
-  11: 'grid-cols-11',
-  12: 'grid-cols-12',
-}
-
-function bucketGridClass(count: number) {
-  if (count <= 6) return gridColsMap[6]
-  if (count >= 12) return gridColsMap[12]
-  return gridColsMap[count] ?? gridColsMap[6]
-}
-
 function alphaEventTitle(event?: ModelRepriceEvent) {
   if (!event) return ''
   const delta = event.delta_prob === null || event.delta_prob === undefined ? '--' : `${(Number(event.delta_prob) * 100).toFixed(1)}pp`
@@ -2877,15 +2861,16 @@ function TemperatureDistributionPanel({
                 {completeSetCost === null
                   ? completeSetLastCost === null
                     ? '全桶成本 --'
-                    : `最近全桶成本 ${(completeSetLastCost * 100).toFixed(1)}¢ · 盘口已过期`
+                    : `盘口已过期 · 最近全桶 ${(completeSetLastCost * 100).toFixed(1)}¢`
                   : `全桶成本 ${(completeSetCost * 100).toFixed(1)}¢ · ${completeSetGap !== null && completeSetGap > 0 ? '毛价差候选' : '无完整集价差'}`}
               </span>
             </div>
-            <div className={`grid gap-1 p-2 text-[10px] ${bucketGridClass(displayItems.length)}`}>
-              {displayItems.map((item, index) => {
-                const edge = item.quote_valid === false ? null : Number(item.probability_edge ?? item.ev ?? 0)
+            <div className="overflow-x-auto p-2">
+              <div className="flex min-w-max gap-1 text-[10px]">
+                {displayItems.map((item, index) => {
                 const alpha = alphaForItem(item)
                 const quoteFresh = item.quote_fresh !== false
+                const edge = item.quote_valid === false || !quoteFresh ? null : Number(item.probability_edge ?? item.ev ?? 0)
                 const tradeCandidate = Boolean(item.quote_valid !== false && quoteFresh && item.paper_allowed)
                 const gateReason = item.blocked_reason_primary ?? item.gate_reasons?.[0] ?? ''
                 const title = [
@@ -2902,23 +2887,36 @@ function TemperatureDistributionPanel({
                       <span className="flex shrink-0 items-center gap-1">
                         {tradeCandidate
                           ? <span className="text-[9px] text-cyan-300">候选</span>
-                          : <span className="text-[9px] text-[#7D8694]">{quoteFresh ? '观察' : '旧盘口'}</span>}
+                          : <span className="text-[9px] text-[#7D8694]">{quoteFresh ? '观察' : '盘口过期'}</span>}
                         {alpha ? <span title={alphaEventTitle(alpha)} className="text-amber-300">⚡</span> : null}
                         {item.event_url ? <ExternalLink className="h-3 w-3 text-[#7D8694]" aria-hidden="true" /> : null}
                       </span>
                     </div>
-                    <div className={`mt-2 text-lg font-semibold tabular-nums ${edge === null ? 'text-[#7D8694]' : tradeCandidate ? 'text-cyan-200' : edge < 0 ? 'text-red-300' : 'text-[#9AA4B2]'}`}>
-                      {fallbackMode || edge === null ? '--' : `${quoteFresh ? '差' : '旧价差'} ${fmtSignedPct(edge)}`}
+                    <div className={`mt-2 font-semibold tabular-nums ${quoteFresh ? 'text-lg' : 'text-base'} ${edge === null ? 'text-[#9AA4B2]' : tradeCandidate ? 'text-cyan-200' : edge < 0 ? 'text-red-300' : 'text-[#9AA4B2]'}`}>
+                      {fallbackMode
+                        ? '--'
+                        : quoteFresh
+                          ? edge === null ? '--' : `差 ${fmtSignedPct(edge)}`
+                          : fmtProb(item.probability)}
                     </div>
                     <div className="mt-1 flex justify-between gap-2 text-[10px] tabular-nums text-[#7D8694]">
-                      <span>model {fmtProb(item.probability)}</span>
-                      <span>ask {fallbackMode || item.quote_valid === false ? '--' : fmtPrice(item.ask)}</span>
+                      {quoteFresh ? (
+                        <>
+                          <span>model {fmtProb(item.probability)}</span>
+                          <span>ask {fallbackMode || item.quote_valid === false ? '--' : fmtPrice(item.ask)}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>旧 ask {fallbackMode || item.quote_valid === false ? '--' : fmtPrice(item.ask)}</span>
+                          <span>不计算差值</span>
+                        </>
+                      )}
                     </div>
-                    {!tradeCandidate && gateReason ? <div className="mt-1 truncate text-[9px] text-[#697281]">{gateReason}</div> : null}
+                    {!tradeCandidate && quoteFresh && gateReason ? <div className="mt-1 truncate text-[9px] text-[#697281]">{gateReason}</div> : null}
                   </>
                 )
                 const key = `${item.market_id || item.bucket_key || item.bucket_label || `${item.bucket_low}-${item.bucket_high}` || 'bucket'}-${index}`
-                const className = `min-h-[112px] border p-2 transition-colors ${tradeCandidate ? 'border-cyan-500/50 bg-cyan-500/10 hover:border-cyan-300' : 'border-[#2C3445] bg-[#1B212C] hover:border-[#4B5563]'}`
+                const className = `min-h-[104px] w-[118px] shrink-0 border p-2 transition-colors ${tradeCandidate ? 'border-cyan-500/50 bg-cyan-500/10 hover:border-cyan-300' : quoteFresh ? 'border-[#2C3445] bg-[#1B212C] hover:border-[#4B5563]' : 'border-[#252C38] bg-[#181D26] opacity-80 hover:opacity-100'}`
                 return item.event_url ? (
                   <a key={key} href={item.event_url} target="_blank" rel="noreferrer" className={className} title={title} aria-label={`打开 Polymarket：${item.question || fmtBucketAxisLabel(item, unit)}`}>
                     {card}
@@ -2926,7 +2924,8 @@ function TemperatureDistributionPanel({
                 ) : (
                   <div key={key} className={className} title={title}>{card}</div>
                 )
-              })}
+                })}
+              </div>
             </div>
           </aside>
         </div>

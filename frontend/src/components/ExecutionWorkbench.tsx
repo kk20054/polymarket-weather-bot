@@ -146,11 +146,12 @@ function DecisionRow({
 }) {
   const [expanded, setExpanded] = useState(false)
   const first = item.decisions[0]
-  const eligible = item.decisions.length === (item.ladderGroupId ? 3 : 1)
+  const staleBook = item.decisions.some(row => (row.cautions ?? []).includes('stale_book') || Number(row.book_age_seconds ?? 0) > 300)
+  const eligible = !staleBook
+    && item.decisions.length === (item.ladderGroupId ? 3 : 1)
     && item.decisions.every(row => row.paper_allowed && row.paper_decision === 'buy')
   const suggested = item.decisions.reduce((sum, row) => sum + Number(row.position_size_usd ?? 0), 0)
   const reasons = [...new Set(item.decisions.flatMap(row => row.gate_reasons ?? row.reasons ?? []))]
-  const staleBook = item.decisions.some(row => (row.cautions ?? []).includes('stale_book') || Number(row.book_age_seconds ?? 0) > 300)
   const eventUrl = String(first.evidence_links?.event_url ?? '')
 
   return (
@@ -174,9 +175,9 @@ function DecisionRow({
         </span>
         <span className="text-right">
           <span className={`block tabular-nums text-[11px] ${eligible && Number(first.edge ?? 0) > 0 ? 'text-green-400' : 'text-neutral-500'}`}>
-            {percent(first.edge, true)}
+            {staleBook ? '--' : percent(first.edge, true)}
           </span>
-          <span className="block text-[9px] text-neutral-600">{staleBook ? '旧价差' : '模型差'}</span>
+          <span className="block text-[9px] text-neutral-600">{staleBook ? '盘口过期' : '模型差'}</span>
         </span>
       </button>
       {expanded && (

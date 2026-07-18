@@ -33,6 +33,7 @@ from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement
 from weatherbot_v3.openmeteo import fetch_openmeteo_forecasts, model_allowlist_for_city, openmeteo_runs_from_response
 from weatherbot_v3.mesonet import ingest_mesonet_observations, mesonet_observation_from_pws_row
 from weatherbot_v3.pws import aggregate_pws_observations, fetch_wunderground_pws_city, parse_pws_current_payload
+from weatherbot_v3.polymarket_gamma import upsert_polymarket_event
 from weatherbot_v3.qualification import build_data_readiness, persist_data_readiness
 from weatherbot_v3.registry import SETTLEMENT_REGISTRY, forecast_source_matches_profile_location
 from weatherbot_v3.signals import build_signal_decisions, signal_decisions_summary
@@ -2897,6 +2898,30 @@ class V3CoreTests(unittest.TestCase):
             },
         }, path=db_path)
 
+    def _seed_recommendation_event(
+        self,
+        db_path: Path,
+        *,
+        city: str,
+        target_date: str,
+        end_at: datetime | None = None,
+    ) -> None:
+        market_end = end_at or (datetime.now(timezone.utc) + timedelta(hours=6))
+        slug = f"highest-temperature-in-{city}-on-{target_date}"
+        upsert_polymarket_event({
+            "event_id": f"fixture-{city}-{target_date}",
+            "slug": slug,
+            "city": city,
+            "target_date": target_date,
+            "raw_json": {
+                "id": f"fixture-{city}-{target_date}",
+                "slug": slug,
+                "active": True,
+                "closed": False,
+                "endDate": market_end.isoformat(),
+            },
+        }, path=db_path)
+
     def test_dashboard_recommendations_use_fresh_verified_signal_decisions(self):
         db_path = test_db_path("dashboard_recommendations")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -2915,6 +2940,7 @@ class V3CoreTests(unittest.TestCase):
                 "settlement_time_basis": "local_day",
                 "primary_settlement_source": "wunderground",
             }, path=db_path)
+            self._seed_recommendation_event(db_path, city="chicago", target_date=target)
             self._seed_signal_decision_fixture(db_path, target_date=target)
             upsert_metar_report({
                 "city": "chicago",
@@ -2957,6 +2983,7 @@ class V3CoreTests(unittest.TestCase):
                 "settlement_time_basis": "local_day",
                 "primary_settlement_source": "wunderground",
             }, path=db_path)
+            self._seed_recommendation_event(db_path, city="chicago", target_date=target)
             self._seed_signal_decision_fixture(db_path, best_ask=0.20, best_bid=0.0, target_date=target)
             upsert_metar_report({
                 "city": "chicago",
@@ -2994,6 +3021,7 @@ class V3CoreTests(unittest.TestCase):
                 "settlement_time_basis": "local_day",
                 "primary_settlement_source": "wunderground",
             }, path=db_path)
+            self._seed_recommendation_event(db_path, city="chicago", target_date=target)
             self._seed_signal_decision_fixture(db_path, target_date=target)
             upsert_metar_report({
                 "city": "chicago",
@@ -3087,6 +3115,7 @@ class V3CoreTests(unittest.TestCase):
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
             init_v3_db(db_path)
             sync_station_registry(path=db_path)
+            self._seed_recommendation_event(db_path, city="chicago", target_date=target)
             upsert_daily_max_prediction({
                 "city_key": "chicago",
                 "target_date": target,
@@ -3099,6 +3128,7 @@ class V3CoreTests(unittest.TestCase):
                 "sigma_floor": 0.5,
                 "model_mu": 29.0,
                 "effective_mu": 30.0,
+                "observed_floor": 31.0,
             }, path=db_path)
             upsert_metar_report({
                 "city": "chicago",
@@ -3116,11 +3146,75 @@ class V3CoreTests(unittest.TestCase):
         focus = payload["focus_items"][0]
         self.assertEqual(focus["type"], "weather_focus")
         self.assertEqual(focus["city_key"], "chicago")
-        self.assertAlmostEqual(focus["deb_mu"], 84.2, places=1)
+        self.assertAlmostEqual(focus["deb_model_mu"], 84.2, places=1)
         self.assertAlmostEqual(focus["deb_effective_mu"], 86.0, places=1)
+        self.assertAlmostEqual(focus["observed_high"], 87.8, places=1)
+        self.assertAlmostEqual(focus["deb_mu"], 87.8, places=1)
         self.assertEqual(focus["focus_reason"], "near_predicted_daily_max")
+        self.assertTrue(focus["market_open"])
+        self.assertIn("polymarket.com", focus["polymarket_url"])
         self.assertNotIn("market_id", focus)
         self.assertFalse(payload["filters"]["weather_focus"]["trade_claim"])
+
+    def test_dashboard_recommendations_exclude_ended_markets(self):
+        db_path = test_db_path("dashboard_recommendations_ended_market")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        target = datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            sync_station_registry(path=db_path)
+            self._seed_recommendation_event(
+                db_path,
+                city="chicago",
+                target_date=target,
+                end_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            )
+            upsert_daily_max_prediction({
+                "city_key": "chicago",
+                "target_date": target,
+                "issued_at": datetime.now(timezone.utc).isoformat(),
+                "mu": 30.0,
+                "sigma": 1.0,
+                "unit": "C",
+                "method": "weatherbot-deb-v2",
+                "model_mu": 30.0,
+            }, path=db_path)
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": datetime.now(timezone.utc).isoformat(),
+                "raw_text": "KORD fixture METAR",
+                "temperature": 30.0,
+                "parser_version": "fixture",
+            })
+            payload = _recommendations_payload(scheduler_status={"running": True}, path=db_path)
+
+        self.assertEqual(payload["weather_focus_count"], 0)
+        self.assertEqual(payload["trade_candidate_count"], 0)
+        self.assertGreater(payload["skipped"].get("focus_market_closed_or_missing", 0), 0)
+
+    def test_dashboard_recommendations_require_a_daily_max_prediction(self):
+        db_path = test_db_path("dashboard_recommendations_missing_prediction")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        target = datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            sync_station_registry(path=db_path)
+            self._seed_recommendation_event(db_path, city="chicago", target_date=target)
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": datetime.now(timezone.utc).isoformat(),
+                "raw_text": "KORD fixture METAR",
+                "temperature": 30.0,
+                "parser_version": "fixture",
+            })
+            payload = _recommendations_payload(scheduler_status={"running": True}, path=db_path)
+
+        self.assertEqual(payload["weather_focus_count"], 0)
+        self.assertGreater(payload["skipped"].get("focus_prediction_or_temperature_missing", 0), 0)
 
     def test_layer8_paper_execution_fills_decision_and_marks_spread_pnl(self):
         db_path = test_db_path("paper_execution_fill")

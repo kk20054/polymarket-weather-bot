@@ -752,6 +752,53 @@ def _recommendation_query_cutoff(stations: dict[str, dict], now: datetime) -> st
     return min(local_dates) if local_dates else _today_str()
 
 
+def _recommendation_event_state(event: dict, now: datetime) -> dict:
+    raw = _read_json_from_text(event.get("raw_json"), {}) if event else {}
+    end_at = _parse_iso(raw.get("endDate") or raw.get("end_date"))
+    is_open = bool(
+        event
+        and raw.get("active") is not False
+        and raw.get("closed") is not True
+        and end_at is not None
+        and now < end_at
+    )
+    if not event:
+        reason = "market_missing"
+    elif end_at is None:
+        reason = "market_end_time_missing"
+    elif now >= end_at:
+        reason = "market_ended"
+    elif raw.get("closed") is True or raw.get("active") is False:
+        reason = "market_inactive"
+    else:
+        reason = ""
+    return {
+        "is_open": is_open,
+        "end_at": end_at.isoformat() if end_at else None,
+        "reason": reason,
+        "slug": event.get("slug") if event else None,
+    }
+
+
+def _recommendation_display_high(prediction: dict, current_temp, unit: str) -> dict:
+    raw = _read_json_from_text(prediction.get("raw_json"), {})
+    model_mu = _temperature_in_unit(raw.get("model_mu"), unit)
+    effective_mu = _temperature_in_unit(
+        prediction.get("mu") if prediction.get("mu") is not None else raw.get("effective_mu"),
+        unit,
+    )
+    observed_high = _temperature_in_unit(raw.get("observed_floor"), unit)
+    has_prediction = model_mu is not None or effective_mu is not None
+    values = [value for value in (model_mu, effective_mu, observed_high, current_temp) if value is not None] if has_prediction else []
+    return {
+        "display_high": max(values) if values else None,
+        "has_prediction": has_prediction,
+        "model_mu": model_mu,
+        "effective_mu": effective_mu,
+        "observed_high": observed_high,
+    }
+
+
 def _freshest_focus_observation(city: str, metars: dict[str, dict], china_live: dict[str, dict]) -> tuple[dict, str]:
     candidates = [
         (china_live.get(city) or {}, "china_live", "observed_at"),
@@ -835,6 +882,20 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
                 (query_cutoff,),
             ).fetchall()
         ]
+        events = [
+            dict(row) for row in conn.execute(
+                """
+                SELECT *
+                FROM polymarket_events
+                WHERE target_date >= ?
+                  AND city IS NOT NULL
+                  AND TRIM(city) != ''
+                ORDER BY city, target_date, updated_at DESC
+                LIMIT 1000
+                """,
+                (query_cutoff,),
+            ).fetchall()
+        ]
         decisions = [
             dict(row) for row in conn.execute(
                 """
@@ -868,11 +929,22 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         if city and city not in latest_prediction_by_city:
             latest_prediction_by_city[city] = row
 
+    latest_event_by_city_date: dict[tuple[str, str], dict] = {}
+    for row in events:
+        city = str(row.get("city") or "").strip().lower()
+        target_date = str(row.get("target_date") or "")
+        if city and target_date:
+            latest_event_by_city_date.setdefault((city, target_date), row)
+
     focus_items: list[dict] = []
     for city, station in stations.items():
         if not bool(station.get("enabled")):
             continue
         target_date = _station_local_today(station, now)
+        event_state = _recommendation_event_state(latest_event_by_city_date.get((city, target_date)) or {}, now)
+        if not event_state["is_open"]:
+            skipped["focus_market_closed_or_missing"] += 1
+            continue
         prediction = latest_prediction_by_city_date.get((city, target_date)) or {}
         live_row, observation_source = _freshest_focus_observation(city, metars, china_live)
         observed_time = live_row.get("observed_at") or live_row.get("report_time")
@@ -882,14 +954,9 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             continue
         unit = str(station.get("settlement_unit") or station.get("unit") or "C").upper()
         current_temp = _temperature_in_unit(live_row.get("temperature"), unit)
-        prediction_raw = _read_json_from_text(prediction.get("raw_json"), {})
-        model_mu = prediction_raw.get("model_mu")
-        predicted_max = _temperature_in_unit(
-            model_mu if model_mu is not None else prediction.get("mu"),
-            unit,
-        )
-        effective_mu = _temperature_in_unit(prediction.get("mu"), unit)
-        if current_temp is None or predicted_max is None:
+        high_summary = _recommendation_display_high(prediction, current_temp, unit)
+        predicted_max = high_summary["display_high"]
+        if current_temp is None or not high_summary["has_prediction"] or predicted_max is None:
             skipped["focus_prediction_or_temperature_missing"] += 1
             continue
         remaining = float(predicted_max) - float(current_temp)
@@ -906,7 +973,9 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             "current_temp": current_temp,
             "current_temp_unit": unit,
             "deb_mu": predicted_max,
-            "deb_effective_mu": effective_mu,
+            "deb_model_mu": high_summary["model_mu"],
+            "deb_effective_mu": high_summary["effective_mu"],
+            "observed_high": high_summary["observed_high"],
             "deb_sigma": prediction.get("sigma"),
             "deb_unit": unit,
             "metar_age_seconds": observation_age,
@@ -915,6 +984,9 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             "prediction_issued_at": prediction.get("issued_at"),
             "remaining_to_max": round(remaining, 1),
             "focus_reason": "near_predicted_daily_max",
+            "market_open": True,
+            "market_end_at": event_state["end_at"],
+            "polymarket_url": f"https://polymarket.com/event/{event_state['slug']}" if event_state["slug"] else None,
             "badge": "天气关注",
         })
     focus_items.sort(key=lambda item: (
@@ -950,6 +1022,10 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         station = stations.get(city) or {}
         if target_date < _station_local_today(station, now):
             skipped["past_target_date"] += 1
+            continue
+        event_state = _recommendation_event_state(latest_event_by_city_date.get((city, target_date)) or {}, now)
+        if not event_state["is_open"]:
+            skipped["market_closed_or_missing"] += 1
             continue
         metar = metars.get(city) or {}
         forecast = latest_forecast_by_city_date.get((city, target_date)) or {}
@@ -1061,6 +1137,8 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             "polymarket_url": row.get("bucket_event_url"),
             "market_id": row.get("market_id"),
             "token_id": row.get("yes_token_id") or row.get("token_id"),
+            "market_open": True,
+            "market_end_at": event_state["end_at"],
         })
         if len(items) >= limit:
             break
@@ -1114,12 +1192,14 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
                 "near_predicted_max_c": 2.0,
                 "near_predicted_max_f": 3.6,
                 "trade_claim": False,
+                "open_market_required": True,
             },
             "today_observation_metar_max_age_seconds": 30 * 60,
             "forecast_lead_forecast_max_age_seconds": 90 * 60,
             "settlement_rule_verified_required": True,
             "strict_match_status": "matched",
             "paper_allowed_or_spread_watch": True,
+            "open_market_required": True,
         },
         "skipped": dict(skipped),
         "count": len(items),
