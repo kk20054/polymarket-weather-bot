@@ -8,7 +8,7 @@
 
 ## Production Blockers
 - Wellington WU hourly history returns HTTP 400, so its Historical series is not yet at PolyWX parity.
-- Shanghai weather.com.cn is unavailable; China Live now plots an explicitly labeled Weather.com v3/ZSPD fallback, which restores freshness but is not source-identical to PolyWX.
+- Shanghai China Live now reads the PolyWX-aligned Pudong `101020600` feed through a browser-fingerprint HTTP client. Weather.com/ZSPD integer fallback rows are isolated from the red series; correct 5-minute history accumulates from 2026-07-18 15:05 local because earlier fallback snapshots cannot be reconstructed.
 - PWS remains unauthorized and trading performance is unproven; Wellington decisions are correctly paper-blocked by insufficient bias samples and wide spreads.
 
 ## Next Task

@@ -948,6 +948,11 @@ def source_series_summary(
         )
         if point:
             series["historical"].append(_native_series_point(point, row.get("observed_at_utc"), profile))
+    shanghai_primary_china_live = city_key == "shanghai" and any(
+        str(row.get("network") or "") == "china_live"
+        and str(row.get("station_id") or "").upper() == "101020600"
+        for row in mesonet_rows
+    )
     for row in mesonet_rows:
         network = str(row.get("network") or "")
         if network == "china_live" and city_key == "shanghai":
@@ -957,6 +962,10 @@ def source_series_summary(
                 # Keep legacy downtown snapshots in the audit trail, but the
                 # chart accepts only Pudong's public feed or the explicitly
                 # labeled ZSPD fallback when that feed is unavailable.
+                continue
+            if shanghai_primary_china_live and china_live_station != "101020600":
+                # Legacy Weather.com integer snapshots remain auditable in the
+                # database but must not be joined to the 0.1 C Pudong feed.
                 continue
         point = _observation_point(
             profile,

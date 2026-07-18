@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.china_weather import WEATHERCN_STATION_CODES, _weathercom_current_observation, hko_rhrread_observation, weathercn_sk2d_observation
+from weatherbot_v3.china_weather import WEATHERCN_STATION_CODES, _http_get, _weathercom_current_observation, hko_rhrread_observation, weathercn_sk2d_observation
 from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_forecast_runs, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, model_reprice_event_summary, paper_execution_summary, set_settlement_contract_verification, truth_delta_audit_summary, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_metar_reports, upsert_model_reprice_event, upsert_settlement_contracts, upsert_signal_decision_record, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.env_utils import redact_secret_text, redact_secrets
@@ -1689,6 +1689,22 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("weathercn_datask_not_found", row["parse_warnings"])
         self.assertIsNone(row["temperature"])
 
+    @patch("curl_cffi.requests.get")
+    def test_weathercn_http_uses_browser_tls_fingerprint(self, browser_get):
+        response = browser_get.return_value
+        response.content = b'var dataSK={"city":"101020600","temp":"35.7"}'
+
+        raw = _http_get(
+            "https://d1.weather.com.cn/sk_2d/101020600.html?_=1",
+            headers={"Referer": "https://www.weather.com.cn/"},
+            timeout=8,
+        )
+
+        self.assertIn('"temp":"35.7"', raw)
+        browser_get.assert_called_once()
+        self.assertEqual(browser_get.call_args.kwargs["impersonate"], "chrome")
+        response.raise_for_status.assert_called_once()
+
     def test_weathercom_current_fallback_is_labeled_and_redacts_api_key(self):
         payload = {
             "validTimeUtc": 1784341081,
@@ -1708,7 +1724,7 @@ class V3CoreTests(unittest.TestCase):
                 primary_failure="http_502",
             )
 
-        self.assertEqual(row["network"], "china_live")
+        self.assertEqual(row["network"], "weathercom_current")
         self.assertEqual(row["station_id"], "ZSPD")
         self.assertEqual(row["temperature"], 36.0)
         self.assertEqual(row["raw_json"]["provider"], "weathercom_v3_current")
@@ -1717,7 +1733,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("apiKey=***", row["source_url"])
         self.assertIn("not_settlement_truth", row["quality_flags"])
 
-    def test_weathercom_current_fallback_is_exposed_as_shanghai_china_live_series(self):
+    def test_weathercom_current_fallback_is_not_exposed_as_shanghai_china_live_series(self):
         db_path = test_db_path("weathercom_current_china_live_series")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
@@ -1727,7 +1743,7 @@ class V3CoreTests(unittest.TestCase):
                 "city_name": "Shanghai",
                 "station_id": "ZSPD",
                 "station_name": "Weather.com current near ZSPD",
-                "network": "china_live",
+                "network": "weathercom_current",
                 "observed_at": "2026-07-18T03:00:00+00:00",
                 "temperature": 36.0,
                 "humidity": 54.0,
@@ -1736,13 +1752,35 @@ class V3CoreTests(unittest.TestCase):
                 "parser_version": "china-live-v2",
                 "parse_status": "partial",
                 "parse_warnings": ["weathercn_primary_unavailable:http_502"],
-                "quality_flags": ["china_live", "display_only", "not_settlement_truth"],
+                "quality_flags": ["weathercom_current", "display_only", "not_settlement_truth"],
             })
             series = source_series_summary("shanghai", "2026-07-18", db_path=db_path)
 
+        self.assertEqual(series["china_live"], [])
+
+    def test_shanghai_primary_china_live_excludes_legacy_integer_fallback(self):
+        db_path = test_db_path("china_live_primary_precedence")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db()
+            for station_id, temperature in (("ZSPD", 37.0), ("101020600", 35.7)):
+                upsert_mesonet_observation({
+                    "city": "shanghai",
+                    "city_name": "Shanghai",
+                    "station_id": station_id,
+                    "network": "china_live",
+                    "observed_at": "2026-07-18T07:00:00+00:00",
+                    "temperature": temperature,
+                    "source_url": "fixture",
+                    "raw_unit": "C",
+                    "parser_version": "china-live-v2",
+                    "parse_status": "parsed",
+                })
+            series = source_series_summary("shanghai", "2026-07-18", db_path=db_path)
+
         self.assertEqual(len(series["china_live"]), 1)
-        self.assertEqual(series["china_live"][0]["station_id"], "ZSPD")
-        self.assertEqual(series["china_live"][0]["temperature"], 36.0)
+        self.assertEqual(series["china_live"][0]["station_id"], "101020600")
+        self.assertEqual(series["china_live"][0]["temperature"], 35.7)
 
     def test_china_live_mesonet_upsert_is_station_time_idempotent(self):
         db_path = test_db_path("china_live_idempotent")

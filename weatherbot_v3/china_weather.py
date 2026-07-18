@@ -16,6 +16,7 @@ from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 
 
 CHINA_LIVE_NETWORK = "china_live"
+WEATHERCOM_CURRENT_NETWORK = "weathercom_current"
 CHINA_LIVE_PARSER_VERSION = "china-live-v2"
 HKO_RHRREAD_URL = "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en"
 WEATHERCN_SK2D_URL_TEMPLATE = "https://d1.weather.com.cn/sk_2d/{station_code}.html?_={timestamp_ms}"
@@ -150,11 +151,13 @@ def fetch_china_weather_city(city: str, *, dry_run: bool = False) -> dict[str, A
         return {"ok": False, "city": city, "error": "unsupported_china_live_city", "rows_upserted": 0}
 
     status = str(observation.get("parse_status") or "failed")
+    provider = str((observation.get("raw_json") or {}).get("provider") or "")
+    primary_available = provider != "weathercom_v3_current"
     row_id = 0
     if not dry_run:
         row_id = upsert_mesonet_observation(observation)
     return {
-        "ok": status in {"parsed", "partial"},
+        "ok": status in {"parsed", "partial"} and primary_available,
         "city": city_key,
         "station_id": observation.get("station_id"),
         "observed_at": observation.get("observed_at"),
@@ -162,7 +165,8 @@ def fetch_china_weather_city(city: str, *, dry_run: bool = False) -> dict[str, A
         "humidity": observation.get("humidity"),
         "parse_status": status,
         "parse_warnings": observation.get("parse_warnings", []),
-        "provider": (observation.get("raw_json") or {}).get("provider"),
+        "provider": provider,
+        "fallback": not primary_available,
         "rows_upserted": 0 if dry_run else (1 if row_id else 0),
         "dry_run": dry_run,
         "source_url": observation.get("source_url"),
@@ -226,6 +230,7 @@ def _weathercom_current_observation(
             "primary_failure": primary_failure,
             "payload": payload,
         },
+        network=WEATHERCOM_CURRENT_NETWORK,
     )
 
 
@@ -331,17 +336,18 @@ def _observation(
     wind_speed: float | None = None,
     wind_direction: float | None = None,
     pressure: float | None = None,
+    network: str = CHINA_LIVE_NETWORK,
 ) -> dict[str, Any]:
     observed_utc = observed_at.astimezone(timezone.utc)
     status = "failed" if temperature is None else ("partial" if parse_warnings else "parsed")
     raw_hash = hashlib.sha256(raw_response.encode("utf-8", errors="replace")).hexdigest()[:32]
     return {
-        "observation_key": _stable_key(CHINA_LIVE_NETWORK, station_id, observed_utc.isoformat()),
+        "observation_key": _stable_key(network, station_id, observed_utc.isoformat()),
         "city": profile.city,
         "city_name": profile.city_name,
         "station_id": station_id,
         "station_name": station_name,
-        "network": CHINA_LIVE_NETWORK,
+        "network": network,
         "observed_at": observed_utc.isoformat(),
         "temperature": round(temperature, 1) if temperature is not None else None,
         "temperature_c": round(temperature, 1) if temperature is not None else None,
@@ -356,11 +362,11 @@ def _observation(
         "parse_status": status,
         "parse_warnings": sorted(set(parse_warnings)),
         "raw_unit": "C",
-        "quality_flags": [CHINA_LIVE_NETWORK, "display_only", "not_settlement_truth"],
+        "quality_flags": [network, "display_only", "not_settlement_truth"],
         "fetched_at": fetched_at.astimezone(timezone.utc).isoformat(),
         "raw_json": {
             **extra_raw,
-            "network": CHINA_LIVE_NETWORK,
+            "network": network,
             "parser_version": CHINA_LIVE_PARSER_VERSION,
             "raw_response_hash": raw_hash,
             "display_only": True,
@@ -373,6 +379,19 @@ def _http_get(url: str, *, headers: dict[str, str] | None = None, timeout: int =
     request_headers = {"User-Agent": DEFAULT_USER_AGENT}
     if headers:
         request_headers.update(headers)
+    if "d1.weather.com.cn" in url:
+        # weather.com.cn resets ordinary Python TLS clients. curl_cffi uses a
+        # maintained browser fingerprint while preserving the same public URL.
+        from curl_cffi import requests as browser_requests
+
+        response = browser_requests.get(
+            url,
+            headers=request_headers,
+            impersonate="chrome",
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.content.decode("utf-8", errors="replace")
     req = Request(url, headers=request_headers)
     with urlopen(req, timeout=timeout) as response:
         raw = response.read()
