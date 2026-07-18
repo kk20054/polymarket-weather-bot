@@ -1725,6 +1725,7 @@ function App() {
               signalDecisions={signalDecisionsQuery.data ?? null}
               dailyMaxPrediction={dailyMaxPredictionQuery.data ?? null}
               hourlySourceSeries={hourlyConsensusQuery.data?.series ?? null}
+              hourlyBiasStats={hourlyConsensusQuery.data?.bias_stats ?? null}
               forecastPeakMarker={hourlyConsensusQuery.data?.forecast_peak_marker ?? null}
               hourlySourceLoading={hourlyConsensusQuery.isLoading || (hourlyConsensusQuery.isFetching && !hourlyConsensusQuery.data)}
               layer7QueryState={layer7QueryState}

@@ -510,6 +510,7 @@ def hourly_consensus_summary(
         if city and target_date
         else None
     ) or _forecast_peak_marker(series.get("forecast") or [], str(target_date or ""))
+    bias_stats = polywx_bias_stats(series) if city and target_date else {}
     return {
         "ok": True,
         "city": city or "",
@@ -519,7 +520,153 @@ def hourly_consensus_summary(
         "points": selected,
         "series": series,
         "forecast_peak_marker": peak_marker,
+        "bias_stats": bias_stats,
     }
+
+
+def polywx_bias_stats(series: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Compare exact local-hour observations and native source overlap.
+
+    PolyWX uses one forecast/observation pair per whole local hour for delta
+    and Pearson R.  Its Historical/METAR overlap is a separate native-cadence
+    coverage metric, limited to the latest timestamp available from both
+    sources.  Keeping those contracts separate prevents a later :30 METAR
+    from replacing the :00 value used by the forecast comparison.
+    """
+
+    forecast_by_time: dict[str, float] = {}
+    for point in series.get("forecast") or []:
+        local_time = _series_local_minute(point)
+        value = _series_temperature(point)
+        if local_time and local_time.endswith(":00") and value is not None:
+            forecast_by_time[local_time] = value
+
+    result: dict[str, Any] = {
+        "method": "polywx_exact_local_hour_v1",
+        "metar": _bias_source_summary(series.get("metar") or [], forecast_by_time),
+        "historical": _bias_source_summary(series.get("historical") or [], forecast_by_time),
+        "historical_metar_overlap": _native_series_overlap(
+            series.get("historical") or [],
+            series.get("metar") or [],
+        ),
+    }
+    return result
+
+
+def _bias_source_summary(
+    observed_rows: list[dict[str, Any]],
+    forecast_by_time: dict[str, float],
+) -> dict[str, Any]:
+    observed_by_time: dict[str, float] = {}
+    for point in observed_rows:
+        local_time = _series_local_minute(point)
+        value = _series_temperature(point)
+        if local_time and local_time.endswith(":00") and value is not None:
+            observed_by_time[local_time] = value
+
+    pairs: list[dict[str, Any]] = []
+    cumulative_delta = 0.0
+    for local_time in sorted(set(forecast_by_time) & set(observed_by_time)):
+        forecast = forecast_by_time[local_time]
+        observed = observed_by_time[local_time]
+        delta = observed - forecast
+        cumulative_delta += delta
+        count = len(pairs) + 1
+        pairs.append({
+            "local_time": local_time,
+            "forecast": forecast,
+            "observed": observed,
+            "delta": delta,
+            "cumulative_mean": cumulative_delta / count,
+            "n": count,
+        })
+
+    deltas = [float(row["delta"]) for row in pairs]
+    pearson = _hourly_pearson(
+        [(float(row["forecast"]), float(row["observed"])) for row in pairs]
+    )
+    return {
+        "count": len(pairs),
+        "avg_delta": round(sum(deltas) / len(deltas), 4) if deltas else None,
+        "pearson_r": round(pearson, 4) if pearson is not None else None,
+        "cutoff_hour": pairs[-1]["local_time"] if pairs else None,
+        "pairs": pairs,
+    }
+
+
+def _native_series_overlap(
+    historical_rows: list[dict[str, Any]],
+    metar_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    historical_times = {
+        local_time
+        for point in historical_rows
+        if (local_time := _series_local_minute(point))
+        and _series_temperature(point) is not None
+    }
+    metar_times = {
+        local_time
+        for point in metar_rows
+        if (local_time := _series_local_minute(point))
+        and _series_temperature(point) is not None
+    }
+    if not historical_times or not metar_times:
+        return {
+            "count": 0,
+            "possible": 0,
+            "ratio": None,
+            "cutoff_time": None,
+        }
+
+    cutoff = min(max(historical_times), max(metar_times))
+    historical_window = {value for value in historical_times if value <= cutoff}
+    metar_window = {value for value in metar_times if value <= cutoff}
+    common = historical_window & metar_window
+    possible = max(len(historical_window), len(metar_window))
+    return {
+        "count": len(common),
+        "possible": possible,
+        "ratio": round(len(common) / possible, 4) if possible else None,
+        "cutoff_time": max(common) if common else cutoff,
+    }
+
+
+def _series_local_minute(point: dict[str, Any]) -> str | None:
+    raw = str(point.get("local_time") or point.get("local_hour") or "").strip()
+    match = re.match(r"^(\d{1,2}):(\d{2})", raw)
+    if not match:
+        timestamp = str(point.get("timestamp") or "")
+        match = re.search(r"T(\d{2}):(\d{2})", timestamp)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _series_temperature(point: dict[str, Any]) -> float | None:
+    for key in ("temperature", "ensemble_mean", "best"):
+        value = _float(point.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _hourly_pearson(pairs: list[tuple[float, float]]) -> float | None:
+    if len(pairs) < 2:
+        return None
+    forecast_mean = sum(forecast for forecast, _ in pairs) / len(pairs)
+    observed_mean = sum(observed for _, observed in pairs) / len(pairs)
+    numerator = sum(
+        (forecast - forecast_mean) * (observed - observed_mean)
+        for forecast, observed in pairs
+    )
+    forecast_var = sum((forecast - forecast_mean) ** 2 for forecast, _ in pairs)
+    observed_var = sum((observed - observed_mean) ** 2 for _, observed in pairs)
+    denominator = math.sqrt(forecast_var * observed_var)
+    return numerator / denominator if denominator else None
 
 
 def _forecast_peak_marker(forecast_rows: list[dict[str, Any]], target_date: str) -> dict[str, Any] | None:
@@ -1352,13 +1499,18 @@ def _select_forecast_runs_for_target(
         if _source_label(run) == WEATHERCOM_SOURCE
     ]
     if weathercom:
+        weathercom_archive = _weathercom_runs_for_hourly_archive(
+            weathercom,
+            profile,
+            str(weathercom[0].get("target_date") or ""),
+        )
         supplemental = [
             run for run in eligible
             if _source_label(run) != WEATHERCOM_SOURCE
             and any(token in _source_label(run).lower() for token in ("ecmwf", "gfs", "hrrr", "nbm", "icon", "gem", "jma", "cma"))
         ]
         return [
-            *(_with_forecast_role(run, "display") for run in weathercom[:48]),
+            *(_with_forecast_role(run, "display") for run in weathercom_archive),
             *(_with_forecast_role(run, "supplemental") for run in supplemental[:6]),
         ]
     exact_primary = [run for run in eligible if _source_label(run) in primary_sources]
@@ -1399,6 +1551,44 @@ def _select_forecast_runs_for_target(
     if polywx:
         return [_with_forecast_role(polywx[0], "fallback")]
     return []
+
+
+def _weathercom_runs_for_hourly_archive(
+    runs: list[dict[str, Any]],
+    profile: CitySettlementProfile | None,
+    target_date: str,
+) -> list[dict[str, Any]]:
+    """Select one no-leak Weather.com snapshot for every local valid hour."""
+    if not runs or not profile or not target_date:
+        return runs[:48]
+    try:
+        start_local = datetime.fromisoformat(target_date).replace(
+            tzinfo=ZoneInfo(profile.timezone)
+        )
+    except (TypeError, ValueError):
+        return runs[:48]
+
+    available_runs: list[tuple[datetime, dict[str, Any]]] = []
+    for run in runs:
+        available_at, _basis = forecast_available_at(run)
+        if available_at is not None:
+            available_runs.append((available_at, run))
+    if not available_runs:
+        return runs[:48]
+
+    selected_ids: set[int] = set()
+    for hour in range(24):
+        valid_at = (start_local + timedelta(hours=hour)).astimezone(timezone.utc)
+        candidates = [item for item in available_runs if item[0] <= valid_at]
+        if not candidates:
+            continue
+        _available_at, selected = max(
+            candidates,
+            key=lambda item: (item[0], int(item[1].get("id") or 0)),
+        )
+        selected_ids.add(int(selected.get("id") or 0))
+
+    return [run for run in runs if int(run.get("id") or 0) in selected_ids]
 
 
 def _primary_sources_for_profile(profile: CitySettlementProfile | None) -> tuple[str, ...]:

@@ -26,7 +26,7 @@ from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest, import_forecast_archive, write_forecast_archive_manifest
 from weatherbot_v3.forecast import ingest_polywx_forecasts, forecast_run_from_polywx_rows
 from weatherbot_v3.history import fetch_open_meteo_historical_backfill, open_meteo_historical_rows_from_response
-from weatherbot_v3.hourly import _forecast_peak_marker, _peak_marker_from_forecast_revisions, build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, forecast_revision_history, hourly_consensus_points, hourly_consensus_summary, source_series_summary
+from weatherbot_v3.hourly import _forecast_peak_marker, _peak_marker_from_forecast_revisions, build_hourly_consensus, build_metar_hourly_consensus, forecast_hourly_points, forecast_revision_history, hourly_consensus_points, hourly_consensus_summary, polywx_bias_stats, source_series_summary
 from weatherbot_v3.deb import bucket_probabilities, build_and_store_daily_max_prediction, build_daily_max_prediction
 from weatherbot_v3.market_buckets import ingest_market_buckets, market_bucket_from_payload, parse_temperature_bucket, sync_active_weather_market_buckets
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
@@ -5911,6 +5911,38 @@ class V3CoreTests(unittest.TestCase):
     def test_weathercom_request_units_follow_city_settlement_unit(self):
         self.assertEqual(weathercom_request_units(SETTLEMENT_REGISTRY["shanghai"]), ("m", "C"))
         self.assertEqual(weathercom_request_units(SETTLEMENT_REGISTRY["chicago"]), ("e", "F"))
+
+    def test_polywx_bias_stats_use_exact_hours_and_native_overlap(self):
+        forecast_values = [32, 31, 31, 31, 30, 31, 31, 33, 34, 34, 36, 37]
+        observed_values = [31, 31, 31, 31, 31, 31, 32, 33, 34, 35, 36, 37]
+        forecast = [
+            {"local_time": f"{hour:02d}:00", "temperature": value}
+            for hour, value in enumerate(forecast_values)
+        ]
+        native = []
+        for index in range(23):
+            hour, minute = divmod(index * 30, 60)
+            temperature = observed_values[hour] if minute == 0 else 99.0
+            native.append({
+                "local_time": f"{hour:02d}:{minute:02d}",
+                "temperature": temperature,
+            })
+
+        stats = polywx_bias_stats({
+            "forecast": forecast,
+            "metar": native,
+            "historical": list(native),
+        })
+
+        self.assertEqual(stats["method"], "polywx_exact_local_hour_v1")
+        self.assertEqual(stats["metar"]["count"], 12)
+        self.assertAlmostEqual(stats["metar"]["avg_delta"], 0.1667, places=4)
+        self.assertAlmostEqual(stats["metar"]["pearson_r"], 0.9664, places=4)
+        self.assertEqual(stats["metar"]["cutoff_hour"], "11:00")
+        self.assertEqual(stats["historical"]["count"], 12)
+        self.assertEqual(stats["historical_metar_overlap"]["count"], 23)
+        self.assertEqual(stats["historical_metar_overlap"]["possible"], 23)
+        self.assertEqual(stats["historical_metar_overlap"]["ratio"], 1.0)
 
     def test_weathercom_forecast_history_separates_snapshots_from_integer_revisions(self):
         db_path = test_db_path("weathercom_v3_forecast_history")

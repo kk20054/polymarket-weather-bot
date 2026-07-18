@@ -14,7 +14,7 @@ import {
 import { ExternalLink, History } from 'lucide-react'
 import { HourlyTemperatureChart, type HourlyChartRow } from './HourlyTemperatureChart'
 import { ForecastRevisionDialog } from './ForecastRevisionDialog'
-import type { BucketProbabilitySummary, CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlyConsensusSummary, HourlySourcePoint, HourlySourceSeries, Layer7QueryState, Layer7ResourceState, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
+import type { BucketProbabilitySummary, CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlyBiasSourceStats, HourlyBiasStats, HourlyConsensusSummary, HourlySourcePoint, HourlySourceSeries, Layer7QueryState, Layer7ResourceState, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
   forecasts: WeatherForecast[]
@@ -28,6 +28,7 @@ interface Props {
   signalDecisions?: SignalDecisionSummary | null
   dailyMaxPrediction?: DailyMaxPredictionSummary | null
   hourlySourceSeries?: HourlySourceSeries | null
+  hourlyBiasStats?: HourlyBiasStats | null
   forecastPeakMarker?: HourlyConsensusSummary['forecast_peak_marker']
   hourlySourceLoading?: boolean
   alphaEvents?: ModelRepriceEvent[]
@@ -684,6 +685,18 @@ function sourceStats(rows: Array<Record<string, unknown>>, observedKey: string):
   }
 }
 
+function canonicalSourceStats(stats?: HourlyBiasSourceStats | null): SourceStats | null {
+  if (!stats) return null
+  const cutoff = typeof stats.cutoff_hour === 'string' ? stats.cutoff_hour : null
+  const hour = cutoff?.match(/^(\d{2})/)?.[1] ?? null
+  return {
+    n: Number(stats.count || 0),
+    avgDelta: asNumber(stats.avg_delta),
+    pearson: asNumber(stats.pearson_r),
+    lastHour: hour ? `@H${hour}` : null,
+  }
+}
+
 function statDeltaPill(label: string, stats: SourceStats, unit: string) {
   if (stats.n === 0) return null
   return `${label} ${fmtSignedTemp(stats.avgDelta, unit)} n=${stats.n}${stats.lastHour ? ` ${stats.lastHour}` : ''}`
@@ -701,6 +714,13 @@ function overlapPill(rows: Array<Record<string, unknown>>) {
   const latest = paired[paired.length - 1]
   const upTo = typeof latest.label === 'string' ? latest.label.replace(':00', ':00') : '--'
   return `${Math.round((paired.length / historicalRows.length) * 100)}% (${paired.length}/${historicalRows.length} pts, up to ${upTo})`
+}
+
+function canonicalOverlapPill(stats?: HourlyBiasStats | null) {
+  const overlap = stats?.historical_metar_overlap
+  const ratio = asNumber(overlap?.ratio)
+  if (!overlap || ratio === null || overlap.possible <= 0) return null
+  return `${Math.round(ratio * 100)}% (${overlap.count}/${overlap.possible} pts, up to ${overlap.cutoff_time || '--'})`
 }
 
 function layerDecisionRank(decision: SignalDecisionRecord) {
@@ -1026,6 +1046,7 @@ export function WeatherPanel({
   signalDecisions,
   dailyMaxPrediction,
   hourlySourceSeries,
+  hourlyBiasStats,
   forecastPeakMarker,
   hourlySourceLoading = false,
   alphaEvents = [],
@@ -1350,6 +1371,7 @@ export function WeatherPanel({
             <HourlyEvidencePanel
               rows={hourlyRows}
               sourceSeries={hourlySourceSeries}
+              biasStats={hourlyBiasStats}
               unit={unit}
               cityName={series?.city_name ?? forecastFallback?.city_name ?? cityKey}
               selectedDate={selectedDate}
@@ -1418,6 +1440,7 @@ export function WeatherPanel({
               selectedDate={selectedDate}
               evidenceSummary={selectedDateEvidence?.modules?.diff_stats?.summary}
               sourceSeries={hourlySourceSeries}
+              biasStats={hourlyBiasStats}
             />
             <details className="border border-[#2C3445] bg-[#161A22]">
               <summary className="cursor-pointer select-none px-2 py-2 text-xs text-[#CBD2DC] hover:bg-[#222A37]">
@@ -1775,6 +1798,7 @@ function DiffStatsPanel({
   selectedDate,
   evidenceSummary,
   sourceSeries,
+  biasStats,
 }: {
   rows: HourlyWeatherRow[]
   chartData: WeatherChartRow[]
@@ -1782,15 +1806,17 @@ function DiffStatsPanel({
   selectedDate: string
   evidenceSummary?: CityEvidenceDiffStatsSummary
   sourceSeries?: HourlySourceSeries | null
+  biasStats?: HourlyBiasStats | null
 }) {
   const [observedSource, setObservedSource] = useState<'metar' | 'historical'>('metar')
   const forecastByHour = new Map(
-    (sourceSeries?.forecast ?? []).map(point => [String(point.local_hour || point.local_time || '').slice(0, 2), point]),
+    (sourceSeries?.forecast ?? []).map(point => [String(point.local_hour || point.local_time || '').slice(0, 5), point]),
   )
   const nativeObserved = observedSource === 'metar' ? sourceSeries?.metar : sourceSeries?.historical
   const nativePairs = (nativeObserved ?? []).flatMap((point, index) => {
-    const hour = String(point.local_time || point.local_hour || '').slice(0, 2)
-    const forecastPoint = forecastByHour.get(hour)
+    const localTime = String(point.local_time || point.local_hour || '').slice(0, 5)
+    if (!localTime.endsWith(':00')) return []
+    const forecastPoint = forecastByHour.get(localTime)
     const observed = asNumber(point.temperature)
     const forecast = asNumber(forecastPoint?.temperature ?? forecastPoint?.ensemble_mean ?? forecastPoint?.best)
     if (observed === null || forecast === null) return []
@@ -1856,19 +1882,24 @@ function DiffStatsPanel({
     tableRows.map(row => row.observed)
   )
   const maxAbsDelta = Math.max(1, ...deltas.map(delta => Math.abs(delta)))
+  const canonical = biasStats?.[observedSource]
   const nativeSelected = nativePairs.length > 0
-  const summaryCount = nativeSelected ? tableRows.length : evidenceSummary?.count ?? tableRows.length
-  const summaryAvgDelta = nativeSelected ? avgDelta : evidenceSummary?.avg_delta ?? avgDelta
+  const summaryCount = canonical?.count ?? (nativeSelected ? tableRows.length : evidenceSummary?.count ?? tableRows.length)
+  const summaryAvgDelta = canonical?.avg_delta ?? (nativeSelected ? avgDelta : evidenceSummary?.avg_delta ?? avgDelta)
   const summaryMae = nativeSelected ? (deltas.length ? mean(deltas.map(delta => Math.abs(delta))) : null) : evidenceSummary?.mae ?? (deltas.length ? mean(deltas.map(delta => Math.abs(delta))) : null)
-  const summaryPearson = nativeSelected ? correlation : evidenceSummary?.pearson_r ?? correlation
-  const summaryOverlap = evidenceSummary?.overlap_ratio
+  const summaryPearson = canonical?.pearson_r ?? (nativeSelected ? correlation : evidenceSummary?.pearson_r ?? correlation)
+  const canonicalOverlap = biasStats?.historical_metar_overlap
+  const summaryOverlap = canonicalOverlap?.ratio ?? evidenceSummary?.overlap_ratio
   const summaryOverlapLabel = summaryOverlap === null || summaryOverlap === undefined
     ? (summaryCount ? `${summaryCount}` : '--')
     : fmtProb(summaryOverlap)
   const summaryOverlapSub = summaryOverlap === null || summaryOverlap === undefined
     ? 'paired samples'
-    : `${evidenceSummary?.overlap_count ?? 0}/${Math.max(evidenceSummary?.metar_hours ?? 0, evidenceSummary?.forecast_hours ?? 0, 1)} hours`
-  const historyMetarOverlap = evidenceSummary?.historical_metar_overlap_ratio
+    : canonicalOverlap
+      ? `${canonicalOverlap.count}/${canonicalOverlap.possible} points`
+      : `${evidenceSummary?.overlap_count ?? 0}/${Math.max(evidenceSummary?.metar_hours ?? 0, evidenceSummary?.forecast_hours ?? 0, 1)} hours`
+  const historyMetarOverlap = canonicalOverlap?.ratio ?? evidenceSummary?.historical_metar_overlap_ratio
+  const historyMetarOverlapCount = canonicalOverlap?.count ?? evidenceSummary?.historical_metar_overlap_count ?? 0
   let cumulative = 0
   const diffChartRows = tableRows.map((row, index) => {
     cumulative += row.delta
@@ -1900,7 +1931,7 @@ function DiffStatsPanel({
         <MetricCard label="MAE" value={summaryMae === null ? '--' : fmtTemp(summaryMae, unit)} sub="mean abs error" />
         <MetricCard label="Accuracy" value={fmtPearson(summaryPearson)} sub="Pearson R" />
         <MetricCard label="Overlap" value={summaryOverlapLabel} sub={summaryOverlapSub} />
-        <MetricCard label="Hist↔METAR" value={historyMetarOverlap === null || historyMetarOverlap === undefined ? '--' : fmtProb(historyMetarOverlap)} sub={`${evidenceSummary?.historical_metar_overlap_count ?? 0} hrs`} />
+        <MetricCard label="Hist↔METAR" value={historyMetarOverlap === null || historyMetarOverlap === undefined ? '--' : fmtProb(historyMetarOverlap)} sub={`${historyMetarOverlapCount} pts`} />
         <MetricCard label="Max Abs Delta" value={fmtTemp(Math.max(0, ...deltas.map(delta => Math.abs(delta))), unit)} sub="worst visible row" />
       </div>
       {diffChartRows.length > 0 && (
@@ -2029,6 +2060,7 @@ function mergeNativeHourlySeries(series: HourlySourceSeries): HourlyChartRow[] {
 function HourlyEvidencePanel({
   rows,
   sourceSeries,
+  biasStats,
   unit,
   cityName,
   selectedDate,
@@ -2038,6 +2070,7 @@ function HourlyEvidencePanel({
 }: {
   rows: HourlyWeatherRow[]
   sourceSeries?: HourlySourceSeries | null
+  biasStats?: HourlyBiasStats | null
   unit: string
   cityName?: string
   selectedDate: string
@@ -2086,12 +2119,11 @@ function HourlyEvidencePanel({
     || row.pws_value !== null
     || row.cloud_pct !== null
   )
-  // Keep native-frequency points for the chart, but compute comparisons from
-  // the backend's station-local hourly buckets. A :51 METAR/WU observation
-  // belongs to that local hour and must not be discarded by an exact-minute join.
-  const metarStats = sourceStats(hourlyChartRows, 'metar_value')
-  const historicalStats = sourceStats(hourlyChartRows, 'historical_value')
-  const overlapStats = overlapPill(hourlyChartRows)
+  // Keep native-frequency points for the chart, but use the backend's
+  // PolyWX-aligned exact-hour contract for delta and correlation statistics.
+  const metarStats = canonicalSourceStats(biasStats?.metar) ?? sourceStats(hourlyChartRows, 'metar_value')
+  const historicalStats = canonicalSourceStats(biasStats?.historical) ?? sourceStats(hourlyChartRows, 'historical_value')
+  const overlapStats = canonicalOverlapPill(biasStats) ?? overlapPill(hourlyChartRows)
   const hasHistorical = historicalValues.length > 0
   const hasChinaLive = chinaLiveValues.length > 0
   const hasPws = pwsValues.length > 0

@@ -1136,6 +1136,37 @@ export interface HourlySourceSeries {
   historical_fallback?: HourlySourcePoint[]
 }
 
+export interface HourlyBiasPair {
+  local_time: string
+  forecast: number
+  observed: number
+  delta: number
+  cumulative_mean: number
+  n: number
+}
+
+export interface HourlyBiasSourceStats {
+  count: number
+  avg_delta?: number | null
+  pearson_r?: number | null
+  cutoff_hour?: string | null
+  pairs?: HourlyBiasPair[]
+}
+
+export interface HourlyNativeOverlapStats {
+  count: number
+  possible: number
+  ratio?: number | null
+  cutoff_time?: string | null
+}
+
+export interface HourlyBiasStats {
+  method: string
+  metar?: HourlyBiasSourceStats
+  historical?: HourlyBiasSourceStats
+  historical_metar_overlap?: HourlyNativeOverlapStats
+}
+
 export interface HourlyConsensusSummary {
   ok: boolean
   city: string
@@ -1144,6 +1175,7 @@ export interface HourlyConsensusSummary {
   source: string
   points: HourlySourcePoint[]
   series?: HourlySourceSeries
+  bias_stats?: HourlyBiasStats
   forecast_peak_marker?: {
     hour_float: number
     date: string
