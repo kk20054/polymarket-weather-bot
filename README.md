@@ -25,11 +25,12 @@
 | `dashboard_server.py` | FastAPI 后端入口，只做 API 和适配层。 |
 | `weatherbot_v3/` | 生产化核心模块：数据采集、DB、DEB、市场桶、信号、策略、paper/live executor、scheduler。 |
 | `frontend/` | Vite + React + TypeScript + Tailwind + Recharts 看板。 |
-| `data/weatherbot_v3.db` | v3 主 SQLite 状态库，本地文件，不提交 Git。 |
+| `data/weatherbot_v3.db` | v3 主 SQLite 状态库；逻辑路径不变，物理数据位于 `D:\WeatherBot\data`。 |
 | `data/weatherbot.db` | legacy `weatherbet.py` 旧库/旧状态，不是当前主路径。 |
 | `audits/` | 本地审计和验证报告，不提交 Git。 |
 | `docs/CURRENT_STATE.md` | 当前进度摘要，开发前优先阅读。 |
 | `docs/IMPLEMENTATION_LOGIC_CN.md` | 当前 Layer 0-9 数据流和执行边界。 |
+| `docs/DATA_STORAGE_CN.md` | C 盘逻辑路径与 D 盘物理数据目录的迁移、检查和恢复说明。 |
 | `AGENTS.md` | 本项目开发规则和安全红线。 |
 | `legacy/`、`weatherbet.py` | 旧版单体 bot，仅作参考，不作为 v6 主运行入口。 |
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from collections import Counter
@@ -1129,7 +1130,12 @@ def run_wunderground_hourly_fetch(
         station = str(row.get("station_id") if settlement_station == "HKO" else (settlement_station or row.get("station_id") or "")).upper()
         timezone_name = str(row.get("settlement_timezone") or row.get("timezone") or "UTC")
         for target in targets:
-            result = fetch_wunderground_hourly_result(station, target, timezone_name=timezone_name)
+            result = fetch_wunderground_hourly_result(
+                station,
+                target,
+                timezone_name=timezone_name,
+                country_code=_wunderground_country_from_station_row(row),
+            )
             if result.get("ok") and not dry_run:
                 persisted = persist_wunderground_hourly(result)
                 rows_upserted += int(persisted.get("rows_upserted") or 0)
@@ -1146,6 +1152,19 @@ def run_wunderground_hourly_fetch(
         "skipped": sum(1 for item in results if not item.get("ok")),
         "results": results,
     }
+
+
+def _wunderground_country_from_station_row(row: dict) -> str:
+    """Prefer the country segment from the market's own WU resolution URL."""
+    for raw in (row.get("settlement_rule_text"), row.get("raw_json")):
+        match = re.search(
+            r"wunderground\.com/history/daily/([a-z]{2})/",
+            str(raw or ""),
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).upper()
+    return ""
 
 
 def _compact_wunderground_result(result: dict) -> dict:

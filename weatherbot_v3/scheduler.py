@@ -10,13 +10,14 @@ from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 from .cli import run_china_weather_fetch, run_daily_max_build, run_gamma_structured_sync, run_hourly_consensus_build, run_market_buckets_sync, run_model_timing_reprice, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build, run_weathercom_fetch, run_wunderground_hourly_fetch
-from .db import log_data_fetch, utc_now
+from .china_weather import supported_china_live_cities
+from .db import connect, log_data_fetch, utc_now
 from .env_utils import env_value
 from .metar import fetch_recent_hours
 from .paper_settlement import settle_open_paper_orders
 from .paper_validation import run_paper_validation_tick
 from .source_health import compact_source_health
-from .stations import enabled_station_rows, sync_station_registry
+from .stations import enabled_station_rows, list_stations, sync_station_registry
 
 
 MAX_CITY_CONCURRENCY = int(os.getenv("WEATHERBOT_SCHEDULER_CITY_CONCURRENCY", "2") or "2")
@@ -26,6 +27,11 @@ FORECAST_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_SECONDS
 NWP_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_NWP_SECONDS", "3600") or "3600")
 HISTORICAL_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_HISTORICAL_SECONDS", "600") or "600")
 BASELINE_REFRESH_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_BASELINE_MULTIPLIER", "3") or "3")
+METAR_BACKGROUND_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_METAR_BACKGROUND_MULTIPLIER", "12") or "12")
+NWP_BACKGROUND_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_NWP_BACKGROUND_MULTIPLIER", "6") or "6")
+HISTORICAL_BACKGROUND_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_HISTORICAL_BACKGROUND_MULTIPLIER", "6") or "6")
+PWS_BACKGROUND_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_PWS_BACKGROUND_MULTIPLIER", "6") or "6")
+GAMMA_DISCOVERY_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_GAMMA_DISCOVERY_MULTIPLIER", "72") or "72")
 PWS_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PWS_SECONDS", "600") or "600")
 DERIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_DERIVE_SECONDS", "900") or "900")
 CHINA_LIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_CHINA_LIVE_SECONDS", "60") or "60")
@@ -312,7 +318,18 @@ class WeatherBotScheduler:
                 continue
 
     async def _run_metar_poller(self) -> dict[str, Any]:
-        rows = await asyncio.to_thread(_enabled_rows)
+        run_count = self.pollers["metar_poller"].run_count
+        all_rows = await asyncio.to_thread(
+            _collection_rows,
+            include_background=_background_due(run_count, METAR_BACKGROUND_MULTIPLIER),
+        )
+        active_city_keys = await asyncio.to_thread(_active_market_city_keys)
+        rows, cadence = _tiered_refresh_rows(
+            all_rows,
+            run_count=run_count,
+            baseline_multiplier=METAR_BACKGROUND_MULTIPLIER,
+            active_city_keys=active_city_keys or None,
+        )
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
@@ -335,19 +352,26 @@ class WeatherBotScheduler:
                 "metar": metar,
             }
 
-        return await _run_city_batch(
+        result = await _run_city_batch(
             rows,
             self.city_concurrency,
             run_city,
             poller_key="metar_poller",
             timeout_seconds=METAR_CITY_TIMEOUT_SECONDS + 10,
         )
+        return {**result, **cadence}
 
     async def _run_forecast_poller(self) -> dict[str, Any]:
-        all_rows = await asyncio.to_thread(_enabled_rows)
+        run_count = self.pollers["forecast_poller"].run_count
+        all_rows = await asyncio.to_thread(
+            _collection_rows,
+            include_background=_background_due(run_count, BASELINE_REFRESH_MULTIPLIER),
+        )
+        active_city_keys = await asyncio.to_thread(_active_market_city_keys)
         rows, cadence = _tiered_refresh_rows(
             all_rows,
-            run_count=self.pollers["forecast_poller"].run_count,
+            run_count=run_count,
+            active_city_keys=active_city_keys or None,
         )
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
@@ -377,7 +401,18 @@ class WeatherBotScheduler:
         return {**result, **cadence}
 
     async def _run_nwp_poller(self) -> dict[str, Any]:
-        rows = await asyncio.to_thread(_enabled_rows)
+        run_count = self.pollers["nwp_poller"].run_count
+        all_rows = await asyncio.to_thread(
+            _collection_rows,
+            include_background=_background_due(run_count, NWP_BACKGROUND_MULTIPLIER),
+        )
+        active_city_keys = await asyncio.to_thread(_active_market_city_keys)
+        rows, cadence = _tiered_refresh_rows(
+            all_rows,
+            run_count=run_count,
+            baseline_multiplier=NWP_BACKGROUND_MULTIPLIER,
+            active_city_keys=active_city_keys or None,
+        )
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
@@ -399,21 +434,29 @@ class WeatherBotScheduler:
                 "openmeteo": openmeteo,
             }
 
-        return await _run_city_batch(
+        result = await _run_city_batch(
             rows,
             self.city_concurrency,
             run_city,
             poller_key="nwp_poller",
             timeout_seconds=FORECAST_CITY_TIMEOUT_SECONDS,
         )
+        return {**result, **cadence}
 
     async def _run_historical_poller(self) -> dict[str, Any]:
         # Hong Kong keeps HKO as settlement truth, but VHHH WU history remains
         # useful display evidence and must not disappear from the operator UI.
-        all_rows = list(await asyncio.to_thread(_enabled_rows))
+        run_count = self.pollers["historical_poller"].run_count
+        all_rows = list(await asyncio.to_thread(
+            _collection_rows,
+            include_background=_background_due(run_count, HISTORICAL_BACKGROUND_MULTIPLIER),
+        ))
+        active_city_keys = await asyncio.to_thread(_active_market_city_keys)
         rows, cadence = _tiered_refresh_rows(
             all_rows,
-            run_count=self.pollers["historical_poller"].run_count,
+            run_count=run_count,
+            baseline_multiplier=HISTORICAL_BACKGROUND_MULTIPLIER,
+            active_city_keys=active_city_keys or None,
         )
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
@@ -448,7 +491,18 @@ class WeatherBotScheduler:
         return {**result, **cadence}
 
     async def _run_pws_poller(self) -> dict[str, Any]:
-        rows = await asyncio.to_thread(_enabled_rows)
+        run_count = self.pollers["pws_poller"].run_count
+        all_rows = await asyncio.to_thread(
+            _collection_rows,
+            include_background=_background_due(run_count, PWS_BACKGROUND_MULTIPLIER),
+        )
+        active_city_keys = await asyncio.to_thread(_active_market_city_keys)
+        rows, cadence = _tiered_refresh_rows(
+            all_rows,
+            run_count=run_count,
+            baseline_multiplier=PWS_BACKGROUND_MULTIPLIER,
+            active_city_keys=active_city_keys or None,
+        )
         if not env_value("WUNDERGROUND_API_KEY"):
             return {
                 "ok": True,
@@ -459,6 +513,7 @@ class WeatherBotScheduler:
                 "city_results": [],
                 "skipped": True,
                 "reason": "missing_wunderground_api_key",
+                **cadence,
             }
         cooldown_remaining = max(0, round(self._pws_auth_disabled_until - time.monotonic()))
         if cooldown_remaining:
@@ -472,6 +527,7 @@ class WeatherBotScheduler:
                 "skipped": True,
                 "reason": "pws_auth_cooldown",
                 "retry_after_seconds": cooldown_remaining,
+                **cadence,
             }
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
@@ -505,16 +561,26 @@ class WeatherBotScheduler:
                 "pws": payload,
             }
 
-        return await _run_city_batch(
+        result = await _run_city_batch(
             rows,
             self.city_concurrency,
             run_city,
             poller_key="pws_poller",
             timeout_seconds=PWS_OPTIONAL_TIMEOUT_SECONDS + 10,
         )
+        return {**result, **cadence}
 
     async def _run_derive_poller(self) -> dict[str, Any]:
-        rows = await asyncio.to_thread(_enabled_rows)
+        all_rows = await asyncio.to_thread(_collection_rows)
+        active_city_keys = await asyncio.to_thread(_active_market_city_keys)
+        rows = (
+            [
+                row for row in all_rows
+                if str(row.get("city_key") or row.get("city") or "") in active_city_keys
+            ]
+            if active_city_keys
+            else all_rows
+        )
         targets_by_city = {
             str(row.get("city_key") or row.get("city") or ""): _target_dates_for_station(row)
             for row in rows
@@ -581,9 +647,10 @@ class WeatherBotScheduler:
         return result
 
     async def _run_china_live_poller(self) -> dict[str, Any]:
+        supported = set(supported_china_live_cities())
         rows = [
-            row for row in await asyncio.to_thread(_enabled_rows)
-            if str(row.get("city_key") or row.get("city") or "") in {"shanghai", "hong-kong"}
+            row for row in await asyncio.to_thread(_collection_rows, include_background=True)
+            if str(row.get("city_key") or row.get("city") or "") in supported
         ]
         return await _run_city_batch(
             rows,
@@ -598,14 +665,31 @@ class WeatherBotScheduler:
         )
 
     async def _run_gamma_orderbook_poller(self) -> dict[str, Any]:
+        run_count = self.pollers["gamma_orderbook_poller"].run_count
+        full_discovery = _background_due(run_count, GAMMA_DISCOVERY_MULTIPLIER)
+        all_rows = await asyncio.to_thread(_collection_rows, include_background=full_discovery)
+        active_city_keys = await asyncio.to_thread(_active_market_city_keys)
+        discovery_cities = (
+            [str(row.get("city_key") or row.get("city") or "") for row in all_rows]
+            if full_discovery
+            else sorted(active_city_keys) or [str(row.get("city_key") or row.get("city") or "") for row in all_rows]
+        )
         structured = await asyncio.to_thread(
             run_gamma_structured_sync,
-            "",
+            ",".join(discovery_cities),
             days=3,
             dry_run=False,
             fetch_orderbooks=True,
         )
-        rows = await asyncio.to_thread(_enabled_rows)
+        active_city_keys = await asyncio.to_thread(_active_market_city_keys)
+        rows = (
+            [
+                row for row in all_rows
+                if str(row.get("city_key") or row.get("city") or "") in active_city_keys
+            ]
+            if active_city_keys
+            else all_rows
+        )
         targets_by_city = {
             str(row.get("city_key") or row.get("city") or ""): _target_dates_for_station(row)
             for row in rows
@@ -657,6 +741,8 @@ class WeatherBotScheduler:
             "active_batches": active_batches,
             "book_gaps": book_gaps,
             "failures": failures,
+            "discovery_scope": "all_registered" if full_discovery else "active_markets",
+            "discovery_cities": len(discovery_cities),
         }
 
     async def _run_model_timing_poller(self) -> dict[str, Any]:
@@ -776,6 +862,45 @@ def _enabled_rows() -> list[dict[str, Any]]:
     return rows
 
 
+def _collection_rows(*, include_background: bool = False) -> list[dict[str, Any]]:
+    """Return active watchlist rows, optionally including every visible city."""
+    if not include_background:
+        return _enabled_rows()
+    rows = [row for row in list_stations() if row.get("display_enabled", True)]
+    if not rows:
+        sync_station_registry()
+        rows = [row for row in list_stations() if row.get("display_enabled", True)]
+    rows.sort(key=lambda row: (0 if row.get("enabled") else 1, int(row.get("tier") or 9), str(row.get("city_name") or "")))
+    return rows
+
+
+def _background_due(run_count: int, multiplier: int) -> bool:
+    """Defer full-registry work until a completed fast cycle exists."""
+    count = max(0, int(run_count or 0))
+    every = max(1, int(multiplier or 1))
+    return count > 0 and count % every == 0
+
+
+def _active_market_city_keys() -> set[str]:
+    """Read current structured events; stale historical probes must not drive work."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    try:
+        with connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT city
+                FROM polymarket_events
+                WHERE target_date >= ?
+                  AND COALESCE(json_extract(raw_json, '$.active'), 1) = 1
+                  AND COALESCE(json_extract(raw_json, '$.closed'), 0) = 0
+                """,
+                (today,),
+            ).fetchall()
+        return {str(row[0] or "") for row in rows if str(row[0] or "")}
+    except Exception:
+        return set()
+
+
 def _safe_log_data_fetch(**kwargs: Any) -> str:
     """Audit logging must never turn a completed collector run into a crash."""
     try:
@@ -797,11 +922,12 @@ def _tiered_refresh_rows(
     *,
     run_count: int,
     baseline_multiplier: int = BASELINE_REFRESH_MULTIPLIER,
+    active_city_keys: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Refresh active markets every cycle and the full watchlist every N cycles."""
     multiplier = max(1, int(baseline_multiplier or 1))
     full_refresh = int(run_count or 0) % multiplier == 0
-    active_rows = [row for row in rows if _station_has_active_market(row)]
+    active_rows = [row for row in rows if _station_has_active_market(row, active_city_keys=active_city_keys)]
     selected = list(rows) if full_refresh else active_rows
     selected_keys = {
         str(row.get("city_key") or row.get("city") or "")
@@ -821,7 +947,10 @@ def _tiered_refresh_rows(
     }
 
 
-def _station_has_active_market(row: dict[str, Any]) -> bool:
+def _station_has_active_market(row: dict[str, Any], *, active_city_keys: set[str] | None = None) -> bool:
+    city_key = str(row.get("city_key") or row.get("city") or "")
+    if active_city_keys is not None:
+        return city_key in active_city_keys
     raw = row.get("raw_json")
     if isinstance(raw, str):
         try:

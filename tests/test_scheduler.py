@@ -569,7 +569,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["failures"], [])
         self.assertEqual(len(result["book_gaps"]), 1)
 
-    async def test_china_live_poller_only_runs_supported_enabled_cities(self):
+    async def test_china_live_poller_runs_all_supported_registry_cities(self):
         db_path = test_db_path("scheduler_china_live")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         seen: list[str] = []
@@ -592,9 +592,19 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
                 result = await scheduler.run_once("china_live_poller")
 
         self.assertTrue(result["ok"])
-        self.assertEqual(sorted(seen), ["hong-kong", "shanghai"])
+        self.assertEqual(sorted(seen), [
+            "beijing",
+            "chengdu",
+            "chongqing",
+            "guangzhou",
+            "hong-kong",
+            "qingdao",
+            "shanghai",
+            "shenzhen",
+            "wuhan",
+        ])
         status = scheduler.status()["pollers"]["china_live_poller"]
-        self.assertEqual(status["last_result"]["result_count"], 2)
+        self.assertEqual(status["last_result"]["result_count"], 9)
 
 
 class RecentMetarTests(unittest.TestCase):

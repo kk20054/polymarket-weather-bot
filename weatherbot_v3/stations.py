@@ -597,6 +597,8 @@ def apply_market_probe_result(result: dict[str, Any], *, path: Path | None = Non
                 primary_settlement_source = ?,
                 confidence = ?,
                 verification_status = ?,
+                enabled = CASE WHEN ? THEN 1 ELSE enabled END,
+                tier = CASE WHEN ? THEN 1 ELSE tier END,
                 raw_json = ?,
                 updated_at = ?
             WHERE city_key = ?
@@ -612,6 +614,8 @@ def apply_market_probe_result(result: dict[str, Any], *, path: Path | None = Non
                 source,
                 confidence,
                 status,
+                1 if active_market and contract_complete else 0,
+                1 if active_market and contract_complete else 0,
                 dump_json(raw),
                 now,
                 city_key,

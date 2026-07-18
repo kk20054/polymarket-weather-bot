@@ -92,7 +92,7 @@ def parse_settlement_rule_text(
 ) -> dict[str, Any]:
     profile = get_city_profile(city_key)
     text = _clean_text(description)
-    source_url = str(source_url or "").strip()
+    source_url = str(source_url or _source_url_from_text(description) or "").strip()
     station_id = _station_from_url(source_url)
     station_name = ""
     source = ""
@@ -107,6 +107,8 @@ def parse_settlement_rule_text(
     if not source:
         if "Wunderground" in text or "wunderground.com" in source_url:
             source = "wunderground"
+        elif re.search(r"\bNOAA\b|weather\.gov", f"{text} {source_url}", re.I):
+            source = "noaa"
         elif "China Meteorological" in text or "中国气象" in text:
             source = "china_meteorological_administration"
         elif "Japan Meteorological" in text:
@@ -285,10 +287,20 @@ def _clean_text(text: str) -> str:
 
 def _station_from_url(url: str) -> str:
     parsed = urllib.parse.urlparse(str(url or ""))
+    query = urllib.parse.parse_qs(parsed.query)
+    for key in ("site", "station", "stationId"):
+        for value in query.get(key, []):
+            if _looks_like_station_id(value):
+                return str(value).upper()
     for part in reversed([item for item in parsed.path.upper().split("/") if item]):
         if _looks_like_station_id(part):
             return part
     return ""
+
+
+def _source_url_from_text(text: str) -> str:
+    match = re.search(r"https?://[^\s<>]+", str(text or ""), re.I)
+    return match.group(0).rstrip(".,;:)\"]'") if match else ""
 
 
 def _station_from_text(text: str) -> str:

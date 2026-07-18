@@ -29,13 +29,39 @@ CHINA_LIVE_CITY_ALIASES = {
     "hk": "hong-kong",
     "hko": "hong-kong",
     "hong-kong": "hong-kong",
+    "beijing": "beijing",
+    "chengdu": "chengdu",
+    "chongqing": "chongqing",
+    "guangzhou": "guangzhou",
+    "qingdao": "qingdao",
     "shanghai": "shanghai",
+    "shenzhen": "shenzhen",
+    "wuhan": "wuhan",
 }
 
 WEATHERCN_STATION_CODES = {
-    # Pudong New Area is the closest public weather.com.cn feed to ZSPD and
-    # matches the station used by the PolyWX Shanghai workbench.
+    # Airport-district feeds are intentionally used instead of city-centre
+    # feeds. They are display-only evidence near the settlement airport, not
+    # settlement truth.
+    "beijing": "101010400",   # Shunyi, near ZBAA
+    "chengdu": "101270106",   # Shuangliu, ZUUU
+    "chongqing": "101040700", # Yubei, near ZUCK
+    "guangzhou": "101280110", # Baiyun, near ZGGG
+    "qingdao": "101120205",   # Jiaozhou, near ZSQD
     "shanghai": "101020600",
+    "shenzhen": "101280605",  # Baoan, ZGSZ
+    "wuhan": "101200103",     # Huangpi, near ZHHH
+}
+
+WEATHERCN_EXPECTED_NAMEEN = {
+    "beijing": "shunyi",
+    "chengdu": "shuangliu",
+    "chongqing": "yubei",
+    "guangzhou": "baiyun",
+    "qingdao": "jiaozhou",
+    "shanghai": "pudongxinqu",
+    "shenzhen": "baoan",
+    "wuhan": "huangpi",
 }
 
 WIND_DIRECTION_DEGREES = {
@@ -59,7 +85,7 @@ WIND_DIRECTION_DEGREES = {
 
 
 def supported_china_live_cities() -> list[str]:
-    return ["shanghai", "hong-kong"]
+    return [*sorted(WEATHERCN_STATION_CODES), "hong-kong"]
 
 
 def normalize_china_city(city: str) -> str:
@@ -119,8 +145,8 @@ def fetch_china_weather_city(city: str, *, dry_run: bool = False) -> dict[str, A
         raw = _http_get(HKO_RHRREAD_URL)
         payload = json.loads(raw)
         observation = hko_rhrread_observation(payload, profile, raw_response=raw, source_url=HKO_RHRREAD_URL)
-    elif city_key == "shanghai":
-        station_code = WEATHERCN_STATION_CODES["shanghai"]
+    elif city_key in WEATHERCN_STATION_CODES:
+        station_code = WEATHERCN_STATION_CODES[city_key]
         source_url = WEATHERCN_SK2D_URL_TEMPLATE.format(
             station_code=station_code,
             timestamp_ms=int(time.time() * 1000),
@@ -140,6 +166,15 @@ def fetch_china_weather_city(city: str, *, dry_run: bool = False) -> dict[str, A
                 station_code=station_code,
                 source_url=source_url,
             )
+            payload = ((observation.get("raw_json") or {}).get("payload") or {})
+            expected_name = WEATHERCN_EXPECTED_NAMEEN.get(city_key, "")
+            actual_name = str(payload.get("nameen") or "").strip().lower()
+            if expected_name and actual_name != expected_name:
+                observation["parse_status"] = "failed"
+                observation["parse_warnings"] = [
+                    *list(observation.get("parse_warnings") or []),
+                    f"weathercn_station_identity_mismatch:{actual_name or 'missing'}",
+                ]
             if observation.get("parse_status") == "failed":
                 raise ValueError("weathercn_parse_failed")
         except Exception as exc:

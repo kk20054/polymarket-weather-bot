@@ -698,6 +698,36 @@ def _cloud_cover_pct(payload: dict[str, Any]) -> float | None:
 
 def _country_from_icao(icao: str) -> str:
     station = str(icao or "").upper()
+    exact = {
+        "EHAM": "NL",
+        "LTAC": "TR",
+        "LTFM": "TR",
+        "SAEZ": "AR",
+        "FACT": "ZA",
+        "EFHK": "FI",
+        "OEJN": "SA",
+        "OPKC": "PK",
+        "WMKK": "MY",
+        "EGLC": "GB",
+        "VILK": "IN",
+        "LEMD": "ES",
+        "RPLL": "PH",
+        "MMMX": "MX",
+        "LIMC": "IT",
+        "EDDM": "DE",
+        "MPMG": "PA",
+        "LFPB": "FR",
+        "SBGR": "BR",
+        "CYYZ": "CA",
+        "EPWA": "PL",
+        "NZWN": "NZ",
+        "WIHH": "ID",
+        "DNMM": "NG",
+        "UUWW": "RU",
+        "LLBG": "IL",
+    }
+    if station in exact:
+        return exact[station]
     if station.startswith("Z"):
         return "CN"
     if station.startswith("RJ"):

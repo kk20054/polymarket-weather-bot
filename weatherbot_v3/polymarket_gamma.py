@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import time
+import urllib.parse
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -14,8 +15,9 @@ import requests
 from .db import connect, dump_json, init_v3_db, log_data_fetch, utc_now
 from .market_buckets import highest_temperature_event_slug, polymarket_city_slug
 from .polymarket import quote_from_market_payload
+from .polymarket_probe import parse_settlement_rule_text
 from .registry import get_city_profile
-from .stations import list_stations, sync_station_registry
+from .stations import apply_market_probe_result, list_stations, sync_station_registry
 
 
 GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
@@ -113,6 +115,8 @@ def sync_asian_weather_markets(
     pending_events: list[dict[str, Any]] = []
     pending_markets: list[dict[str, Any]] = []
     pending_orderbooks: list[tuple[dict[str, Any], str]] = []
+    verification_updates: list[dict[str, Any]] = []
+    verified_cities: set[str] = set()
     started_at = utc_now()
     started_perf = time.perf_counter()
     for station in selected:
@@ -135,6 +139,36 @@ def sync_asian_weather_markets(
                 continue
             events_seen += 1
             event_row, market_rows = event_to_rows(event, station, target)
+            if not dry_run and city_key not in verified_cities:
+                active_market = next(
+                    (market for market in (event.get("markets") or []) if isinstance(market, dict) and market.get("active") is not False and market.get("closed") is not True),
+                    {},
+                )
+                description = str(active_market.get("description") or event.get("description") or "")
+                source_url = str(active_market.get("resolutionSource") or event.get("resolutionSource") or event_row.get("resolution_source_url") or "")
+                parsed_contract = parse_settlement_rule_text(
+                    city_key=city_key,
+                    description=description,
+                    source_url=source_url,
+                    event_slug=str(event.get("slug") or slug),
+                )
+                verification = apply_market_probe_result({
+                    "ok": True,
+                    "status": "active_market",
+                    "active_market": True,
+                    "city_key": city_key,
+                    "city_name": city_name,
+                    "event_slug": str(event.get("slug") or slug),
+                    "event_title": str(event.get("title") or ""),
+                    "event_url": f"https://polymarket.com/event/{event.get('slug') or slug}",
+                    "gamma_url": str(event.get("source_url") or f"{GAMMA_BASE_URL}/events/slug/{slug}"),
+                    "target_date": target,
+                    "current_station_id": str(station.get("station_id") or ""),
+                    "market_count": len(event.get("markets") or []),
+                    **parsed_contract,
+                }, path=path)
+                verification_updates.append(verification)
+                verified_cities.add(city_key)
             if not dry_run:
                 pending_events.append(event_row)
                 for row in market_rows:
@@ -204,6 +238,7 @@ def sync_asian_weather_markets(
             "orderbooks_stored": orderbooks_stored,
             "failures": failures[:20],
             "dry_run": dry_run,
+            "verification_updates": verification_updates,
         },
         started_at=started_at,
         finished_at=utc_now(),
@@ -218,6 +253,7 @@ def sync_asian_weather_markets(
         "orderbooks_stored": orderbooks_stored,
         "failures": failures,
         "results": results,
+        "verification_updates": verification_updates,
         "duration_ms": duration_ms,
     }
 
@@ -231,8 +267,11 @@ def event_to_rows(event: dict[str, Any], station: dict[str, Any], target_date: s
     first_market = active_markets[0] if active_markets else {}
     if not source_url:
         source_url = str(first_market.get("resolutionSource") or "")
+    description = str(first_market.get("description") or event.get("description") or "")
+    if not source_url:
+        source_url = _source_url_from_text(description)
     resolution_station = _station_from_source_url(source_url) or str(station.get("settlement_station_id") or station.get("station_id") or "")
-    resolution_source = _resolution_source(source_url, first_market.get("description") or event.get("description") or "")
+    resolution_source = _resolution_source(source_url, description)
     market_rows = []
     bucket_defs = []
     for market in active_markets:
@@ -507,9 +546,16 @@ def _normalize_degree_text(text: str) -> str:
 
 
 def _station_from_source_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(str(url or ""))
+    query = urllib.parse.parse_qs(parsed.query)
+    for key in ("site", "station", "stationId"):
+        for value in query.get(key, []):
+            text = str(value or "").upper()
+            if re.fullmatch(r"[A-Z]{4}", text):
+                return text
     for part in reversed([piece for piece in str(url or "").split("/") if piece]):
         text = part.upper()
-        if re.fullmatch(r"(K[A-Z]{3}|Z[A-Z]{3}|R[A-Z]{3}|V[A-Z]{3}|W[A-Z]{3}|E[A-Z]{3}|L[A-Z]{3}|S[A-Z]{3})", text):
+        if re.fullmatch(r"[A-Z]{4}", text):
             return text
     return ""
 
@@ -520,7 +566,14 @@ def _resolution_source(url: str, text: str) -> str:
         return "wunderground"
     if "hong kong observatory" in combined or "weather.gov.hk" in combined:
         return "hong_kong_observatory"
+    if "noaa" in combined or "weather.gov" in combined:
+        return "noaa"
     return "unknown"
+
+
+def _source_url_from_text(text: str) -> str:
+    match = re.search(r"https?://[^\s<>]+", str(text or ""), re.I)
+    return match.group(0).rstrip(".,;:)\"]'") if match else ""
 
 
 def _json_list(raw: Any) -> list[Any]:

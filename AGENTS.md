@@ -17,6 +17,7 @@ Do not claim stable profitability until paper-trading and validation gates prove
 - `README.md`: local startup and operator guide.
 - `docs/CURRENT_STATE.md`: the only default turn-start context.
 - `docs/IMPLEMENTATION_LOGIC_CN.md`: stable layer and data-flow architecture.
+- `docs/DATA_STORAGE_CN.md`: canonical logical/physical data paths and migration safety rules.
 - `docs/AGENTS_DETAIL_CN.md`: detailed PolyWX, UI, data, algorithm, naming, and Git rules; read only the section needed for the task.
 - Git history is the project ledger. Do not maintain a second chronological progress log.
 - Local evidence under `audits/` is ignored and is never a default context source.
@@ -64,6 +65,7 @@ See `docs/AGENTS_DETAIL_CN.md` for PolyWX Reference Workflow, Reference Fusion A
 - `LIVE_TRADING=false` remains the default; live behavior stays behind dry-run checks, risk gates, and canary sizing.
 - First allowed live behavior is BUY YES limit-only canary with strict idempotency, balance, tick size, `orderMinSize`, stale-book, duplicate-order, spread, and daily-limit checks.
 - Do not commit `audits/`, `data/`, `.env`, `config.json`, `.venv/`, `frontend/dist/`, `node_modules/`, or secrets.
+- Runtime code keeps using the project `data/` path; it is a Junction to `D:\WeatherBot\data`. Do not replace it with scattered absolute paths or delete the physical target.
 
 ## Required Checks
 

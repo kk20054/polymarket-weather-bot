@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.china_weather import WEATHERCN_STATION_CODES, _http_get, _weathercom_current_observation, hko_rhrread_observation, weathercn_sk2d_observation
+from weatherbot_v3.china_weather import WEATHERCN_EXPECTED_NAMEEN, WEATHERCN_STATION_CODES, _http_get, _weathercom_current_observation, hko_rhrread_observation, supported_china_live_cities, weathercn_sk2d_observation
 from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_forecast_runs, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, model_reprice_event_summary, paper_execution_summary, set_settlement_contract_verification, truth_delta_audit_summary, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_metar_reports, upsert_model_reprice_event, upsert_settlement_contracts, upsert_signal_decision_record, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.env_utils import redact_secret_text, redact_secrets
@@ -45,7 +45,7 @@ from weatherbot_v3.truth.wunderground import _country_from_icao, fetch_wundergro
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.weathercom import weathercom_request_units, weathercom_runs_from_response
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
-from weatherbot_v3.cli import _stage_result, default_orderbook_start_date, run_china_weather_fetch, run_daily_max_build, run_hourly_consensus_build, run_iem_asos_truth_fetch, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_polymarket_market_probe, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
+from weatherbot_v3.cli import _stage_result, _wunderground_country_from_station_row, default_orderbook_start_date, run_china_weather_fetch, run_daily_max_build, run_hourly_consensus_build, run_iem_asos_truth_fetch, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_polymarket_market_probe, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
 from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _recommendations_payload, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
 from dashboard_server import signal_decision_detail as signal_decision_detail_api
 from dashboard_server import signal_decisions as signal_decisions_api
@@ -1810,7 +1810,7 @@ class V3CoreTests(unittest.TestCase):
             "humidity": {"data": [{"place": "Hong Kong Observatory", "value": 80, "unit": "percent"}]},
         }
         raw_hko = json.dumps(hko_payload)
-        raw_sh = 'var dataSK={"city":"101020100","temp":"31.2","SD":"70%","time":"10:00","date":"07月04日(星期六)"}'
+        raw_sh = 'var dataSK={"city":"101020600","nameen":"pudongxinqu","temp":"31.2","SD":"70%","time":"10:00","date":"07月04日(星期六)"}'
 
         def fake_http_get(url, **_kwargs):
             return raw_hko if "data.weather.gov.hk" in url else raw_sh
@@ -6385,8 +6385,55 @@ class V3CoreTests(unittest.TestCase):
     def test_wunderground_country_mapping_keeps_hong_kong_out_of_us_fallback(self):
         self.assertEqual(_country_from_icao("VHHH"), "HK")
 
+    def test_wunderground_country_mapping_covers_global_market_stations(self):
+        self.assertEqual(_country_from_icao("EGLC"), "GB")
+        self.assertEqual(_country_from_icao("NZWN"), "NZ")
+        self.assertEqual(_country_from_icao("CYYZ"), "CA")
+        self.assertEqual(_country_from_icao("WIHH"), "ID")
+
+    def test_wunderground_country_prefers_resolution_url(self):
+        row = {
+            "settlement_rule_text": (
+                "Resolution source: https://www.wunderground.com/history/daily/"
+                "nz/wellington/NZWN"
+            )
+        }
+        self.assertEqual(_wunderground_country_from_station_row(row), "NZ")
+
+    def test_noaa_timeseries_rule_extracts_source_station_and_local_day(self):
+        parsed = parse_settlement_rule_text(
+            city_key="istanbul",
+            description=(
+                "This market will resolve to the highest temperature recorded by NOAA "
+                "at Istanbul Airport in degrees Celsius on 20 Jul '26. The highest "
+                "reading for all times on this day is available here: "
+                "https://www.weather.gov/wrh/timeseries?site=LTFM"
+            ),
+        )
+        self.assertEqual(parsed["primary_settlement_source"], "noaa")
+        self.assertEqual(parsed["settlement_station_id"], "LTFM")
+        self.assertEqual(parsed["source_url"], "https://www.weather.gov/wrh/timeseries?site=LTFM")
+        self.assertEqual(parsed["settlement_time_basis"], "local_day")
+
     def test_shanghai_china_live_uses_pudong_station(self):
         self.assertEqual(WEATHERCN_STATION_CODES["shanghai"], "101020600")
+
+    def test_mainland_china_live_uses_airport_district_feeds(self):
+        self.assertEqual(WEATHERCN_STATION_CODES, {
+            "beijing": "101010400",
+            "chengdu": "101270106",
+            "chongqing": "101040700",
+            "guangzhou": "101280110",
+            "qingdao": "101120205",
+            "shanghai": "101020600",
+            "shenzhen": "101280605",
+            "wuhan": "101200103",
+        })
+        self.assertEqual(set(WEATHERCN_EXPECTED_NAMEEN), set(WEATHERCN_STATION_CODES))
+        self.assertEqual(set(supported_china_live_cities()), {
+            *WEATHERCN_STATION_CODES,
+            "hong-kong",
+        })
 
     def test_celsius_bucket_probability_uses_truncation_not_rounding_window(self):
         result = bucket_probabilities(
