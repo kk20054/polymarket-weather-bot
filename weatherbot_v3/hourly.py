@@ -803,10 +803,14 @@ def source_series_summary(
             series["historical"].append(_native_series_point(point, row.get("observed_at_utc"), profile))
     for row in mesonet_rows:
         network = str(row.get("network") or "")
-        if network == "china_live" and city_key == "shanghai" and str(row.get("station_id") or "") != "101020600":
-            # Keep legacy downtown snapshots in the audit trail, but the
-            # production chart is aligned to the Pudong/ZSPD reference feed.
-            continue
+        if network == "china_live" and city_key == "shanghai":
+            china_live_station = str(row.get("station_id") or "").upper()
+            allowed_stations = {"101020600", str(profile.station_id or "").upper()}
+            if china_live_station not in allowed_stations:
+                # Keep legacy downtown snapshots in the audit trail, but the
+                # chart accepts only Pudong's public feed or the explicitly
+                # labeled ZSPD fallback when that feed is unavailable.
+                continue
         point = _observation_point(
             profile,
             report_time=row.get("observed_at"),

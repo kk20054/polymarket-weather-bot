@@ -1717,6 +1717,33 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("apiKey=***", row["source_url"])
         self.assertIn("not_settlement_truth", row["quality_flags"])
 
+    def test_weathercom_current_fallback_is_exposed_as_shanghai_china_live_series(self):
+        db_path = test_db_path("weathercom_current_china_live_series")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db()
+            upsert_mesonet_observation({
+                "city": "shanghai",
+                "city_name": "Shanghai",
+                "station_id": "ZSPD",
+                "station_name": "Weather.com current near ZSPD",
+                "network": "china_live",
+                "observed_at": "2026-07-18T03:00:00+00:00",
+                "temperature": 36.0,
+                "humidity": 54.0,
+                "source_url": "https://api.weather.com/v3/wx/observations/current?apiKey=***",
+                "raw_unit": "C",
+                "parser_version": "china-live-v2",
+                "parse_status": "partial",
+                "parse_warnings": ["weathercn_primary_unavailable:http_502"],
+                "quality_flags": ["china_live", "display_only", "not_settlement_truth"],
+            })
+            series = source_series_summary("shanghai", "2026-07-18", db_path=db_path)
+
+        self.assertEqual(len(series["china_live"]), 1)
+        self.assertEqual(series["china_live"][0]["station_id"], "ZSPD")
+        self.assertEqual(series["china_live"][0]["temperature"], 36.0)
+
     def test_china_live_mesonet_upsert_is_station_time_idempotent(self):
         db_path = test_db_path("china_live_idempotent")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
