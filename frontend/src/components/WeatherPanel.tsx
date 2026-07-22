@@ -231,6 +231,55 @@ function fmtWind(speed?: number | null, direction?: number | null) {
   return `${windCompass(degrees)} ${degrees.toFixed(0)}° ${speedText}`
 }
 
+function CloudCoverMeter({ value }: { value?: number | null }) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return <span className="text-neutral-600">--</span>
+  }
+  const percent = Math.max(0, Math.min(100, Number(value)))
+  return (
+    <span
+      className="weather-cloud-meter"
+      title={`Cloud cover ${percent.toFixed(0)}%`}
+      aria-label={`Cloud cover ${percent.toFixed(0)} percent`}
+    >
+      <span className="weather-cloud-meter-fill" style={{ width: `${percent}%` }} />
+      <span className="weather-cloud-meter-label">{percent.toFixed(0)}%</span>
+    </span>
+  )
+}
+
+function PrecipitationMetric({ amount, probability }: { amount?: number | null; probability?: number | null }) {
+  if (
+    (amount === null || amount === undefined || Number.isNaN(Number(amount)))
+    && (probability === null || probability === undefined || Number.isNaN(Number(probability)))
+  ) {
+    return <span className="text-neutral-600">--</span>
+  }
+  const percent = probability === null || probability === undefined || Number.isNaN(Number(probability))
+    ? 0
+    : Math.max(0, Math.min(100, Number(probability)))
+  return (
+    <span className="inline-flex min-w-[68px] flex-col gap-0.5" title={`Precipitation ${fmtPrecip(amount)} / ${fmtPct(probability)}`}>
+      <span className={`tabular-nums ${percent > 0 ? 'text-sky-300' : 'text-neutral-500'}`}>{fmtPrecip(amount)} / {fmtPct(probability)}</span>
+      <span className="h-px w-full bg-neutral-800"><span className="block h-px bg-sky-400" style={{ width: `${percent}%` }} /></span>
+    </span>
+  )
+}
+
+function WindMetric({ speed, direction }: { speed?: number | null; direction?: number | null }) {
+  const text = fmtWind(speed, direction)
+  if (text === '--') return <span className="text-neutral-600">--</span>
+  const cardinal = direction === null || direction === undefined || Number.isNaN(Number(direction))
+    ? '--'
+    : windCompass(Number(direction))
+  return (
+    <span className="inline-flex items-center gap-1 whitespace-nowrap" title={text}>
+      <span className="min-w-7 border border-neutral-700 bg-neutral-900/70 px-1 py-0.5 text-center text-[9px] font-medium text-neutral-300">{cardinal}</span>
+      <span className="tabular-nums text-neutral-400">{text.replace(`${cardinal} `, '')}</span>
+    </span>
+  )
+}
+
 function windCompass(direction: number) {
   const labels = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
   return labels[Math.round((((direction % 360) + 360) % 360) / 22.5) % 16]
@@ -1604,9 +1653,9 @@ function ForecastDataTable({ rows, unit, selectedDate, city, language }: { rows:
                 <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
                   <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
                   <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.forecast, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.forecast_cloud_cover)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPrecip(row.precipitation)} / {fmtPct(row.precipitation_probability)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
+                  <td className="px-2 py-1"><CloudCoverMeter value={row.forecast_cloud_cover} /></td>
+                  <td className="px-2 py-1"><PrecipitationMetric amount={row.precipitation} probability={row.precipitation_probability} /></td>
+                  <td className="px-2 py-1"><WindMetric speed={row.wind_speed} direction={row.wind_direction} /></td>
                   <td className="max-w-[140px] truncate px-2 py-1 text-neutral-400" title={`${row.source || '--'} · ${row.horizon || '--'}`}>
                     {row.condition || row.source || row.horizon || '--'}
                   </td>
@@ -1701,10 +1750,10 @@ function MetarObservationTable({ rows, unit, selectedDate, loading = false, lang
                 <tr key={row.id} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
                    <td className="whitespace-nowrap px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
                    <td className="whitespace-nowrap px-2 py-1 tabular-nums text-amber-300">{fmtTemp(row.metar, unit)}</td>
-                   <td className="whitespace-nowrap px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.cloud_cover)}</td>
+                   <td className="whitespace-nowrap px-2 py-1"><CloudCoverMeter value={row.cloud_cover} /></td>
                    <td className="truncate whitespace-nowrap px-2 py-1 text-neutral-500" title={row.condition || '--'}>{row.condition || '--'}</td>
                    <td className="whitespace-nowrap px-2 py-1 tabular-nums text-neutral-400">{fmtVisibility(row.visibility)}</td>
-                   <td className="whitespace-nowrap px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
+                   <td className="whitespace-nowrap px-2 py-1"><WindMetric speed={row.wind_speed} direction={row.wind_direction} /></td>
                    <td className="whitespace-nowrap px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
                    <td className="whitespace-nowrap px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
                    <td className="truncate whitespace-nowrap px-2 py-1 font-mono text-neutral-400" title={row.raw_text || '--'}>{row.raw_text || '--'}</td>
@@ -1819,10 +1868,10 @@ function HistoricalHourlyObservationTable({ rows, unit, selectedDate, loading = 
                 <tr key={`historical-${row.id}`} className="border-b border-neutral-900/80 hover:bg-neutral-900/50">
                   <td className="px-2 py-1 tabular-nums text-neutral-300">{row.label}</td>
                   <td className="px-2 py-1 tabular-nums text-green-300">{fmtTemp(row.historical, unit)}</td>
-                  <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.cloud_cover)}</td>
+                  <td className="px-2 py-1"><CloudCoverMeter value={row.cloud_cover} /></td>
                   <td className="max-w-[140px] truncate px-2 py-1 text-neutral-500" title={row.condition || '--'}>{row.condition || '--'}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtVisibility(row.visibility)}</td>
-                  <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
+                  <td className="px-2 py-1"><WindMetric speed={row.wind_speed} direction={row.wind_direction} /></td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
                   <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.fetched_at)}</td>
@@ -2051,10 +2100,10 @@ function DiffStatsPanel({
                         <div className={`h-full ${barClass}`} style={{ width: `${width}%` }} />
                       </div>
                     </td>
-                    <td className="px-2 py-1 tabular-nums text-amber-300">{fmtPct(row.cloud_cover)}</td>
+                    <td className="px-2 py-1"><CloudCoverMeter value={row.cloud_cover} /></td>
                     <td className="max-w-[120px] truncate px-2 py-1 text-neutral-400" title={row.condition || row.source}>{row.condition || row.source || '--'}</td>
                     <td className="px-2 py-1 tabular-nums text-neutral-500">--</td>
-                    <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtWind(row.wind_speed, row.wind_direction)}</td>
+                    <td className="px-2 py-1"><WindMetric speed={row.wind_speed} direction={row.wind_direction} /></td>
                     <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtPressure(row.pressure)}</td>
                     <td className="px-2 py-1 tabular-nums text-neutral-400">{fmtTemp(row.dew_point, unit)}</td>
                     <td className="px-2 py-1 tabular-nums text-neutral-500">{shortTime(row.fetched_sys)}</td>
@@ -2508,7 +2557,13 @@ function EventTimeline({
     if (tone === 'green' || tone === 'cyan') return 'OK'
     return 'INFO'
   }
-  const productionRows: NormalizedFetchLogRow[] = productionRefresh?.stages?.map((stage, index) => {
+  const showRunningProductionRefresh = Boolean(
+    productionRefresh?.running
+    || productionRefresh?.production_refresh_running
+    || productionRefresh?.stages?.some((stage) => stage.running),
+  )
+  const productionRows: NormalizedFetchLogRow[] = showRunningProductionRefresh
+    ? productionRefresh?.stages?.map((stage, index) => {
     const payload = compactData(stage.payload, 420)
     const status = stage.running ? 'RUN' : stage.skipped ? 'SKIP' : stage.ok ? 'OK' : 'ERR'
     const message = stage.error || stage.reason || stage.name
@@ -2523,7 +2578,8 @@ function EventTimeline({
       message,
       details: payload || message || '--',
     }
-  }) ?? []
+      }) ?? []
+    : []
   const sourceRows: NormalizedFetchLogRow[] = fetchLog.length > 0
     ? fetchLog.slice(0, 100).map((row, index) => {
       const duration = visibleElapsedLabel(row.duration) || '--'
@@ -2563,8 +2619,8 @@ function EventTimeline({
     if (status === 'OK') return 'text-green-300'
     return 'text-neutral-400'
   }
-  const stageGroup = (stage: string) => {
-    const lower = stage.toLowerCase()
+  const stageGroup = (row: NormalizedFetchLogRow) => {
+    const lower = [row.stage, row.source, row.message].join(' ').toLowerCase()
     if (/forecast|openmeteo|daily|max|hourly/.test(lower)) return 'weather'
     if (/metar|truth|observation|historical/.test(lower)) return 'observation'
     if (/orderbook|bucket|clob|market/.test(lower)) return 'orderbook'
@@ -2576,10 +2632,10 @@ function EventTimeline({
     <section className="min-w-0 border border-neutral-800 bg-black">
       <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-2 py-1.5">
         <div>
-          <div className="text-[10px] text-neutral-500">Fetch Log (last 100)</div>
-          <div className="text-xs text-neutral-100">{rows.length} events</div>
+          <div className="text-[10px] text-neutral-500">抓取日志（当前城市）</div>
+          <div className="text-xs text-neutral-100">{rows.length} 条</div>
         </div>
-        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500"># / Time / Source / Status / Duration / Message</span>
+        <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] text-neutral-500">时间 / 来源 / 状态 / 耗时 / 信息</span>
       </div>
       <div className="grid grid-cols-[repeat(auto-fit,minmax(100px,1fr))] gap-1 border-b border-neutral-900 p-2 text-[10px]">
         {[
@@ -2589,7 +2645,7 @@ function EventTimeline({
           ['signal', '信号'],
           ['system', '系统'],
         ].map(([stage, label]) => {
-          const count = rows.filter(row => stageGroup(row.stage) === stage).length
+          const count = rows.filter(row => stageGroup(row) === stage).length
           return (
             <div key={stage} className="border border-neutral-800 px-2 py-1 text-neutral-500">
               {label} <span className="tabular-nums text-neutral-200">{count}</span>
@@ -2602,7 +2658,7 @@ function EventTimeline({
           <table className="min-w-[860px] w-full border-collapse text-left text-[10px]">
             <thead className="sticky top-0 bg-black text-neutral-500">
               <tr className="border-b border-neutral-900">
-                {['#', 'Time', 'Source', 'Status', 'Duration', 'Message'].map(column => (
+                {['#', '时间', '来源', '状态', '耗时', '信息'].map(column => (
                   <th key={column} className="px-2 py-1 font-normal">{column}</th>
                 ))}
               </tr>
@@ -2610,7 +2666,7 @@ function EventTimeline({
             <tbody>
               <tr>
                 <td colSpan={6} className="px-2 py-12 text-center text-neutral-600">
-                  No log entries.
+                  暂无该城市的抓取记录
                 </td>
               </tr>
             </tbody>
@@ -2621,7 +2677,7 @@ function EventTimeline({
           <table className="min-w-[860px] w-full border-collapse text-left text-[10px]">
             <thead className="sticky top-0 bg-black text-neutral-500">
               <tr className="border-b border-neutral-900">
-                {['#', 'Time', 'Source', 'Status', 'Duration', 'Message'].map(column => (
+                {['#', '时间', '来源', '状态', '耗时', '信息'].map(column => (
                   <th key={column} className="px-2 py-1 font-normal">{column}</th>
                 ))}
               </tr>

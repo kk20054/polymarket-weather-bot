@@ -665,6 +665,37 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("polymarket.com/event/highest-temperature-in-chicago-on-july-2-2026", rows[0]["event_url"])
         self.assertEqual(logs[0]["source"], "polymarket_gamma")
 
+    def test_data_fetch_logs_can_be_scoped_to_current_city(self):
+        path = test_db_path("data_fetch_logs_city_scope")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(path)}, clear=False):
+            init_v3_db(path)
+            log_data_fetch(
+                source="metar",
+                stage="observations",
+                status="OK",
+                city="chicago",
+                target_date="2026-07-22",
+                message="Chicago refreshed",
+                log_key="test-log-chicago",
+                path=path,
+            )
+            log_data_fetch(
+                source="china_live",
+                stage="observations",
+                status="OK",
+                city="shanghai",
+                target_date="2026-07-22",
+                message="Shanghai refreshed",
+                log_key="test-log-shanghai",
+                path=path,
+            )
+            rows = list_data_fetch_logs(10, city="chicago")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["city"], "chicago")
+        self.assertEqual(rows[0]["source"], "metar")
+
     def test_active_weather_market_sync_dry_run_does_not_write_rows(self):
         path = test_db_path("active-weather-market-buckets-dry-run")
         event_payload = {
@@ -6252,36 +6283,49 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(weathercom_request_units(SETTLEMENT_REGISTRY["shanghai"]), ("m", "C"))
         self.assertEqual(weathercom_request_units(SETTLEMENT_REGISTRY["chicago"]), ("e", "F"))
 
-    def test_polywx_bias_stats_use_exact_hours_and_native_overlap(self):
-        forecast_values = [32, 31, 31, 31, 30, 31, 31, 33, 34, 34, 36, 37]
-        observed_values = [31, 31, 31, 31, 31, 31, 32, 33, 34, 35, 36, 37]
+    def test_polywx_bias_stats_match_nearest_hour_and_source_specific_dedup(self):
+        forecast_values = [67, 65, 65, 65, 64, 63, 61, 62, 64, 66, 69, 68, 68]
         forecast = [
             {"local_time": f"{hour:02d}:00", "temperature": value}
             for hour, value in enumerate(forecast_values)
         ]
-        native = []
-        for index in range(23):
-            hour, minute = divmod(index * 30, 60)
-            temperature = observed_values[hour] if minute == 0 else 99.0
-            native.append({
-                "local_time": f"{hour:02d}:{minute:02d}",
-                "temperature": temperature,
-            })
+        metar = [
+            {"local_time": time, "temperature": value}
+            for time, value in [
+                ("00:51", 66.02), ("01:51", 66.02), ("02:51", 66.02),
+                ("03:10", 66.02), ("03:51", 64.04), ("04:51", 60.98),
+                ("05:51", 60.08), ("06:51", 60.98), ("07:51", 64.04),
+                ("08:51", 66.02), ("09:51", 68.0), ("10:51", 66.92),
+                ("11:51", 68.0),
+            ]
+        ]
+        historical = [
+            {"local_time": time, "temperature": value}
+            for time, value in [
+                ("00:51", 66.2), ("01:51", 66.2), ("02:51", 66.2),
+                ("03:10", 66.2), ("03:51", 64.4), ("04:51", 60.8),
+                ("05:51", 60.2), ("06:51", 60.8), ("07:51", 64.4),
+                ("08:51", 66.2), ("09:51", 68.0), ("10:51", 66.8),
+            ]
+        ]
 
         stats = polywx_bias_stats({
             "forecast": forecast,
-            "metar": native,
-            "historical": list(native),
+            "metar": metar,
+            "historical": historical,
         })
 
-        self.assertEqual(stats["method"], "polywx_exact_local_hour_v1")
-        self.assertEqual(stats["metar"]["count"], 12)
-        self.assertAlmostEqual(stats["metar"]["avg_delta"], 0.1667, places=4)
-        self.assertAlmostEqual(stats["metar"]["pearson_r"], 0.9664, places=4)
-        self.assertEqual(stats["metar"]["cutoff_hour"], "11:00")
-        self.assertEqual(stats["historical"]["count"], 12)
-        self.assertEqual(stats["historical_metar_overlap"]["count"], 23)
-        self.assertEqual(stats["historical_metar_overlap"]["possible"], 23)
+        self.assertEqual(stats["method"], "polywx_nearest_local_hour_v3")
+        self.assertEqual(stats["metar"]["count"], 13)
+        self.assertAlmostEqual(stats["metar"]["avg_delta"], -0.1431, places=4)
+        self.assertAlmostEqual(stats["metar"]["pearson_r"], 0.9277, places=4)
+        self.assertEqual(stats["metar"]["cutoff_hour"], "12:00")
+        self.assertEqual(stats["historical"]["count"], 11)
+        self.assertAlmostEqual(stats["historical"]["avg_delta"], -0.2727, places=4)
+        self.assertAlmostEqual(stats["historical"]["pearson_r"], 0.9287, places=4)
+        self.assertEqual(stats["historical"]["cutoff_hour"], "11:00")
+        self.assertEqual(stats["historical_metar_overlap"]["count"], 12)
+        self.assertEqual(stats["historical_metar_overlap"]["possible"], 12)
         self.assertEqual(stats["historical_metar_overlap"]["ratio"], 1.0)
 
     def test_weathercom_forecast_history_separates_snapshots_from_integer_revisions(self):
@@ -6345,6 +6389,59 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(point["snapshot_count"], 3)
         self.assertEqual(point["revision_count"], 1)
         self.assertEqual(point["distinct_count"], 2)
+
+    def test_weathercom_hourly_display_does_not_leak_late_snapshot_into_past_hour(self):
+        db_path = test_db_path("weathercom_v3_hourly_no_leak")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        profile = SETTLEMENT_REGISTRY["shanghai"]
+
+        def epoch(local_value: str) -> int:
+            return int(datetime.fromisoformat(local_value).timestamp())
+
+        old_payload = {
+            "validTimeUtc": [
+                epoch("2026-07-14T00:00:00+08:00"),
+                epoch("2026-07-14T12:00:00+08:00"),
+            ],
+            "temperature": [28.0, 32.0],
+            "cloudCover": [25, 50],
+        }
+        late_payload = {
+            "validTimeUtc": [
+                epoch("2026-07-14T00:00:00+08:00"),
+                epoch("2026-07-14T12:00:00+08:00"),
+            ],
+            "temperature": [99.0, 35.0],
+            "cloudCover": [99, 75],
+        }
+        old_runs, old_members = weathercom_runs_from_response(
+            profile,
+            old_payload,
+            retrieved_at="2026-07-13T12:00:00+00:00",
+            forecast_days=2,
+        )
+        late_runs, late_members = weathercom_runs_from_response(
+            profile,
+            late_payload,
+            retrieved_at="2026-07-14T02:30:00+00:00",
+            forecast_days=1,
+        )
+
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            for run, members in [*zip(old_runs, old_members), *zip(late_runs, late_members)]:
+                insert_forecast_run(run, members)
+            points = forecast_hourly_points(
+                {"shanghai": {"2026-07-14"}},
+                db_path=db_path,
+            )["shanghai"]
+
+        by_hour = {point["local_hour"]: point for point in points}
+        self.assertEqual(by_hour["00:00"]["best"], 28.0)
+        self.assertEqual(by_hour["00:00"]["cloud_cover"], 25.0)
+        self.assertEqual(by_hour["00:00"]["retrieved_at"], "2026-07-13T12:00:00+00:00")
+        self.assertEqual(by_hour["12:00"]["best"], 35.0)
+        self.assertEqual(by_hour["12:00"]["cloud_cover"], 75.0)
+        self.assertEqual(by_hour["12:00"]["retrieved_at"], "2026-07-14T02:30:00+00:00")
 
     def test_weathercom_forecast_fields_survive_hourly_consensus(self):
         db_path = test_db_path("weathercom_v3_hourly_consensus_fields")
@@ -6668,6 +6765,45 @@ class V3CoreTests(unittest.TestCase):
         self.assertIsNone(points["shanghai"][0]["metar"])
         self.assertEqual(len(native_series["historical"]), 1)
         self.assertEqual(native_series["historical"][0]["local_time"], "12:00")
+
+    def test_native_observation_series_normalizes_pressure_to_hpa(self):
+        db_path = test_db_path("native_pressure_hpa")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            upsert_metar_report({
+                "city": "chicago",
+                "city_name": "Chicago",
+                "station_id": "KORD",
+                "report_time": "2026-07-22T17:51:00+00:00",
+                "raw_text": "METAR KORD 221751Z 03011KT 10SM BKN055 22/10 A3010",
+                "temperature": 71.06,
+                "pressure": 1.0,
+                "altimeter": 1019.4,
+                "sea_level_pressure": 1018.9,
+            })
+            persist_wunderground_hourly({
+                "ok": True,
+                "icao": "KORD",
+                "date_local": "2026-07-22",
+                "timezone": "America/Chicago",
+                "rows": [{
+                    "observation_key": "KORD:2026-07-22:1251",
+                    "icao": "KORD",
+                    "date_local": "2026-07-22",
+                    "timezone": "America/Chicago",
+                    "observed_at_local": "2026-07-22T12:51:00-05:00",
+                    "observed_at_utc": "2026-07-22T17:51:00+00:00",
+                    "temp_c": 21.8,
+                    "pressure_hpa": 1007.1,
+                    "source_url": "https://api.weather.com/history/KORD",
+                    "method": "weather_com_location_historical_json",
+                    "parser_version": "truth-wunderground-hourly-v1",
+                }],
+            }, path=db_path)
+            native_series = source_series_summary("chicago", "2026-07-22", db_path=db_path)
+
+        self.assertAlmostEqual(native_series["metar"][0]["pressure"], 1018.9)
+        self.assertAlmostEqual(native_series["historical"][0]["pressure"], 1007.1)
 
     def test_stored_wunderground_hourly_rollup_requires_complete_mature_local_day(self):
         db_path = test_db_path("wunderground_hourly_rollup")

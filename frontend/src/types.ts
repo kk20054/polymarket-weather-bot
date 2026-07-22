@@ -1924,6 +1924,8 @@ export interface FetchLogRow {
   details?: string
   event_id?: number
   event_type?: string
+  city?: string
+  target_date?: string
 }
 
 export interface V3Summary {

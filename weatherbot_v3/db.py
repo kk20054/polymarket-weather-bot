@@ -5280,18 +5280,33 @@ def log_data_fetch(
         return int(row["id"]) if row else 0
 
 
-def list_data_fetch_logs(limit: int = 100) -> list[dict[str, Any]]:
+def list_data_fetch_logs(
+    limit: int = 100,
+    *,
+    city: str = "",
+    target_date: str = "",
+) -> list[dict[str, Any]]:
     init_v3_db()
     bounded = max(1, min(int(limit or 100), 500))
+    where: list[str] = []
+    params: list[Any] = []
+    if city:
+        where.append("city = ?")
+        params.append(str(city).strip().lower())
+    if target_date:
+        where.append("target_date = ?")
+        params.append(str(target_date).strip())
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     with connect() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT *
             FROM data_fetch_logs
+            {where_sql}
             ORDER BY datetime(COALESCE(finished_at, created_at)) DESC, id DESC
             LIMIT ?
             """,
-            (bounded,),
+            (*params, bounded),
         ).fetchall()
         return [dict(row) for row in rows]
 

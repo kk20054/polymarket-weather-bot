@@ -2,11 +2,8 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
-  ArrowDownAZ,
   CheckCircle2,
-  Clock3,
   FlaskConical,
-  Globe2,
   ListChecks,
   PauseCircle,
   RefreshCw,
@@ -478,6 +475,37 @@ function continentLabel(value: string, language: UiLanguage) {
   return labels[value]?.[language === 'zh' ? 0 : 1] ?? value
 }
 
+function cityBrowseKey(
+  city: { continent: string; settlementTimezone?: string; name: string },
+  mode: CityBrowseMode,
+) {
+  if (mode === 'continent') return city.continent
+  if (mode === 'timezone') return cityTimezoneGroup(city.settlementTimezone)
+  return cityAlphabet(city.name)
+}
+
+function cityBrowseGroupLabel(value: string, mode: CityBrowseMode, language: UiLanguage) {
+  if (mode === 'continent') return continentLabel(value, language)
+  if (value === 'Unknown') return language === 'zh' ? '时区待定' : 'Unknown time zone'
+  return value
+}
+
+function cityBrowseGroupRank(value: string, mode: CityBrowseMode) {
+  if (mode === 'continent') {
+    const order = ['Asia', 'Europe', 'Africa', 'Americas', 'Pacific', 'Other']
+    const index = order.indexOf(value)
+    return index >= 0 ? index : order.length
+  }
+  if (mode === 'timezone') {
+    if (value === 'Unknown') return 10_000
+    const match = value.match(/^UTC([+-])(\d{2}):?(\d{2})$/)
+    if (!match) return 9_999
+    const sign = match[1] === '-' ? -1 : 1
+    return sign * (Number(match[2]) * 60 + Number(match[3]))
+  }
+  return value === '#' ? 10_000 : value.charCodeAt(0)
+}
+
 function validationActionLimit(action: ProductionValidationAction) {
   const raw = Number(action.targets_count ?? action.count ?? 20)
   if (!Number.isFinite(raw) || raw <= 0) return 20
@@ -879,7 +907,6 @@ function App() {
   const [contractStatus, setContractStatus] = useState('mature-auto')
   const [citySearch, setCitySearch] = useState('')
   const [cityBrowseMode, setCityBrowseMode] = useState<CityBrowseMode>('continent')
-  const [cityBrowseValue, setCityBrowseValue] = useState('all')
   const [uiLanguage, setUiLanguage] = useState<UiLanguage>(() => {
     if (typeof window === 'undefined') return 'zh'
     return window.localStorage.getItem('weatherbot-ui-language') === 'en' ? 'en' : 'zh'
@@ -1449,51 +1476,34 @@ function App() {
     }
   }, [schedulerStatus, uiLanguage, queryClient])
 
-  const cityBrowseChoices = useMemo(() => {
-    const counts = new Map<string, number>()
-    cityOptions.forEach(city => {
-      if (!city.displayEnabled && city.key !== selectedCity) return
-      const key = cityBrowseMode === 'continent'
-        ? city.continent
-        : cityBrowseMode === 'timezone'
-          ? cityTimezoneGroup(city.settlementTimezone)
-          : cityAlphabet(city.name)
-      counts.set(key, (counts.get(key) ?? 0) + 1)
-    })
-    return [...counts.entries()]
-      .sort(([a], [b]) => {
-        if (cityBrowseMode === 'timezone') {
-          if (a === 'Unknown') return 1
-          if (b === 'Unknown') return -1
-        }
-        return a.localeCompare(b, 'en')
-      })
-      .map(([value, count]) => ({
-        value,
-        label: cityBrowseMode === 'continent' ? continentLabel(value, uiLanguage) : value,
-        count,
-      }))
-  }, [cityBrowseMode, cityOptions, selectedCity, uiLanguage])
-
-  useEffect(() => {
-    if (cityBrowseValue === 'all') return
-    if (!cityBrowseChoices.some(option => option.value === cityBrowseValue)) setCityBrowseValue('all')
-  }, [cityBrowseChoices, cityBrowseValue])
-
   const filteredCityOptions = useMemo(() => cityOptions
     .filter(city => {
       const query = citySearch.trim().toLowerCase()
       if (!city.displayEnabled && city.key !== selectedCity) return false
-      const browseKey = cityBrowseMode === 'continent'
-        ? city.continent
-        : cityBrowseMode === 'timezone'
-          ? cityTimezoneGroup(city.settlementTimezone)
-          : cityAlphabet(city.name)
-      if (cityBrowseValue !== 'all' && browseKey !== cityBrowseValue) return false
       if (!query) return true
       return `${city.name} ${city.station ?? ''} ${city.key} ${city.continent} ${city.settlementTimezone ?? ''}`.toLowerCase().includes(query)
     })
-    .sort((a, b) => a.name.localeCompare(b.name, 'en')), [cityBrowseMode, cityBrowseValue, cityOptions, citySearch, selectedCity])
+    .sort((a, b) => a.name.localeCompare(b.name, 'en')), [cityOptions, citySearch, selectedCity])
+
+  const groupedCityOptions = useMemo(() => {
+    const groups = new Map<string, typeof filteredCityOptions>()
+    filteredCityOptions.forEach(city => {
+      const key = cityBrowseKey(city, cityBrowseMode)
+      const rows = groups.get(key) ?? []
+      rows.push(city)
+      groups.set(key, rows)
+    })
+    return [...groups.entries()]
+      .sort(([a], [b]) => {
+        const rankDiff = cityBrowseGroupRank(a, cityBrowseMode) - cityBrowseGroupRank(b, cityBrowseMode)
+        return rankDiff || a.localeCompare(b, 'en')
+      })
+      .map(([key, cities]) => ({
+        key,
+        label: cityBrowseGroupLabel(key, cityBrowseMode, uiLanguage),
+        cities,
+      }))
+  }, [cityBrowseMode, filteredCityOptions, uiLanguage])
 
   const signalStatusMutation = useMutation({
     mutationFn: ({ signalId, status, amount }: { signalId: number; status: string; amount?: number }) =>
@@ -1746,51 +1756,29 @@ function App() {
               </div>
               <span className="border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">{filteredCityOptions.length}</span>
             </div>
-            <input
-              value={citySearch}
-              onChange={event => setCitySearch(event.target.value)}
-              placeholder={copy.citySearch}
-              className="mb-2 w-full border border-neutral-800 bg-black px-2 py-1.5 text-[11px]"
-              aria-label={copy.citySearch}
-            />
-            <div className="mb-2 grid grid-cols-3 border border-neutral-800" role="group" aria-label={uiLanguage === 'zh' ? '城市排序方式' : 'City browse mode'}>
-              {([
-                { id: 'continent' as const, label: copy.browseContinent, icon: Globe2 },
-                { id: 'timezone' as const, label: copy.browseTimezone, icon: Clock3 },
-                { id: 'alphabet' as const, label: copy.browseAlphabet, icon: ArrowDownAZ },
-              ]).map(option => {
-                const Icon = option.icon
-                return (
-                  <button
-                    key={option.id}
-                    type="button"
-                    onClick={() => {
-                      setCityBrowseMode(option.id)
-                      setCityBrowseValue('all')
-                    }}
-                    aria-pressed={cityBrowseMode === option.id}
-                    className={`inline-flex h-8 items-center justify-center gap-1 border-r border-neutral-800 px-1 text-[10px] last:border-r-0 ${cityBrowseMode === option.id ? 'bg-blue-600 text-white' : 'text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200'}`}
-                  >
-                    <Icon className="h-3 w-3" />
-                    <span>{option.label}</span>
-                  </button>
-                )
-              })}
+            <div className="mb-2 grid grid-cols-[minmax(0,1fr)_88px] gap-1.5">
+              <input
+                value={citySearch}
+                onChange={event => setCitySearch(event.target.value)}
+                placeholder={copy.citySearch}
+                className="h-8 min-w-0 border border-neutral-800 bg-black px-2 text-[11px]"
+                aria-label={copy.citySearch}
+              />
+              <label className="block">
+                <span className="sr-only">{uiLanguage === 'zh' ? '城市分组方式' : 'City grouping mode'}</span>
+                <select
+                  data-testid="city-browse-mode"
+                  value={cityBrowseMode}
+                  onChange={event => setCityBrowseMode(event.target.value as CityBrowseMode)}
+                  className="h-8 w-full border border-neutral-800 bg-black px-2 text-[10px] text-neutral-300 outline-none"
+                >
+                  <option value="continent">{copy.browseContinent}</option>
+                  <option value="timezone">{copy.browseTimezone}</option>
+                  <option value="alphabet">{copy.browseAlphabet}</option>
+                </select>
+              </label>
             </div>
-            <label className="mb-2 block">
-              <span className="sr-only">{uiLanguage === 'zh' ? '城市筛选' : 'City filter'}</span>
-              <select
-                value={cityBrowseValue}
-                onChange={event => setCityBrowseValue(event.target.value)}
-                className="h-8 w-full border border-neutral-800 bg-black px-2 text-[11px] text-neutral-300 outline-none"
-              >
-                <option value="all">{copy.all} ({cityOptions.filter(city => city.displayEnabled || city.key === selectedCity).length})</option>
-                {cityBrowseChoices.map(option => (
-                  <option key={option.value} value={option.value}>{option.label} ({option.count})</option>
-                ))}
-              </select>
-            </label>
-            <div className="space-y-1">
+            <div className="space-y-2" data-testid="city-groups">
               {cityOptions.length === 0 && (
                 <div className="border border-neutral-800 bg-black/40 p-3 text-[11px] leading-relaxed text-neutral-500">
                   {copy.noCities}
@@ -1801,7 +1789,14 @@ function App() {
                   {copy.noCityMatch}
                 </div>
               )}
-              {filteredCityOptions.map(city => (
+              {groupedCityOptions.map(group => (
+                <section key={group.key} data-testid={`city-group-${group.key}`}>
+                  <div className="sticky top-0 z-10 flex items-center justify-between border-b border-neutral-800 bg-neutral-950/95 px-2 py-1 text-[9px] font-medium text-neutral-500 backdrop-blur-sm">
+                    <span>{group.label}</span>
+                    <span className="tabular-nums text-neutral-700">{group.cities.length}</span>
+                  </div>
+                  <div>
+                  {group.cities.map(city => (
                 <div
                   key={city.key}
                   title={`${city.enabled ? copy.collecting : copy.notCollecting} · ${uiLanguage === 'zh' ? '当前' : 'Now'} ${city.current !== null && city.current !== undefined ? Number(city.current).toFixed(1) + '°' + city.unit : '--'} (${city.currentSource || '--'}) · ${uiLanguage === 'zh' ? '预计最高' : 'Forecast high'} ${city.forecastHigh !== null && city.forecastHigh !== undefined ? Number(city.forecastHigh).toFixed(1) + '°' + city.unit : '--'} · ${copy.historical} ${city.historyCount}`}
@@ -1838,6 +1833,9 @@ function App() {
                     </div>
                   </a>
                 </div>
+                  ))}
+                  </div>
+                </section>
               ))}
             </div>
           </div>

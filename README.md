@@ -1,146 +1,111 @@
-# WeatherBot v6
+# WeatherBot
 
-WeatherBot 是一个本地运行的 Polymarket 城市日最高温研究与模拟交易平台。当前主线目标是：
+面向 Polymarket 日最高温市场的本地天气量化研究与模拟交易平台。系统将机场观测、历史观测、多模型预报、市场温度桶和真实盘口放进同一条可审计链路，并提供受控模拟账户验证策略。
 
-```text
-真实数据采集 -> 可审计概率模型 -> 实时盘口匹配 -> 模拟成交与结算 -> 14-30 天验证 -> 小额实盘 canary
-```
+> 当前状态：可采集、可分析、可模拟；实盘保持锁定。历史证据尚未证明正收益，不应把“天气关注”或正概率差直接当成买入建议。
 
-当前版本可用于数据观察、信号研究和受控模拟交易。它尚未证明具有稳定盈利能力，`LIVE_TRADING=false` 必须保持关闭。
+## 当前能力
 
-## 当前可用性
+- 51 个工作台城市的机场站点、时区和结算规则注册表；尚未完成采集的城市会明确标为待接入。
+- METAR、中国实况、Wunderground 历史观测、Weather.com v3 与 Open-Meteo 多模型预报。
+- PolyWX 风格的城市工作台：预报、METAR、历史观测、偏差统计、抓取日志。
+- DEB 日最高温分布、市场温度桶严格匹配、盘口价格与概率优势计算。
+- `$40` 等自定义本金的受控模拟账户、Kelly 仓位、订单生命周期、模型保护退出、资金曲线。
+- SQLite 审计链：每次预报、观测、决策、订单、估值和结算均保留来源与时间。
 
-截至 2026-07-20：
+## 重要结论
 
-- 后端、前端、调度器、天气采集、Polymarket Gamma/CLOB 盘口、模拟成交和模拟结算链路可运行。
-- 已注册 51 个城市，其中 49 个城市有活跃天气市场映射。
-- 当前模拟 cohort 为 `paper-20260719T080517Z-63d973b3`，本金 `$40`，单笔上限 `$2`，最多同时持仓 5 笔。
-- 当前 cohort 已产生 6 笔模拟订单：1 笔已结算亏损 `$1.26`，5 笔仍持仓或等待市场结算。
-- 当前 cohort 使用 `single_bucket_ev + ladder_grid`，退出方式固定为 `hold_to_settlement`。
-- `model_guarded` 模型失效退出已实现，但只对新建 cohort 生效，不会改写当前实验。
-- PWS 仍缺具备 Weather Underground PWS 产品权限的 API key，因此保持禁用。
-- 实盘执行器、资金授权和 canary 验收尚未完成，不能自动实盘。
+当前活跃策略 `core_modal_v1` 只观察模型概率最高的两个温度桶，并要求：
 
-这份状态会变化。实时状态以看板和下面的命令为准：
+- 模型概率至少 `25%`；
+- 扣除价差缓冲后的有效优势至少 `8%`；
+- 至少 4 个独立模型家族，模型最高温分歧不超过 `1.5°C`；
+- 校准覆盖率至少 `80%`，且有足够独立结算日；
+- 盘口、tick、最小订单、深度、新鲜度和结算规则全部有效；
+- 仓位使用 `15% fractional Kelly`，单笔最多本金的 `5%`。
 
-```powershell
-./.venv/Scripts/python.exe -m weatherbot_v3.cli source-health
-./.venv/Scripts/python.exe -m weatherbot_v3.cli paper-cohort-status
-```
+2026-07-18 至 2026-07-22 的无泄漏回放得到 113 个有效案例：Top-1 命中率 `27.43%`、Top-2 `45.13%`、多分类 Brier `0.6968`，可执行历史交易为 `0`。这说明系统已经能诚实拒绝低质量交易，但还没有盈利证据。
 
-## 系统结构
+## 技术架构
 
 ```text
-天气源 / 观测源
-  |-- Weather.com v3 hourly forecast
-  |-- Open-Meteo NWP models
-  |-- AWC / IEM METAR
-  |-- WU hourly / daily history
-  |-- China Weather Live / HKO
-  `-- PWS (有授权时)
-          |
-          v
-hourly_consensus -> Daily Max Prediction (DEB) -> 概率桶
-          |                                      |
-          `------------------+-------------------'
-                             v
-Polymarket Gamma/CLOB -> market buckets -> signal decisions
-                                                |
-                                                v
-                                  paper executor / settlement
-                                                |
-                                                v
-                                       React 交易看板
+天气/市场采集器
+  -> SQLite 原始事实与快照
+  -> hourly consensus / DEB / bucket probabilities
+  -> signal decisions + 风控闸门
+  -> paper executor / settlement / equity curve
+  -> FastAPI
+  -> React + TypeScript + Tailwind + Recharts
 ```
 
-| 路径 | 作用 |
-|---|---|
-| `dashboard_server.py` | FastAPI API 和前端适配层 |
-| `weatherbot_v3/` | 采集、DEB、市场桶、策略、模拟执行、结算、调度器 |
-| `weatherbot_v3/strategies/` | 三类策略实现 |
-| `frontend/` | Vite + React + TypeScript + Tailwind + Recharts 看板 |
-| `data/weatherbot_v3.db` | SQLite 主状态库；逻辑路径实际指向 `D:\WeatherBot\data` |
-| `data/weatherbot.db` | legacy 旧库，不是 v6 主库 |
-| `docs/CURRENT_STATE.md` | 当前开发阶段和阻塞项 |
-| `docs/IMPLEMENTATION_LOGIC_CN.md` | Layer 0-9 数据流和边界 |
-| `docs/DATA_STORAGE_CN.md` | D 盘数据迁移与恢复说明 |
-| `AGENTS.md` | 项目开发、安全和验证规则 |
-| `legacy/`、`weatherbet.py` | 旧版参考，不要与 v6 同时运行 |
+主要目录：
 
-## 数据源职责
-
-数据源不能混用。看板上的多条曲线代表不同角色，并不保证数值完全一致。
-
-| 数据源 | 当前用途 | 是否结算 truth |
-|---|---|---|
-| Weather.com v3 | 主小时预报、云量、天气状态，并作为 DEB 的 `v3` 分量 | 否 |
-| Open-Meteo | ECMWF、GFS、ICON、GEM、JMA 等独立 NWP 输入 | 否 |
-| AWC / IEM METAR | 机场实况、当日最高温下限、模型失效判断 | 否，通常只是近似观测 |
-| WU hourly / daily | 历史观测与非香港市场 truth 候选 | 规则指向 WU 时是首选 |
-| HKO Daily Extract | 香港市场 truth 候选 | 是，取决于市场规则 |
-| China Weather Live | 中国城市分钟级实况辅助 | 否 |
-| WU PWS | 邻近个人站趋势和拐点辅助 | 否 |
-| Gamma API | 市场、事件、结算状态 | 市场胜负权威来源 |
-| CLOB | token、bid/ask、深度、tick、最小订单 | 交易执行依据 |
-
-重要边界：PWS 和 China Live 可以帮助判断温度是否见顶，但不能替代市场规则指定的结算站。
+| 路径 | 用途 |
+| --- | --- |
+| `weatherbot_v3/` | 生产化采集、派生、策略、执行和风控 |
+| `dashboard_server.py` | FastAPI 与看板适配层 |
+| `frontend/src/` | React 看板 |
+| `tests/` | 单元、契约和集成测试 |
+| `tools/` | 回放与只读诊断工具 |
+| `data/` | 本地运行数据 Junction，实际指向 `D:\WeatherBot\data` |
+| `legacy/` | 旧版，只读参考 |
 
 ## 首次安装
 
-在 PowerShell 中进入项目：
+在 PowerShell 中：
 
 ```powershell
 cd C:\Users\Administrator\Documents\polymarket\weatherbot
-```
-
-创建 Python 环境并安装依赖：
-
-```powershell
 python -m venv .venv
-./.venv/Scripts/python.exe -m pip install -r requirements.txt
-```
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-安装前端依赖：
-
-```powershell
 cd frontend
 npm install
-cd ..
 ```
 
-密钥放在项目根目录 `.env`，不要提交 Git。可在看板“设置”中查看掩码状态和测试 API。
+密钥只放项目根目录 `.env`，不要写入 README、`config.json` 或 Git：
 
-## 本地启动
+```dotenv
+LIVE_TRADING=false
+WEATHER_COM_API_KEY=***
+WUNDERGROUND_API_KEY=***
+MINIMAX_API_KEY=***
+FEISHU_WEBHOOK_URL=***
+```
 
-需要两个 PowerShell 窗口。
+没有某个可选密钥时，对应来源会明确降级或禁用，不会伪造数据。
 
-窗口 1，启动后端：
+## 启动项目
+
+### 1. 后端
+
+打开第一个 PowerShell：
 
 ```powershell
 cd C:\Users\Administrator\Documents\polymarket\weatherbot
-./.venv/Scripts/python.exe -m uvicorn dashboard_server:app --host 127.0.0.1 --port 8765
+.\.venv\Scripts\python.exe -m uvicorn dashboard_server:app --host 127.0.0.1 --port 8765
 ```
 
-窗口 2，启动前端：
+### 2. 前端
+
+打开第二个 PowerShell：
 
 ```powershell
 cd C:\Users\Administrator\Documents\polymarket\weatherbot\frontend
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-浏览器打开：
+浏览器打开：<http://127.0.0.1:5173/>
 
-```text
-http://127.0.0.1:5173/
-```
+### 3. 启动调度器
 
-后端启动后默认不会自动启动调度器。可在顶栏点击“启动调度器”，或执行：
+后端默认不会自动抓取。可在看板顶部点击“启动调度器”，或执行：
 
 ```powershell
 Invoke-RestMethod -Method Post http://127.0.0.1:8765/api/scheduler/start
 ```
 
-查看状态：
+检查状态：
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8765/api/scheduler/status
@@ -155,330 +120,144 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8765/api/scheduler/stop
 
 ## 日常操作
 
-1. 启动后端和前端，确认页面没有长期显示“正在连接”。
-2. 启动调度器，等待数据源徽章转为绿色。
-3. 从左侧按洲、时区或字母选择城市，再选择当地日期。
-4. 在“预报”页检查 Forecast、METAR、历史观测和 China Live 是否新鲜。
-5. 查看 DEB 的预测最高温、标准差、模型来源和权重。
-6. 查看温度桶中的模型概率、市场 ask、优势和交易状态。
-7. 右侧“策略队列”只展示通过策略计算的候选；“天气关注”只是值得观察，不等于买入。
-8. 启动模拟 cohort 后，系统按固定策略版本和 Kelly 风控自动处理新信号。
-9. 在“模拟订单”查看入场时间、桶、价格、份额、当前 bid 估值、浮动盈亏和结算结果。
-10. 实验结束后导出或记录 cohort 的 ROI、Brier score、回撤和逐笔证据，再决定下一轮参数。
+### 左侧城市栏
 
-关闭电脑会停止后端和调度器。再次开机后需要重新启动两个服务和调度器；数据库中的历史、订单和 cohort 不会丢失。
+- 搜索城市名或 ICAO 机场代码。
+- 分组下拉支持按洲、时区、字母浏览；每组有独立标题与城市数。
+- 城市温度是最近可用观测，不等于该日最终结算高温。
 
-## 看懂天气图与 DEB
+### 中间天气工作台
 
-### 小时图
+1. **预报**：独立显示中国实况、PWS、METAR、历史观测、本系统预报和云量。没有真实值的系列不会补零。
+2. **METAR**：机场原始报文和解析字段。它是日内实况证据，不自动等同于 Wunderground 结算值。
+3. **历史观测**：Wunderground/weather.com 历史序列；香港采用 HKO 规则。缺失时诚实显示空态。
+4. **偏差统计**：`观测 - 预报`。METAR 按最近整点匹配；历史观测按最近整点匹配并去重，避免同一小时重复计数。
+5. **抓取日志**：只显示当前城市的最近记录，检查来源、状态、耗时和错误；天气、观测、盘口、信号按消息语义归类。
 
-- Forecast：当天每小时预测温度。
-- METAR：结算机场附近的航空观测，是当日温度下限和走势证据。
-- Historical：WU 历史/当日观测，适合对照结算口径。
-- China Live：国内实况站辅助线，不是结算温度。
-- PWS：邻近个人站高频趋势；未授权时不会画线。
-- Cloud：与主 forecast 同一快照的云量，不用湿度冒充。
-- Peak：混合曲线的预测峰值小时，不是已确定结算值。
+各观测表的气压统一显示为 `hPa`；温度、风速和能见度按城市显示习惯转换。
 
-### DEB
+DEB 的 `μ ± σ` 表示日最高温预测中心和不确定度。概率桶是模型分布，不是收益保证。只有市场桶严格匹配且真实 ask、价差、流动性和风控全部通过时，才会成为模拟候选。
 
-DEB 将 `v3 / GFS / ECMWF / ICON / GEM / JMA` 等模型去偏后加权，输出：
+### 右侧模拟交易台
 
-- `mu`：当日最高温中心预测。
-- `sigma`：预测不确定度；越大表示分布越分散。
-- observed floor：当日已经观测到的最高温，模型不能再预测低于这个值。
-- 每源权重：先验权重结合近 7 日误差调整；缺源时重新归一化。
+1. 展开“自动模拟设置”。
+2. 输入模拟本金和单笔上限。
+3. 选择入场策略与退出方式。
+4. 确认顶部调度器正在运行。
+5. 点击“一键模拟”。
 
-DEB 不是“最可能温度就是必胜温度”。对于 1°C 或 1°F 窄桶，哪怕中心预测只偏 1 度，也可能完全结算到相邻桶。
+当前建议只使用 `核心高概率桶`。旧的单桶 EV、相邻网格和低价尾部策略仍保留用于研究，但默认关闭，因为历史证据不足。
 
-## 看懂温度桶
+模拟账户启动后会固定策略版本，避免测试期间参数漂移。策略队列展示当前城市的决策；模拟订单页展示：
 
-每个桶对应一个 Polymarket YES 市场。
+- 入场时间、城市、日期、温度桶和策略；
+- 买入价、份额、成本、当前买一价；
+- 未实现/已实现 PnL 与状态；
+- Polymarket 对应市场链接；
+- 资金曲线。
 
-| 字段 | 含义 |
-|---|---|
-| 模型概率 | DEB 认为当日最高温落入该桶的概率 |
-| 市场 ask | 立即买入 YES 需要支付的价格 |
-| 市场 bid | 立即卖出 YES 大致能收到的价格 |
-| 优势/edge | `模型概率 - ask`，以百分点表示 |
-| 毛 EV/份 | 忽略费用时，每份的期望收益近似为 `模型概率 - ask` |
-| 浮动盈亏 | 按可卖出的 best bid 估值，不按页面中间价 |
+没有通过全部闸门的候选时显示“暂无模拟订单”，这是有效结果，不是故障。
 
-例：模型概率 30%，ask 10¢，优势为 `+20 个百分点`。这只是候选，不是自动买入理由。它还必须通过：
+## 退出与结算
 
-- 市场与温度桶严格匹配。
-- 站点、单位、日期和结算规则已核验。
-- forecast、DEB、盘口没有过期。
-- spread、深度、tick size、最小订单满足要求。
-- 模型校准样本和策略阈值满足要求。
-- Kelly 仓位大于零且不突破 cohort 风控。
+### 持有至结算
 
-买入后立刻出现小幅浮亏通常是 bid/ask spread，不代表天气判断已错；但宽 spread 会显著侵蚀 edge。
+忽略盘中噪声，等待 Polymarket 官方结果。适合先验证概率质量。
 
-## 当前策略
+### 模型保护退出
 
-### 1. Single Bucket EV
+仅用于模拟盘：
 
-实现：`weatherbot_v3/strategies/single_bucket_ev.py`
+- 已观测最高温使目标桶不可能时，尝试按真实买一价退出；
+- 仅模型转弱时，需要连续两次概率低于 `8%`；
+- 还要满足最短持有时间、盘口新鲜度、深度和卖价不差于模型公允价。
 
-- 对每个桶独立计算 `model_probability - best_ask`。
-- 当前最低 edge 为 5 个百分点。
-- 通过完整数据、盘口和风险 gate 后，按 fractional Kelly 分配仓位。
-- 优点：简单、可审计，适合建立基线。
-- 风险：窄桶对 1 度误差极敏感，尾部概率失准时会连续买错。
+这不是传统固定百分比止损，避免薄盘口的短期价差把正常波动固化成损失。
 
-### 2. Ladder Grid
-
-实现：`weatherbot_v3/strategies/ladder_grid.py`
-
-- 选择最接近 `mu` 的中心桶和左右各一个相邻桶。
-- 三个桶每个都必须至少有 3 个百分点 edge。
-- 整组仓位为中心桶 Kelly 仓位的 60%，再按模型概率分配。
-- 三个桶原子执行：一个桶盘口不合格，整组跳过。
-- 优点：降低最高温刚好落在相邻桶导致全损的风险。
-- 风险：多个 ask 的总成本可能过高，分散不等于正期望。
-
-### 3. Tail Buying
-
-实现：`weatherbot_v3/strategies/tail_buying.py`
-
-- 只看 ask 不高于 15¢ 的低价桶。
-- 模型概率必须比 ask 高至少 10 个百分点。
-- 城市至少需要 20 个独立结算日，避免用少量数据夸大尾部概率。
-- 每日最多 5 个候选。
-- 当前模拟 cohort 没有启用该策略。
-- 风险最高。便宜不等于低风险，低价尾部可以连续归零。
-
-## Kelly 仓位
-
-二元 YES 合约的全 Kelly 比例可写为：
+## 如何读“概率优势”
 
 ```text
-b = 1 / ask - 1
-kelly = (p * b - (1 - p)) / b
+原始优势 = 模型概率 - 当前 YES ask
+有效优势 = 原始优势 - max(tick, spread / 2)
 ```
 
-本项目使用 15% fractional Kelly，并额外限制：
+正数只表示模型比市场更乐观，不代表可以买。真正的候选还必须满足模型排名、校准、结算 truth、模型分歧、盘口、最小订单和 Kelly 大小等条件。
 
-- 单笔不超过 bankroll 的 5%。
-- 单笔不超过 cohort 的 `max_per_trade_usd`。
-- 不超过当日剩余额度、现金和最大同时持仓数。
+## 数据源职责
 
-Kelly 只是在“概率 p 已校准”的前提下控制仓位。若概率本身偏差很大，Kelly 会把模型错误放大，因此 paper 验证优先于提高金额。
+| 来源 | 角色 | 是否直接解锁实盘 |
+| --- | --- | --- |
+| AWC/IEM METAR | 机场实况、日内最高温下限 | 否 |
+| Wunderground daily/hourly | 非香港市场历史/结算 truth 候选 | 需覆盖与核验 |
+| HKO Daily Extract | 香港结算 truth | 需规则匹配 |
+| Weather.com v3 | 主展示预报与 DEB 模型之一 | 否 |
+| Open-Meteo ECMWF/GFS/ICON/GEM/JMA | 独立 NWP 与 DEB | 否 |
+| 中国天气实况 | 中国城市短临辅助 | 否 |
+| PWS | 温度走势与峰值拐点辅助 | 否 |
+| Polymarket Gamma/CLOB | 市场、token、盘口、结算 | 交易必需 |
 
-## 退出方式
+## 与参考项目的取舍
 
-### Hold To Settlement
+- [alteregoeth-ai/weatherbot](https://github.com/alteregoeth-ai/weatherbot)：借鉴机场站点、EV、Kelly、模拟和价差过滤；不沿用 JSON 单体状态和未经验证的概率校准。
+- [suislanchez/polymarket-kalshi-weather-bot](https://github.com/suislanchez/polymarket-kalshi-weather-bot)：借鉴 31-member ensemble、8% edge、15% fractional Kelly、Brier 和三栏看板；不混入 BTC 策略。
+- [PolyWeather](https://github.com/yangyuan-zhen/PolyWeather)：借鉴 settlement-oriented 观测、DEB、严格桶匹配、EMOS shadow 和事件驱动展示；不把未公开的生产阈值当作已验证事实。
+- [Polymarket 官方订单文档](https://docs.polymarket.com/trading/orders/create)：实盘必须遵守限价、tick、minimum size、余额、订单状态和重复订单约束。
 
-持有到 Polymarket 结算。优点是实验口径清楚，不会把短时 spread 当成止损信号；缺点是错误仓位会承受全部损失。
+## 当前局限
 
-### Model Guarded
+- 回放只有少量独立结算日，城市级命中率波动很大。
+- 当前回放没有历史可执行订单，无法计算真实 ROI 或证明 edge。
+- 多数候选被模型分歧、最小订单和盘口价差阻塞。
+- Weather.com v3 的无泄漏历史样本仍不足，部分城市权重为零。
+- PWS 取决于独立 API entitlement；无权限时保持禁用。
+- 历史买一价只能近似持仓退出价值，薄盘口会造成明显浮亏。
 
-只对新 cohort 可选：
+因此当前正确路径是继续采集和受控模拟，按城市统计 Brier、Top-2、CLV、成交率、ROI 和最大回撤，再决定是否调整策略。不要为了产生订单而放宽风控。
 
-- 观测最高温已经物理越过目标桶时，尝试按新鲜 best bid 退出。
-- 最新模型概率持续跌破阈值，并经过两次独立确认时退出。
-- best bid 过旧、深度不足或价格不合法时拒绝退出。
-
-当前 cohort 仍固定为 `hold_to_settlement`。不要在同一 cohort 中途换退出规则，否则无法比较策略。
-
-普通的“价格跌 20% 就止损”不适合薄盘口天气桶：买入 ask 后按 bid 估值会天然亏 spread，容易把噪声固化成真实亏损。
-
-## 市面常见玩法
-
-这些是天气预测市场常见研究方向，不代表本项目都已实现，更不代表必然盈利。
-
-1. 概率差交易：用集合预报生成每桶概率，与可成交 ask 比较。WeatherBot 当前主要属于这一类。
-2. 近结算锁峰：D+0 使用 METAR、PWS、云量和剩余升温空间判断日高温是否已形成。项目已有观测 floor 和 guarded exit，完整 peak-lock 入场仍需验证。
-3. 相邻桶组合：买中心桶和邻桶，降低边界误差。项目的 Ladder Grid 已实现模拟版本。
-4. 模型更新时间差：ECMWF/GFS 新 run 发布后，模型概率先变化、盘口稍后重定价。项目记录 model timing，但不自动追价。
-5. 低价尾部：买市场低估的小概率桶。项目有 Tail Buying，但它对概率校准要求最高，当前不应作为主策略。
-6. 全套桶套利：若互斥桶的可成交总成本加费用低于 1 美元，理论上存在锁定空间；必须同时核对深度、费用和是否真能全部成交。项目暂未实现自动套利。
-7. Maker 挂单：用被动限价减少 spread 和 taker fee，但存在不成交或只成交最差一腿的风险。项目 paper 目前按可成交 ask 模拟，不等于 maker 回测。
-8. 跨平台价差：比较 Polymarket、Kalshi 等同口径市场。结算站、单位和规则往往不同，项目尚未接入跨平台执行。
-
-Polymarket 显示价格通常是 midpoint，但实际买入支付 ask、卖出收到 bid；天气市场还可能启用 taker fee。因此任何策略都应以可成交价格、深度和费用计算，而不是只看页面概率。
-
-## 模拟交易建议
-
-推荐先运行 14-30 天，并至少积累 30 个已结算独立仓位。每轮实验只改一个变量。
-
-建议顺序：
-
-1. Cohort A：`single_bucket_ev`，`hold_to_settlement`，作为基线。
-2. Cohort B：相同入场策略，改用 `model_guarded`，比较是否降低损失而不过早卖出赢家。
-3. Cohort C：加入 `ladder_grid`，比较组合桶的 ROI 和最大回撤。
-4. 只有独立结算样本足够后，再单独测试 `tail_buying`。
-
-至少记录：
-
-- 已结算数量、胜率、ROI、最大回撤。
-- Brier score 和按城市/lead time/价格桶的校准。
-- 买入 ask、退出 bid、spread、深度和费用估计。
-- 信号产生到模拟成交的延迟与拒单原因。
-- guarded exit 的触发数、成功退出数和 exit regret。
-
-不要只看胜率。买入 5¢ 的合约即使胜率低也可能盈利，买入 40¢ 的合约即使胜率较高也可能亏损；核心是长期校准后的期望收益。
-
-## 当前限制
-
-- 尚无 14-30 天、30+ 独立已结算仓位证明正 ROI。
-- 部分城市 WU 历史接口不稳定；Istanbul 当前有明确缺口。
-- PWS key 无产品权限，PWS 线保持禁用。
-- 部分城市 settlement source 仍有 mismatch 或样本不足，只允许观察/paper。
-- 盘口薄、spread 宽时，模型 edge 可能无法兑现。
-- paper fill 是基于盘口快照的模拟，不等于真实排队、部分成交和网络延迟。
-- 天气市场可能启用 taker fee；实验必须逐步加入费用后的净 PnL。
-- live executor、钱包授权、余额检查、撤单与 canary 尚未完成生产验收。
-- MiniMax AI 审核和飞书通知不是当前核心盈利依据，默认可以关闭。
-
-## 实盘开放条件
-
-在同时满足以下条件前，不应解除 `LIVE_TRADING=false`：
-
-- 连续 14-30 天调度稳定。
-- 至少 30 个独立已结算 paper 仓位。
-- 允许策略组费用后 ROI 为正，并优于 blocked/观察组。
-- truth coverage、站点和结算规则达到验收阈值。
-- 最大回撤、日亏损和重复订单保护通过测试。
-- CLOB tick、min order、余额、深度、过期盘口和 idempotency 测试通过。
-- 第一笔只允许 `$1-$2` canary，且需要人工确认。
-
-## 常用命令
-
-项目健康检查：
+## 验证命令
 
 ```powershell
-./.venv/Scripts/python.exe -m weatherbot_v3.cli state-print
-./.venv/Scripts/python.exe -m weatherbot_v3.cli source-health
-./.venv/Scripts/python.exe -m weatherbot_v3.cli project-verify --verification-mode paper
-```
+cd C:\Users\Administrator\Documents\polymarket\weatherbot
+.\.venv\Scripts\python.exe -m unittest tests.test_v3_core
+.\.venv\Scripts\python.exe -m unittest tests.test_polywx_contract
 
-城市与站点：
-
-```powershell
-./.venv/Scripts/python.exe -m weatherbot_v3.cli stations-list
-./.venv/Scripts/python.exe -m weatherbot_v3.cli stations-enable --city chicago
-./.venv/Scripts/python.exe -m weatherbot_v3.cli stations-disable --city chicago
-```
-
-单城市手动刷新：
-
-```powershell
-./.venv/Scripts/python.exe -m weatherbot_v3.cli metar-refresh --city chicago --recent-hours 6
-./.venv/Scripts/python.exe -m weatherbot_v3.cli weathercom-fetch --city chicago
-./.venv/Scripts/python.exe -m weatherbot_v3.cli openmeteo-fetch --city chicago
-./.venv/Scripts/python.exe -m weatherbot_v3.cli wunderground-hourly-fetch --city chicago --days 1
-```
-
-模拟 cohort：
-
-```powershell
-./.venv/Scripts/python.exe -m weatherbot_v3.cli paper-cohort-status
-./.venv/Scripts/python.exe -m weatherbot_v3.cli paper-cohort-tick
-```
-
-完整 CLI：
-
-```powershell
-./.venv/Scripts/python.exe -m weatherbot_v3.cli --help
-```
-
-## 测试
-
-后端：
-
-```powershell
-./.venv/Scripts/python.exe -m unittest discover tests
-```
-
-前端：
-
-```powershell
 cd frontend
 npm run build
 ```
 
-API：
+无泄漏策略回放示例：
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8765/api/dashboard
-Invoke-RestMethod http://127.0.0.1:8765/api/source-health
-Invoke-RestMethod http://127.0.0.1:8765/api/paper-validation/status
+cd C:\Users\Administrator\Documents\polymarket\weatherbot
+.\.venv\Scripts\python.exe tools\backtest_core_modal_strategy.py `
+  --cities chicago shanghai tokyo singapore `
+  --start 2026-07-18 --end 2026-07-22 `
+  --output audits\core-modal-review.json
 ```
 
-## 故障排查
+## 常见问题
 
-### 端口被占用
-
-查看监听进程：
+### 8765 或 5173 端口被占用
 
 ```powershell
-Get-NetTCPConnection -LocalPort 8765,5173 -State Listen |
-  Select-Object LocalPort,OwningProcess
+Get-NetTCPConnection -LocalPort 8765 -State Listen | Select-Object LocalAddress,LocalPort,OwningProcess
+Stop-Process -Id <OwningProcess> -Force
 ```
 
-停止指定端口的旧进程：
+只停止确认属于 WeatherBot 的 PID。Vite 若发现 5173 被占用会自动切到 5174，应优先清理旧进程，避免打开错版本。
 
-```powershell
-Get-NetTCPConnection -LocalPort 8765 -State Listen |
-  ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+### 看板数据不更新
 
-Get-NetTCPConnection -LocalPort 5173 -State Listen |
-  ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
-```
-
-### 页面一直显示正在连接
-
-1. 确认 `http://127.0.0.1:8765/api/dashboard` 能返回 JSON。
-2. 确认前端实际端口是 5173，而不是 Vite 自动切换后的 5174。
-3. 查看 `.tmp/dashboard_server.stderr.log` 和 `.tmp/vite.stderr.log`。
-4. 更新代码后重启后端，旧 uvicorn 不会自动加载新逻辑。
-
-### 数据不更新
-
-先看调度器：
+依次检查：
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8765/api/scheduler/status
+Invoke-RestMethod http://127.0.0.1:8765/api/source-health
+Invoke-RestMethod http://127.0.0.1:8765/api/dashboard
 ```
 
-若 `running=false`，手动启动。关闭电脑、结束后端或重启系统都会停止内存中的 scheduler，但不会删除数据库。
+然后打开当前城市的“抓取日志”。不要只看顶部“刷新成功”，要确认对应 source 的最新时间和状态。
 
-### 没有买入信号
+### 实盘
 
-这是允许的正常状态。常见原因包括：
-
-- 当地日期或市场已经过期。
-- 只有“天气关注”，没有满足交易 gate。
-- model edge 不足。
-- spread 太宽、盘口过旧或深度不足。
-- 结算站、市场桶或 token 没有严格匹配。
-- 策略样本不足，只允许观察。
-- 达到每日额度或最大持仓数。
-
-### 订单一买入就浮亏
-
-买入按 ask，持仓按可卖出的 bid 估值。`ask - bid` 会立刻表现为浮亏。应同时检查 spread、深度和费用，而不是用页面 midpoint 估值。
-
-## 安全与数据
-
-- `.env`、`config.json`、API key、钱包私钥、`data/` 不提交 Git。
-- 物理数据目录是 `D:\WeatherBot\data`，项目内 `data/` 是 junction。
-- 不要同时运行 legacy `weatherbet.py` 和 v6 scheduler。
-- 所有实盘按钮默认锁定；不要仅因看板出现正 edge 就手动提高金额。
-
-## 参考资料
-
-- [Polymarket Market Data Overview](https://docs.polymarket.com/market-data/overview)
-- [Polymarket Prices and Orderbook](https://docs.polymarket.com/concepts/prices-orderbook)
-- [Polymarket Orderbook API](https://docs.polymarket.com/trading/orderbook)
-- [Polymarket Order Overview](https://docs.polymarket.com/trading/orders/overview)
-- [Polymarket Fees](https://docs.polymarket.com/trading/fees)
-- [alteregoeth-ai/weatherbot](https://github.com/alteregoeth-ai/weatherbot)
-- [suislanchez/polymarket-kalshi-weather-bot](https://github.com/suislanchez/polymarket-kalshi-weather-bot)
-- [yangyuan-zhen/PolyWeather](https://github.com/yangyuan-zhen/PolyWeather)
-
-## 免责声明
-
-本项目是研究和模拟工具，不构成投资建议，不承诺盈利。天气市场同时存在预测误差、结算源差异、盘口流动性、费用、滑点、接口故障和规则变更风险。只使用可以全部损失的资金，并在完整 paper 证据成立后再考虑极小额 canary。
+`LIVE_TRADING=false` 是默认且必须保持的状态。当前版本尚未达到实盘验收门槛，也不承诺稳定盈利。

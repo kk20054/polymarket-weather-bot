@@ -525,13 +525,14 @@ def hourly_consensus_summary(
 
 
 def polywx_bias_stats(series: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    """Compare exact local-hour observations and native source overlap.
+    """Reproduce the displayed-hour comparison used by the PolyWX workbench.
 
-    PolyWX uses one forecast/observation pair per whole local hour for delta
-    and Pearson R.  Its Historical/METAR overlap is a separate native-cadence
-    coverage metric, limited to the latest timestamp available from both
-    sources.  Keeping those contracts separate prevents a later :30 METAR
-    from replacing the :00 value used by the forecast comparison.
+    Airport reports are matched to the nearest forecast hour, so a routine
+    ``:51`` METAR compares with the following hour while an early SPECI stays
+    in its current hour.  METAR keeps every report.  WU Historical collapses
+    duplicate reports in the same matched hour and uses its integer display
+    temperature.  Native-cadence Historical/METAR overlap is audited
+    separately and never discards the underlying rows.
     """
 
     forecast_by_time: dict[str, float] = {}
@@ -539,12 +540,22 @@ def polywx_bias_stats(series: dict[str, list[dict[str, Any]]]) -> dict[str, Any]
         local_time = _series_local_minute(point)
         value = _series_temperature(point)
         if local_time and local_time.endswith(":00") and value is not None:
-            forecast_by_time[local_time] = value
+            forecast_by_time[local_time] = _display_temperature(value)
 
     result: dict[str, Any] = {
-        "method": "polywx_exact_local_hour_v1",
-        "metar": _bias_source_summary(series.get("metar") or [], forecast_by_time),
-        "historical": _bias_source_summary(series.get("historical") or [], forecast_by_time),
+        "method": "polywx_nearest_local_hour_v3",
+        "metar": _bias_source_summary(
+            series.get("metar") or [],
+            forecast_by_time,
+            dedupe_matched_hour=False,
+            round_observed=False,
+        ),
+        "historical": _bias_source_summary(
+            series.get("historical") or [],
+            forecast_by_time,
+            dedupe_matched_hour=True,
+            round_observed=True,
+        ),
         "historical_metar_overlap": _native_series_overlap(
             series.get("historical") or [],
             series.get("metar") or [],
@@ -556,24 +567,42 @@ def polywx_bias_stats(series: dict[str, list[dict[str, Any]]]) -> dict[str, Any]
 def _bias_source_summary(
     observed_rows: list[dict[str, Any]],
     forecast_by_time: dict[str, float],
+    *,
+    dedupe_matched_hour: bool,
+    round_observed: bool,
 ) -> dict[str, Any]:
-    observed_by_time: dict[str, float] = {}
+    matched_rows: list[tuple[str, str, float]] = []
     for point in observed_rows:
         local_time = _series_local_minute(point)
         value = _series_temperature(point)
-        if local_time and local_time.endswith(":00") and value is not None:
-            observed_by_time[local_time] = value
+        if not local_time or value is None:
+            continue
+        hour_key = _nearest_local_hour(local_time)
+        if not hour_key or hour_key not in forecast_by_time:
+            continue
+        matched_rows.append((hour_key, local_time, _display_temperature(value) if round_observed else value))
+
+    if dedupe_matched_hour:
+        by_hour: dict[str, tuple[str, float]] = {}
+        for hour_key, local_time, value in matched_rows:
+            previous = by_hour.get(hour_key)
+            if previous is None or local_time >= previous[0]:
+                by_hour[hour_key] = (local_time, value)
+        matched_rows = [
+            (hour_key, local_time, value)
+            for hour_key, (local_time, value) in by_hour.items()
+        ]
 
     pairs: list[dict[str, Any]] = []
     cumulative_delta = 0.0
-    for local_time in sorted(set(forecast_by_time) & set(observed_by_time)):
-        forecast = forecast_by_time[local_time]
-        observed = observed_by_time[local_time]
+    for hour_key, native_time, observed in sorted(matched_rows, key=lambda row: (row[0], row[1])):
+        forecast = forecast_by_time[hour_key]
         delta = observed - forecast
         cumulative_delta += delta
         count = len(pairs) + 1
         pairs.append({
-            "local_time": local_time,
+            "local_time": hour_key,
+            "observation_time": native_time,
             "forecast": forecast,
             "observed": observed,
             "delta": delta,
@@ -592,6 +621,23 @@ def _bias_source_summary(
         "cutoff_hour": pairs[-1]["local_time"] if pairs else None,
         "pairs": pairs,
     }
+
+
+def _nearest_local_hour(local_time: str) -> str | None:
+    match = re.match(r"^(\d{2}):(\d{2})$", str(local_time or ""))
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if minute >= 30:
+        if hour >= 23:
+            return None
+        hour += 1
+    return f"{hour:02d}:00"
+
+
+def _display_temperature(value: float) -> float:
+    return float(math.floor(float(value) + 0.5))
 
 
 def _native_series_overlap(
@@ -913,7 +959,7 @@ def source_series_summary(
             cloud_cover=_metar_cloud_cover_percent(row),
             wind_speed=row.get("wind_speed"),
             wind_direction=row.get("wind_direction"),
-            pressure=row.get("pressure") or row.get("altimeter"),
+            pressure=_metar_pressure_hpa(row),
             dew_point=row.get("dew_point"),
             visibility=row.get("visibility"),
             condition=_metar_weather_tokens(row),
@@ -927,7 +973,6 @@ def source_series_summary(
         historical_visibility = _float(row.get("visibility_km"))
         if str(profile.unit or "").upper() == "F":
             historical_wind_speed = historical_wind_speed / 1.609344 if historical_wind_speed is not None else None
-            historical_pressure = historical_pressure / 33.8638866667 if historical_pressure is not None else None
             historical_visibility = historical_visibility / 1.609344 if historical_visibility is not None else None
         point = _observation_point(
             profile,
@@ -1376,6 +1421,9 @@ def forecast_hourly_points(
                 continue
             key = (city, target_date, local_hour)
             if source == WEATHERCOM_SOURCE:
+                selected_hours = run.get("_weathercom_selected_hours")
+                if isinstance(selected_hours, (list, tuple, set)) and local_hour not in selected_hours:
+                    continue
                 weathercom_revision_counts[key] += 1
                 if key in seen_weathercom_hours:
                     continue
@@ -1390,6 +1438,7 @@ def forecast_hourly_points(
                     "values": [],
                     **{f"{field}_values": [] for field in FIELD_KEYS},
                     "condition_values": [],
+                    "weathercom_condition_values": [],
                     "sources": set(),
                     "primary_sources": set(),
                     "fallback_sources": set(),
@@ -1412,6 +1461,12 @@ def forecast_hourly_points(
             bucket["source_values"][source].append(float(temp))
             if source == WEATHERCOM_SOURCE:
                 bucket["weathercom_values"].append(float(temp))
+                bucket["retrieved_at"] = (
+                    run.get("available_at")
+                    or run.get("retrieved_at")
+                    or run.get("run_at")
+                    or run.get("created_at")
+                )
             for field, keys in FIELD_KEYS.items():
                 value = _first_float(item, keys)
                 if value is not None:
@@ -1421,6 +1476,8 @@ def forecast_hourly_points(
             condition = _condition_label(item)
             if condition:
                 bucket["condition_values"].append(condition)
+                if source == WEATHERCOM_SOURCE:
+                    bucket["weathercom_condition_values"].append(condition)
 
     by_city: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for (city, _target_date, _valid_at), bucket in buckets.items():
@@ -1461,7 +1518,7 @@ def forecast_hourly_points(
             "pressure": _mean(bucket["weathercom_pressure_values"]) if bucket["weathercom_pressure_values"] else _mean(bucket["pressure_values"]),
             "dew_point": _mean(bucket["weathercom_dew_point_values"]) if bucket["weathercom_dew_point_values"] else _mean(bucket["dew_point_values"]),
             "shortwave_radiation": _mean(bucket["shortwave_radiation_values"]),
-            "condition": _mode(bucket["condition_values"]),
+            "condition": _mode(bucket["weathercom_condition_values"]) or _mode(bucket["condition_values"]),
             "source": " + ".join(source_parts) if source_parts else "forecast_archive",
             "member_count": len(values),
             "ecmwf": _mean(_matching_source_values(source_values, "ecmwf")),
@@ -1585,7 +1642,7 @@ def _weathercom_runs_for_hourly_archive(
     if not available_runs:
         return runs[:48]
 
-    selected_ids: set[int] = set()
+    selected_hours_by_id: dict[int, set[str]] = defaultdict(set)
     for hour in range(24):
         valid_at = (start_local + timedelta(hours=hour)).astimezone(timezone.utc)
         candidates = [item for item in available_runs if item[0] <= valid_at]
@@ -1595,9 +1652,18 @@ def _weathercom_runs_for_hourly_archive(
             candidates,
             key=lambda item: (item[0], int(item[1].get("id") or 0)),
         )
-        selected_ids.add(int(selected.get("id") or 0))
+        selected_hours_by_id[int(selected.get("id") or 0)].add(f"{hour:02d}:00")
 
-    return [run for run in runs if int(run.get("id") or 0) in selected_ids]
+    selected_runs: list[dict[str, Any]] = []
+    for run in runs:
+        run_id = int(run.get("id") or 0)
+        selected_hours = selected_hours_by_id.get(run_id)
+        if not selected_hours:
+            continue
+        copied = dict(run)
+        copied["_weathercom_selected_hours"] = sorted(selected_hours)
+        selected_runs.append(copied)
+    return selected_runs
 
 
 def _primary_sources_for_profile(profile: CitySettlementProfile | None) -> tuple[str, ...]:
@@ -2335,6 +2401,22 @@ def _metar_temperature_unit(row: dict[str, Any], profile: CitySettlementProfile)
         if unit:
             return str(unit)
     return profile.unit
+
+
+def _metar_pressure_hpa(row: dict[str, Any]) -> float | None:
+    """Return absolute METAR pressure in hPa, never the AWC pressure-tendency field."""
+    for key in ("sea_level_pressure", "altimeter"):
+        value = _float(row.get(key))
+        if value is None:
+            continue
+        if 800.0 <= value <= 1100.0:
+            return value
+        if key == "altimeter" and 20.0 <= value <= 35.0:
+            return value * 33.8638866667
+    pressure = _float(row.get("pressure"))
+    if pressure is not None and 800.0 <= pressure <= 1100.0:
+        return pressure
+    return None
 
 
 def _convert_temp(value: float, source_unit: str, target_unit: str) -> float:

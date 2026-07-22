@@ -1594,9 +1594,12 @@ def _fetch_log_payload(events: list[dict], limit: int = 100) -> list[dict]:
     return rows
 
 
-def _data_fetch_log_payload(limit: int = 100) -> list[dict]:
+def _data_fetch_log_payload(limit: int = 100, city: str = "", target_date: str = "") -> list[dict]:
     rows: list[dict] = []
-    for index, row in enumerate(list_data_fetch_logs(limit), start=1):
+    for index, row in enumerate(
+        list_data_fetch_logs(limit, city=city, target_date=target_date),
+        start=1,
+    ):
         rows.append({
             "index": index,
             "time": row.get("finished_at") or row.get("created_at") or row.get("started_at"),
@@ -4623,6 +4626,12 @@ async def dashboard(city: str = ""):
             row for row in (payload.get("city_evidence") or [])
             if _city_evidence_matches(row, city)
         ]
+        payload["fetch_log"] = await asyncio.to_thread(
+            _data_fetch_log_payload,
+            100,
+            city,
+            "",
+        )
     else:
         payload["city_evidence"] = []
     latest_refresh = await asyncio.to_thread(
