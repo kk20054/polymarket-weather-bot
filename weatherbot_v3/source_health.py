@@ -50,7 +50,11 @@ def build_source_health_matrix(
                 where="COALESCE(parse_status, '') != 'failed'",
                 expected_cities=enabled,
                 expected_interval_seconds=300,
-                stale_after_seconds=900,
+                # A station can legitimately publish only one routine report per
+                # hour. Keep the platform health threshold aligned with the D+0
+                # decision gate; individual stale cities are still rejected by
+                # signal generation.
+                stale_after_seconds=1800,
                 required=True,
                 stages=("metar_poller", "refresh_metar_reports"),
                 now=now,

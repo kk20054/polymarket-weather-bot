@@ -283,6 +283,27 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rollup.call_count, 2)
         self.assertEqual({call.kwargs["target_date"] for call in rollup.call_args_list}, {"2026-07-10"})
 
+    async def test_historical_badge_stays_healthy_when_only_daily_truth_rollup_is_incomplete(self):
+        rows = [{"city_key": "amsterdam", "station_id": "EHAM", "timezone": "Europe/Amsterdam"}]
+        scheduler = WeatherBotScheduler(city_concurrency=1)
+        with patch("weatherbot_v3.scheduler._enabled_rows", return_value=rows), patch(
+            "weatherbot_v3.scheduler._local_today", return_value="2026-07-22"
+        ), patch(
+            "weatherbot_v3.scheduler.run_wunderground_hourly_fetch",
+            return_value={"ok": True, "rows_upserted": 30},
+        ), patch(
+            "weatherbot_v3.scheduler.run_wunderground_daily_rollup",
+            return_value={"ok": False, "failed": 1, "results": [{"reason": "insufficient_hourly_coverage"}]},
+        ):
+            result = await scheduler._run_historical_poller()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["failed_cities"], 0)
+        self.assertEqual(result["daily_truth_failed_cities"], 1)
+        payload = result["results"][0]["payload"]
+        self.assertTrue(payload["daily_truth_ok"] is False)
+        self.assertEqual(payload["daily_truth_failed"], 1)
+
     async def test_metar_run_once_limits_concurrency_and_logs_per_city(self):
         db_path = test_db_path("scheduler_concurrency")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))

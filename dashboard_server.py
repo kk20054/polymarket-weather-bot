@@ -11,7 +11,7 @@ import sys
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -832,19 +832,21 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         metars = _latest_rows_by_city(
             [dict(row) for row in conn.execute(
                 """
-                WITH ranked AS (
-                    SELECT
-                        *,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY city
-                            ORDER BY report_time DESC, id DESC
-                        ) AS city_rank
+                SELECT mr.*
+                FROM metar_reports mr
+                JOIN (
+                    SELECT city, MAX(report_time) AS report_time
                     FROM metar_reports
                     WHERE city IS NOT NULL AND TRIM(city) != ''
+                    GROUP BY city
+                ) latest
+                  ON latest.city = mr.city
+                 AND latest.report_time = mr.report_time
+                WHERE mr.id = (
+                    SELECT MAX(m2.id)
+                    FROM metar_reports m2
+                    WHERE m2.city = mr.city AND m2.report_time = mr.report_time
                 )
-                SELECT *
-                FROM ranked
-                WHERE city_rank = 1
                 """
             ).fetchall()],
             "report_time",
@@ -874,24 +876,14 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         forecast_runs = [
             dict(row) for row in conn.execute(
                 """
-                WITH ranked AS (
-                    SELECT
-                        city,
-                        target_date,
-                        COALESCE(available_at, retrieved_at, created_at) AS forecast_time,
-                        source,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY city, target_date
-                            ORDER BY COALESCE(available_at, retrieved_at, created_at) DESC, id DESC
-                        ) AS city_date_rank
-                    FROM forecast_runs
-                    WHERE target_date >= ?
-                      AND city IS NOT NULL
-                      AND TRIM(city) != ''
-                )
-                SELECT city, target_date, forecast_time, source
-                FROM ranked
-                WHERE city_date_rank = 1
+                SELECT city, target_date,
+                       MAX(COALESCE(available_at, retrieved_at, created_at)) AS forecast_time,
+                       '' AS source
+                FROM forecast_runs
+                WHERE target_date >= ?
+                  AND city IS NOT NULL
+                  AND TRIM(city) != ''
+                GROUP BY city, target_date
                 ORDER BY city, target_date
                 """,
                 (query_cutoff,),
@@ -900,20 +892,25 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         predictions = [
             dict(row) for row in conn.execute(
                 """
-                WITH ranked AS (
-                    SELECT
-                        *,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY city_key, target_date
-                            ORDER BY issued_at DESC, id DESC
-                        ) AS city_date_rank
+                SELECT prediction.*
+                FROM daily_max_predictions prediction
+                JOIN (
+                    SELECT city_key, target_date, MAX(issued_at) AS issued_at
                     FROM daily_max_predictions
                     WHERE target_date >= ?
+                    GROUP BY city_key, target_date
+                ) latest
+                  ON latest.city_key = prediction.city_key
+                 AND latest.target_date = prediction.target_date
+                 AND latest.issued_at = prediction.issued_at
+                WHERE prediction.id = (
+                    SELECT MAX(p2.id)
+                    FROM daily_max_predictions p2
+                    WHERE p2.city_key = prediction.city_key
+                      AND p2.target_date = prediction.target_date
+                      AND p2.issued_at = prediction.issued_at
                 )
-                SELECT *
-                FROM ranked
-                WHERE city_date_rank = 1
-                ORDER BY target_date ASC, city_key ASC
+                ORDER BY prediction.target_date ASC, prediction.city_key ASC
                 """,
                 (query_cutoff,),
             ).fetchall()
@@ -2895,6 +2892,55 @@ def _hourly_cache_for_targets(targets: dict[str, set[str]], *, allow_forecast_fa
     }
 
 
+def _city_local_day_summary(city: dict, now: datetime | None = None) -> dict:
+    """Return an honest current observation and forecast high for the city's local day."""
+    now = now or datetime.now(timezone.utc)
+    local_today = _station_local_today(city, now)
+    day_points = [
+        point
+        for point in (city.get("hourly_points") or [])
+        if str(point.get("target_date") or "") == local_today
+    ]
+
+    forecast_values = [
+        float(value)
+        for point in day_points
+        if (value := _point_forecast_value(point)) is not None
+    ]
+
+    observation_candidates: list[tuple[datetime, int, str, float, str]] = []
+    source_priority = {
+        "historical": 0,
+        "metar": 1,
+        "pws": 2,
+        "china_live": 3,
+    }
+    for point in day_points:
+        observed_at = _parse_iso(point.get("timestamp"))
+        if observed_at is None or observed_at > now + timedelta(minutes=10):
+            continue
+        for source, priority in source_priority.items():
+            value = point.get(source)
+            if value is None:
+                continue
+            observation_candidates.append(
+                (observed_at, priority, source, float(value), str(point.get("timestamp") or ""))
+            )
+
+    current = max(observation_candidates, default=None, key=lambda item: (item[0], item[1]))
+    forecast_high = max(forecast_values) if forecast_values else None
+    if observation_candidates:
+        observed_high = max(item[3] for item in observation_candidates)
+        forecast_high = max(forecast_high, observed_high) if forecast_high is not None else observed_high
+    return {
+        "current_temp": current[3] if current else None,
+        "current_temp_source": current[2] if current else None,
+        "current_temp_timestamp": current[4] if current else None,
+        "forecast_high": forecast_high,
+        "summary_target_date": local_today,
+    }
+
+
 def _build_weather_city_series(markets):
     """Compact chart-friendly forecast history by city for the dashboard."""
     history_cache = merge_history_points(market_history_points(markets))
@@ -2988,6 +3034,7 @@ def _build_weather_city_series(markets):
             1 for point in hourly_points if _point_forecast_value(point) is not None
         )
         city["hourly_count"] = len(city["hourly_points"])
+        city.update(_city_local_day_summary(city))
         rows.append(city)
     return sorted(rows, key=lambda row: row.get("city_name") or "")
 
@@ -3008,7 +3055,7 @@ def _registry_city_series(targets: dict[str, set[str]] | None = None):
         latest_metar_point = next((point for point in reversed(hourly_points) if point.get("metar") is not None), {})
         humidity_values = [p.get("humidity") for p in hourly_points if p.get("humidity") is not None]
         forecast_count = sum(1 for point in hourly_points if _point_forecast_value(point) is not None)
-        rows.append({
+        row = {
             "city_key": profile.city,
             "city_name": profile.city_name,
             "station_id": profile.station_id,
@@ -3040,7 +3087,9 @@ def _registry_city_series(targets: dict[str, set[str]] | None = None):
             "forecast_points": [],
             "hourly_points": hourly_points,
             "points": [],
-        })
+        }
+        row.update(_city_local_day_summary(row))
+        rows.append(row)
     return sorted(rows, key=lambda row: (row.get("city_name") or "").lower())
 
 
@@ -4392,6 +4441,16 @@ def _minimal_dashboard_payload(reason: str = "cache_warming"):
     }
 
 
+def _dashboard_city_series_for_selection(rows: list[dict], city: str = "") -> list[dict]:
+    detail_fields = ("hourly_points", "history_points", "forecast_points", "points")
+    return [
+        row
+        if city and _city_evidence_matches(row, city)
+        else {**row, **{field: [] for field in detail_fields}}
+        for row in rows
+    ]
+
+
 async def _refresh_dashboard_cache_once():
     global dashboard_payload_cache, dashboard_payload_cache_at
     try:
@@ -4555,10 +4614,10 @@ async def dashboard(city: str = ""):
         payload = dict(dashboard_payload_cache)
     else:
         payload = _minimal_dashboard_payload()
-    payload["weather_city_series"] = [
-        row if city and _city_evidence_matches(row, city) else {**row, "hourly_points": []}
-        for row in (payload.get("weather_city_series") or [])
-    ]
+    payload["weather_city_series"] = _dashboard_city_series_for_selection(
+        payload.get("weather_city_series") or [],
+        city,
+    )
     if city:
         payload["city_evidence"] = [
             row for row in (payload.get("city_evidence") or [])

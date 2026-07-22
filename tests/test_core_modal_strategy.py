@@ -118,10 +118,10 @@ class CoreModalStrategyTests(unittest.TestCase):
         self.assertEqual(decisions[0]["core_modal"]["model_rank"], 2)
         self.assertNotEqual(decisions[0]["bucket_key"], "cheap-third")
 
-    def test_does_not_fall_back_when_modal_orderbook_is_not_executable(self):
+    def test_uses_second_modal_bucket_when_top_orderbook_is_not_executable(self):
         modal = _bucket("modal", 29, 30, 0.25, 0.24)
         modal["enable_order_book"] = False
-        buckets = [modal, _bucket("second", 30, 31, 0.12, 0.11)]
+        buckets = [modal, _bucket("second", 30, 31, 0.20, 0.19)]
         probabilities = {
             "modal": {"bucket_key": "modal", "probability": 0.40},
             "second": {"bucket_key": "second", "probability": 0.35},
@@ -129,9 +129,10 @@ class CoreModalStrategyTests(unittest.TestCase):
 
         decision = CoreModalStrategy().evaluate_many(buckets, probabilities, _prediction(), _context())[0]
 
-        self.assertEqual(decision["bucket_key"], "modal")
-        self.assertFalse(decision["paper_allowed"])
-        self.assertIn("core_modal_not_executable", decision["gate_reasons"])
+        self.assertEqual(decision["bucket_key"], "second")
+        self.assertTrue(decision["paper_allowed"])
+        self.assertEqual(decision["core_modal"]["model_rank"], 2)
+        self.assertNotIn("core_modal_not_executable", decision["gate_reasons"])
 
     def test_blocks_low_calibration_coverage(self):
         prediction = _prediction()

@@ -47,7 +47,7 @@ from weatherbot_v3.validation import _compact_action, build_production_validatio
 from weatherbot_v3.weathercom import weathercom_request_units, weathercom_runs_from_response
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import _stage_result, _wunderground_country_from_station_row, default_orderbook_start_date, run_china_weather_fetch, run_daily_max_build, run_hourly_consensus_build, run_iem_asos_truth_fetch, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_polymarket_market_probe, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
-from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _recommendation_query_cutoff, _recommendations_payload, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
+from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _city_local_day_summary, _combined_fetch_log_payload, _dashboard_city_series_for_selection, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _recommendation_query_cutoff, _recommendations_payload, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
 from dashboard_server import signal_decision_detail as signal_decision_detail_api
 from dashboard_server import signal_decisions as signal_decisions_api
 from dashboard_server import paper_orders as paper_orders_api
@@ -7011,6 +7011,91 @@ class V3CoreTests(unittest.TestCase):
         day = next(day for day in payload[0]["dates"] if day["target_date"] == "2026-07-03")
         self.assertEqual(day["modules"]["hourly_temperature"]["rows"], 2)
         self.assertEqual(day["modules"]["forecast"]["rows"], 2)
+
+    def test_city_summary_uses_local_day_observation_not_stale_market_snapshot(self):
+        now = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
+        city = {
+            "settlement_timezone": "America/Chicago",
+            "hourly_points": [
+                {
+                    "target_date": "2026-07-22",
+                    "timestamp": "2026-07-22T06:00:00-05:00",
+                    "best": 61.0,
+                    "metar": 60.98,
+                },
+                {
+                    "target_date": "2026-07-22",
+                    "timestamp": "2026-07-22T14:00:00-05:00",
+                    "best": 72.0,
+                    "metar": None,
+                },
+            ],
+            "forecast_points": [
+                {
+                    "target_date": "2026-06-29",
+                    "timestamp": "2026-06-28T14:07:47+00:00",
+                    "best": 94.9,
+                }
+            ],
+        }
+
+        summary = _city_local_day_summary(city, now=now)
+
+        self.assertAlmostEqual(summary["current_temp"], 60.98)
+        self.assertEqual(summary["current_temp_source"], "metar")
+        self.assertAlmostEqual(summary["forecast_high"], 72.0)
+        self.assertEqual(summary["summary_target_date"], "2026-07-22")
+
+    def test_city_summary_expected_high_cannot_fall_below_observed_high(self):
+        now = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
+        city = {
+            "settlement_timezone": "Europe/Istanbul",
+            "hourly_points": [
+                {
+                    "target_date": "2026-07-22",
+                    "timestamp": "2026-07-22T14:00:00+03:00",
+                    "best": 30.0,
+                    "metar": 34.0,
+                },
+                {
+                    "target_date": "2026-07-22",
+                    "timestamp": "2026-07-22T16:00:00+03:00",
+                    "best": 31.0,
+                    "metar": None,
+                },
+            ],
+        }
+
+        summary = _city_local_day_summary(city, now=now)
+
+        self.assertAlmostEqual(summary["current_temp"], 34.0)
+        self.assertAlmostEqual(summary["forecast_high"], 34.0)
+
+    def test_dashboard_city_series_only_keeps_selected_city_detail_arrays(self):
+        rows = [
+            {
+                "city_key": "chicago",
+                "station_id": "KORD",
+                "hourly_points": [{"local_hour": "12:00"}],
+                "history_points": [{"local_hour": "12:00"}],
+                "forecast_points": [{"local_hour": "12:00"}],
+                "points": [{"local_hour": "12:00"}],
+            },
+            {
+                "city_key": "shanghai",
+                "station_id": "ZSPD",
+                "hourly_points": [{"local_hour": "12:00"}],
+                "history_points": [{"local_hour": "12:00"}],
+                "forecast_points": [{"local_hour": "12:00"}],
+                "points": [{"local_hour": "12:00"}],
+            },
+        ]
+
+        compacted = _dashboard_city_series_for_selection(rows, "chicago-kord")
+
+        self.assertEqual(len(compacted[0]["hourly_points"]), 1)
+        for field in ("hourly_points", "history_points", "forecast_points", "points"):
+            self.assertEqual(compacted[1][field], [])
 
     def test_forecast_archive_import_persists_no_leak_members(self):
         db_path = test_db_path("forecast_archive_import")

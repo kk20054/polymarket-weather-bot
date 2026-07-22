@@ -1281,6 +1281,11 @@ export interface WeatherCitySeries {
   latest_metar?: number | null
   latest_source?: string | null
   latest_timestamp?: string | null
+  current_temp?: number | null
+  current_temp_source?: string | null
+  current_temp_timestamp?: string | null
+  forecast_high?: number | null
+  summary_target_date?: string | null
   humidity_status?: 'available' | 'not_collected' | string
   history_count?: number
   forecast_count?: number

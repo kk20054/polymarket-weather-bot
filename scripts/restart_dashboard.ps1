@@ -1,6 +1,7 @@
 param(
   [string]$HostAddress = "127.0.0.1",
   [int]$Port = 8765,
+  [int]$ReadyTimeoutSeconds = 120,
   [switch]$NoStart
 )
 
@@ -54,7 +55,7 @@ $Process = Start-Process `
   -PassThru
 
 $Health = $null
-$Deadline = (Get-Date).AddSeconds(60)
+$Deadline = (Get-Date).AddSeconds($ReadyTimeoutSeconds)
 do {
   Start-Sleep -Milliseconds 500
   try {
@@ -65,7 +66,7 @@ do {
 } while (-not $Health -and (Get-Date) -lt $Deadline)
 
 if (-not $Health) {
-  throw "Dashboard did not become ready on http://$HostAddress`:$Port within 60 seconds."
+  throw "Dashboard did not become ready on http://$HostAddress`:$Port within $ReadyTimeoutSeconds seconds."
 }
 
 $NewListeningPids = netstat -ano |

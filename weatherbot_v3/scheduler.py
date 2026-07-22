@@ -532,13 +532,19 @@ class WeatherBotScheduler:
                 limit_cities=1,
                 dry_run=False,
             )
+            hourly_ok = _payload_ok(payload)
+            daily_truth_ok = _payload_ok(daily_rollup)
             return {
-                "ok": _payload_ok(payload) and _payload_ok(daily_rollup),
+                # The Historical badge describes the current-day display feed.
+                # Previous-day truth completeness remains separately auditable.
+                "ok": hourly_ok,
                 "city": city,
                 "station_id": row.get("station_id"),
                 "target_date": target_date,
                 "historical": payload,
                 "daily_truth_rollup": daily_rollup,
+                "daily_truth_ok": daily_truth_ok,
+                "daily_truth_failed": 0 if daily_truth_ok else 1,
             }
 
         result = await _run_city_batch(
@@ -551,7 +557,16 @@ class WeatherBotScheduler:
             poller_key="historical_poller",
             timeout_seconds=FORECAST_CITY_TIMEOUT_SECONDS,
         )
-        return {**result, **cadence}
+        daily_truth_failures = sum(
+            int((item.get("payload") or {}).get("daily_truth_failed") or 0)
+            for item in result.get("results") or []
+            if isinstance(item, dict)
+        )
+        return {
+            **result,
+            **cadence,
+            "daily_truth_failed_cities": daily_truth_failures,
+        }
 
     async def _run_pws_poller(self) -> dict[str, Any]:
         run_count = self.pollers["pws_poller"].run_count
@@ -1132,6 +1147,8 @@ def _compact_city_payload(payload: Any) -> dict[str, Any]:
         "stored_count",
         "failed",
         "failed_cities",
+        "daily_truth_ok",
+        "daily_truth_failed",
         "events_stored",
         "markets_stored",
         "orderbooks_stored",
@@ -1201,6 +1218,8 @@ def _compact_result(payload: dict[str, Any]) -> dict[str, Any]:
             "source_observation_changed": payload_result.get("source_observation_changed"),
             "source_unchanged": payload_result.get("source_unchanged"),
             "failed": payload_result.get("failed") or payload_result.get("failed_cities"),
+            "daily_truth_ok": payload_result.get("daily_truth_ok"),
+            "daily_truth_failed": payload_result.get("daily_truth_failed"),
         })
     compact = {
         "ok": bool(payload.get("ok")),
@@ -1216,6 +1235,7 @@ def _compact_result(payload: dict[str, Any]) -> dict[str, Any]:
         "active_market_cities",
         "deferred_cities",
         "baseline_every_cycles",
+        "daily_truth_failed_cities",
         "cached_buckets",
         "tokens_requested",
         "quotes_refreshed",

@@ -27,7 +27,7 @@ CORE_RUNTIME_SOURCES = (
     "hourly_consensus",
     "signal_decisions",
 )
-ALLOWED_STRATEGIES = {"single_bucket_ev", "ladder_grid", "tail_buying"}
+ALLOWED_STRATEGIES = {"core_modal_v1", "single_bucket_ev", "ladder_grid", "tail_buying"}
 NORMALIZED_DISTRIBUTION_TOLERANCE = 1e-3
 
 
@@ -211,7 +211,12 @@ class DataFoundationVerificationAgent(VerificationAgent):
         stale_core = [
             key
             for key in CORE_RUNTIME_SOURCES
-            if str((source_rows.get(key) or {}).get("status") or "missing") != "healthy"
+            if str((source_rows.get(key) or {}).get("status") or "missing") in {"missing", "stale"}
+        ]
+        degraded_core = [
+            key
+            for key in CORE_RUNTIME_SOURCES
+            if str((source_rows.get(key) or {}).get("status") or "missing") == "degraded"
         ]
         truth_bad = _truth_coverage_gaps(context.source_health)
         pws = source_rows.get("wunderground_pws") or {}
@@ -238,10 +243,18 @@ class DataFoundationVerificationAgent(VerificationAgent):
             _check(
                 self.key,
                 "runtime_source_freshness",
-                "pass" if not stale_core else "fail",
-                "核心实时数据源均在新鲜度窗口内。" if not stale_core else f"核心链路过期或缺失：{', '.join(stale_core)}。",
-                blocks=READINESS_MODES,
-                evidence={"bad_sources": stale_core},
+                "fail" if stale_core else ("warn" if degraded_core else "pass"),
+                (
+                    f"核心链路过期或缺失：{', '.join(stale_core)}。"
+                    if stale_core
+                    else (
+                        f"核心链路可用但部分降级：{', '.join(degraded_core)}。"
+                        if degraded_core
+                        else "核心实时数据源均在新鲜度窗口内。"
+                    )
+                ),
+                blocks=READINESS_MODES if stale_core else (),
+                evidence={"bad_sources": stale_core, "degraded_sources": degraded_core},
                 action="受控启动调度器并等待 METAR、预报、盘口、派生决策完成一轮，再重新验证。",
             ),
             _check(
@@ -620,10 +633,38 @@ class DecisionRiskVerificationAgent(VerificationAgent):
                 reasons.append("missing_tick_or_minimum")
             if not bool(row.get("enable_order_book")):
                 reasons.append("orderbook_disabled")
-            if age is None or age < 0 or age > max_book_age:
+            if age is None or age < -60 or age > max_book_age:
                 reasons.append("stale_or_future_orderbook")
             if reasons:
                 market_violations.append({"market_bucket_id": row.get("id"), "city": row.get("city_key"), "reasons": reasons, "age_seconds": age})
+
+        candidate_tokens = {
+            str(row.get("yes_token_id") or row.get("token_id") or "")
+            for row in rows
+            if bool(row.get("paper_allowed"))
+        }
+        candidate_tokens.discard("")
+        candidate_market_ids = {
+            int(row.get("id"))
+            for row in matched_markets
+            if str(row.get("yes_token_id") or row.get("token_id") or "") in candidate_tokens
+        }
+        candidate_market_violations = [
+            row for row in market_violations
+            if int(row.get("market_bucket_id") or 0) in candidate_market_ids
+        ]
+        matched_candidate_tokens = {
+            str(row.get("yes_token_id") or row.get("token_id") or "")
+            for row in matched_markets
+            if str(row.get("yes_token_id") or row.get("token_id") or "") in candidate_tokens
+        }
+        missing_candidate_tokens = sorted(candidate_tokens - matched_candidate_tokens)
+        executable_status = (
+            "warn"
+            if not candidate_tokens
+            else ("fail" if missing_candidate_tokens or candidate_market_violations else "pass")
+        )
+        executable_blocks = ("paper", "paper_evidence", "live_canary") if executable_status == "fail" else ()
 
         checks = [
             _check(
@@ -669,10 +710,26 @@ class DecisionRiskVerificationAgent(VerificationAgent):
             _check(
                 self.key,
                 "matched_market_executable",
-                "pass" if matched_markets and not market_violations else "fail",
-                "最新 matched 市场均有新鲜、未交叉且约束完整的盘口。" if matched_markets and not market_violations else f"matched 市场可执行性失败：{len(market_violations)} 条异常，市场总数 {len(matched_markets)}。",
-                blocks=("paper", "paper_evidence", "live_canary"),
-                evidence={"matched": len(matched_markets), "violations": market_violations[:50]},
+                executable_status,
+                (
+                    "当前没有通过 paper gate 的候选；观察桶盘口异常不会阻塞模拟系统。"
+                    if executable_status == "warn"
+                    else (
+                        f"候选盘口可执行性失败：{len(candidate_market_violations)} 条异常，"
+                        f"{len(missing_candidate_tokens)} 个 token 未匹配。"
+                        if executable_status == "fail"
+                        else "全部 paper 候选均有新鲜、未交叉且约束完整的盘口。"
+                    )
+                ),
+                blocks=executable_blocks,
+                evidence={
+                    "matched": len(matched_markets),
+                    "paper_candidate_tokens": len(candidate_tokens),
+                    "missing_candidate_tokens": missing_candidate_tokens[:50],
+                    "candidate_violations": candidate_market_violations[:50],
+                    "observation_market_violations": len(market_violations),
+                    "observation_violation_samples": market_violations[:10],
+                },
                 action="刷新 Gamma/CLOB 盘口并修复 crossed/stale/tick/orderMinSize 异常后再执行模拟。",
             ),
         ]

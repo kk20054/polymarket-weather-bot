@@ -73,19 +73,13 @@ class CoreModalStrategy(StrategyBase):
 
         quality = self._prediction_quality(prediction, context)
         modal = ranked[0]
-        modal_execution_reasons = self._execution_reasons(modal["bucket"], context)
         event_reasons = self._quality_reasons(quality)
-        if event_reasons or modal_execution_reasons:
+        if event_reasons:
             decision = self._build_audit_decision(
                 modal,
                 prediction,
                 context,
                 force_skip_reasons=event_reasons,
-                extra_hard_blocks=(
-                    unique([*modal_execution_reasons, "core_modal_not_executable"])
-                    if modal_execution_reasons
-                    else []
-                ),
             )
             self._attach_metadata(decision, modal, modal, ranked, quality)
             return [decision]

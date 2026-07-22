@@ -897,7 +897,7 @@ function App() {
   const t = useT(i18nLanguage)
 
   const showRefreshNotice = (notice: RefreshNotice, ttlMs = 7000) => {
-    setRefreshNotices(current => [notice, ...current.filter(item => item.id !== notice.id)].slice(0, 5))
+    setRefreshNotices(current => [notice, ...current.filter(item => item.id !== notice.id)].slice(0, 3))
     if (ttlMs > 0) {
       window.setTimeout(() => {
         setRefreshNotices(current => current.filter(item => item.id !== notice.id))
@@ -1254,7 +1254,10 @@ function App() {
       verificationStatus?: string
       continent: string
       unit: string
-      latest?: number | null
+      current?: number | null
+      currentSource?: string | null
+      currentTimestamp?: string | null
+      forecastHigh?: number | null
       latestMetar?: number | null
       forecastCount: number
       historyCount: number
@@ -1284,7 +1287,10 @@ function App() {
         verificationStatus: row.verification_status,
         continent: cityContinent(row.city_key, row.city_name),
         unit: row.unit || 'F',
-        latest: row.latest_best ?? null,
+        current: row.current_temp ?? null,
+        currentSource: row.current_temp_source ?? null,
+        currentTimestamp: row.current_temp_timestamp ?? null,
+        forecastHigh: row.forecast_high ?? null,
         latestMetar: row.latest_metar ?? null,
         forecastCount: row.forecast_count ?? row.forecast_points?.length ?? row.points?.length ?? 0,
         historyCount: row.history_count ?? row.history_points?.length ?? 0,
@@ -1318,7 +1324,10 @@ function App() {
           verificationStatus: 'unverified',
           continent: cityContinent(row.city_key, row.city_name),
           unit: 'F',
-          latest: row.mean_high,
+          current: null,
+          currentSource: null,
+          currentTimestamp: null,
+          forecastHigh: row.mean_high,
           latestMetar: null,
           forecastCount: 1,
           historyCount: 0,
@@ -1350,7 +1359,10 @@ function App() {
         verificationStatus: 'unverified',
         continent: cityContinent(signal.city_key, signal.city_name),
         unit: 'F',
-        latest: null,
+        current: null,
+        currentSource: null,
+        currentTimestamp: null,
+        forecastHigh: null,
         latestMetar: null,
         forecastCount: 0,
         historyCount: 0,
@@ -1403,25 +1415,25 @@ function App() {
       shouldRefreshDashboard = true
       shouldRefreshLayer7 = true
       const cityResults = poller.last_result?.city_results ?? []
-      for (const [index, result] of cityResults.entries()) {
-        const city = result.city || result.station_id || 'unknown'
-        const ok = Boolean(result.ok)
+      if (cityResults.length > 0) {
+        const successfulResults = cityResults.filter(result => Boolean(result.ok))
+        const failedResults = cityResults.filter(result => !result.ok)
+        const completed = successfulResults.length
+        const total = cityResults.length
+        const failedCities = failedResults
+          .slice(0, 4)
+          .map(result => `${result.city || result.station_id || 'unknown'}${result.error ? `: ${result.error}` : ''}`)
         showRefreshNotice({
-          id: Date.now() + index + (key === 'metar_poller' ? 100 : key === 'forecast_poller' ? 200 : key === 'china_live_poller' ? 250 : 300),
-          tone: ok ? 'success' : 'error',
-          title: ok
-            ? `${poller.label} ${city} ${uiLanguage === 'zh' ? '更新完成' : 'updated'}`
-            : `${poller.label} ${city} ${uiLanguage === 'zh' ? '更新失败' : 'failed'}`,
-          message: ok
-            ? `${poller.label} · ${durationLabel(poller.last_duration_ms)} · ${relativeTime(runKey)}`
-            : (result.error || poller.last_message || 'scheduler city refresh failed'),
-          details: [
-            result.station_id ? `station ${result.station_id}` : city,
-            result.rows_upserted !== null && result.rows_upserted !== undefined
-              ? `upserted ${result.rows_upserted}`
-              : (result.reports_upserted !== null && result.reports_upserted !== undefined ? `upserted ${result.reports_upserted}` : `poller ${key}`),
-          ],
-        }, ok ? 5000 : 14000)
+          id: Date.now() + (key === 'metar_poller' ? 100 : key === 'forecast_poller' ? 200 : key === 'china_live_poller' ? 250 : 300),
+          tone: failedResults.length === 0 ? 'success' : 'warning',
+          title: failedResults.length === 0
+            ? `${poller.label} ${uiLanguage === 'zh' ? '更新完成' : 'updated'}`
+            : `${poller.label} ${uiLanguage === 'zh' ? '部分更新失败' : 'partially failed'}`,
+          message: `${completed}/${total} ${uiLanguage === 'zh' ? '个城市完成' : 'cities completed'} · ${durationLabel(poller.last_duration_ms)} · ${relativeTime(runKey)}`,
+          details: failedCities.length > 0
+            ? failedCities
+            : successfulResults.slice(0, 3).map(result => result.city || result.station_id || 'unknown'),
+        }, failedResults.length === 0 ? 5000 : 14000)
       }
     }
     if (shouldRefreshDashboard) {
@@ -1792,7 +1804,7 @@ function App() {
               {filteredCityOptions.map(city => (
                 <div
                   key={city.key}
-                  title={`${city.enabled ? copy.collecting : copy.notCollecting} · ${city.cityScope === 'observation_only' ? copy.observationCatalog : copy.marketCandidate} · ${copy.forecast} ${city.forecastCount} · METAR ${city.latestMetar !== null && city.latestMetar !== undefined ? Number(city.latestMetar).toFixed(1) + '°' + city.unit : '--'} · ${copy.historical} ${city.historyCount} · ${copy.signal} ${city.actionable}/${city.signals}`}
+                  title={`${city.enabled ? copy.collecting : copy.notCollecting} · ${uiLanguage === 'zh' ? '当前' : 'Now'} ${city.current !== null && city.current !== undefined ? Number(city.current).toFixed(1) + '°' + city.unit : '--'} (${city.currentSource || '--'}) · ${uiLanguage === 'zh' ? '预计最高' : 'Forecast high'} ${city.forecastHigh !== null && city.forecastHigh !== undefined ? Number(city.forecastHigh).toFixed(1) + '°' + city.unit : '--'} · ${copy.historical} ${city.historyCount}`}
                   className={`flex min-h-[40px] w-full items-stretch gap-2 border-x-0 border-b border-t-0 px-2 py-1.5 text-left transition ${
                     selectedCity === city.key
                       ? 'border-blue-500/40 bg-blue-500/10 text-blue-100'
@@ -1819,7 +1831,7 @@ function App() {
                     </div>
                     <div className="shrink-0 text-right">
                       <div className="tabular-nums text-[11px] leading-tight text-neutral-200">
-                        {city.latest === null || city.latest === undefined ? (city.enabled ? '--' : copy.pending) : `${Number(city.latest).toFixed(1)}°${city.unit}`}
+                        {city.current === null || city.current === undefined ? (city.enabled ? '--' : copy.pending) : `${Number(city.current).toFixed(1)}°${city.unit}`}
                       </div>
                       <div className="mt-0.5 text-[9px] tabular-nums text-neutral-600">{city.enabled ? relativeTime(city.lastRefreshedAt, uiLanguage) : copy.notCollected}</div>
                     </div>
@@ -1886,7 +1898,9 @@ function App() {
             <div className="flex flex-wrap gap-1.5 text-[10px] text-neutral-500">
               <span>{selectedDate || copy.datePending}</span>
               <span>·</span>
-              <span>{selectedCityMeta?.latest === null || selectedCityMeta?.latest === undefined ? `${copy.forecast} --` : `${copy.forecast} ${Number(selectedCityMeta.latest).toFixed(1)}°${selectedCityMeta.unit}`}</span>
+              <span>{uiLanguage === 'zh' ? '当前' : 'Now'} {selectedCityMeta?.current === null || selectedCityMeta?.current === undefined ? '--' : `${Number(selectedCityMeta.current).toFixed(1)}°${selectedCityMeta.unit}`}</span>
+              <span>·</span>
+              <span>{uiLanguage === 'zh' ? '预计最高' : 'Forecast high'} {selectedCityMeta?.forecastHigh === null || selectedCityMeta?.forecastHigh === undefined ? '--' : `${Number(selectedCityMeta.forecastHigh).toFixed(1)}°${selectedCityMeta.unit}`}</span>
             </div>
           </div>
 

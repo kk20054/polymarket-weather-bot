@@ -24,6 +24,7 @@ from weatherbot_v3.paper import execute_paper_decisions
 from weatherbot_v3.qualification import build_data_readiness
 from weatherbot_v3.sizing import calculate_kelly_fraction
 from weatherbot_v3.verification_agents import (
+    ALLOWED_STRATEGIES,
     _decision_probability_price_violations,
     _parse_time,
     build_project_verification_report,
@@ -32,6 +33,9 @@ from weatherbot_v3.verification_agents import (
 
 
 class ProjectVerificationTests(unittest.TestCase):
+    def test_current_core_modal_strategy_is_allowed_by_verification(self):
+        self.assertIn("core_modal_v1", ALLOWED_STRATEGIES)
+
     def test_readiness_excludes_legacy_prediction_decisions(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "weatherbot.db"
