@@ -80,8 +80,15 @@ def quote_from_market_payload(data: dict[str, Any], default_order_min_size: floa
     yes_price = _to_float(prices[0], 0.0) if prices else 0.0
     bids = tuple(_levels(data.get("bids")))
     asks = tuple(_levels(data.get("asks")))
-    best_bid = max((level["price"] for level in bids), default=_to_float(data.get("bestBid"), yes_price))
-    best_ask = min((level["price"] for level in asks), default=_to_float(data.get("bestAsk"), yes_price))
+    has_clob_book = str(data.get("snapshot_type") or "").lower() == "clob" or "bids" in data or "asks" in data
+    best_bid = max(
+        (level["price"] for level in bids),
+        default=0.0 if has_clob_book else _to_float(data.get("bestBid"), yes_price),
+    )
+    best_ask = min(
+        (level["price"] for level in asks),
+        default=0.0 if has_clob_book else _to_float(data.get("bestAsk"), yes_price),
+    )
     if bids or asks:
         spread = best_ask - best_bid if best_ask and best_bid else _to_float(data.get("spread"), 0.0)
     else:
@@ -117,6 +124,10 @@ def validate_order_constraints(quote: MarketQuote, amount: float, limit_price: f
         errors.append("orderbook_disabled")
     if quote.best_ask <= 0 or quote.best_ask >= 1:
         errors.append("invalid_best_ask")
+    if quote.best_bid <= 0 or quote.best_bid >= 1:
+        errors.append("invalid_best_bid")
+    if quote.best_bid > 0 and quote.best_ask > 0 and quote.best_bid > quote.best_ask:
+        errors.append("crossed_orderbook")
     if quote.best_ask > cfg.max_price:
         errors.append("ask_above_max_price")
     if quote.best_ask < cfg.min_price:

@@ -496,8 +496,10 @@ def _run_metrics(run: dict[str, Any], *, path: Path | None) -> dict[str, Any]:
     order_rows = [dict(row) for row in orders]
     settlement_rows = [dict(row) for row in settlements]
     open_rows = [row for row in order_rows if str(row.get("lifecycle_status") or "") == "open"]
+    exited_rows = [row for row in order_rows if str(row.get("lifecycle_status") or "") == "exited"]
     today_rows = [row for row in order_rows if str(row.get("opened_at") or "")[:10] == today]
     realized = sum(float(row.get("pnl") or 0.0) for row in settlement_rows)
+    realized += sum(float(row.get("realized_pnl") or 0.0) for row in exited_rows)
     open_cost = sum(float(row.get("filled_amount") or 0.0) for row in open_rows)
     brier = [float(row["brier_score"]) for row in settlement_rows if row.get("brier_score") is not None]
     wins = sum(1 for row in settlement_rows if row.get("result") == "win")
@@ -506,6 +508,7 @@ def _run_metrics(run: dict[str, Any], *, path: Path | None) -> dict[str, Any]:
         "orders_today": len(today_rows),
         "open_positions": len(open_rows),
         "resolved_orders": len(settlement_rows),
+        "exited_orders": len(exited_rows),
         "wins": wins,
         "losses": len(settlement_rows) - wins,
         "win_rate": wins / len(settlement_rows) if settlement_rows else None,

@@ -274,6 +274,7 @@ def run_openmeteo_fetch(
     cities_arg: str = "",
     *,
     ensemble: bool = False,
+    models_arg: str = "",
     dry_run: bool = False,
     all_cities: bool = False,
     limit_cities: int = 5,
@@ -289,6 +290,7 @@ def run_openmeteo_fetch(
     payload = fetch_openmeteo_forecasts(
         cities or None,
         ensemble=ensemble,
+        models=[item.strip() for item in str(models_arg or "").split(",") if item.strip()] or None,
         dry_run=dry_run,
         limit_cities=limit_cities,
         forecast_days=forecast_days,
@@ -598,6 +600,7 @@ def run_signal_decisions_build(
     dry_run: bool = False,
     limit_cities: int = 5,
     limit: int = 200,
+    strategy_revision_id: str = "",
     refresh_readiness: bool = True,
 ) -> dict:
     from .signals import build_signal_decisions_for_targets
@@ -609,7 +612,12 @@ def run_signal_decisions_build(
         targets = [(city, target_date) for city in cities]
     else:
         targets = _signal_decision_targets_from_db(cities, days_arg or 7)
-    payload = build_signal_decisions_for_targets(targets, dry_run=dry_run, limit=limit)
+    payload = build_signal_decisions_for_targets(
+        targets,
+        dry_run=dry_run,
+        limit=limit,
+        strategy_revision_id=strategy_revision_id or None,
+    )
     if refresh_readiness and not dry_run:
         readiness = build_data_readiness()
         persist_data_readiness(readiness)
@@ -1154,6 +1162,81 @@ def run_wunderground_hourly_fetch(
     }
 
 
+def run_wunderground_daily_rollup(
+    cities_arg: str = "",
+    *,
+    target_date: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    days: int = 30,
+    all_cities: bool = False,
+    limit_cities: int = 10,
+    min_distinct_hours: int = 18,
+    dry_run: bool = False,
+    force_rebuild: bool = False,
+) -> dict:
+    from .truth.wunderground import rollup_stored_wunderground_hourly_day
+
+    sync_station_registry()
+    requested = _cities_from_arg(cities_arg)
+    rows = list_stations()
+    if requested:
+        wanted = {item.lower() for item in requested}
+        rows = [
+            row for row in rows
+            if str(row.get("city_key") or "").lower() in wanted
+            or str(row.get("station_id") or "").lower() in wanted
+        ]
+    elif not all_cities:
+        rows = [row for row in rows if row.get("enabled")][: max(1, int(limit_cities or 10))]
+    targets = _cli_date_window(
+        target_date=target_date,
+        start_date=start_date,
+        end_date=end_date,
+        days=days,
+    )
+    results: list[dict] = []
+    for row in rows:
+        settlement_station = str(row.get("settlement_station_id") or "").upper()
+        if settlement_station == "HKO":
+            results.append({
+                "ok": True,
+                "skipped": True,
+                "city": row.get("city_key"),
+                "station_id": settlement_station,
+                "reason": "hong_kong_uses_hko_daily_truth",
+            })
+            continue
+        station = str(settlement_station or row.get("station_id") or "").upper()
+        timezone_name = str(row.get("settlement_timezone") or row.get("timezone") or "UTC")
+        for target in targets:
+            result = rollup_stored_wunderground_hourly_day(
+                station,
+                target,
+                timezone_name=timezone_name,
+                min_distinct_hours=min_distinct_hours,
+                persist=not dry_run,
+                force=force_rebuild,
+            )
+            results.append({"city": row.get("city_key"), **result})
+    failures = [item for item in results if not item.get("ok") and item.get("reason") != "local_day_not_complete"]
+    return {
+        "ok": not failures,
+        "source": "wunderground",
+        "stage": "truth_wunderground_daily",
+        "mode": "stored_hourly_rollup",
+        "dry_run": dry_run,
+        "force_rebuild": force_rebuild,
+        "target_dates": targets,
+        "min_distinct_hours": max(1, min(int(min_distinct_hours or 18), 24)),
+        "stored": sum(1 for item in results if item.get("persisted")),
+        "cached": sum(1 for item in results if item.get("cached")),
+        "incomplete_days": sum(1 for item in results if item.get("reason") == "local_day_not_complete"),
+        "failed": len(failures),
+        "results": results,
+    }
+
+
 def _wunderground_country_from_station_row(row: dict) -> str:
     """Prefer the country segment from the market's own WU resolution URL."""
     for raw in (row.get("settlement_rule_text"), row.get("raw_json")):
@@ -1476,6 +1559,7 @@ def main() -> None:
             "hko-truth-fetch",
             "wunderground-truth-fetch",
             "wunderground-hourly-fetch",
+            "wunderground-daily-rollup",
             "truth-delta-build",
             "gamma-structured-sync",
         ],
@@ -1485,6 +1569,7 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=None, help="Days for supported commands; forecast defaults to 4, METAR backfill defaults to 30")
     parser.add_argument("--recent-hours", type=float, default=24.0, help="Recent METAR hours for metar-refresh")
     parser.add_argument("--station-limit", type=int, default=5, help="Maximum PWS stations per city")
+    parser.add_argument("--min-hours", type=int, default=18, help="Minimum distinct local hours required for a WU hourly-to-daily rollup")
     parser.add_argument("--limit", type=int, default=50, help="Maximum current/future signal markets to refresh")
     parser.add_argument("--start-date", default="", help="Inclusive local target date filter")
     parser.add_argument("--target-date", default="", help="Single local target date for Layer 4 build commands")
@@ -1497,6 +1582,11 @@ def main() -> None:
     )
     parser.add_argument("--contract-id", default="", help="Settlement contract id or event slug")
     parser.add_argument("--decision-id", default="", help="Layer 6 signal decision id")
+    parser.add_argument(
+        "--strategy-revision-id",
+        default="",
+        help="Audit-only strategy revision override; signal-decisions-build requires --dry-run",
+    )
     parser.add_argument("--amount", type=float, default=None, help="Paper/live order amount where supported")
     parser.add_argument("--reviewer", default="local-operator", help="Manual verifier name")
     parser.add_argument("--note", default="", help="Manual verification note")
@@ -1515,7 +1605,7 @@ def main() -> None:
     parser.add_argument("--ensemble", action="store_true", help="Fetch Open-Meteo ensemble endpoint where supported")
     parser.add_argument("--forecast-days", type=int, default=7, help="Forecast days for Open-Meteo fetch")
     parser.add_argument("--previous-days", default="1,2,3", help="Comma-separated Open-Meteo Previous Runs lead days, 1-7")
-    parser.add_argument("--models", default="", help="Comma-separated model names for Open-Meteo Previous Runs")
+    parser.add_argument("--models", default="", help="Comma-separated model names for Open-Meteo forecast, ensemble, or Previous Runs")
     parser.add_argument("--force-rebuild", action="store_true", help="Force upsert/rebuild where supported")
     parser.add_argument("--active-weather", action="store_true", help="Sync active Polymarket weather events from Gamma/CLOB")
     parser.add_argument("--skip-orderbooks", action="store_true", help="Skip CLOB orderbook fetches for active weather market buckets")
@@ -1625,6 +1715,7 @@ def main() -> None:
             run_openmeteo_fetch(
                 cities_arg,
                 ensemble=args.ensemble,
+                models_arg=args.models,
                 dry_run=args.dry_run,
                 all_cities=args.all_cities,
                 limit_cities=args.limit_cities,
@@ -1772,6 +1863,7 @@ def main() -> None:
                 dry_run=args.dry_run,
                 limit_cities=args.limit_cities,
                 limit=args.limit,
+                strategy_revision_id=args.strategy_revision_id,
             ),
             ensure_ascii=False,
             indent=2,
@@ -1995,6 +2087,23 @@ def main() -> None:
                 all_cities=args.all_cities,
                 limit_cities=args.limit_cities,
                 dry_run=args.dry_run,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ))
+    elif args.command == "wunderground-daily-rollup":
+        print(json.dumps(
+            run_wunderground_daily_rollup(
+                cities_arg,
+                target_date=args.target_date or "",
+                start_date=args.start_date,
+                end_date=args.end_date,
+                days=args.days or 30,
+                all_cities=args.all_cities,
+                limit_cities=args.limit_cities,
+                min_distinct_hours=args.min_hours,
+                dry_run=args.dry_run,
+                force_rebuild=args.force_rebuild,
             ),
             ensure_ascii=False,
             indent=2,

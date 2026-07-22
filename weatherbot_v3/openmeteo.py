@@ -110,6 +110,7 @@ def fetch_openmeteo_forecasts(
     cities: list[str] | None = None,
     *,
     ensemble: bool = False,
+    models: list[str] | tuple[str, ...] | None = None,
     dry_run: bool = False,
     limit_cities: int = 5,
     forecast_days: int = 7,
@@ -129,19 +130,34 @@ def fetch_openmeteo_forecasts(
     endpoint_url = OPENMETEO_ENSEMBLE_URL if ensemble else OPENMETEO_FORECAST_URL
     delay = float(os.getenv("OPENMETEO_REQUEST_DELAY_SECONDS", "1.5")) if sleep_seconds is None else float(sleep_seconds)
 
+    requested_models = [str(model).strip() for model in (models or []) if str(model).strip()]
     for profile in profiles:
-        models = ensemble_model_allowlist_for_city(profile.city) if ensemble else model_allowlist_for_city(profile.city)
+        allowed_models = ensemble_model_allowlist_for_city(profile.city) if ensemble else model_allowlist_for_city(profile.city)
+        selected_models = (
+            [model for model in requested_models if model in allowed_models]
+            if requested_models
+            else allowed_models
+        )
         city_result = {
             "city": profile.city,
             "station_id": profile.station_id,
             "endpoint": endpoint_kind,
-            "models_requested": models,
+            "models_requested": requested_models or allowed_models,
+            "models_selected": selected_models,
+            "models_rejected": [model for model in requested_models if model not in allowed_models],
             "models": [],
             "runs_upserted": 0,
             "members_upserted": 0,
             "failures": [],
         }
-        for model in models:
+        if not selected_models:
+            failures += 1
+            city_result["failures"].append({
+                "reason": "no_supported_models_selected",
+                "requested": requested_models,
+                "allowed": allowed_models,
+            })
+        for model in selected_models:
             request = build_openmeteo_request(profile, model, endpoint_url=endpoint_url, forecast_days=forecast_days)
             requests_planned.append({
                 "city": profile.city,
@@ -422,15 +438,20 @@ def build_openmeteo_request(
 
 def previous_run_models_for_city(city_key: str) -> list[str]:
     profile = SETTLEMENT_REGISTRY.get(str(city_key or "").strip().lower())
+    common = [
+        "ecmwf_ifs025",
+        "gfs_seamless",
+        "icon_seamless",
+        "gem_seamless",
+        "jma_seamless",
+    ]
     if not profile:
-        return ["gfs_seamless", "ecmwf_ifs025"]
+        return common
     if profile.region == "us":
-        return ["ecmwf_ifs025", "gfs_seamless", "ncep_hrrr_conus"]
+        return [*common, "ncep_hrrr_conus"]
     if profile.city in {"shanghai", "beijing", "wuhan", "qingdao", "shenzhen", "hong-kong"}:
-        return ["ecmwf_ifs025", "gfs_seamless", "cma_grapes_global"]
-    if profile.city in {"tokyo", "seoul", "taipei"}:
-        return ["ecmwf_ifs025", "gfs_seamless", "jma_seamless"]
-    return ["ecmwf_ifs025", "gfs_seamless"]
+        return [*common, "cma_grapes_global"]
+    return common
 
 
 def build_previous_runs_request(
@@ -965,6 +986,9 @@ def _deterministic_series(hourly: dict[str, Any], model: str) -> dict[str, list[
 
 def _ensemble_member_series(hourly: dict[str, Any], model: str) -> dict[str, dict[str, list[Any]]]:
     members: dict[str, dict[str, list[Any]]] = {}
+    control = hourly.get("temperature_2m")
+    if isinstance(control, list):
+        members["control"] = {"temperature_2m": control}
     for key, values in hourly.items():
         if not str(key).startswith("temperature_2m_member"):
             continue

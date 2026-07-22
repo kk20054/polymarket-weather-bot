@@ -10,6 +10,7 @@ from weatherbot_v3.db import (
     init_v3_db,
     insert_orderbook,
     list_paper_orders,
+    paper_execution_summary,
     upsert_daily_max_prediction,
     upsert_signal_decision_record as _db_upsert_signal_decision_record,
 )
@@ -22,6 +23,7 @@ from weatherbot_v3.paper_validation import (
 )
 from weatherbot_v3.paper import execute_paper_decisions
 from weatherbot_v3.strategy_profiles import DEFAULT_PARAMETERS, create_strategy_profile_revision
+from weatherbot_v3.config import ASIAN_CITY_PRIORITY
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +69,9 @@ def upsert_signal_decision_record(decision: dict, path: Path | None = None) -> i
 
 
 class PaperValidationTests(unittest.TestCase):
+    def test_seoul_is_available_to_paper_validation_but_not_live(self):
+        self.assertEqual(ASIAN_CITY_PRIORITY["seoul"]["mode"], "paper_only")
+
     def test_cohort_only_executes_fresh_post_start_decisions_with_limits(self):
         path = test_db_path("paper_validation_freshness")
         self.addCleanup(lambda: path.unlink(missing_ok=True))
@@ -103,11 +108,65 @@ class PaperValidationTests(unittest.TestCase):
         self.assertEqual(len(orders), 1)
         self.assertEqual(orders[0]["decision_id"], "fresh-high")
         self.assertEqual(orders[0]["cohort_run_id"], run_id)
+        self.assertEqual(len(list_paper_orders(cohort_run_id=run_id, path=path)), 1)
+        self.assertEqual(list_paper_orders(cohort_run_id="other-run", path=path), [])
+        cohort_summary = paper_execution_summary(cohort_run_id=run_id, path=path)
+        self.assertEqual(cohort_summary["count"], 1)
+        self.assertEqual(cohort_summary["cohort_run_id"], run_id)
         self.assertEqual(applied["metrics"]["open_positions"], 1)
         self.assertLessEqual(applied["metrics"]["spent_today_usd"], 2.0)
         self.assertAlmostEqual(orders[0]["filled_amount"], 1.5, places=2)
         self.assertEqual(orders[0]["strategy_revision_id"], revision_id)
         self.assertEqual(orders[0]["sizing_snapshot"]["bankroll_usd"], 40.0)
+
+    def test_execution_summary_marks_open_orders_to_latest_bid_and_builds_equity_curve(self):
+        path = test_db_path("paper_validation_mark_to_market")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        started = start_paper_validation_run(
+            bankroll_usd=40,
+            max_per_trade_usd=2,
+            cities=["chicago"],
+            strategies=["single_bucket_ev"],
+            path=path,
+        )
+        run = started["run"]
+        issued_at = datetime.now(timezone.utc)
+        upsert_signal_decision_record(
+            _decision("marked-order", issued_at, "yes-marked", edge=0.2, revision_id=run["strategy_revision_id"]),
+            path=path,
+        )
+        applied = run_paper_validation_tick(apply=True, run_id=run["run_id"], path=path)
+        self.assertEqual(applied["executed"], 1)
+        order = list_paper_orders(cohort_run_id=run["run_id"], path=path)[0]
+        insert_orderbook(
+            str(order["market_id"]),
+            {
+                "snapshot_key": "marked-order-latest",
+                "yes_token_id": "yes-marked",
+                "bids": [{"price": 0.25, "size": 100}],
+                "asks": [{"price": 0.26, "size": 100}],
+                "orderMinSize": 5,
+                "orderPriceMinTickSize": 0.01,
+                "quote_timestamp": (issued_at + timedelta(minutes=1)).isoformat(),
+            },
+            path=path,
+        )
+
+        summary = paper_execution_summary(cohort_run_id=run["run_id"], path=path)
+        marked = summary["orders"][0]
+        expected_pnl = (0.25 - float(marked["entry_price"])) * float(marked["filled_shares"])
+
+        self.assertEqual(marked["pnl_kind"], "unrealized")
+        self.assertAlmostEqual(float(marked["mark_price"]), 0.25)
+        self.assertAlmostEqual(float(marked["pnl_value"]), expected_pnl, places=4)
+        self.assertEqual(marked["exit_policy"], "hold_to_settlement")
+        self.assertFalse(marked["force_exit_enabled"])
+        self.assertAlmostEqual(float(summary["starting_bankroll"]), 40.0)
+        self.assertAlmostEqual(float(summary["cash_available"]), 40.0 - float(marked["filled_amount"]), places=4)
+        self.assertAlmostEqual(float(summary["position_value"]), 0.25 * float(marked["filled_shares"]), places=4)
+        self.assertAlmostEqual(float(summary["equity"]), 40.0 + expected_pnl, places=4)
+        self.assertGreaterEqual(len(summary["equity_curve"]), 3)
+        self.assertAlmostEqual(float(summary["equity_curve"][-1]["pnl"]), expected_pnl, places=4)
 
     def test_start_stop_are_explicit_and_single_active_run(self):
         path = test_db_path("paper_validation_lifecycle")

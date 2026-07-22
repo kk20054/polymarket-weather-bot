@@ -1,16 +1,17 @@
 # WeatherBot Current State
 
 ## Phase And Usability
-- Date: 2026-07-18. Phase 2/3 data-source and probability-contract validation.
-- Physical runtime data has moved to `D:\WeatherBot\data`; the project `data/` path is a Junction, so existing code paths remain valid.
-- All 51 registered cities have current METAR and forecast inputs. Nine China/Hong Kong cities have China Live; 49 cities have active Polymarket events, valid DEB rows, strictly matched market buckets, and persisted signal decisions.
-- Jakarta and Lagos currently have no active Polymarket temperature event, so they remain observation-only. PWS remains unavailable without an entitled WU PWS key.
-- Scheduler is stopped, auto simulation is off, the paper cohort is inactive, and `LIVE_TRADING=false`.
+- Date: 2026-07-22. Phase 3/6 leakage-free calibration and controlled paper validation; observation and paper operation are available, live trading is not.
+- Runtime data remains under the project `data/` Junction to `D:\WeatherBot\data`. Backend `8765`, frontend `5173`, and the scheduler are running; `LIVE_TRADING=false`.
+- Active revision `spr_2c5694b368eb394cf07d1bdc67dcd35b` runs only `core_modal_v1`: top-two modal buckets, 8% minimum effective edge, 15% fractional Kelly, 5% bankroll cap, authoritative truth, model agreement, liquidity and order-minimum gates.
+- A stale 31-member GFS run could previously shadow a fresh deterministic GFS run and leave US cities below the four-family gate. Source selection now keeps candidates in the newest 12-hour cohort before preferring ensemble members; fresh Chicago/Shanghai DEB rows again use GFS.
+- Leakage-safe D0/D+1 replay across 13 cohort cities and 2026-07-18..21 produced 87 valid cases: top-1 accuracy 26.44%, top-2 49.43%, multiclass Brier 0.6559, and zero historically executable trades. D0 outperformed D+1; this supports continued paper study, not a profitability claim.
+- Active paper cohort `paper-20260721T094730Z-7705f78f` has `$40` bankroll, `$2` trade cap, `$6` daily cap, three orders/day and five open positions. Its apply-mode tick is healthy and currently has no fresh executable candidate.
 
 ## Production Blockers
-- Current candidate buckets are blocked mainly by insufficient independent truth samples and thin low-price orderbooks; gates must not be relaxed merely to display signals.
-- Denver has a KDEN/KBKF settlement mismatch and Hong Kong uses HKO rather than VHHH; live remains blocked for both. Istanbul uses NOAA rules rather than WU history.
-- Paper evidence is not established: no authoritative 14-30 day settled cohort, and the live executor is not production-ready.
+- Evidence: the replay has only four independent dates and no executable historical trades; positive net ROI/CLV and calibrated probability have not been demonstrated.
+- Inputs: Weather.com v3 remains below 20 leakage-free pairs per city and stays zero-weight while collecting; WU/HKO coverage and settlement contracts still block live qualification in part of the registry.
+- Execution quality: current decisions are mainly rejected for cross-model spread, market spread, order minimum or insufficient edge. These gates must not be weakened solely to manufacture trades.
 
 ## Next Task
-- Run a controlled scheduler smoke and begin the 14-30 day paper cohort only after source freshness remains stable; do not unlock live trading.
+- Keep the scheduler and current cohort running; after several independent settlements, review ROI, Brier, CLV and gate counterfactuals by city before changing thresholds. Do not enable live trading.

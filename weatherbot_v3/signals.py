@@ -22,8 +22,8 @@ from .forecasts.ensemble import (
     distribution_for_prediction as ensemble_distribution_for_prediction,
 )
 from .stations import get_station
-from .strategies import LadderGridStrategy, SingleBucketEVStrategy, TailBuyingStrategy
-from .strategy_profiles import ensure_default_strategy_profile, profile_snapshot
+from .strategies import CoreModalStrategy, LadderGridStrategy, SingleBucketEVStrategy, TailBuyingStrategy
+from .strategy_profiles import ensure_default_strategy_profile, get_strategy_profile_revision, profile_snapshot
 
 
 DECISION_VERSION = "signal-decision-v3"
@@ -42,6 +42,7 @@ def build_signal_decisions(
     issued_at_hour: str | None = None,
     dry_run: bool = False,
     limit: int = 200,
+    strategy_revision_id: str | None = None,
     path: Path | None = None,
 ) -> dict[str, Any]:
     init_v3_db(path)
@@ -49,6 +50,15 @@ def build_signal_decisions(
     date = str(target_date or "").strip()
     if not city or not date:
         return {"ok": False, "reasons": ["city_or_target_date_missing"], "decisions": []}
+    requested_revision = str(strategy_revision_id or "").strip()
+    if requested_revision and not dry_run:
+        return {
+            "ok": False,
+            "city_key": city,
+            "target_date": date,
+            "reasons": ["shadow_strategy_revision_requires_dry_run"],
+            "decisions": [],
+        }
 
     predictions = list_daily_max_predictions(city_key=city, target_date=date, limit=10, path=path)
     prediction = _select_prediction(predictions, issued_at_hour)
@@ -101,12 +111,26 @@ def build_signal_decisions(
     evidence = _evidence_links(city, date, prediction, buckets, path)
     station_live_reasons = _station_live_gate_reasons(city, path)
     cfg = load_config()
-    profile = ensure_default_strategy_profile("signal_generation", path=path)
+    profile = (
+        get_strategy_profile_revision(requested_revision, path=path)
+        if requested_revision
+        else ensure_default_strategy_profile("signal_generation", path=path)
+    )
+    if not profile:
+        return {
+            "ok": False,
+            "city_key": city,
+            "target_date": date,
+            "reasons": ["strategy_profile_revision_not_found"],
+            "decisions": [],
+        }
     profile_parameters = profile["parameters"]
     decision_policy = profile_parameters["decision_policy"]
     sizing_policy = profile_parameters["sizing"]
     strategy_parameters = profile_parameters["strategies"]
+    settlement_evidence = _independent_settlement_evidence(city, path, prediction)
     context = {
+        "decision_time": datetime.now(timezone.utc).isoformat(),
         "decision_version": DECISION_VERSION,
         "single_bucket_id_version": SINGLE_BUCKET_ID_VERSION,
         "distribution": distribution,
@@ -121,12 +145,15 @@ def build_signal_decisions(
         "kelly_multiplier": sizing_policy.get("kelly_multiplier", getattr(cfg, "kelly_multiplier", 0.15)),
         "bankroll_fraction_cap": sizing_policy.get("max_bankroll_fraction_per_trade", 0.05),
         "max_per_trade_usd": getattr(cfg, "max_per_trade_usd", getattr(cfg, "max_bet", 0.0)),
-        "independent_settlement_days": _independent_settlement_days(city, path, prediction),
+        "independent_settlement_days": settlement_evidence["days"],
+        "independent_settlement_basis": settlement_evidence["basis"],
+        "independent_settlement_authoritative": settlement_evidence["authoritative"],
         "strategy_revision_id": profile["revision_id"],
         "strategy_params_hash": profile["content_sha256"],
         "strategy_params_snapshot": profile_snapshot(profile),
     }
     strategy_builders = (
+        ("core_modal_v1", CoreModalStrategy),
         ("single_bucket_ev", SingleBucketEVStrategy),
         ("ladder_grid", LadderGridStrategy),
         ("tail_buying", TailBuyingStrategy),
@@ -134,7 +161,7 @@ def build_signal_decisions(
     strategies = [
         builder(strategy_parameters[name])
         for name, builder in strategy_builders
-        if strategy_parameters.get(name, {}).get("enabled", True)
+        if name in strategy_parameters and strategy_parameters[name].get("enabled", False)
     ]
     decisions: list[dict[str, Any]] = []
     for strategy in strategies:
@@ -181,10 +208,18 @@ def build_signal_decisions_for_targets(
     *,
     dry_run: bool = False,
     limit: int = 200,
+    strategy_revision_id: str | None = None,
     path: Path | None = None,
 ) -> dict[str, Any]:
     results = [
-        build_signal_decisions(city, date, dry_run=dry_run, limit=limit, path=path)
+        build_signal_decisions(
+            city,
+            date,
+            dry_run=dry_run,
+            limit=limit,
+            strategy_revision_id=strategy_revision_id,
+            path=path,
+        )
         for city, date in targets
     ]
     return {
@@ -194,6 +229,7 @@ def build_signal_decisions_for_targets(
         "stored": sum(int(result.get("stored") or 0) for result in results),
         "decision_count": sum(int(result.get("decision_count") or 0) for result in results),
         "failed": sum(1 for result in results if not result.get("ok")),
+        "strategy_revision_id": str(strategy_revision_id or ""),
         "results": results,
     }
 
@@ -283,33 +319,100 @@ def _station_live_gate_reasons(city_key: str, path: Path | None = None) -> list[
 
 
 def _independent_settlement_days(city_key: str, path: Path | None, prediction: dict[str, Any]) -> int:
+    return int(_independent_settlement_evidence(city_key, path, prediction)["days"])
+
+
+def _independent_settlement_evidence(
+    city_key: str,
+    path: Path | None,
+    prediction: dict[str, Any],
+) -> dict[str, Any]:
     city = str(city_key or "").strip().lower()
-    counts: list[int] = []
-    try:
-        with connect(path) as conn:
-            counts.append(int(conn.execute(
+    station = get_station(city, path) or {}
+    station_id = str(station.get("settlement_station_id") or station.get("station_id") or "").upper()
+    source = str(station.get("primary_settlement_source") or "").lower()
+    candidates: list[dict[str, Any]] = []
+    with connect(path) as conn:
+        resolved_days = int(conn.execute(
+            """
+            SELECT COUNT(DISTINCT target_date)
+            FROM settlements
+            WHERE city_key = ?
+              AND actual_temp IS NOT NULL
+            """,
+            (city,),
+        ).fetchone()[0] or 0)
+        if resolved_days:
+            candidates.append({"days": resolved_days, "basis": "polymarket_resolved", "authoritative": True})
+
+        if "hong_kong_observatory" in source or station_id == "HKO":
+            hko_days = int(conn.execute(
+                "SELECT COUNT(DISTINCT date_local) FROM truth_hko_daily WHERE high_c IS NOT NULL"
+            ).fetchone()[0] or 0)
+            if hko_days:
+                candidates.append({
+                    "days": hko_days,
+                    "basis": "hong_kong_observatory_daily_extract",
+                    "authoritative": True,
+                })
+        elif station_id and "wunderground" in source:
+            wu_days = int(conn.execute(
                 """
-                SELECT COUNT(DISTINCT target_date)
-                FROM truth_observations
-                WHERE city = ?
-                  AND COALESCE(calibration_eligible, 0) = 1
-                  AND actual_temp IS NOT NULL
+                SELECT COUNT(DISTINCT date_local)
+                FROM truth_wunderground_daily
+                WHERE UPPER(icao) = ?
+                  AND high_c IS NOT NULL
+                  AND settlement_truth_type = 'wunderground_daily'
                 """,
-                (city,),
-            ).fetchone()[0] or 0))
-            counts.append(int(conn.execute(
+                (station_id,),
+            ).fetchone()[0] or 0)
+            if wu_days:
+                candidates.append({"days": wu_days, "basis": "wunderground_daily", "authoritative": True})
+
+        calibration_days = int(conn.execute(
+            """
+            SELECT COUNT(DISTINCT target_date)
+            FROM truth_observations
+            WHERE city = ?
+              AND COALESCE(calibration_eligible, 0) = 1
+              AND actual_temp IS NOT NULL
+            """,
+            (city,),
+        ).fetchone()[0] or 0)
+        if calibration_days:
+            candidates.append({
+                "days": calibration_days,
+                "basis": "truth_observations_calibration_eligible",
+                "authoritative": True,
+            })
+
+        if station_id:
+            iem_days = int(conn.execute(
                 """
-                SELECT COUNT(DISTINCT target_date)
-                FROM settlements
-                WHERE city = ?
-                  AND actual_temp IS NOT NULL
+                SELECT COUNT(DISTINCT date_local)
+                FROM truth_iem_daily
+                WHERE UPPER(icao) = ? AND high_c IS NOT NULL
                 """,
-                (city,),
-            ).fetchone()[0] or 0))
-    except Exception:
-        pass
-    counts.append(int(prediction.get("bias_sample_count") or 0))
-    return max(counts or [0])
+                (station_id,),
+            ).fetchone()[0] or 0)
+            if iem_days:
+                candidates.append({
+                    "days": iem_days,
+                    "basis": "iem_asos_approximation",
+                    "authoritative": False,
+                })
+    if not candidates:
+        prediction_days = int(prediction.get("bias_sample_count") or 0)
+        if prediction_days:
+            candidates.append({
+                "days": prediction_days,
+                "basis": "prediction_component_minimum",
+                "authoritative": False,
+            })
+    if not candidates:
+        return {"days": 0, "basis": "missing", "authoritative": False}
+    candidates.sort(key=lambda item: (bool(item["authoritative"]), int(item["days"])), reverse=True)
+    return candidates[0]
 
 
 def _list_market_buckets(city: str, target_date: str, *, limit: int, path: Path | None) -> list[dict[str, Any]]:

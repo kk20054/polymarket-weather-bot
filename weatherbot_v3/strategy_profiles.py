@@ -10,7 +10,7 @@ from .db import connect, init_v3_db, utc_now
 
 
 STRATEGY_PROFILE_SCHEMA_VERSION = 1
-STRATEGY_ENGINE_VERSION = "weatherbot-strategy-v1"
+STRATEGY_ENGINE_VERSION = "weatherbot-strategy-v3"
 DEFAULT_PROFILE_KEY = "weatherbot_conservative"
 ALLOWED_SCOPES = {"signal_generation", "paper_default", "live_default"}
 
@@ -27,6 +27,19 @@ DEFAULT_PARAMETERS: dict[str, Any] = {
         "max_bankroll_fraction_per_trade": 0.05,
     },
     "strategies": {
+        "core_modal_v1": {
+            "enabled": False,
+            "min_effective_edge": 0.08,
+            "min_model_probability": 0.25,
+            "max_model_rank": 2,
+            "min_market_ask": 0.10,
+            "min_settlement_days": 20,
+            "require_authoritative_truth": True,
+            "min_component_calibration_days": 20,
+            "min_calibration_coverage": 0.80,
+            "min_model_families": 4,
+            "max_model_spread_c": 1.50,
+        },
         "single_bucket_ev": {"enabled": True, "min_edge": 0.05},
         "ladder_grid": {
             "enabled": True,
@@ -44,7 +57,14 @@ DEFAULT_PARAMETERS: dict[str, Any] = {
             "daily_candidate_cap": 5,
         },
     },
-    "exit_policy": {"mode": "hold_to_settlement"},
+    "exit_policy": {
+        "mode": "hold_to_settlement",
+        "model_probability_threshold": 0.08,
+        "min_bid_over_model_edge": 0.02,
+        "confirmations_required": 2,
+        "min_hold_minutes": 30,
+        "max_quote_age_seconds": 300,
+    },
 }
 
 
@@ -70,9 +90,20 @@ def validate_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     _bounded(sizing, "kelly_multiplier", 0.0, 1.0)
     _bounded(sizing, "max_bankroll_fraction_per_trade", 0.001, 0.25)
 
+    core_modal = strategies["core_modal_v1"]
     single = strategies["single_bucket_ev"]
     ladder = strategies["ladder_grid"]
     tail = strategies["tail_buying"]
+    _bounded(core_modal, "min_effective_edge", 0.0, 0.5)
+    _bounded(core_modal, "min_model_probability", 0.0, 1.0)
+    _bounded(core_modal, "max_model_rank", 1, 2, integer=True)
+    _bounded(core_modal, "min_market_ask", 0.01, 0.5)
+    _bounded(core_modal, "min_settlement_days", 0, 365, integer=True)
+    core_modal["require_authoritative_truth"] = bool(core_modal.get("require_authoritative_truth", True))
+    _bounded(core_modal, "min_component_calibration_days", 0, 365, integer=True)
+    _bounded(core_modal, "min_calibration_coverage", 0.0, 1.0)
+    _bounded(core_modal, "min_model_families", 1, 20, integer=True)
+    _bounded(core_modal, "max_model_spread_c", 0.1, 10.0)
     _bounded(single, "min_edge", 0.0, 0.5)
     _bounded(ladder, "min_edge", 0.0, 0.5)
     _bounded(ladder, "neighbor_count", 1, 1, integer=True)
@@ -82,12 +113,41 @@ def validate_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     _bounded(tail, "min_settlement_days", 0, 365, integer=True)
     _bounded(tail, "max_order_usd", 0.1, 1000.0)
     _bounded(tail, "daily_candidate_cap", 1, 100, integer=True)
-    for item in (single, ladder, tail):
+    for item in (core_modal, single, ladder, tail):
         item["enabled"] = bool(item.get("enabled", True))
     ladder["atomic"] = True
-    if merged.get("exit_policy", {}).get("mode") != "hold_to_settlement":
+    exit_policy = merged.get("exit_policy", {})
+    if exit_policy.get("mode") not in {"hold_to_settlement", "model_guarded"}:
         raise ValueError("unsupported_exit_policy")
+    _bounded(exit_policy, "model_probability_threshold", 0.0, 0.5)
+    _bounded(exit_policy, "min_bid_over_model_edge", 0.0, 0.25)
+    _bounded(exit_policy, "confirmations_required", 1, 10, integer=True)
+    _bounded(exit_policy, "min_hold_minutes", 0, 1440, integer=True)
+    _bounded(exit_policy, "max_quote_age_seconds", 30, 3600, integer=True)
     return merged
+
+
+def core_modal_v1_parameters() -> dict[str, Any]:
+    """Return a paper-safe preset without mutating the active revision."""
+    parameters = deepcopy(DEFAULT_PARAMETERS)
+    for name, strategy in parameters["strategies"].items():
+        strategy["enabled"] = name == "core_modal_v1"
+    parameters["exit_policy"]["mode"] = "hold_to_settlement"
+    return validate_parameters(parameters)
+
+
+def dynamic_core_modal_paper_parameters() -> dict[str, Any]:
+    """Return the controlled paper preset for calibrated dynamic model weights."""
+    parameters = core_modal_v1_parameters()
+    parameters["exit_policy"].update({
+        "mode": "model_guarded",
+        "model_probability_threshold": 0.08,
+        "min_bid_over_model_edge": 0.02,
+        "confirmations_required": 2,
+        "min_hold_minutes": 30,
+        "max_quote_age_seconds": 300,
+    })
+    return validate_parameters(parameters)
 
 
 def create_strategy_profile_revision(

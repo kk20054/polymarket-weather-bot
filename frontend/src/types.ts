@@ -688,8 +688,12 @@ export interface PaperOrderRecord {
   market_id?: string
   yes_token_id?: string
   bucket_key?: string
+  bucket_label?: string
+  bucket_unit?: string
+  market_question?: string
   strategy_name?: string
   ladder_group_id?: string
+  cohort_run_id?: string
   strategy_revision_id?: string
   sizing_snapshot?: Record<string, unknown>
   execution_quote?: Record<string, unknown>
@@ -704,9 +708,36 @@ export interface PaperOrderRecord {
   filled_shares?: number | null
   unfilled_amount?: number | null
   average_fill_price?: number | null
+  entry_price?: number | null
+  entry_value?: number | null
   mark_price?: number | null
+  current_best_ask?: number | null
+  mark_timestamp?: string | null
+  mark_age_seconds?: number | null
+  mark_source?: string
+  mark_value?: number | null
+  quote_is_stale?: boolean
   unrealized_pnl?: number | null
   realized_pnl?: number | null
+  pnl_value?: number | null
+  pnl_pct?: number | null
+  pnl_kind?: 'unrealized' | 'realized' | 'realized_exit'
+  exit_price?: number | null
+  exit_time?: string | null
+  exit_policy?: string
+  force_exit_enabled?: boolean
+  exit_details?: {
+    trigger?: string
+    confirmation_count?: number
+    model_probability?: number | null
+    observed_high?: number | null
+    best_bid?: number | null
+    proceeds?: number | null
+    realized_pnl?: number | null
+    closed_at?: string
+    reasons?: string[]
+  }
+  settlement?: PaperSettlementRecord | null
   status?: string
   lifecycle_status?: string
   fill_status?: string
@@ -740,11 +771,19 @@ export interface PaperExecutionSummary {
   execution_version?: string
   city_key?: string
   target_date?: string
+  cohort_run_id?: string
   count: number
   open_orders: number
   filled_amount: number
   unrealized_pnl: number
+  starting_bankroll?: number
+  cash_available?: number
+  position_value?: number
+  equity?: number
+  total_pnl?: number
+  equity_curve?: EquityPoint[]
   resolved_orders: number
+  exited_orders?: number
   provisional_orders?: number
   wins: number
   losses: number
@@ -818,6 +857,9 @@ export interface DashboardRecommendationItem {
   prediction_issued_at?: string | null
   remaining_to_max?: number | null
   focus_reason?: string
+  expected_high_basis?: string
+  observation_role?: string
+  attention_only?: boolean
 }
 
 export interface DashboardRecommendations {
@@ -871,6 +913,8 @@ export interface EquityPoint {
   timestamp: string
   pnl: number
   bankroll: number
+  realized_pnl?: number | null
+  unrealized_pnl?: number | null
 }
 
 export interface CalibrationSummary {
@@ -1379,6 +1423,7 @@ export interface PaperValidationStatus {
   orders_today?: number
   open_positions?: number
   resolved_orders?: number
+  exited_orders?: number
   wins?: number
   losses?: number
   win_rate?: number | null
@@ -1434,7 +1479,14 @@ export interface StrategyProfileParameters {
     max_bankroll_fraction_per_trade: number
   }
   strategies: Record<string, Record<string, boolean | number>>
-  exit_policy: { mode: string }
+  exit_policy: {
+    mode: 'hold_to_settlement' | 'model_guarded' | string
+    model_probability_threshold?: number
+    min_bid_over_model_edge?: number
+    confirmations_required?: number
+    min_hold_minutes?: number
+    max_quote_age_seconds?: number
+  }
 }
 
 export interface StrategyProfileRevision extends StrategyProfileSnapshot {

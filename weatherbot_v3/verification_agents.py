@@ -875,19 +875,20 @@ def probe_local_runtime(*, base_url: str = "http://127.0.0.1:8765", timeout_seco
     dashboard: dict[str, Any] = {}
     settings: dict[str, Any] = {}
     scheduler: dict[str, Any] = {}
+    paper_validation: dict[str, Any] = {}
     started = time.perf_counter()
     try:
         dashboard = _get_json(f"{base_url.rstrip('/')}/api/dashboard", timeout_seconds)
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         settings = _get_json(f"{base_url.rstrip('/')}/api/developer/api-settings", timeout_seconds)
         scheduler = _get_json(f"{base_url.rstrip('/')}/api/scheduler/status", timeout_seconds)
+        paper_validation = _get_json(f"{base_url.rstrip('/')}/api/paper-validation/status", timeout_seconds)
     except Exception as exc:
         errors.append(f"{type(exc).__name__}: {exc}")
         return {"probed": True, "available": False, "errors": errors}
     stats = dashboard.get("stats") or {}
     auto_sim = dashboard.get("auto_simulation") or {}
     live = dashboard.get("live_trading") or {}
-    paper_validation = dashboard.get("paper_validation") or {}
     providers = settings.get("providers") or []
     settings_safe = all(_provider_secret_safe(provider) for provider in providers if isinstance(provider, dict))
     return {
@@ -897,7 +898,10 @@ def probe_local_runtime(*, base_url: str = "http://127.0.0.1:8765", timeout_seco
         "legacy_scanner_running": bool(stats.get("is_running") or stats.get("scanner_status") == "running"),
         "auto_simulation_enabled": bool(auto_sim.get("enabled")),
         "live_trading_enabled": bool(live.get("enabled")),
-        "paper_validation_active": bool(paper_validation.get("active") or paper_validation.get("status") == "running"),
+        "paper_validation_active": bool(
+            paper_validation.get("active")
+            or str(paper_validation.get("status") or "").lower() in {"active", "running"}
+        ),
         "scheduler_running": bool(scheduler.get("running")),
         "api_settings_safe": settings_safe,
         "api_provider_count": len(providers),

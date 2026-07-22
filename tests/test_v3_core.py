@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from weatherbot_v3.ai_review import AIReviewer
-from weatherbot_v3.china_weather import WEATHERCN_EXPECTED_NAMEEN, WEATHERCN_STATION_CODES, _http_get, _weathercom_current_observation, hko_rhrread_observation, supported_china_live_cities, weathercn_sk2d_observation
+from weatherbot_v3.china_weather import WEATHERCN_EXPECTED_NAMEEN, WEATHERCN_STATION_CODES, _http_get, _weathercom_current_observation, fetch_china_weather_city, hko_rhrread_observation, supported_china_live_cities, weathercn_sk2d_observation
 from weatherbot_v3.db import bulk_settlement_contract_verification, connect, dashboard_summary, forecast_summary, init_v3_db, insert_forecast_run, insert_forecast_runs, insert_orderbook, list_data_fetch_logs, list_market_buckets, list_paper_orders, list_settlement_contracts, list_signal_decisions, log_data_fetch, market_bucket_summary, model_reprice_event_summary, paper_execution_summary, set_settlement_contract_verification, truth_delta_audit_summary, upsert_daily_max_prediction, upsert_hourly_consensus, upsert_market_bucket, upsert_market_rule, upsert_market_rules, upsert_mesonet_observation, upsert_metar_report, upsert_metar_reports, upsert_model_reprice_event, upsert_settlement_contracts, upsert_signal_decision_record, weather_evidence_summary
 from weatherbot_v3.executor import PaperExecutor
 from weatherbot_v3.env_utils import redact_secret_text, redact_secrets
@@ -30,7 +30,7 @@ from weatherbot_v3.hourly import _forecast_peak_marker, _peak_marker_from_foreca
 from weatherbot_v3.deb import bucket_probabilities, build_and_store_daily_max_prediction, build_daily_max_prediction
 from weatherbot_v3.market_buckets import ingest_market_buckets, market_bucket_from_payload, parse_temperature_bucket, sync_active_weather_market_buckets
 from weatherbot_v3.model_dataset import build_model_dataset_audit, is_settlement_pending
-from weatherbot_v3.openmeteo import fetch_openmeteo_forecasts, model_allowlist_for_city, openmeteo_runs_from_response
+from weatherbot_v3.openmeteo import fetch_openmeteo_forecasts, model_allowlist_for_city, openmeteo_previous_runs_from_response, openmeteo_runs_from_response
 from weatherbot_v3.mesonet import ingest_mesonet_observations, mesonet_observation_from_pws_row
 from weatherbot_v3.pws import aggregate_pws_observations, fetch_wunderground_pws_city, parse_pws_current_payload
 from weatherbot_v3.polymarket_gamma import upsert_polymarket_event
@@ -42,12 +42,12 @@ from weatherbot_v3.stations import apply_market_probe_result, list_stations, rec
 from weatherbot_v3.migration import repair_truth_temporal_mismatches
 from weatherbot_v3.metar import backfill_iem_asos_metars, ingest_iem_asos_csv, parse_iem_asos_csv, probe_iem_stations, fetch_awc_metars, metar_report_from_awc, refresh_metar_reports
 from weatherbot_v3.truth import _parse_time, infer_settlement_rule, settlement_contract_from_rule
-from weatherbot_v3.truth.wunderground import _country_from_icao, fetch_wunderground_daily_result, fetch_wunderground_hourly_result, persist_wunderground_hourly
+from weatherbot_v3.truth.wunderground import _country_from_icao, fetch_wunderground_daily_result, fetch_wunderground_hourly_result, persist_wunderground_hourly, rollup_stored_wunderground_hourly_day
 from weatherbot_v3.validation import _compact_action, build_production_validation_report
 from weatherbot_v3.weathercom import weathercom_request_units, weathercom_runs_from_response
 from weatherbot_v3.db import truth_coverage_summary, upsert_truth_observation
 from weatherbot_v3.cli import _stage_result, _wunderground_country_from_station_row, default_orderbook_start_date, run_china_weather_fetch, run_daily_max_build, run_hourly_consensus_build, run_iem_asos_truth_fetch, run_market_buckets_sync, run_openmeteo_fetch, run_orderbook_backfill, run_paper_execute, run_polymarket_market_probe, run_production_refresh, run_signal_decisions_build, select_orderbook_backfill_markets
-from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _recommendations_payload, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
+from dashboard_server import AutoSimulationUpdate, ProductionActionRequest, ProductionRefreshRequest, _augment_strategy_replay_record, _auto_simulation_state, _bucket_probability_f, _bucket_value_in_range, _bulk_simulation_skip_reason, _build_city_evidence_payload, _build_policy_candidates, _build_temperature_fit, _build_weather_city_series, _city_evidence_matches, _combined_fetch_log_payload, _diff_stats_summary, _entry_snapshot_features, _fit_trade_readiness, _forecast_archive_manifest_payload, _live_gate, _merge_hourly_points, _metric_summary, _position_from_signal, _recommendation_query_cutoff, _recommendations_payload, _refresh_signal_orderbooks, _run_paper_validation_action, _save_auto_simulation_state, forecasts as forecasts_api, hourly_consensus as hourly_consensus_api, market_buckets as market_buckets_api, observations as observations_api, production_refresh, production_refresh_lock, update_auto_simulation
 from dashboard_server import signal_decision_detail as signal_decision_detail_api
 from dashboard_server import signal_decisions as signal_decisions_api
 from dashboard_server import paper_orders as paper_orders_api
@@ -468,6 +468,31 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(quote.best_ask, 0.21)
         self.assertEqual(validate_order_constraints(quote, 5.0, 0.21), [])
         self.assertIn("below_order_min_size", validate_order_constraints(quote, 1.0, 0.21))
+
+    def test_quote_rejects_missing_and_crossed_clob_books(self):
+        missing_bid = quote_from_market_payload({
+            "id": "missing-bid",
+            "outcomePrices": '["0.20", "0.80"]',
+            "bestBid": "0",
+            "bestAsk": "0.21",
+            "orderMinSize": "5",
+            "orderPriceMinTickSize": "0.01",
+            "enableOrderBook": True,
+            "clobTokenIds": '["yes", "no"]',
+        })
+        self.assertIn("invalid_best_bid", validate_order_constraints(missing_bid, 5.0, 0.21))
+
+        crossed = quote_from_market_payload({
+            "id": "crossed",
+            "outcomePrices": '["0.20", "0.80"]',
+            "bestBid": "0.22",
+            "bestAsk": "0.21",
+            "orderMinSize": "5",
+            "orderPriceMinTickSize": "0.01",
+            "enableOrderBook": True,
+            "clobTokenIds": '["yes", "no"]',
+        })
+        self.assertIn("crossed_orderbook", validate_order_constraints(crossed, 5.0, 0.21))
 
     def test_market_bucket_parser_handles_temperature_shapes(self):
         between = parse_temperature_bucket(
@@ -1319,7 +1344,7 @@ class V3CoreTests(unittest.TestCase):
         db_path = test_db_path("canonical_weather_key_migration")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
-            init_v3_db(db_path)
+            init_v3_db(db_path, force=True)
             with connect(db_path) as conn:
                 conn.execute("DROP INDEX idx_metar_reports_station_report_time_unique")
                 conn.execute("DROP INDEX idx_hourly_consensus_city_date_hour_unique")
@@ -1345,7 +1370,7 @@ class V3CoreTests(unittest.TestCase):
                     """
                 )
 
-            init_v3_db(db_path)
+            init_v3_db(db_path, force=True)
             with connect(db_path) as conn:
                 metar = conn.execute(
                     "SELECT raw_text FROM metar_reports WHERE station_id = 'KORD' AND report_time = '2026-07-13T12:51:00+00:00'"
@@ -1802,6 +1827,46 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(rows[0]["temperature"], 31.5)
         self.assertIsNotNone(rows[0]["raw_response_hash"])
 
+    def test_china_live_collector_reports_new_then_source_unchanged(self):
+        db_path = test_db_path("china_live_source_unchanged")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        raw = 'var dataSK={"city":"101020600","nameen":"pudongxinqu","temp":"31.2","SD":"70%","time":"10:00","date":"07月19日星期日"}'
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path)}, clear=False):
+            init_v3_db()
+            with patch("weatherbot_v3.china_weather._http_get", return_value=raw):
+                first = fetch_china_weather_city("shanghai")
+                second = fetch_china_weather_city("shanghai")
+            with connect(db_path) as conn:
+                count = conn.execute("SELECT COUNT(*) FROM mesonet_observations").fetchone()[0]
+
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["rows_inserted"], 1)
+        self.assertTrue(first["source_observation_new"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(second["rows_inserted"], 0)
+        self.assertEqual(second["rows_updated"], 1)
+        self.assertTrue(second["source_unchanged"])
+        self.assertEqual(count, 1)
+
+    def test_china_live_primary_failure_does_not_write_weathercom_fallback(self):
+        db_path = test_db_path("china_live_no_silent_fallback")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "WEATHER_COM_API_KEY": "unused"}, clear=False):
+            init_v3_db()
+            with patch("weatherbot_v3.china_weather._http_get", side_effect=OSError("upstream 502")), patch(
+                "weatherbot_v3.china_weather._weathercom_current_observation"
+            ) as fallback:
+                result = fetch_china_weather_city("shanghai")
+            with connect(db_path) as conn:
+                count = conn.execute("SELECT COUNT(*) FROM mesonet_observations").fetchone()[0]
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "china_live_primary_failed")
+        self.assertFalse(result["fallback"])
+        self.assertEqual(result["rows_upserted"], 0)
+        fallback.assert_not_called()
+        self.assertEqual(count, 0)
+
     def test_china_weather_cli_dry_run_does_not_write_mesonet_rows(self):
         db_path = test_db_path("china_weather_cli_dry_run")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
@@ -1873,7 +1938,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(result["ok_cities"], 1)
         self.assertEqual(result["failed"], 1)
         self.assertEqual(result["rows_upserted"], 1)
-        self.assertEqual(result["results"][0]["error"], "china_live_fetch_failed")
+        self.assertEqual(result["results"][0]["error"], "china_live_primary_failed")
         self.assertEqual([(row["city"], row["network"]) for row in rows], [("hong-kong", "china_live")])
 
     def test_hourly_consensus_exposes_china_live_without_overwriting_metar(self):
@@ -2984,7 +3049,7 @@ class V3CoreTests(unittest.TestCase):
                 "primary_settlement_source": "wunderground",
             }, path=db_path)
             self._seed_recommendation_event(db_path, city="chicago", target_date=target)
-            self._seed_signal_decision_fixture(db_path, best_ask=0.20, best_bid=0.0, target_date=target)
+            self._seed_signal_decision_fixture(db_path, best_ask=0.20, best_bid=0.05, target_date=target)
             upsert_metar_report({
                 "city": "chicago",
                 "city_name": "Chicago",
@@ -3149,12 +3214,74 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(focus["deb_model_mu"], 84.2, places=1)
         self.assertAlmostEqual(focus["deb_effective_mu"], 86.0, places=1)
         self.assertAlmostEqual(focus["observed_high"], 87.8, places=1)
-        self.assertAlmostEqual(focus["deb_mu"], 87.8, places=1)
-        self.assertEqual(focus["focus_reason"], "near_predicted_daily_max")
+        self.assertAlmostEqual(focus["deb_mu"], 84.2, places=1)
+        self.assertEqual(focus["focus_reason"], "observed_above_model_high")
+        self.assertEqual(focus["expected_high_basis"], "model_mu")
+        self.assertEqual(focus["observation_role"], "settlement_station_observation")
+        self.assertTrue(focus["attention_only"])
         self.assertTrue(focus["market_open"])
         self.assertIn("polymarket.com", focus["polymarket_url"])
         self.assertNotIn("market_id", focus)
         self.assertFalse(payload["filters"]["weather_focus"]["trade_claim"])
+
+    def test_dashboard_weather_focus_matches_wellington_near_peak_case(self):
+        db_path = test_db_path("dashboard_weather_focus_wellington")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        target = datetime.now(ZoneInfo("Pacific/Auckland")).date().isoformat()
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false"}, clear=False):
+            init_v3_db(db_path)
+            sync_station_registry(path=db_path)
+            with connect(db_path) as conn:
+                stations = {
+                    str(row["city_key"]): dict(row)
+                    for row in conn.execute("SELECT * FROM stations").fetchall()
+                }
+                query_cutoff = _recommendation_query_cutoff(stations, datetime.now(timezone.utc))
+                now_iso = datetime.now(timezone.utc).isoformat()
+                conn.executemany(
+                    """
+                    INSERT INTO daily_max_predictions (
+                        prediction_key, city_key, target_date, issued_at, mu, sigma,
+                        unit, method, created_at, updated_at
+                    ) VALUES (?, 'filler', ?, ?, 20.0, 1.0, 'C', 'fixture', ?, ?)
+                    """,
+                    [
+                        (f"filler-{index}", query_cutoff, f"{query_cutoff}T00:{index // 60:02d}:{index % 60:02d}+00:00", now_iso, now_iso)
+                        for index in range(525)
+                    ],
+                )
+            self._seed_recommendation_event(db_path, city="wellington", target_date=target)
+            upsert_daily_max_prediction({
+                "city_key": "wellington",
+                "target_date": target,
+                "issued_at": datetime.now(timezone.utc).isoformat(),
+                "mu": 13.2,
+                "sigma": 0.9,
+                "unit": "C",
+                "method": "polywx_aligned_deb_v1",
+                "deb_version": "polywx_aligned_deb_v1",
+                "sigma_floor": 0.5,
+                "raw_json": {"model_mu": 13.2, "effective_mu": 13.2},
+            }, path=db_path)
+            upsert_metar_report({
+                "city": "wellington",
+                "city_name": "Wellington",
+                "station_id": "NZWN",
+                "report_time": datetime.now(timezone.utc).isoformat(),
+                "raw_text": "NZWN fixture METAR",
+                "temperature": 13.0,
+                "parser_version": "fixture",
+            })
+            payload = _recommendations_payload(scheduler_status={"running": True}, path=db_path)
+
+        self.assertEqual(payload["weather_focus_count"], 1)
+        focus = payload["focus_items"][0]
+        self.assertEqual(focus["city_key"], "wellington")
+        self.assertEqual(focus["current_temp"], 13.0)
+        self.assertEqual(focus["deb_mu"], 13.2)
+        self.assertEqual(focus["focus_reason"], "near_model_high")
+        self.assertTrue(focus["attention_only"])
+        self.assertIn("highest-temperature-in-wellington", focus["polymarket_url"])
 
     def test_dashboard_recommendations_exclude_ended_markets(self):
         db_path = test_db_path("dashboard_recommendations_ended_market")
@@ -5040,10 +5167,72 @@ class V3CoreTests(unittest.TestCase):
         target_run = next(run for run in runs if run["target_date"] == "2026-07-01")
         target_members = members[runs.index(target_run)]
         self.assertEqual(target_run["source"], "openmeteo_ensemble_gfs_seamless")
-        self.assertEqual(target_run["member_count"], 2)
-        self.assertEqual([member["member_id"] for member in target_members], ["member01", "member02"])
-        self.assertAlmostEqual(target_run["mean_high"], 72.5, places=1)
+        self.assertEqual(target_run["member_count"], 3)
+        self.assertEqual([member["member_id"] for member in target_members], ["control", "member01", "member02"])
+        self.assertAlmostEqual(target_run["mean_high"], 71.6, places=1)
         self.assertGreater(target_run["std_high"], 0)
+
+    def test_openmeteo_ensemble_dry_run_can_limit_to_real_gfs_members(self):
+        payload = fetch_openmeteo_forecasts(
+            ["chicago"],
+            ensemble=True,
+            models=["gfs_seamless"],
+            dry_run=True,
+            limit_cities=1,
+            forecast_days=3,
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual({row["model"] for row in payload["requests_planned"]}, {"gfs_seamless"})
+        self.assertEqual(payload["results"][0]["models_selected"], ["gfs_seamless"])
+
+    def test_bias_model_families_are_unique_per_city(self):
+        from weatherbot_v3.bias import DEFAULT_CITY_MODELS
+
+        for city, models in DEFAULT_CITY_MODELS.items():
+            self.assertEqual(len(models), len(set(models)), city)
+
+    def test_openmeteo_previous_runs_use_archive_availability_for_no_leak_training(self):
+        db_path = test_db_path("openmeteo_previous_archive_contract")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        times = [
+            (datetime(2026, 7, 1, tzinfo=timezone.utc) + timedelta(hours=hour)).strftime("%Y-%m-%dT%H:%M")
+            for hour in range(48)
+        ]
+        payload = {
+            "hourly": {
+                "time": times,
+                "temperature_2m_previous_day1": [20.0 + ((hour % 24) / 10.0) for hour in range(48)],
+            }
+        }
+        runs, members = openmeteo_previous_runs_from_response(
+            "chicago",
+            "jma_seamless",
+            "2026-07-01",
+            payload,
+            previous_days=[1],
+            source_url=(
+                "https://previous-runs-api.open-meteo.com/v1/forecast?"
+                "latitude=41.9786&longitude=-87.9048&models=jma_seamless"
+            ),
+            retrieved_at="2026-07-21T00:00:00+00:00",
+        )
+        insert_forecast_runs(list(zip(runs, members)), path=db_path)
+        with connect(db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT training_eligible, availability_basis, run_at, available_at,
+                       ineligibility_reason, quality_flags
+                FROM forecast_runs
+                WHERE source = 'openmeteo_previous_jma_seamless_day1'
+                """
+            ).fetchone()
+
+        self.assertEqual(row["training_eligible"], 1)
+        self.assertEqual(row["availability_basis"], "archive_run_at")
+        self.assertEqual(row["available_at"], row["run_at"])
+        self.assertEqual(row["ineligibility_reason"], "")
+        self.assertIn("trusted_forecast_archive", json.loads(row["quality_flags"]))
 
     def test_openmeteo_snapshots_preserve_distinct_retrievals_within_same_hour(self):
         db_path = test_db_path("openmeteo_idempotent")
@@ -5710,10 +5899,19 @@ class V3CoreTests(unittest.TestCase):
             valid_times=["2026-07-06T00:00:00+00:00", "2026-07-06T06:00:00+00:00"],
             retrieved_at="2026-07-05T12:00:00+00:00",
         )
+        icon_run, icon_members = openmeteo_hourly_run(
+            "shanghai",
+            "2026-07-06",
+            "openmeteo_icon_seamless",
+            [27.5, 33.5],
+            valid_times=["2026-07-06T00:00:00+00:00", "2026-07-06T06:00:00+00:00"],
+            retrieved_at="2026-07-05T12:00:00+00:00",
+        )
         with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "DEB_WEIGHT_MODE": "polywx_aligned"}, clear=False):
             for run, members in zip(weather_runs, weather_members):
                 insert_forecast_run(run, members)
             insert_forecast_run(gfs_run, gfs_members)
+            insert_forecast_run(icon_run, icon_members)
             prediction = build_daily_max_prediction(
                 "shanghai",
                 "2026-07-06",
@@ -5725,6 +5923,12 @@ class V3CoreTests(unittest.TestCase):
                     "sample_count": 20,
                     "mae_7d_c": 0.8,
                     "location_version": profile.location_version,
+                }, {
+                    "icao": "ZSPD",
+                    "model": "icon",
+                    "sample_count": 20,
+                    "mae_7d_c": 0.7,
+                    "location_version": profile.location_version,
                 }],
             )
 
@@ -5733,13 +5937,17 @@ class V3CoreTests(unittest.TestCase):
         families = {component["family"] for component in prediction["components"]}
         self.assertIn("weathercom_v3", families)
         self.assertIn("gfs", families)
+        self.assertIn("icon", families)
         self.assertAlmostEqual(sum(prediction["model_weights"].values()), 1.0, places=6)
         v3_component = next(component for component in prediction["components"] if component["family"] == "weathercom_v3")
         self.assertEqual(v3_component["role"], "weather.com/WU-style v3 forecast")
         self.assertIn("truth_basis", v3_component)
         self.assertTrue(v3_component["mae_imputed"])
-        self.assertGreaterEqual(v3_component["effective_mae_c"], 1.2)
-        self.assertLess(v3_component["weight"], 0.484 / (0.484 + 0.152))
+        self.assertIsNone(v3_component["effective_mae_c"])
+        self.assertEqual(v3_component["weight"], 0.0)
+        self.assertEqual(v3_component["weight_status"], "collecting")
+        self.assertEqual(v3_component["weight_exclusion_reason"], "insufficient_leakage_free_pairs")
+        self.assertIn("uncalibrated_components_excluded_from_dynamic_weight", prediction["build_warnings"])
         self.assertNotIn("missing_weathercom_v3", prediction["build_warnings"])
 
     def test_weathercom_v3_deb_rebuilds_elapsed_hours_from_forecast_snapshots(self):
@@ -6460,6 +6668,101 @@ class V3CoreTests(unittest.TestCase):
         self.assertIsNone(points["shanghai"][0]["metar"])
         self.assertEqual(len(native_series["historical"]), 1)
         self.assertEqual(native_series["historical"][0]["local_time"], "12:00")
+
+    def test_stored_wunderground_hourly_rollup_requires_complete_mature_local_day(self):
+        db_path = test_db_path("wunderground_hourly_rollup")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        rows = []
+        for hour in range(24):
+            temp = 20.0 + (hour / 10.0)
+            rows.append({
+                "observation_key": f"KORD:2026-07-01:{hour:02d}",
+                "icao": "KORD",
+                "date_local": "2026-07-01",
+                "timezone": "America/Chicago",
+                "observed_at_local": f"2026-07-01T{hour:02d}:00:00-05:00",
+                "observed_at_utc": f"2026-07-01T{(hour + 5) % 24:02d}:00:00+00:00",
+                "temp_c": temp,
+                "source_url": "https://api.weather.com/history/KORD",
+                "method": "weather_com_location_historical_json",
+                "parser_version": "truth-wunderground-hourly-v1",
+            })
+        persist_wunderground_hourly(
+            {
+                "ok": True,
+                "icao": "KORD",
+                "date_local": "2026-07-01",
+                "timezone": "America/Chicago",
+                "rows": rows,
+            },
+            path=db_path,
+        )
+
+        rolled = rollup_stored_wunderground_hourly_day(
+            "KORD",
+            "2026-07-01",
+            timezone_name="America/Chicago",
+            path=db_path,
+        )
+        partial = rollup_stored_wunderground_hourly_day(
+            "KORD",
+            "2026-07-02",
+            timezone_name="America/Chicago",
+            path=db_path,
+        )
+        with connect(db_path) as conn:
+            stored = conn.execute(
+                "SELECT high_c, low_c, method, parser_version FROM truth_wunderground_daily"
+            ).fetchone()
+        profile = SETTLEMENT_REGISTRY["chicago"]
+        insert_forecast_run(
+            {
+                "run_key": "weathercom-v3-forward-snapshot",
+                "city": "chicago",
+                "target_date": "2026-07-01",
+                "source": "weathercom_v3_forecast",
+                "provider": "weather.com",
+                "model": "weathercom_v3",
+                "run_at": "",
+                "retrieved_at": "2026-06-30T12:00:00+00:00",
+                "available_at": "2026-06-30T12:00:00+00:00",
+                "availability_basis": "retrieved_at",
+                "valid_at": "2026-07-01T20:00:00+00:00",
+                "horizon": "D+1",
+                "lead_hours": 32,
+                "latitude": profile.latitude,
+                "longitude": profile.longitude,
+                "station_id": "KORD",
+                "timezone": "America/Chicago",
+                "unit": "F",
+                "mean_high": 86.0,
+                "member_count": 1,
+                "source_url": (
+                    "https://api.weather.com/v3/wx/forecast/hourly/2day?"
+                    f"geocode={profile.latitude},{profile.longitude}"
+                ),
+                "training_eligible": True,
+                "parse_status": "parsed",
+            },
+            [{"member_id": "deterministic", "high_temp": 86.0, "hourly": []}],
+            path=db_path,
+        )
+        from weatherbot_v3.bias import train_bias_table
+        trained = train_bias_table(cities=["chicago"], days=30, path=db_path, persist=False)
+        weathercom_bias = next(row for row in trained["rows"] if row["model"] == "weathercom_v3")
+
+        self.assertTrue(rolled["ok"])
+        self.assertTrue(rolled["persisted"])
+        self.assertEqual(rolled["distinct_hours"], 24)
+        self.assertAlmostEqual(float(stored["high_c"]), 22.3)
+        self.assertAlmostEqual(float(stored["low_c"]), 20.0)
+        self.assertEqual(stored["method"], "stored_wunderground_hourly_daily_rollup")
+        self.assertEqual(stored["parser_version"], "truth-wunderground-hourly-rollup-v1")
+        self.assertEqual(weathercom_bias["sample_count"], 1)
+        self.assertEqual(weathercom_bias["truth_basis_counts"], {"wunderground_daily": 1})
+        self.assertAlmostEqual(weathercom_bias["additive_bias_c"], 7.7, places=1)
+        self.assertFalse(partial["ok"])
+        self.assertEqual(partial["reason"], "insufficient_hourly_coverage")
 
     def test_awc_visibility_uses_city_display_convention(self):
         item = {

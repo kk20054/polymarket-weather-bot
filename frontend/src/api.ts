@@ -1,7 +1,7 @@
 import axios from 'axios'
 import type { ApiSettingsResponse, ApiSettingTestResult, AutoSimulationStatus, BucketProbabilitySummary, BulkContractVerificationResult, BulkSimulateResult, DashboardData, Signal, Trade, BotStats, BtcPrice, BtcWindow, WeatherForecast, WeatherSignal, TemperatureFitData, SettlementContractList, ForecastArchiveManifest, ProductionRefreshResult, ProductionValidationReport, ProductionActionRequest, ProductionActionRunResult, MarketBucketSummary, SignalDecisionSummary, DailyMaxPredictionSummary, SchedulerStatus, SourceHealthMatrix, PaperValidationStatus, PaperValidationStartOptions, PaperExecutionSummary, PaperExecutionResult, WeatherCitySeries, TruthDeltaAuditSummary, ModelRepriceEventSummary, HourlyConsensusSummary, ForecastRevisionHistory, StrategyProfileParameters, StrategyProfileRevision, StrategyProfilesResponse } from './types'
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
+const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
 
 const api = axios.create({
   baseURL: `${API_BASE}/api`,
@@ -251,9 +251,9 @@ export async function fetchSignalDecisions(city: string, targetDate: string, lim
   return data
 }
 
-export async function fetchPaperOrders(city: string, targetDate: string, limit = 100): Promise<PaperExecutionSummary> {
+export async function fetchPaperOrders(city: string, targetDate: string, limit = 100, cohortRunId = ''): Promise<PaperExecutionSummary> {
   const { data } = await api.get<PaperExecutionSummary>('/paper-orders', {
-    params: { city, target_date: targetDate, limit },
+    params: { city, target_date: targetDate, cohort_run_id: cohortRunId, limit },
   })
   return data
 }

@@ -16,6 +16,7 @@ from ..env_utils import env_value
 
 PARSER_VERSION = "truth-wunderground-daily-v1"
 HOURLY_PARSER_VERSION = "truth-wunderground-hourly-v1"
+DAILY_ROLLUP_PARSER_VERSION = "truth-wunderground-hourly-rollup-v1"
 SETTLEMENT_TRUTH_TYPE = "wunderground_daily"
 HOURLY_SETTLEMENT_TRUTH_TYPE = "wunderground_hourly_history"
 
@@ -314,6 +315,153 @@ def persist_wunderground_daily(result: dict[str, Any], *, path: Path | None = No
             ),
         )
     return {"ok": True, "truth_key": truth_key}
+
+
+def rollup_stored_wunderground_hourly_day(
+    icao: str,
+    date_local: str | date,
+    *,
+    timezone_name: str = "UTC",
+    min_distinct_hours: int = 18,
+    persist: bool = True,
+    force: bool = False,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Build one mature WU daily truth row from stored hourly observations.
+
+    The rollup is deliberately local-only: it never re-fetches a source and it
+    refuses the station's current local day. This lets forward Weather.com v3
+    snapshots be paired with already captured WU history without introducing
+    target-day leakage or silently treating an incomplete day as settlement.
+    """
+
+    init_v3_db(path)
+    station = str(icao or "").strip().upper()
+    target = _as_date(date_local)
+    zone_name = str(timezone_name or "UTC")
+    try:
+        local_today = datetime.now(timezone.utc).astimezone(ZoneInfo(zone_name)).date()
+    except Exception:
+        return {
+            "ok": False,
+            "icao": station,
+            "date_local": target.isoformat(),
+            "reason": "invalid_timezone",
+        }
+    if target >= local_today:
+        return {
+            "ok": False,
+            "icao": station,
+            "date_local": target.isoformat(),
+            "reason": "local_day_not_complete",
+        }
+
+    with connect(path) as conn:
+        existing = conn.execute(
+            """
+            SELECT truth_key, high_c, low_c, method, parser_version
+            FROM truth_wunderground_daily
+            WHERE UPPER(icao) = ? AND date_local = ? AND high_c IS NOT NULL
+            """,
+            (station, target.isoformat()),
+        ).fetchone()
+        if existing and not force:
+            return {
+                "ok": True,
+                "cached": True,
+                "icao": station,
+                "date_local": target.isoformat(),
+                "high_c": existing["high_c"],
+                "low_c": existing["low_c"],
+                "method": existing["method"],
+                "parser_version": existing["parser_version"],
+                "persisted": False,
+            }
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT observation_key, observed_at_local, observed_at_utc,
+                       temp_c, source_url, method, parser_version
+                FROM truth_wunderground_hourly
+                WHERE UPPER(icao) = ? AND date_local = ? AND temp_c IS NOT NULL
+                ORDER BY observed_at_utc, id
+                """,
+                (station, target.isoformat()),
+            ).fetchall()
+        ]
+
+    valid_rows: list[dict[str, Any]] = []
+    distinct_hours: set[str] = set()
+    for row in rows:
+        try:
+            temp_c = float(row["temp_c"])
+        except (TypeError, ValueError):
+            continue
+        observed_local = str(row.get("observed_at_local") or "")
+        try:
+            parsed_local = datetime.fromisoformat(observed_local.replace("Z", "+00:00"))
+            if parsed_local.date() != target:
+                continue
+            distinct_hours.add(parsed_local.strftime("%Y-%m-%dT%H"))
+        except ValueError:
+            continue
+        valid_rows.append({**row, "temp_c": temp_c})
+
+    required_hours = max(1, min(int(min_distinct_hours or 18), 24))
+    if len(distinct_hours) < required_hours:
+        return {
+            "ok": False,
+            "icao": station,
+            "date_local": target.isoformat(),
+            "reason": "insufficient_hourly_coverage",
+            "observation_count": len(valid_rows),
+            "distinct_hours": len(distinct_hours),
+            "required_distinct_hours": required_hours,
+        }
+
+    high_row = max(valid_rows, key=lambda row: (float(row["temp_c"]), str(row.get("observed_at_utc") or "")))
+    low_row = min(valid_rows, key=lambda row: (float(row["temp_c"]), str(row.get("observed_at_utc") or "")))
+    methods = sorted({str(row.get("method") or "") for row in valid_rows if row.get("method")})
+    source_urls = [str(row.get("source_url") or "") for row in valid_rows if row.get("source_url")]
+    result = {
+        "ok": True,
+        "cached": False,
+        "icao": station,
+        "date_local": target.isoformat(),
+        "timezone": zone_name,
+        "high_c": round(float(high_row["temp_c"]), 1),
+        "low_c": round(float(low_row["temp_c"]), 1),
+        "source_url": source_urls[-1] if source_urls else "",
+        "method": "stored_wunderground_hourly_daily_rollup",
+        "settlement_truth_type": SETTLEMENT_TRUTH_TYPE,
+        "skip_reasons": ["derived_from_complete_stored_wunderground_hourly_history"],
+        "parser_version": DAILY_ROLLUP_PARSER_VERSION,
+        "observation_count": len(valid_rows),
+        "distinct_hours": len(distinct_hours),
+        "required_distinct_hours": required_hours,
+        "high_observed_at_local": high_row.get("observed_at_local"),
+        "low_observed_at_local": low_row.get("observed_at_local"),
+        "raw": {
+            "source_methods": methods,
+            "source_parser_versions": sorted({
+                str(row.get("parser_version") or "") for row in valid_rows if row.get("parser_version")
+            }),
+            "observation_count": len(valid_rows),
+            "distinct_hours": len(distinct_hours),
+            "required_distinct_hours": required_hours,
+            "high_observation_key": high_row.get("observation_key"),
+            "high_observed_at_local": high_row.get("observed_at_local"),
+            "low_observation_key": low_row.get("observation_key"),
+            "low_observed_at_local": low_row.get("observed_at_local"),
+        },
+    }
+    if persist:
+        persisted = persist_wunderground_daily(result, path=path)
+        result.update({"persisted": bool(persisted.get("ok")), "truth_key": persisted.get("truth_key")})
+    else:
+        result["persisted"] = False
+    return result
 
 
 def _daily_from_hourly_result(

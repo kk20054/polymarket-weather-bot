@@ -90,6 +90,20 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(skipped["paper_decision"], "skip")
         self.assertIn("edge_below_min", skipped["gate_reasons"])
 
+    def test_single_bucket_ev_blocks_orders_below_market_minimum(self):
+        bucket = _bucket("large-minimum", 89.0, 91.0, 0.20, 0.195)
+        bucket["order_min_size"] = 500.0
+        decision = SingleBucketEVStrategy().evaluate(
+            bucket,
+            {"bucket_key": "large-minimum", "probability": 0.28},
+            _prediction(),
+            _context(),
+        )
+
+        self.assertEqual(decision["paper_decision"], "skip")
+        self.assertFalse(decision["paper_allowed"])
+        self.assertIn("below_order_min_size", decision["gate_reasons"])
+
     def test_ladder_grid_builds_three_bucket_atomic_group(self):
         buckets = [
             _bucket("low", 88.0, 89.0, 0.10, 0.095),

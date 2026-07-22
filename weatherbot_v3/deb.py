@@ -1260,6 +1260,20 @@ def _bucket_excluded_by_observed_floor(
     return observed_settlement_value > maximum + 1e-9
 
 
+def bucket_excluded_by_observed_floor(
+    bucket: dict[str, Any],
+    *,
+    prediction_unit: str,
+    observed_floor: float | None,
+) -> bool:
+    """Return whether the observed daily high makes a YES bucket irreversible."""
+    return _bucket_excluded_by_observed_floor(
+        bucket,
+        prediction_unit=prediction_unit,
+        observed_floor=observed_floor,
+    )
+
+
 def bucket_bounds_in_prediction_unit(
     bucket: dict[str, Any],
     prediction_unit: str,

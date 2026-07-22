@@ -37,6 +37,7 @@ type Props = {
   averageDelta: Array<string | null>
   accuracy: Array<string | null>
   overlap: string | null
+  language?: 'zh' | 'en'
 }
 
 const HOUR_TICKS = Array.from({ length: 24 }, (_, hour) => hour * 60)
@@ -79,8 +80,8 @@ function HourlyTooltip({
 }) {
   if (!active || label === undefined || !payload?.length) return null
   return (
-    <div className="min-w-[180px] border border-[#2C3445] bg-[#1B212C] px-2.5 py-2 text-[11px] text-[#CBD2DC] shadow-xl">
-      <div className="mb-1.5 font-semibold text-white">{formatTooltipTime(dateLabel, label)}</div>
+    <div className="weatherbot-tooltip min-w-[180px] border px-2.5 py-2 text-[11px] shadow-xl">
+      <div className="mb-1.5 font-semibold">{formatTooltipTime(dateLabel, label)}</div>
       <div className="space-y-1">
         {payload.map(item => {
           const numeric = Number(item.value)
@@ -162,6 +163,7 @@ export function HourlyTemperatureChart({
   averageDelta,
   accuracy,
   overlap,
+  language = 'zh',
 }: Props) {
   const peakMinute = peakHour ? HOUR_TICKS.find(value => formatMinute(value) === peakHour) ?? null : null
   const temperatureValues = rows.flatMap(row => [
@@ -187,6 +189,7 @@ export function HourlyTemperatureChart({
     forecast: true,
     cloud: true,
   })
+  const text = (zh: string, en: string) => language === 'zh' ? zh : en
   const toggleSeries = (key: SeriesKey) => {
     setVisibleSeries(current => ({ ...current, [key]: !current[key] }))
   }
@@ -197,7 +200,9 @@ export function HourlyTemperatureChart({
       disabled={!available}
       aria-pressed={visibleSeries[key]}
       className={`inline-flex items-center gap-1 border-0 bg-transparent p-0 text-[10px] transition ${available && visibleSeries[key] ? 'text-[#AEB7C4]' : 'text-[#596272] opacity-55'}`}
-      title={available ? `${visibleSeries[key] ? '隐藏' : '显示'}${label}` : `${label}当前不可用`}
+      title={available
+        ? `${visibleSeries[key] ? text('隐藏', 'Hide ') : text('显示', 'Show ')}${label}`
+        : text(`${label}当前不可用`, `${label} unavailable`)}
     >
       {marker}{label}
     </button>
@@ -206,24 +211,24 @@ export function HourlyTemperatureChart({
     <section className="min-h-0 border border-[#2C3445] bg-[#161A22]">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#2C3445] px-2 py-1.5">
         <div>
-          <div className="text-[10px] text-[#7D8694]">逐小时气温</div>
+          <div className="text-[10px] text-[#7D8694]">{text('逐小时气温', 'Hourly temperature')}</div>
           <div className="text-xs text-[#CBD2DC]">{cityName} · {dateLabel}</div>
         </div>
         <div className="flex flex-wrap gap-1 text-[9px] text-[#7D8694]">
-          <span className="border border-[#2C3445] px-1.5 py-0.5">预报最高 {formatTemp(forecastMax, unit)}</span>
-          <span className="border border-[#2C3445] px-1.5 py-0.5">METAR 最高 {formatTemp(metarMax, unit)}</span>
-          <span className="border border-[#2C3445] px-1.5 py-0.5">峰值 {peakHour ?? '--'}</span>
+          <span className="border border-[#2C3445] px-1.5 py-0.5">{text('预报最高', 'Forecast high')} {formatTemp(forecastMax, unit)}</span>
+          <span className="border border-[#2C3445] px-1.5 py-0.5">{text('METAR 最高', 'METAR high')} {formatTemp(metarMax, unit)}</span>
+          <span className="border border-[#2C3445] px-1.5 py-0.5">{text('峰值', 'Peak')} {peakHour ?? '--'}</span>
         </div>
       </div>
 
-      <div className="p-2" role="img" aria-label={`${cityName} 逐小时温度图`}>
+      <div className="p-2" role="img" aria-label={text(`${cityName} 逐小时温度图`, `${cityName} hourly temperature chart`)}>
         <div className="mb-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[10px] text-[#7D8694]">
-          {legendButton('china', '中国实况', <span className="h-2.5 w-2.5 bg-[#EF4444]" />, hasChinaLive)}
-          {legendButton('pws', hasPws ? 'PWS（实时）' : 'PWS（未授权/无数据）', <span className="h-0 w-0 border-x-[5px] border-b-[9px] border-x-transparent border-b-[#A855F7]" />, hasPws)}
-          {legendButton('metar', 'METAR（本地时）', <span className="h-2.5 w-2.5 rounded-full bg-[#F97316]" />)}
-          {legendButton('historical', '历史观测（本地时）', <span className="h-2.5 w-2.5 rounded-full bg-[#22C55E]" />, hasHistorical)}
-          {legendButton('forecast', '本系统预报（本地时）', <span className="h-2.5 w-2.5 rounded-full border border-[#3B82F6]" />)}
-          {legendButton('cloud', '云量 %', <span className="h-2.5 w-3 bg-[#94A3B8]/30" />)}
+          {legendButton('china', text('中国实况', 'China live'), <span className="h-2.5 w-2.5 bg-[#EF4444]" />, hasChinaLive)}
+          {legendButton('pws', hasPws ? text('PWS（实时）', 'PWS (live)') : text('PWS（未授权/无数据）', 'PWS (unavailable)'), <span className="h-0 w-0 border-x-[5px] border-b-[9px] border-x-transparent border-b-[#A855F7]" />, hasPws)}
+          {legendButton('metar', text('METAR（本地时）', 'METAR (local)'), <span className="h-2.5 w-2.5 rounded-full bg-[#F97316]" />)}
+          {legendButton('historical', text('历史观测（本地时）', 'Historical (local)'), <span className="h-2.5 w-2.5 rounded-full bg-[#22C55E]" />, hasHistorical)}
+          {legendButton('forecast', text('本系统预报（本地时）', 'WeatherBot forecast (local)'), <span className="h-2.5 w-2.5 rounded-full border border-[#3B82F6]" />)}
+          {legendButton('cloud', text('云量 %', 'Cloud %'), <span className="h-2.5 w-3 bg-[#94A3B8]/30" />)}
         </div>
         <div className="relative h-[340px]">
           <ResponsiveContainer width="100%" height="100%">
@@ -233,21 +238,21 @@ export function HourlyTemperatureChart({
               <YAxis yAxisId="temp" domain={temperatureDomain} allowDataOverflow stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°${unit}`} />
               <YAxis yAxisId="percent" orientation="right" domain={[0, 100]} stroke="#475569" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}%`} />
               <Tooltip content={<HourlyTooltip dateLabel={dateLabel} unit={unit} />} />
-              {visibleSeries.cloud && <Area yAxisId="percent" type="monotone" dataKey="cloud_pct" name="云量 %" stroke="#94A3B8" fill="#94A3B8" fillOpacity={0.25} strokeOpacity={0.65} connectNulls />}
+              {visibleSeries.cloud && <Area yAxisId="percent" type="monotone" dataKey="cloud_pct" name={text('云量 %', 'Cloud %')} stroke="#94A3B8" fill="#94A3B8" fillOpacity={0.25} strokeOpacity={0.65} connectNulls />}
               {visibleSeries.metar && <Line yAxisId="temp" type="linear" dataKey="metar_value" name="METAR" stroke="#F97316" dot={{ r: 3, fill: '#F97316', stroke: '#F97316', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls />}
-              {visibleSeries.historical && <Line yAxisId="temp" type="linear" dataKey="historical_value" name="历史观测" stroke="#22C55E" dot={{ r: 3, fill: '#22C55E', stroke: '#22C55E', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls />}
-              {hasChinaLive && visibleSeries.china && <Line yAxisId="temp" type="linear" dataKey="china_live_value" name="中国实况" stroke="#EF4444" dot={<SquareDot />} activeDot={<SquareDot active />} strokeWidth={2} connectNulls />}
+              {visibleSeries.historical && <Line yAxisId="temp" type="linear" dataKey="historical_value" name={text('历史观测', 'Historical')} stroke="#22C55E" dot={{ r: 3, fill: '#22C55E', stroke: '#22C55E', strokeWidth: 1 }} activeDot={{ r: 5 }} strokeWidth={2} connectNulls />}
+              {hasChinaLive && visibleSeries.china && <Line yAxisId="temp" type="linear" dataKey="china_live_value" name={text('中国实况', 'China live')} stroke="#EF4444" dot={<SquareDot />} activeDot={<SquareDot active />} strokeWidth={2} connectNulls />}
               {hasPws && visibleSeries.pws && <Line yAxisId="temp" type="linear" dataKey="pws_value" name="PWS" stroke="#A855F7" dot={<TriangleDot />} activeDot={<TriangleDot active />} strokeWidth={2} connectNulls />}
-              {visibleSeries.forecast && <Line yAxisId="temp" type="linear" dataKey="forecast_value" name="预报" stroke="#3B82F6" strokeDasharray="4 4" dot={<HollowCircleDot />} activeDot={<HollowCircleDot active />} strokeWidth={2} connectNulls />}
-              {peakMinute !== null && <ReferenceLine yAxisId="temp" x={peakMinute} stroke="#EC4899" strokeDasharray="4 4" label={<PeakLabel value={`peak ${peakHour}`} />} />}
+              {visibleSeries.forecast && <Line yAxisId="temp" type="linear" dataKey="forecast_value" name={text('预报', 'Forecast')} stroke="#3B82F6" strokeDasharray="4 4" dot={<HollowCircleDot />} activeDot={<HollowCircleDot active />} strokeWidth={2} connectNulls />}
+              {peakMinute !== null && <ReferenceLine yAxisId="temp" x={peakMinute} stroke="#EC4899" strokeDasharray="4 4" label={<PeakLabel value={`${text('峰值', 'peak')} ${peakHour}`} />} />}
             </ComposedChart>
           </ResponsiveContainer>
         </div>
       </div>
 
-      <StatRow label="AVG Δ (OBS−FC)" values={averageDelta} empty="No diff stats yet" tone="green" />
-      <StatRow label="ACCURACY (PEARSON R)" values={accuracy} empty="No accuracy stats yet" tone="orange" />
-      <StatRow label="HIST↔METAR OVERLAP" values={[overlap]} empty="No overlap data yet" tone="green" />
+      <StatRow label={text('平均偏差（实测−预报）', 'AVG Δ (OBS−FC)')} values={averageDelta} empty={text('暂无偏差统计', 'No diff stats yet')} tone="green" />
+      <StatRow label={text('准确度（Pearson R）', 'ACCURACY (PEARSON R)')} values={accuracy} empty={text('暂无准确度统计', 'No accuracy stats yet')} tone="orange" />
+      <StatRow label={text('历史↔METAR 重合度', 'HIST↔METAR OVERLAP')} values={[overlap]} empty={text('暂无重合数据', 'No overlap data yet')} tone="green" />
     </section>
   )
 }

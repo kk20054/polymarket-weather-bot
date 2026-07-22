@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
-from .db import log_data_fetch, upsert_mesonet_observation, utc_now
+from .db import connect, log_data_fetch, upsert_mesonet_observation, utc_now
 from .env_utils import env_value
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
 
@@ -178,10 +178,23 @@ def fetch_china_weather_city(city: str, *, dry_run: bool = False) -> dict[str, A
             if observation.get("parse_status") == "failed":
                 raise ValueError("weathercn_parse_failed")
         except Exception as exc:
-            observation = _weathercom_current_observation(
-                profile,
-                primary_failure=_safe_failure_reason(exc),
-            )
+            return {
+                "ok": False,
+                "city": city_key,
+                "station_id": station_code,
+                "provider": "weathercn_sk2d",
+                "fallback": False,
+                "error": "china_live_primary_failed",
+                "message": _safe_failure_reason(exc),
+                "rows_upserted": 0,
+                "rows_inserted": 0,
+                "rows_updated": 0,
+                "source_observation_new": False,
+                "source_observation_changed": False,
+                "source_unchanged": False,
+                "dry_run": dry_run,
+                "source_url": source_url,
+            }
     else:
         return {"ok": False, "city": city, "error": "unsupported_china_live_city", "rows_upserted": 0}
 
@@ -189,8 +202,23 @@ def fetch_china_weather_city(city: str, *, dry_run: bool = False) -> dict[str, A
     provider = str((observation.get("raw_json") or {}).get("provider") or "")
     primary_available = provider != "weathercom_v3_current"
     row_id = 0
+    existing = None
+    observation_key = str(observation.get("observation_key") or "")
     if not dry_run:
+        if observation_key:
+            with connect() as conn:
+                found = conn.execute(
+                    "SELECT id, raw_response_hash FROM mesonet_observations WHERE observation_key = ?",
+                    (observation_key,),
+                ).fetchone()
+                existing = dict(found) if found else None
         row_id = upsert_mesonet_observation(observation)
+    source_new = not bool(existing)
+    source_changed = bool(
+        existing
+        and str(existing.get("raw_response_hash") or "")
+        != str(observation.get("raw_response_hash") or "")
+    )
     return {
         "ok": status in {"parsed", "partial"} and primary_available,
         "city": city_key,
@@ -203,6 +231,11 @@ def fetch_china_weather_city(city: str, *, dry_run: bool = False) -> dict[str, A
         "provider": provider,
         "fallback": not primary_available,
         "rows_upserted": 0 if dry_run else (1 if row_id else 0),
+        "rows_inserted": 0 if dry_run else (1 if row_id and source_new else 0),
+        "rows_updated": 0 if dry_run else (1 if row_id and not source_new else 0),
+        "source_observation_new": False if dry_run else source_new,
+        "source_observation_changed": False if dry_run else source_changed,
+        "source_unchanged": False if dry_run else bool(existing and not source_changed),
         "dry_run": dry_run,
         "source_url": observation.get("source_url"),
     }

@@ -1,127 +1,95 @@
 import {
-  AreaChart,
   Area,
+  AreaChart,
+  CartesianGrid,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
   XAxis,
   YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  ReferenceLine
 } from 'recharts'
-import { motion, useReducedMotion } from 'framer-motion'
 import type { EquityPoint } from '../types'
 
 interface Props {
   data: EquityPoint[]
   initialBankroll: number
+  language?: 'zh' | 'en'
 }
 
-const CustomTooltip = ({ active, payload, label }: any) => {
-  if (!active || !payload || !payload.length) return null
-  const value = payload[0].value
-  const isPositive = value >= 0
+function formatTime(value: string, language: 'zh' | 'en') {
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString(language === 'zh' ? 'zh-CN' : 'en-US', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
 
+function EquityTooltip({ active, payload, language }: { active?: boolean; payload?: Array<{ payload?: EquityPoint }>; language: 'zh' | 'en' }) {
+  const point = payload?.[0]?.payload
+  if (!active || !point) return null
   return (
-    <div className="bg-[#0a0a0a] border border-neutral-800 px-2 py-1.5">
-      <p className="text-[10px] text-neutral-500 mb-0.5">{label}</p>
-      <p className={`text-sm font-semibold tabular-nums ${isPositive ? 'text-green-500' : 'text-red-500'}`}>
-        {isPositive ? '+' : ''}${value.toFixed(2)}
-      </p>
+    <div className="border border-neutral-700 bg-neutral-950 px-2.5 py-2 text-[10px] shadow-xl">
+      <div className="text-neutral-500">{formatTime(point.timestamp, language)}</div>
+      <div className="mt-1 flex min-w-32 items-center justify-between gap-4">
+        <span className="text-neutral-400">{language === 'zh' ? '账户权益' : 'Equity'}</span>
+        <span className="font-medium tabular-nums text-neutral-100">${Number(point.bankroll).toFixed(2)}</span>
+      </div>
+      <div className="mt-0.5 flex items-center justify-between gap-4">
+        <span className="text-neutral-400">{language === 'zh' ? '累计盈亏' : 'Total PnL'}</span>
+        <span className={`font-medium tabular-nums ${Number(point.pnl) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+          {Number(point.pnl) > 0 ? '+' : ''}${Number(point.pnl).toFixed(2)}
+        </span>
+      </div>
     </div>
   )
 }
 
-export function EquityChart({ data, initialBankroll }: Props) {
-  const reduceMotion = useReducedMotion()
-  if (data.length === 0) {
+export function EquityChart({ data, initialBankroll, language = 'zh' }: Props) {
+  if (!data.length) {
     return (
-      <div className="h-full flex flex-col items-center justify-center text-neutral-600">
-        <p className="text-xs">暂无结算记录</p>
-        <p className="text-[10px] mt-0.5">有结算结果后会显示曲线</p>
+      <div className="flex h-full items-center justify-center text-[10px] text-neutral-600">
+        {language === 'zh' ? '暂无可估值的订单轨迹' : 'No mark-to-market history yet'}
       </div>
     )
   }
 
-  const chartData = [
-    { timestamp: '开始', pnl: 0, bankroll: initialBankroll },
-    ...data.map(d => ({
-      ...d,
-      timestamp: new Date(d.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-    }))
-  ]
-
-  const currentPnl = data.length > 0 ? data[data.length - 1].pnl : 0
-  const isPositive = currentPnl >= 0
-  const minPnl = Math.min(0, ...data.map(d => d.pnl))
-  const maxPnl = Math.max(0, ...data.map(d => d.pnl))
-  const padding = Math.max(Math.abs(minPnl), Math.abs(maxPnl)) * 0.2
-
-  const gradientId = `equityGradient-${isPositive ? 'green' : 'red'}`
+  const chartData = data.map(point => ({ ...point, label: formatTime(point.timestamp, language) }))
+  const latestPnl = Number(chartData[chartData.length - 1]?.pnl ?? 0)
+  const values = chartData.map(point => Number(point.bankroll))
+  const minimum = Math.min(initialBankroll, ...values)
+  const maximum = Math.max(initialBankroll, ...values)
+  const padding = Math.max(0.15, (maximum - minimum) * 0.2)
+  const color = latestPnl >= 0 ? '#22c55e' : '#ef4444'
+  const gradientId = latestPnl >= 0 ? 'paper-equity-positive' : 'paper-equity-negative'
 
   return (
-    <motion.div
-      className="h-full"
-      role="img"
-      aria-label={`模拟账户已结算资金曲线。起始本金 ${initialBankroll.toFixed(2)} 美元，当前累计已结算盈亏 ${currentPnl.toFixed(2)} 美元，共 ${data.length} 个结算点。`}
-      initial={reduceMotion ? false : { opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: reduceMotion ? 0 : 0.5 }}
-    >
+    <div className="h-full" role="img" aria-label={language === 'zh' ? '模拟账户按最新买一价估值的资金曲线' : 'Paper account equity marked at the latest best bid'}>
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={chartData} margin={{ top: 5, right: 5, left: -15, bottom: 0 }}>
+        <AreaChart data={chartData} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
           <defs>
             <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-              <stop
-                offset="5%"
-                stopColor={isPositive ? '#22c55e' : '#ef4444'}
-                stopOpacity={0.25}
-              />
-              <stop
-                offset="95%"
-                stopColor={isPositive ? '#22c55e' : '#ef4444'}
-                stopOpacity={0}
-              />
+              <stop offset="5%" stopColor={color} stopOpacity={0.24} />
+              <stop offset="95%" stopColor={color} stopOpacity={0.01} />
             </linearGradient>
           </defs>
-
-          <CartesianGrid strokeDasharray="3 3" stroke="#1a1a1a" vertical={false} />
-
-          <XAxis
-            dataKey="timestamp"
-            stroke="#525252"
-            fontSize={9}
-            tickLine={false}
-            axisLine={false}
-            dy={5}
-            fontFamily="JetBrains Mono"
-          />
-
+          <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="text-neutral-800" vertical={false} />
+          <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={36} tick={{ fill: '#737373', fontSize: 9 }} />
           <YAxis
-            stroke="#525252"
-            fontSize={9}
+            domain={[minimum - padding, maximum + padding]}
             tickLine={false}
             axisLine={false}
-            tickFormatter={(value) => `$${value}`}
-            domain={[minPnl - padding, maxPnl + padding]}
-            dx={-5}
-            fontFamily="JetBrains Mono"
+            tickFormatter={value => `$${Number(value).toFixed(0)}`}
+            tick={{ fill: '#737373', fontSize: 9 }}
           />
-
-          <Tooltip content={<CustomTooltip />} />
-
-          <ReferenceLine y={0} stroke="#262626" strokeDasharray="3 3" />
-
-          <Area
-            type="monotone"
-            dataKey="pnl"
-            stroke={isPositive ? '#22c55e' : '#ef4444'}
-            strokeWidth={1.5}
-            fill={`url(#${gradientId})`}
-            isAnimationActive={!reduceMotion}
-            animationDuration={reduceMotion ? 0 : 800}
-          />
+          <Tooltip content={<EquityTooltip language={language} />} />
+          <ReferenceLine y={initialBankroll} stroke="#525252" strokeDasharray="4 4" />
+          <Area type="stepAfter" dataKey="bankroll" stroke={color} strokeWidth={1.5} fill={`url(#${gradientId})`} isAnimationActive={false} />
         </AreaChart>
       </ResponsiveContainer>
-    </motion.div>
+    </div>
   )
 }

@@ -17,7 +17,7 @@ from .registry import SETTLEMENT_REGISTRY, forecast_source_matches_profile_locat
 
 
 DEFAULT_BIAS_TABLE = DATA_DIR / "bias_table.json"
-COMMON_MODELS = ("weathercom_v3", "ecmwf", "gfs", "icon", "gem")
+COMMON_MODELS = ("weathercom_v3", "ecmwf", "gfs", "icon", "gem", "jma")
 DEFAULT_CITY_MODELS = {
     "atlanta": (*COMMON_MODELS, "hrrr", "nbm"),
     "beijing": (*COMMON_MODELS, "cma"),
@@ -26,12 +26,12 @@ DEFAULT_CITY_MODELS = {
     "hong-kong": (*COMMON_MODELS, "cma"),
     "nyc": (*COMMON_MODELS, "hrrr", "nbm"),
     "qingdao": (*COMMON_MODELS, "cma"),
-    "seoul": (*COMMON_MODELS, "jma"),
+    "seoul": COMMON_MODELS,
     "shanghai": (*COMMON_MODELS, "cma"),
     "shenzhen": (*COMMON_MODELS, "cma"),
     "singapore": COMMON_MODELS,
-    "taipei": (*COMMON_MODELS, "jma"),
-    "tokyo": (*COMMON_MODELS, "jma"),
+    "taipei": COMMON_MODELS,
+    "tokyo": COMMON_MODELS,
     "wuhan": (*COMMON_MODELS, "cma"),
 }
 

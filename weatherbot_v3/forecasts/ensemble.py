@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import statistics
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -14,12 +13,14 @@ from ..db import connect, init_v3_db, upsert_model_reprice_event, utc_now
 from ..deb import bucket_bounds_in_prediction_unit, sigma_with_floor
 from ..env_utils import env_value
 from ..forecast_time import (
+    DEFAULT_COMPONENT_MAX_SKEW_HOURS,
     FORECAST_COMPONENT_COHORT_VERSION,
     apply_forecast_component_cohort,
     assess_forecast_run,
     forecast_component_cohort_as_of,
     forecast_snapshot_selection_mode,
     historical_build_requires_explicit_as_of,
+    parse_utc,
 )
 from ..registry import CitySettlementProfile, forecast_source_matches_profile_location, get_city_profile
 
@@ -33,6 +34,12 @@ SIGMA_FLOOR_C = 0.5
 UNCALIBRATED_SIGMA_C = 1.2
 BIAS_MIN_SAMPLE_COUNT = 20
 FORECAST_SNAPSHOT_SELECTION_VERSION = "forecast-snapshot-selection-v2"
+DYNAMIC_WEIGHT_MIN_SAMPLES = BIAS_MIN_SAMPLE_COUNT
+DYNAMIC_WEIGHT_FULL_SAMPLES = 40
+DYNAMIC_WEIGHT_PERFORMANCE_BLEND_MAX = 0.75
+DYNAMIC_WEIGHT_MAX_SHARE = 0.45
+DYNAMIC_WEIGHT_ERROR_FLOOR_C = 0.25
+DYNAMIC_WEIGHT_METHOD = "prior_inverse_mae_shrinkage_v1"
 
 REGION_MODEL_WEIGHTS = {
     "us": {"gfs": 0.40, "ecmwf": 0.50, "hrrr": 0.10},
@@ -260,8 +267,9 @@ def build_ensemble_prediction(
     components = list(cohort.get("components") or [])
     usable = [component for component in components if component["member_count"] > 0 and component["family"] in region_model_weights(profile)]
     _normalize_component_weights(usable, algo)
-    usable_families = {component["family"] for component in usable}
-    total_members = sum(int(component["member_count"]) for component in usable)
+    active_components = [component for component in usable if float(component.get("weight") or 0.0) > 0.0]
+    usable_families = {component["family"] for component in active_components}
+    total_members = sum(int(component["member_count"]) for component in active_components)
     if len(usable_families) < MIN_FAMILIES_FOR_ENSEMBLE and total_members < MIN_MEMBER_COUNT_FOR_SINGLE_FAMILY:
         return {
             "ok": False,
@@ -273,11 +281,12 @@ def build_ensemble_prediction(
             ],
             "families": sorted(usable_families),
             "member_count": total_members,
+            "components": usable,
             "excluded_components": cohort.get("excluded") or [],
             "cohort_as_of": cohort.get("cohort_as_of") or "",
         }
 
-    weighted = _weighted_member_highs(profile, usable)
+    weighted = _weighted_member_highs(profile, active_components)
     if not weighted:
         return {"ok": False, "city_key": city_key, "target_date": target_date, "reasons": ["empty_weighted_samples"]}
     values = [value for value, _weight, _meta in weighted]
@@ -286,7 +295,7 @@ def build_ensemble_prediction(
     sigma_from_spread_c = _weighted_std(values, weights)
     residual_terms = [
         (float(component.get("effective_mae_c")), float(component.get("weight") or 0.0))
-        for component in usable
+        for component in active_components
         if _first_number(component.get("effective_mae_c")) is not None
     ]
     residual_weight = sum(weight for _value, weight in residual_terms)
@@ -308,14 +317,14 @@ def build_ensemble_prediction(
         }
         for value, weight, meta in weighted
     ]
-    peak = _weighted_peak_hour(usable)
+    peak = _weighted_peak_hour(active_components)
     weighted_bias_c = sum(
         float(component.get("bias_correction_c") or 0.0) * float(component.get("weight") or 0.0)
-        for component in usable
+        for component in active_components
     )
     calibration_coverage_weight = sum(
         float(component.get("weight") or 0.0)
-        for component in usable
+        for component in active_components
         if not component.get("mae_imputed")
     )
     return {
@@ -330,6 +339,7 @@ def build_ensemble_prediction(
         "deb_version": algo,
         "forecast_algo": algo,
         "algo": algo,
+        "weight_method": DYNAMIC_WEIGHT_METHOD if algo == POLYWX_ALIGNED_ALGO else "fixed_region_prior_v1",
         "model_weights": {component["source"]: component["weight"] for component in usable},
         "member_count": len(samples_unit),
         "components": usable,
@@ -341,7 +351,7 @@ def build_ensemble_prediction(
         "calibration_coverage_weight": round(calibration_coverage_weight, 6),
         "source_run_ids": sorted({
             int(run_id)
-            for component in usable
+            for component in active_components
             for run_id in (component.get("source_run_ids") or [component["run_id"]])
             if int(run_id or 0) > 0
         }),
@@ -355,7 +365,7 @@ def build_ensemble_prediction(
         "sigma_from_spread": round(convert_temperature_delta(sigma_from_spread_c, "C", profile.unit), 4),
         "sigma_from_history": round(convert_temperature_delta(sigma_from_history_c, "C", profile.unit), 4),
         "bias_correction": round(convert_temperature_delta(weighted_bias_c, "C", profile.unit), 4),
-        "bias_sample_count": min((int(component.get("bias_sample_count") or 0) for component in usable), default=0),
+        "bias_sample_count": min((int(component.get("bias_sample_count") or 0) for component in active_components), default=0),
         "observed_floor": None,
         "sigma_floor": sigma_floor,
         "time_decay_factor": 1.0,
@@ -896,12 +906,38 @@ def _best_source_group(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_source: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         by_source.setdefault(str(row.get("source") or ""), []).append(row)
-    def source_rank(group: list[dict[str, Any]]) -> tuple[int, str, int]:
-        latest_run_id = int(group[0].get("run_id") or 0)
-        latest_member_count = sum(1 for row in group if int(row.get("run_id") or 0) == latest_run_id)
-        return latest_member_count, str(group[0].get("available_at") or ""), latest_run_id
 
-    return max(by_source.values(), key=source_rank, default=[])
+    def source_stats(group: list[dict[str, Any]]) -> tuple[datetime, int, int]:
+        latest = max(
+            group,
+            key=lambda row: (
+                parse_utc(row.get("available_at") or row.get("retrieved_at"))
+                or datetime.min.replace(tzinfo=timezone.utc),
+                int(row.get("run_id") or 0),
+            ),
+        )
+        available_at = (
+            parse_utc(latest.get("available_at") or latest.get("retrieved_at"))
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
+        latest_run_id = int(latest.get("run_id") or 0)
+        latest_member_count = sum(
+            1 for row in group if int(row.get("run_id") or 0) == latest_run_id
+        )
+        return available_at, latest_member_count, latest_run_id
+
+    ranked = [(group, source_stats(group)) for group in by_source.values() if group]
+    if not ranked:
+        return []
+    newest = max(stats[0] for _group, stats in ranked)
+    freshness_floor = newest - timedelta(hours=DEFAULT_COMPONENT_MAX_SKEW_HOURS)
+    fresh_enough = [item for item in ranked if item[1][0] >= freshness_floor]
+    # Prefer member-rich ensembles only when they are in the same freshness
+    # cohort. A stale ensemble must not shadow a current deterministic run.
+    return max(
+        fresh_enough,
+        key=lambda item: (item[1][1], item[1][0], item[1][2]),
+    )[0]
 
 
 def _archived_daily_high(
@@ -1176,30 +1212,105 @@ def _truth_basis(profile: CitySettlementProfile, target_date: str, path: Path | 
 
 
 def _apply_mae_adjusted_weights(components: list[dict[str, Any]]) -> None:
-    known_maes = [
-        float(value)
-        for component in components
-        if (value := _first_number(component.get("mae_7d"))) is not None
-    ]
-    imputed_mae = max(
-        UNCALIBRATED_SIGMA_C,
-        statistics.median(known_maes) if known_maes else UNCALIBRATED_SIGMA_C,
-    )
-    scored: list[tuple[dict[str, Any], float]] = []
+    eligible: list[dict[str, Any]] = []
     for component in components:
         prior = max(0.0, float(component.get("weight_prior") or component.get("weight_raw") or 0.0))
         mae = _first_number(component.get("mae_7d"))
-        effective_mae = imputed_mae if mae is None else float(mae)
-        component["mae_imputed"] = mae is None
-        component["effective_mae_c"] = round(effective_mae, 4)
-        quality = 1.0 / max(effective_mae, 0.05)
-        scored.append((component, prior * quality))
-    total = sum(score for _component, score in scored) or 1.0
-    for component, score in scored:
-        weight = score / total
+        sample_count = int(component.get("bias_sample_count") or 0)
+        component["weight_method"] = DYNAMIC_WEIGHT_METHOD
+        component["calibration_progress"] = round(min(1.0, sample_count / DYNAMIC_WEIGHT_MIN_SAMPLES), 4)
+        component["weight_eligible"] = bool(
+            prior > 0.0
+            and mae is not None
+            and math.isfinite(float(mae))
+            and sample_count >= DYNAMIC_WEIGHT_MIN_SAMPLES
+        )
+        if not component["weight_eligible"]:
+            component["mae_imputed"] = True
+            component["effective_mae_c"] = None
+            component["weight_status"] = "collecting"
+            component["weight_exclusion_reason"] = (
+                "insufficient_leakage_free_pairs"
+                if sample_count < DYNAMIC_WEIGHT_MIN_SAMPLES
+                else "calibration_mae_missing"
+            )
+            component["weight_raw"] = 0.0
+            component["weight"] = 0.0
+            component["weight_after_mae"] = 0.0
+            continue
+        component["mae_imputed"] = False
+        component["effective_mae_c"] = round(max(float(mae), DYNAMIC_WEIGHT_ERROR_FLOOR_C), 4)
+        component["weight_status"] = "active"
+        component["weight_exclusion_reason"] = ""
+        eligible.append(component)
+
+    if not eligible:
+        # Preserve a display-only forecast for brand-new cities and regression
+        # replay fixtures. Core paper/live strategies still reject it because
+        # every component remains mae_imputed and calibration coverage is zero.
+        prior_total = sum(max(0.0, float(component.get("weight_prior") or 0.0)) for component in components) or 1.0
+        for component in components:
+            weight = max(0.0, float(component.get("weight_prior") or 0.0)) / prior_total
+            component["weight_raw"] = weight
+            component["weight"] = weight
+            component["weight_after_mae"] = weight
+            component["weight_status"] = "provisional"
+            component["weight_exclusion_reason"] = "all_components_uncalibrated_display_only"
+            component["effective_mae_c"] = UNCALIBRATED_SIGMA_C
+        return
+
+    prior_total = sum(max(0.0, float(component.get("weight_prior") or 0.0)) for component in eligible) or 1.0
+    accuracy_scores = [1.0 / float(component["effective_mae_c"]) for component in eligible]
+    accuracy_total = sum(accuracy_scores) or 1.0
+    combined_scores: list[float] = []
+    for component, accuracy_score in zip(eligible, accuracy_scores):
+        prior_share = max(0.0, float(component.get("weight_prior") or 0.0)) / prior_total
+        accuracy_share = accuracy_score / accuracy_total
+        sample_count = int(component.get("bias_sample_count") or 0)
+        sample_maturity = min(1.0, sample_count / DYNAMIC_WEIGHT_FULL_SAMPLES)
+        performance_blend = DYNAMIC_WEIGHT_PERFORMANCE_BLEND_MAX * sample_maturity
+        score = ((1.0 - performance_blend) * prior_share) + (performance_blend * accuracy_share)
+        component["dynamic_prior_share"] = round(prior_share, 8)
+        component["dynamic_accuracy_share"] = round(accuracy_share, 8)
+        component["sample_maturity"] = round(sample_maturity, 4)
+        component["performance_blend"] = round(performance_blend, 4)
+        combined_scores.append(score)
+
+    weights = _normalize_capped_weights(combined_scores, DYNAMIC_WEIGHT_MAX_SHARE)
+    for component, score, weight in zip(eligible, combined_scores, weights):
         component["weight_raw"] = score
         component["weight"] = weight
         component["weight_after_mae"] = weight
+
+
+def _normalize_capped_weights(scores: list[float], max_share: float) -> list[float]:
+    if not scores:
+        return []
+    cap = max(float(max_share), 1.0 / len(scores))
+    weights = [0.0 for _score in scores]
+    remaining = set(range(len(scores)))
+    remaining_mass = 1.0
+    while remaining:
+        score_total = sum(max(0.0, scores[index]) for index in remaining)
+        allocations = {
+            index: remaining_mass * (
+                max(0.0, scores[index]) / score_total if score_total > 0 else 1.0 / len(remaining)
+            )
+            for index in remaining
+        }
+        capped = [index for index, value in allocations.items() if value > cap + 1e-12]
+        if not capped:
+            for index, value in allocations.items():
+                weights[index] = value
+            break
+        for index in capped:
+            weights[index] = cap
+            remaining.remove(index)
+            remaining_mass -= cap
+        if remaining_mass <= 1e-12:
+            break
+    total = sum(weights) or 1.0
+    return [weight / total for weight in weights]
 
 
 def _normalize_component_weights(components: list[dict[str, Any]], algo: str) -> None:
@@ -1221,6 +1332,10 @@ def _source_warnings(components: list[dict[str, Any]], algo: str) -> list[str]:
         warnings.append("missing_weathercom_v3")
     if not any(component.get("truth_basis") in {"wunderground_daily", "hong_kong_observatory_daily_extract"} for component in components):
         warnings.append("truth_basis_uses_approximation_or_none")
+    if algo == POLYWX_ALIGNED_ALGO and any(component.get("weight_status") == "collecting" for component in components):
+        warnings.append("uncalibrated_components_excluded_from_dynamic_weight")
+    if algo == POLYWX_ALIGNED_ALGO and any(component.get("weight_status") == "provisional" for component in components):
+        warnings.append("uncalibrated_prior_fallback_display_only")
     return warnings
 
 

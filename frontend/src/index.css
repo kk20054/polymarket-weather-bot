@@ -16,6 +16,11 @@
   --warning: #d97706;
   --success: #16a34a;
   --muted: #525252;
+  --tooltip-bg: #1b212c;
+  --tooltip-border: #2c3445;
+  --tooltip-text: #e5e7eb;
+  --surface-panel: #161a22;
+  --surface-raised: #1b212c;
 }
 
 * {
@@ -58,6 +63,11 @@ body {
   --card-hover: #f9fafb;
   --border: #e5e7eb;
   --border-light: #d1d5db;
+  --tooltip-bg: #ffffff;
+  --tooltip-border: #cbd5e1;
+  --tooltip-text: #111827;
+  --surface-panel: #ffffff;
+  --surface-raised: #f8fafc;
   background: #ffffff !important;
   color: #111827 !important;
 }
@@ -110,6 +120,28 @@ body {
   border-radius: 0 !important;
 }
 
+.polywx-light select option {
+  background: #ffffff;
+  color: #111827;
+}
+
+.polywx-light .market-bucket-card,
+.polywx-light .deb-source-dialog {
+  background: #ffffff !important;
+  border-color: #d8e0ea !important;
+  color: #111827 !important;
+}
+
+.polywx-light .deb-source-backdrop {
+  background: rgba(15, 23, 42, 0.18) !important;
+  backdrop-filter: blur(3px);
+}
+
+.polywx-light .market-bucket-card:hover {
+  background: #f8fafc !important;
+  border-color: #94a3b8 !important;
+}
+
 .polywx-light table {
   background: #ffffff !important;
   color: #111827 !important;
@@ -152,6 +184,11 @@ body {
   --card-hover: #222a37;
   --border: #2c3445;
   --border-light: #3a4558;
+  --tooltip-bg: #1b212c;
+  --tooltip-border: #2c3445;
+  --tooltip-text: #e5e7eb;
+  --surface-panel: #161a22;
+  --surface-raised: #1b212c;
   background: #161a22 !important;
   color: #cbd2dc !important;
 }
@@ -172,6 +209,11 @@ body {
 .polywx-dark [class*="bg-gray-50"],
 .polywx-dark [class*="bg-neutral-100"] {
   background-color: #1b212c !important;
+}
+
+.polywx-dark .deb-source-backdrop {
+  background: rgba(4, 8, 15, 0.34) !important;
+  backdrop-filter: blur(3px);
 }
 
 .polywx-dark [class*="border-neutral"],
@@ -212,6 +254,21 @@ body {
   background: #222a37 !important;
   color: #cbd2dc !important;
   border-color: #2c3445 !important;
+}
+
+.polywx-dark select option {
+  background: #222a37;
+  color: #cbd2dc;
+}
+
+.weatherbot-tooltip {
+  background: var(--tooltip-bg) !important;
+  border-color: var(--tooltip-border) !important;
+  color: var(--tooltip-text) !important;
+}
+
+.weatherbot-tooltip * {
+  color: inherit;
 }
 
 .polywx-dark table {

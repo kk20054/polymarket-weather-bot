@@ -2,8 +2,11 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
+  ArrowDownAZ,
   CheckCircle2,
+  Clock3,
   FlaskConical,
+  Globe2,
   ListChecks,
   PauseCircle,
   RefreshCw,
@@ -50,6 +53,7 @@ import type { BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommenda
 type TradeMode = 'paper' | 'live'
 type UiLanguage = 'zh' | 'en'
 type ThemeMode = 'light' | 'dark'
+type CityBrowseMode = 'continent' | 'timezone' | 'alphabet'
 type ProductionRefreshOptions = {
   cities?: string[]
   days?: number
@@ -66,7 +70,7 @@ type RefreshNotice = {
   details?: string[]
 }
 
-const APP_VERSION = 'v6.0'
+const APP_VERSION = 'V1.0.0'
 
 const UI_COPY = {
   zh: {
@@ -85,6 +89,38 @@ const UI_COPY = {
     stopLegacy: '停止旧扫描',
     language: '语言',
     theme: '主题',
+    updated: '已刷新',
+    light: '浅色',
+    dark: '深色',
+    settings: '设置',
+    cities: '城市',
+    citySubtitle: '按站点浏览',
+    citySearch: '搜索城市或机场',
+    browseContinent: '洲别',
+    browseTimezone: '时区',
+    browseAlphabet: '字母',
+    all: '全部',
+    noCities: '暂无城市数据',
+    noCityMatch: '没有匹配的城市',
+    collecting: '采集已启用',
+    notCollecting: '未加入采集',
+    observationCatalog: '观察目录',
+    marketCandidate: '市场候选',
+    forecast: '预报',
+    historical: '历史',
+    signal: '信号',
+    stationPending: '站点未映射',
+    pending: '待接入',
+    notCollected: '未采集',
+    recommendations: '天气关注',
+    noRecommendations: '暂无天气关注',
+    marketRules: '市场规则',
+    settlementStation: '结算站',
+    verified: '已核验',
+    unverified: '未核验',
+    datePending: '日期待定',
+    current: '现在',
+    expectedHigh: '预计最高',
   },
   en: {
     subtitle: 'weather quant trading platform',
@@ -102,13 +138,45 @@ const UI_COPY = {
     stopLegacy: 'Stop legacy scan',
     language: 'Language',
     theme: 'Theme',
+    updated: 'Updated',
+    light: 'Light',
+    dark: 'Dark',
+    settings: 'Settings',
+    cities: 'Cities',
+    citySubtitle: 'Browse by station',
+    citySearch: 'Search city or airport',
+    browseContinent: 'Region',
+    browseTimezone: 'Time zone',
+    browseAlphabet: 'A-Z',
+    all: 'All',
+    noCities: 'No city data yet',
+    noCityMatch: 'No matching cities',
+    collecting: 'Collection enabled',
+    notCollecting: 'Not collected',
+    observationCatalog: 'Observation catalog',
+    marketCandidate: 'Market candidate',
+    forecast: 'Forecast',
+    historical: 'Historical',
+    signal: 'Signals',
+    stationPending: 'Station pending',
+    pending: 'Pending',
+    notCollected: 'Not collected',
+    recommendations: 'Weather focus',
+    noRecommendations: 'No weather focus',
+    marketRules: 'Market rules',
+    settlementStation: 'Settlement station',
+    verified: 'Verified',
+    unverified: 'Unverified',
+    datePending: 'Date pending',
+    current: 'Now',
+    expectedHigh: 'Forecast high',
   },
 } satisfies Record<UiLanguage, Record<string, string>>
 
 const ROUND5_STATUS_FALLBACK: Record<string, CityStatusConfig> = {
   shanghai: { status: 'fully_active', rank: 1, settlement: 'verified WU' },
   'hong-kong': { status: 'paper_only', rank: 2, settlement: 'HKO mismatch' },
-  seoul: { status: 'monitor_only', rank: 3, settlement: 'verified WU', reason: 'external_pnl_negative' },
+  seoul: { status: 'paper_only', rank: 3, settlement: 'verified WU', reason: 'paper_validation_required' },
   tokyo: { status: 'fully_active', rank: 4, settlement: 'verified WU' },
   beijing: { status: 'fully_active', rank: 5, settlement: 'verified WU' },
   singapore: { status: 'fully_active', rank: 6, settlement: 'verified WU' },
@@ -131,13 +199,13 @@ function resolveCityTradingStatus(
   statusMap?: Record<string, CityStatusConfig>,
   cityScope?: string,
 ): CityTradingStatus {
-  if (cityScope === 'observation_only') return 'observation_only'
   const key = cityKey || ''
   const configured = (statusMap?.[key]?.status || ROUND5_STATUS_FALLBACK[key]?.status || '') as CityTradingStatus | ''
-  if (configured === 'fully_active' || configured === 'paper_only' || configured === 'monitor_only' || configured === 'observation_only') return configured
-  if (verificationStatus === 'settlement_mismatch') return 'paper_only'
   if (verificationStatus === 'no_active_market') return 'observation_only'
-  if (verificationStatus === 'verified' && cityScope === 'market_candidate') return 'fully_active'
+  if (verificationStatus === 'settlement_mismatch') return 'paper_only'
+  if (configured === 'fully_active' || configured === 'paper_only' || configured === 'monitor_only' || configured === 'observation_only') return configured
+  if (verificationStatus === 'verified') return 'fully_active'
+  if (cityScope === 'observation_only') return 'observation_only'
   return 'observation_only'
 }
 
@@ -188,15 +256,15 @@ function dataAge(minutes?: number | null) {
   return `${(minutes / 1440).toFixed(1)} 天前`
 }
 
-function relativeTime(value?: string | null) {
+function relativeTime(value?: string | null, language: UiLanguage = 'zh') {
   if (!value) return '--'
   const timestamp = new Date(value).getTime()
   if (!Number.isFinite(timestamp)) return '--'
   const seconds = Math.max(0, (Date.now() - timestamp) / 1000)
-  if (seconds < 60) return `${Math.round(seconds)} 秒前`
-  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟前`
-  if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} 小时前`
-  return `${(seconds / 86400).toFixed(1)} 天前`
+  if (seconds < 60) return language === 'zh' ? `${Math.round(seconds)} 秒前` : `${Math.round(seconds)}s ago`
+  if (seconds < 3600) return language === 'zh' ? `${Math.round(seconds / 60)} 分钟前` : `${Math.round(seconds / 60)}m ago`
+  if (seconds < 86400) return language === 'zh' ? `${(seconds / 3600).toFixed(1)} 小时前` : `${(seconds / 3600).toFixed(1)}h ago`
+  return language === 'zh' ? `${(seconds / 86400).toFixed(1)} 天前` : `${(seconds / 86400).toFixed(1)}d ago`
 }
 
 function durationLabel(ms?: number | null) {
@@ -221,16 +289,26 @@ function RecommendationCard({
   item,
   selected,
   onSelect,
+  language,
 }: {
   item: DashboardRecommendationItem
   selected: boolean
   onSelect: () => void
+  language: UiLanguage
 }) {
   const isWeatherFocus = item.type === 'weather_focus'
   const isObservationOnly = item.type === 'observation_only'
   const age = ageSecondsLabel(item.metar_age_seconds)
   const verified = item.verification_status || (item.settlement_rule_verified_at ? 'verified' : 'unverified')
   const blocker = item.blocked_reasons?.[0] ? reasonLabel(item.blocked_reasons[0]) : (item.paper_allowed ? 'paper allowed' : 'watch')
+  const focusDelta = Number(item.remaining_to_max)
+  const focusReason = item.focus_reason === 'observed_above_model_high'
+    ? (language === 'zh'
+        ? `实况高于模型 ${Number.isFinite(focusDelta) ? Math.abs(focusDelta).toFixed(1) : '--'}°`
+        : `Above model ${Number.isFinite(focusDelta) ? Math.abs(focusDelta).toFixed(1) : '--'}°`)
+    : (language === 'zh'
+        ? `接近模型高点 ${Number.isFinite(focusDelta) ? Math.max(0, focusDelta).toFixed(1) : '--'}°`
+        : `Near model high ${Number.isFinite(focusDelta) ? Math.max(0, focusDelta).toFixed(1) : '--'}°`)
   const cardTone = selected
     ? 'border-amber-400/60 bg-amber-400/15 text-amber-50'
     : isObservationOnly
@@ -238,11 +316,12 @@ function RecommendationCard({
       : 'border-amber-500/35 bg-amber-500/10 text-neutral-100 hover:border-amber-400/70'
   const title = isWeatherFocus
     ? [
-        '天气关注，不代表交易建议',
+        language === 'zh' ? '天气关注，不代表交易建议或买入信号' : 'Weather focus, not a trade recommendation or buy signal',
+        focusReason,
         `${item.observation_source || 'observation'} age ${age}`,
         item.remaining_to_max === null || item.remaining_to_max === undefined
           ? ''
-          : `距离预计最高 ${Number(item.remaining_to_max).toFixed(1)}°${item.deb_unit || ''}`,
+          : `${language === 'zh' ? '距离预计最高' : 'Below forecast high'} ${Number(item.remaining_to_max).toFixed(1)}°${item.deb_unit || ''}`,
       ].filter(Boolean).join('\n')
     : [
         `METAR age ${age}`,
@@ -265,10 +344,12 @@ function RecommendationCard({
       className={`w-[190px] shrink-0 cursor-pointer border px-3 py-1.5 text-left transition ${cardTone}`}
       title={title}
     >
-      <div className="truncate text-[12px] font-semibold">{item.city_name}</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 truncate text-[12px] font-semibold">{item.city_name}</div>
+      </div>
       <div className="mt-0.5 flex items-center gap-3 text-[10px] tabular-nums">
-        <span className="text-amber-200">现在 {tempLabel(item.current_temp, item.current_temp_unit)}</span>
-        <span className="text-amber-200">预计最高 {tempLabel(item.deb_mu, item.deb_unit)}</span>
+        <span className="text-amber-200">{language === 'zh' ? '现在' : 'Now'} {tempLabel(item.current_temp, item.current_temp_unit)}</span>
+        <span className="text-amber-200">{language === 'zh' ? '预计最高' : 'Forecast high'} {tempLabel(item.deb_mu, item.deb_unit)}</span>
       </div>
     </div>
   )
@@ -364,6 +445,37 @@ function cityContinent(cityKey?: string, cityName?: string) {
   if (/cape|lagos/.test(value)) return 'Africa'
   if (/new-york|nyc|chicago|miami|dallas|seattle|atlanta|toronto|sao|paulo|austin|denver|houston|los-angeles|san-francisco|mexico|panama|buenos/.test(value)) return 'Americas'
   return 'Other'
+}
+
+function cityAlphabet(cityName?: string) {
+  const letter = String(cityName || '').trim().charAt(0).toUpperCase()
+  return /^[A-Z]$/.test(letter) ? letter : '#'
+}
+
+function cityTimezoneGroup(timeZone?: string) {
+  if (!timeZone) return 'Unknown'
+  try {
+    const part = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      timeZoneName: 'longOffset',
+      hour: '2-digit',
+    }).formatToParts(new Date()).find(item => item.type === 'timeZoneName')?.value
+    return part ? part.replace('GMT', 'UTC') : timeZone
+  } catch {
+    return 'Unknown'
+  }
+}
+
+function continentLabel(value: string, language: UiLanguage) {
+  const labels: Record<string, [string, string]> = {
+    Americas: ['美洲', 'Americas'],
+    Europe: ['欧洲', 'Europe'],
+    Asia: ['亚洲', 'Asia'],
+    Pacific: ['大洋洲', 'Pacific'],
+    Africa: ['非洲', 'Africa'],
+    Other: ['其他', 'Other'],
+  }
+  return labels[value]?.[language === 'zh' ? 0 : 1] ?? value
 }
 
 function validationActionLimit(action: ProductionValidationAction) {
@@ -766,6 +878,8 @@ function App() {
   })
   const [contractStatus, setContractStatus] = useState('mature-auto')
   const [citySearch, setCitySearch] = useState('')
+  const [cityBrowseMode, setCityBrowseMode] = useState<CityBrowseMode>('continent')
+  const [cityBrowseValue, setCityBrowseValue] = useState('all')
   const [uiLanguage, setUiLanguage] = useState<UiLanguage>(() => {
     if (typeof window === 'undefined') return 'zh'
     return window.localStorage.getItem('weatherbot-ui-language') === 'en' ? 'en' : 'zh'
@@ -1179,7 +1293,9 @@ function App() {
         actionable: 0,
         enabled: Boolean(row.enabled),
         displayEnabled: row.display_enabled !== false,
-        cityScope: row.city_scope || 'market_candidate',
+        cityScope: ['verified', 'settlement_mismatch'].includes(String(row.verification_status || ''))
+          ? 'market_candidate'
+          : row.city_scope || 'market_candidate',
         tier: row.tier ?? 9,
         lastRefreshedAt: row.last_refreshed_at ?? row.latest_timestamp ?? null,
       })
@@ -1321,12 +1437,51 @@ function App() {
     }
   }, [schedulerStatus, uiLanguage, queryClient])
 
-  const filteredCityOptions = cityOptions.filter(city => {
-    const query = citySearch.trim().toLowerCase()
-    if (!city.displayEnabled && city.key !== selectedCity) return false
-    if (!query) return true
-    return `${city.name} ${city.station ?? ''} ${city.key} ${city.continent}`.toLowerCase().includes(query)
-  })
+  const cityBrowseChoices = useMemo(() => {
+    const counts = new Map<string, number>()
+    cityOptions.forEach(city => {
+      if (!city.displayEnabled && city.key !== selectedCity) return
+      const key = cityBrowseMode === 'continent'
+        ? city.continent
+        : cityBrowseMode === 'timezone'
+          ? cityTimezoneGroup(city.settlementTimezone)
+          : cityAlphabet(city.name)
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    })
+    return [...counts.entries()]
+      .sort(([a], [b]) => {
+        if (cityBrowseMode === 'timezone') {
+          if (a === 'Unknown') return 1
+          if (b === 'Unknown') return -1
+        }
+        return a.localeCompare(b, 'en')
+      })
+      .map(([value, count]) => ({
+        value,
+        label: cityBrowseMode === 'continent' ? continentLabel(value, uiLanguage) : value,
+        count,
+      }))
+  }, [cityBrowseMode, cityOptions, selectedCity, uiLanguage])
+
+  useEffect(() => {
+    if (cityBrowseValue === 'all') return
+    if (!cityBrowseChoices.some(option => option.value === cityBrowseValue)) setCityBrowseValue('all')
+  }, [cityBrowseChoices, cityBrowseValue])
+
+  const filteredCityOptions = useMemo(() => cityOptions
+    .filter(city => {
+      const query = citySearch.trim().toLowerCase()
+      if (!city.displayEnabled && city.key !== selectedCity) return false
+      const browseKey = cityBrowseMode === 'continent'
+        ? city.continent
+        : cityBrowseMode === 'timezone'
+          ? cityTimezoneGroup(city.settlementTimezone)
+          : cityAlphabet(city.name)
+      if (cityBrowseValue !== 'all' && browseKey !== cityBrowseValue) return false
+      if (!query) return true
+      return `${city.name} ${city.station ?? ''} ${city.key} ${city.continent} ${city.settlementTimezone ?? ''}`.toLowerCase().includes(query)
+    })
+    .sort((a, b) => a.name.localeCompare(b.name, 'en')), [cityBrowseMode, cityBrowseValue, cityOptions, citySearch, selectedCity])
 
   const signalStatusMutation = useMutation({
     mutationFn: ({ signalId, status, amount }: { signalId: number; status: string; amount?: number }) =>
@@ -1424,7 +1579,7 @@ function App() {
           <div className="text-[11px] text-neutral-600">{t('app.subtitle')}</div>
         </div>
         <span className="hidden shrink-0 text-[10px] text-neutral-500 md:inline">
-          已刷新 {dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--'}
+          {copy.updated} {dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString(uiLanguage === 'zh' ? 'zh-CN' : 'en-GB', { hour12: false }) : '--:--:--'}
         </span>
         <label className="inline-flex items-center gap-1 border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400" aria-label={t('language.label')}>
           <span>{t('language.label')}</span>
@@ -1443,22 +1598,22 @@ function App() {
             onClick={() => setThemeMode('light')}
             className={`px-2 py-1.5 ${themeMode === 'light' ? 'bg-neutral-100 text-black' : 'text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200'}`}
           >
-            {uiLanguage === 'zh' ? '浅色' : 'Light'}
+            {copy.light}
           </button>
           <button
             type="button"
             onClick={() => setThemeMode('dark')}
             className={`border-l border-neutral-800 px-2 py-1.5 ${themeMode === 'dark' ? 'bg-[#2563EB] text-white' : 'text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200'}`}
           >
-            {uiLanguage === 'zh' ? '深色' : 'Dark'}
+            {copy.dark}
           </button>
         </div>
         <button
           type="button"
           onClick={() => setDeveloperSettingsOpen(true)}
           className="inline-flex h-[30px] w-[30px] items-center justify-center border border-neutral-700 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-100"
-          aria-label="打开设置"
-          title="设置与开发者模式"
+          aria-label={copy.settings}
+          title={uiLanguage === 'zh' ? '设置与开发者模式' : 'Settings and developer tools'}
         >
           <Settings2 className="h-3.5 w-3.5" />
         </button>
@@ -1569,38 +1724,75 @@ function App() {
         </div>
       )}
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[220px_minmax(600px,1fr)_340px] xl:overflow-hidden">
+      <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[232px_minmax(0,1fr)_336px] xl:overflow-hidden">
         <aside className="order-2 border-b border-neutral-800 bg-neutral-950/40 xl:order-1 xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
           <div className="p-2">
             <div className="mb-2 flex items-center justify-between">
               <div>
-                <div className="text-sm font-medium text-neutral-100">城市</div>
-                <div className="text-[10px] text-neutral-600">按站点浏览</div>
+                <div className="text-sm font-medium text-neutral-100">{copy.cities}</div>
+                <div className="text-[10px] text-neutral-600">{copy.citySubtitle}</div>
               </div>
               <span className="border border-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-500">{filteredCityOptions.length}</span>
             </div>
             <input
               value={citySearch}
               onChange={event => setCitySearch(event.target.value)}
-              placeholder="搜索城市或机场"
+              placeholder={copy.citySearch}
               className="mb-2 w-full border border-neutral-800 bg-black px-2 py-1.5 text-[11px]"
-              aria-label="搜索城市或机场"
+              aria-label={copy.citySearch}
             />
+            <div className="mb-2 grid grid-cols-3 border border-neutral-800" role="group" aria-label={uiLanguage === 'zh' ? '城市排序方式' : 'City browse mode'}>
+              {([
+                { id: 'continent' as const, label: copy.browseContinent, icon: Globe2 },
+                { id: 'timezone' as const, label: copy.browseTimezone, icon: Clock3 },
+                { id: 'alphabet' as const, label: copy.browseAlphabet, icon: ArrowDownAZ },
+              ]).map(option => {
+                const Icon = option.icon
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => {
+                      setCityBrowseMode(option.id)
+                      setCityBrowseValue('all')
+                    }}
+                    aria-pressed={cityBrowseMode === option.id}
+                    className={`inline-flex h-8 items-center justify-center gap-1 border-r border-neutral-800 px-1 text-[10px] last:border-r-0 ${cityBrowseMode === option.id ? 'bg-blue-600 text-white' : 'text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200'}`}
+                  >
+                    <Icon className="h-3 w-3" />
+                    <span>{option.label}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <label className="mb-2 block">
+              <span className="sr-only">{uiLanguage === 'zh' ? '城市筛选' : 'City filter'}</span>
+              <select
+                value={cityBrowseValue}
+                onChange={event => setCityBrowseValue(event.target.value)}
+                className="h-8 w-full border border-neutral-800 bg-black px-2 text-[11px] text-neutral-300 outline-none"
+              >
+                <option value="all">{copy.all} ({cityOptions.filter(city => city.displayEnabled || city.key === selectedCity).length})</option>
+                {cityBrowseChoices.map(option => (
+                  <option key={option.value} value={option.value}>{option.label} ({option.count})</option>
+                ))}
+              </select>
+            </label>
             <div className="space-y-1">
               {cityOptions.length === 0 && (
                 <div className="border border-neutral-800 bg-black/40 p-3 text-[11px] leading-relaxed text-neutral-500">
-                  暂无城市快照。点击顶部“自动抓取”后，这里会按城市列出预报、站点和信号数量。
+                  {copy.noCities}
                 </div>
               )}
               {cityOptions.length > 0 && filteredCityOptions.length === 0 && (
                 <div className="border border-neutral-800 bg-black/40 p-3 text-[11px] text-neutral-500">
-                  没有匹配的城市。
+                  {copy.noCityMatch}
                 </div>
               )}
               {filteredCityOptions.map(city => (
                 <div
                   key={city.key}
-                  title={`${city.enabled ? '采集已启用' : '未加入采集'} · ${city.cityScope === 'observation_only' ? '观察目录' : '市场候选'} · 预报 ${city.forecastCount} · METAR ${city.latestMetar !== null && city.latestMetar !== undefined ? Number(city.latestMetar).toFixed(1) + '°' + city.unit : '--'} · 历史 ${city.historyCount} · 信号 ${city.actionable}/${city.signals}`}
+                  title={`${city.enabled ? copy.collecting : copy.notCollecting} · ${city.cityScope === 'observation_only' ? copy.observationCatalog : copy.marketCandidate} · ${copy.forecast} ${city.forecastCount} · METAR ${city.latestMetar !== null && city.latestMetar !== undefined ? Number(city.latestMetar).toFixed(1) + '°' + city.unit : '--'} · ${copy.historical} ${city.historyCount} · ${copy.signal} ${city.actionable}/${city.signals}`}
                   className={`flex min-h-[40px] w-full items-stretch gap-2 border-x-0 border-b border-t-0 px-2 py-1.5 text-left transition ${
                     selectedCity === city.key
                       ? 'border-blue-500/40 bg-blue-500/10 text-blue-100'
@@ -1621,15 +1813,15 @@ function App() {
                       <div className="min-w-0">
                         <div className="truncate text-xs font-medium leading-tight">{city.name}</div>
                         <div className="mt-0.5 truncate text-[9px] leading-tight text-neutral-600">
-                          {city.station || 'station 未映射'}
+                          {city.station || copy.stationPending}
                         </div>
                       </div>
                     </div>
                     <div className="shrink-0 text-right">
                       <div className="tabular-nums text-[11px] leading-tight text-neutral-200">
-                        {city.latest === null || city.latest === undefined ? (city.enabled ? '--' : '待接入') : `${Number(city.latest).toFixed(1)}°${city.unit}`}
+                        {city.latest === null || city.latest === undefined ? (city.enabled ? '--' : copy.pending) : `${Number(city.latest).toFixed(1)}°${city.unit}`}
                       </div>
-                      <div className="mt-0.5 text-[9px] tabular-nums text-neutral-600">{city.enabled ? relativeTime(city.lastRefreshedAt) : '未采集'}</div>
+                      <div className="mt-0.5 text-[9px] tabular-nums text-neutral-600">{city.enabled ? relativeTime(city.lastRefreshedAt, uiLanguage) : copy.notCollected}</div>
                     </div>
                     </div>
                   </a>
@@ -1640,10 +1832,12 @@ function App() {
 
         </aside>
 
-        <section className="order-1 min-h-[720px] overflow-hidden xl:order-2 xl:flex xl:min-h-0 xl:flex-col">
+        <section className="order-1 min-w-0 min-h-[720px] overflow-hidden xl:order-2 xl:flex xl:min-h-0 xl:flex-col">
           <div className="shrink-0 border-b border-amber-500/20 bg-amber-500/10 px-3 py-1.5">
             <div className="flex flex-wrap items-center gap-3">
-              <div className="shrink-0 text-[11px] font-semibold text-amber-300">推荐关注</div>
+              <div className="flex shrink-0 items-center gap-2" title={uiLanguage === 'zh' ? '天气临界关注；交易判断请以右侧策略队列为准。' : 'Weather threshold watch; use the strategy queue for trade decisions.'}>
+                <span className="text-[11px] font-semibold text-amber-300">{copy.recommendations}</span>
+              </div>
               {recommendedItems.length > 0 ? (
                 <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto">
                   {recommendedItems.slice(0, 4).map(item => (
@@ -1651,6 +1845,7 @@ function App() {
                       key={`${item.type}-${item.city_key}-${item.target_date}-${item.bucket_key ?? item.metar_report_time ?? 'latest'}`}
                       item={item}
                       selected={selectedCity === item.city_key}
+                      language={uiLanguage}
                       onSelect={() => {
                         setSelectedCity(item.city_key)
                         if (item.target_date) setSelectedDate(item.target_date)
@@ -1659,20 +1854,20 @@ function App() {
                   ))}
                 </div>
               ) : (
-                <div className="text-[11px] text-amber-200/80">暂无推荐</div>
+                <div className="text-[11px] text-amber-200/80">{copy.noRecommendations}</div>
               )}
             </div>
           </div>
           <div className="z-20 shrink-0 flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 bg-black/95 px-3 py-1.5">
             <div className="min-w-0">
               <div className="truncate text-sm font-medium text-neutral-100">
-                {selectedCityMeta?.name ?? '城市天气证据'} · {selectedCityMeta?.station || 'station 未映射'}
+                {selectedCityMeta?.name ?? (uiLanguage === 'zh' ? '城市天气证据' : 'City weather evidence')} · {selectedCityMeta?.station || copy.stationPending}
               </div>
               <details className="mt-1 text-[9px] text-neutral-500">
-                <summary className="w-fit cursor-pointer select-none hover:text-neutral-300">市场规则</summary>
+                <summary className="w-fit cursor-pointer select-none hover:text-neutral-300">{copy.marketRules}</summary>
                 <div className="mt-1 flex flex-wrap gap-1.5">
                   <span className="border border-neutral-800 px-1.5 py-0.5" title={selectedCityMeta?.settlementStationName || selectedCityMeta?.stationName || ''}>
-                    结算站 {selectedCityMeta?.settlementStation || selectedCityMeta?.station || '--'}
+                    {copy.settlementStation} {selectedCityMeta?.settlementStation || selectedCityMeta?.station || '--'}
                   </span>
                   <span className={`border px-1.5 py-0.5 ${
                     selectedCityMeta?.verificationStatus === 'verified'
@@ -1681,7 +1876,7 @@ function App() {
                         ? 'border-red-500/30 text-red-300'
                         : 'border-amber-500/30 text-amber-300'
                   }`}>
-                    {selectedCityMeta?.settlementRuleVerifiedAt ? `已核验 ${relativeTime(selectedCityMeta.settlementRuleVerifiedAt)}` : '未核验'}
+                    {selectedCityMeta?.settlementRuleVerifiedAt ? `${copy.verified} ${relativeTime(selectedCityMeta.settlementRuleVerifiedAt, uiLanguage)}` : copy.unverified}
                   </span>
                   <span className="border border-neutral-800 px-1.5 py-0.5">{selectedCityMeta?.settlementTimezone || '--'}</span>
                   <span className="border border-neutral-800 px-1.5 py-0.5">truth {selectedCityMeta?.primarySettlementSource || 'pending'}</span>
@@ -1689,9 +1884,9 @@ function App() {
               </details>
             </div>
             <div className="flex flex-wrap gap-1.5 text-[10px] text-neutral-500">
-              <span>{selectedDate || '日期待定'}</span>
+              <span>{selectedDate || copy.datePending}</span>
               <span>·</span>
-              <span>{selectedCityMeta?.latest === null || selectedCityMeta?.latest === undefined ? '预报 --' : `预报 ${Number(selectedCityMeta.latest).toFixed(1)}°${selectedCityMeta.unit}`}</span>
+              <span>{selectedCityMeta?.latest === null || selectedCityMeta?.latest === undefined ? `${copy.forecast} --` : `${copy.forecast} ${Number(selectedCityMeta.latest).toFixed(1)}°${selectedCityMeta.unit}`}</span>
             </div>
           </div>
 
@@ -1703,8 +1898,8 @@ function App() {
                 </span>
                 {selectedTradingStatus === 'paper_only' && selectedCityMeta.key === 'hong-kong' ? (
                   <span>{t('banner.hk')}</span>
-                ) : selectedTradingStatus === 'monitor_only' && selectedCityMeta.key === 'seoul' ? (
-                  <span>{t('banner.seoul')}</span>
+                ) : selectedTradingStatus === 'paper_only' && selectedCityMeta.key === 'seoul' ? (
+                  <span>{uiLanguage === 'zh' ? '该城市仅进入模拟验证，实盘保持锁定。' : 'This city is available for paper validation only; live remains locked.'}</span>
                 ) : (
                   <span>{selectedStatusConfig?.reason || selectedCityMeta.verificationStatus || 'no active market'}</span>
                 )}
@@ -1712,7 +1907,7 @@ function App() {
             </div>
           )}
 
-          <div className="min-h-[720px] overflow-y-auto xl:min-h-0 xl:flex-1">
+          <div className="min-h-[720px] min-w-0 overflow-x-hidden overflow-y-auto xl:min-h-0 xl:flex-1">
             <WeatherPanel
               forecasts={forecasts}
               signals={signals}
@@ -1746,11 +1941,12 @@ function App() {
               backfilling={historyBackfillMutation.isPending}
               backfillResult={historyBackfillMutation.data}
               alphaEvents={modelRepriceEventsQuery.data?.rows ?? []}
+              language={uiLanguage}
             />
           </div>
         </section>
 
-        <aside className="order-3 flex h-[900px] min-h-0 flex-col border-t border-neutral-800 xl:h-auto xl:border-l xl:border-t-0">
+        <aside className="order-3 flex h-[900px] min-h-0 min-w-0 flex-col border-t border-neutral-800 xl:h-auto xl:border-l xl:border-t-0">
           <ExecutionWorkbench
             cityKey={selectedCity}
             targetDate={selectedDate}
@@ -1759,6 +1955,7 @@ function App() {
             liveAvailable={liveAvailable}
             schedulerRunning={schedulerRunning}
             onOpenDeveloperSettings={() => setDeveloperSettingsOpen(true)}
+            language={uiLanguage}
           />
           {false && <>
           <div className="shrink-0 border-b border-neutral-800 bg-black/95 px-3 py-2">

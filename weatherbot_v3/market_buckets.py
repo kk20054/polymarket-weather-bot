@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 import time
 from datetime import date, datetime, timedelta
 from typing import Any
 
 import requests
 
-from .db import insert_orderbooks, log_data_fetch, upsert_market_buckets
+from .db import connect, init_v3_db, insert_orderbooks, log_data_fetch, upsert_market_buckets
 from .polymarket import quote_from_market_payload
 from .stations import list_stations
 
@@ -19,6 +20,7 @@ GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
 CLOB_BASE_URL = "https://clob.polymarket.com"
 POLYMARKET_BASE_URL = "https://polymarket.com"
 ACTIVE_SYNC_VERSION = "market-buckets-active-weather-v1"
+CACHED_ORDERBOOK_REFRESH_VERSION = "market-buckets-cached-orderbooks-v1"
 MONTHS = {
     "january": "01",
     "february": "02",
@@ -106,6 +108,189 @@ class PolymarketWeatherMarketClient:
                     item["source_url"] = f"{CLOB_BASE_URL}/books"
                     books[token_id] = item
         return books
+
+
+def refresh_cached_market_bucket_orderbooks(
+    *,
+    targets_by_city: dict[str, list[str]] | None = None,
+    limit: int = 5000,
+    dry_run: bool = False,
+    path=None,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    """Refresh CLOB books for already-discovered weather buckets in batches.
+
+    Event discovery is intentionally excluded from this hot path. A full Gamma
+    scan requires hundreds of sequential event requests, while CLOB accepts up
+    to 500 token ids in one `/books` request. Keeping these jobs separate lets
+    five-minute quotes remain fresh even while discovery or model derivation is
+    still running.
+    """
+    started = time.perf_counter()
+    init_v3_db(path)
+    target_pairs = {
+        (str(city), str(target_date))
+        for city, target_dates in (targets_by_city or {}).items()
+        for target_date in target_dates
+        if city and target_date
+    }
+    bounded_limit = max(1, min(int(limit or 5000), 10_000))
+    with connect(path) as conn:
+        db_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT *
+                FROM market_buckets
+                WHERE COALESCE(yes_token_id, '') != ''
+                ORDER BY target_date ASC, city ASC, id ASC
+                LIMIT ?
+                """,
+                (bounded_limit,),
+            ).fetchall()
+        ]
+    if target_pairs:
+        db_rows = [
+            row for row in db_rows
+            if (str(row.get("city") or ""), str(row.get("target_date") or "")) in target_pairs
+        ]
+    if not db_rows:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "no_cached_market_buckets",
+            "refresh_version": CACHED_ORDERBOOK_REFRESH_VERSION,
+            "cached_buckets": 0,
+            "tokens_requested": 0,
+            "quotes_refreshed": 0,
+            "quotes_missing": 0,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000),
+        }
+
+    token_ids = list(dict.fromkeys(str(row.get("yes_token_id") or "") for row in db_rows))
+    client = PolymarketWeatherMarketClient(session=session)
+    try:
+        books = client.get_orderbooks(token_ids)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "refresh_version": CACHED_ORDERBOOK_REFRESH_VERSION,
+            "cached_buckets": len(db_rows),
+            "tokens_requested": len(token_ids),
+            "quotes_refreshed": 0,
+            "quotes_missing": len(token_ids),
+            "error": str(exc),
+            "elapsed_ms": round((time.perf_counter() - started) * 1000),
+        }
+
+    refreshed_rows: list[dict[str, Any]] = []
+    orderbook_rows: list[tuple[str, dict[str, Any]]] = []
+    missing: list[dict[str, str]] = []
+    quote_times: list[str] = []
+    for row in db_rows:
+        token_id = str(row.get("yes_token_id") or "")
+        book = books.get(token_id)
+        if not book:
+            missing.append({
+                "city": str(row.get("city") or ""),
+                "target_date": str(row.get("target_date") or ""),
+                "market_id": str(row.get("market_id") or ""),
+                "token_id": token_id,
+            })
+            continue
+        cached_payload = _cached_market_payload(row)
+        merged = _merge_orderbook_payload(cached_payload, book)
+        refreshed = market_bucket_from_payload(
+            merged,
+            city=str(row.get("city") or ""),
+            city_name=str(row.get("city_name") or ""),
+            target_date=str(row.get("target_date") or ""),
+            station_id=str(row.get("station_id") or ""),
+        )
+        refreshed["bucket_key"] = str(row.get("bucket_key") or refreshed.get("bucket_key") or "")
+        refreshed_rows.append(refreshed)
+        orderbook_rows.append(
+            (str(row.get("market_id") or ""), _orderbook_payload_for_db(merged, book))
+        )
+        quote_time = str(refreshed.get("quote_timestamp") or "")
+        if quote_time:
+            quote_times.append(quote_time)
+
+    if not dry_run:
+        # SQLite permits one writer. Short transactions let minute-level
+        # observation collectors make progress while a thousand-token market
+        # refresh is being persisted.
+        write_batch_size = 100
+        for start in range(0, len(refreshed_rows), write_batch_size):
+            _sqlite_write_with_retry(
+                upsert_market_buckets,
+                refreshed_rows[start:start + write_batch_size],
+                path=path,
+            )
+        for start in range(0, len(orderbook_rows), write_batch_size):
+            _sqlite_write_with_retry(
+                insert_orderbooks,
+                orderbook_rows[start:start + write_batch_size],
+                path=path,
+            )
+    return {
+        "ok": bool(refreshed_rows) and not missing,
+        "refresh_version": CACHED_ORDERBOOK_REFRESH_VERSION,
+        "dry_run": dry_run,
+        "cached_buckets": len(db_rows),
+        "tokens_requested": len(token_ids),
+        "quotes_refreshed": len(refreshed_rows),
+        "quotes_missing": len(missing),
+        "missing": missing[:20],
+        "quote_timestamp_min": min(quote_times) if quote_times else None,
+        "quote_timestamp_max": max(quote_times) if quote_times else None,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000),
+    }
+
+
+def _sqlite_write_with_retry(write_fn, payload, *, path=None, attempts: int = 4):
+    """Retry a short SQLite batch when another collector owns the writer lock."""
+    for attempt in range(max(1, attempts)):
+        try:
+            return write_fn(payload, path=path)
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt >= attempts - 1:
+                raise
+            time.sleep(0.2 * (2 ** attempt))
+
+
+def _cached_market_payload(row: dict[str, Any]) -> dict[str, Any]:
+    raw = row.get("raw_json")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            raw = {}
+    payload = dict(raw) if isinstance(raw, dict) else {}
+    field_map = {
+        "id": "market_id",
+        "eventSlug": "event_slug",
+        "event_url": "event_url",
+        "conditionId": "condition_id",
+        "question": "question",
+        "city": "city",
+        "city_name": "city_name",
+        "target_date": "target_date",
+        "station_id": "station_id",
+        "yes_token_id": "yes_token_id",
+        "no_token_id": "no_token_id",
+        "orderMinSize": "order_min_size",
+        "orderPriceMinTickSize": "tick_size",
+        "enableOrderBook": "enable_order_book",
+        "volume": "volume",
+        "liquidity": "liquidity",
+        "negRisk": "neg_risk",
+        "source_url": "source_url",
+    }
+    for payload_key, row_key in field_map.items():
+        if payload.get(payload_key) in (None, "") and row.get(row_key) not in (None, ""):
+            payload[payload_key] = row.get(row_key)
+    return payload
 
 
 def sync_active_weather_market_buckets(
@@ -347,8 +532,9 @@ def market_bucket_from_payload(
     yes_token_id = str(payload.get("yes_token_id") or quote.yes_token_id or (tokens[0] if tokens else ""))
     no_token_id = str(payload.get("no_token_id") or (tokens[1] if len(tokens) > 1 else ""))
     outcome_name = _outcome_name(outcomes)
-    best_bid = quote.best_bid if quote.best_bid > 0 else _num(payload.get("bestBid"))
-    best_ask = quote.best_ask if quote.best_ask > 0 else _num(payload.get("bestAsk"))
+    has_clob_book = quote.book_source == "clob"
+    best_bid = quote.best_bid if quote.best_bid > 0 else (None if has_clob_book else _num(payload.get("bestBid")))
+    best_ask = quote.best_ask if quote.best_ask > 0 else (None if has_clob_book else _num(payload.get("bestAsk")))
     price = best_ask or (_num(prices[0]) if prices else None)
     spread = quote.spread if quote.spread > 0 else (
         round(best_ask - best_bid, 6) if best_ask is not None and best_bid is not None else None
@@ -485,6 +671,14 @@ def strict_match_reasons(row: dict[str, Any]) -> list[str]:
         reasons.append("orderbook_disabled")
     if row.get("price") is None and row.get("best_ask") is None:
         reasons.append("quote_price_missing")
+    best_bid = _num(row.get("best_bid"))
+    best_ask = _num(row.get("best_ask"))
+    if best_bid is not None and not (0 < best_bid < 1):
+        reasons.append("invalid_best_bid")
+    if best_ask is not None and not (0 < best_ask < 1):
+        reasons.append("invalid_best_ask")
+    if best_bid is not None and best_ask is not None and best_bid > best_ask:
+        reasons.append("crossed_orderbook")
     return reasons
 
 

@@ -53,7 +53,21 @@ $Process = Start-Process `
   -WindowStyle Hidden `
   -PassThru
 
-Start-Sleep -Seconds 3
+$Health = $null
+$Deadline = (Get-Date).AddSeconds(60)
+do {
+  Start-Sleep -Milliseconds 500
+  try {
+    $Health = Invoke-RestMethod -Uri "http://$HostAddress`:$Port/api/scheduler/status" -TimeoutSec 5
+  } catch {
+    $Health = $null
+  }
+} while (-not $Health -and (Get-Date) -lt $Deadline)
+
+if (-not $Health) {
+  throw "Dashboard did not become ready on http://$HostAddress`:$Port within 60 seconds."
+}
+
 $NewListeningPids = netstat -ano |
   Select-String ":$Port\s" |
   Where-Object { $_.Line -match "\sLISTENING\s+(\d+)\s*$" } |
@@ -65,14 +79,11 @@ $NewListeningPids = netstat -ano |
   Sort-Object -Unique |
   Set-Content -LiteralPath $PidFile
 
-$Dashboard = Invoke-RestMethod -Uri "http://$HostAddress`:$Port/api/dashboard" -TimeoutSec 15
-
 [pscustomobject]@{
   ok = $true
   url = "http://$HostAddress`:$Port"
   started_pid = $Process.Id
   listening_pids = $NewListeningPids
-  scanner_status = $Dashboard.stats.scanner_status
-  strategy_status = $Dashboard.stats.strategy_readiness_status
-  data_age_minutes = $Dashboard.stats.data_age_minutes
+  scheduler_running = [bool]$Health.running
+  scheduler_message = $Health.message
 } | ConvertTo-Json

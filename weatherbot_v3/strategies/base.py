@@ -69,7 +69,10 @@ class StrategyBase:
             edge_percent = edge / market_probability
         spread = optional_float(bucket.get("spread"))
         spread_bps = spread_bps_value(spread, market_ask, market_bid)
-        book_age_seconds = book_age_seconds_value(bucket.get("quote_timestamp"))
+        book_age_seconds = book_age_seconds_value(
+            bucket.get("quote_timestamp"),
+            as_of=context.get("decision_time"),
+        )
 
         gate_reasons: list[str] = []
         cautions: list[str] = []
@@ -86,6 +89,12 @@ class StrategyBase:
             hard_blocks.append("order_min_size_missing")
         if not bool(bucket.get("enable_order_book")):
             hard_blocks.append("orderbook_disabled")
+        if market_ask is None or not (0 < market_ask < 1):
+            hard_blocks.append("invalid_best_ask")
+        if market_bid is None or not (0 < market_bid < 1):
+            hard_blocks.append("invalid_best_bid")
+        if market_bid is not None and market_ask is not None and market_bid > market_ask:
+            hard_blocks.append("crossed_orderbook")
         if market_probability is None:
             hard_blocks.append("market_probability_missing")
         if model_probability is None:
@@ -115,6 +124,28 @@ class StrategyBase:
         hard_blocks.extend(extra_hard_blocks or [])
         gate_reasons.extend(extra_gate_reasons or [])
 
+        sizing = size_position(
+            model_probability,
+            market_ask,
+            bankroll=float(context.get("bankroll") or 0.0),
+            max_per_trade_usd=float(context.get("max_per_trade_usd") or 0.0),
+            kelly_multiplier=kelly_multiplier,
+            bankroll_fraction_cap=bankroll_fraction_cap,
+        )
+        kelly_fraction = sizing.kelly_fraction if kelly_fraction_override is None else round(max(0.0, float(kelly_fraction_override)), 8)
+        position_size = sizing.capped_position_size_usd if position_size_override is None else round(max(0.0, float(position_size_override)), 4)
+        order_min_size = optional_float(bucket.get("order_min_size"))
+        if (
+            market_ask is not None
+            and market_ask > 0
+            and order_min_size is not None
+            and order_min_size > 0
+            and position_size / market_ask + 1e-9 < order_min_size
+        ):
+            skip_reasons.append("below_order_min_size")
+        if position_size <= 0:
+            skip_reasons.append("non_positive_kelly_size")
+
         gate_reasons.extend(hard_blocks)
         gate_reasons.extend(skip_reasons)
         gate_reasons = unique(gate_reasons)
@@ -135,16 +166,6 @@ class StrategyBase:
         gate_reasons = unique(gate_reasons + live_reasons)
         gate_status = "paper_allowed" if paper_allowed else ("paper_blocked" if hard_blocks else "skip")
         primary_reason = (hard_blocks or skip_reasons or live_reasons or gate_reasons or [""])[0]
-        sizing = size_position(
-            model_probability,
-            market_ask,
-            bankroll=float(context.get("bankroll") or 0.0),
-            max_per_trade_usd=float(context.get("max_per_trade_usd") or 0.0),
-            kelly_multiplier=kelly_multiplier,
-            bankroll_fraction_cap=bankroll_fraction_cap,
-        )
-        kelly_fraction = sizing.kelly_fraction if kelly_fraction_override is None else round(max(0.0, float(kelly_fraction_override)), 8)
-        position_size = sizing.capped_position_size_usd if position_size_override is None else round(max(0.0, float(position_size_override)), 4)
         distribution = context.get("distribution") or {}
         evidence = context.get("evidence") or {}
         decision = {
@@ -321,11 +342,12 @@ def spread_bps_value(spread: float | None, ask: float | None, bid: float | None)
     return max(0.0, float(spread) / float(ask) * 10_000.0)
 
 
-def book_age_seconds_value(value: Any) -> float | None:
+def book_age_seconds_value(value: Any, *, as_of: Any = None) -> float | None:
     parsed = parse_datetime(value)
     if parsed is None:
         return None
-    return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+    reference = parse_datetime(as_of) or datetime.now(timezone.utc)
+    return max(0.0, (reference - parsed).total_seconds())
 
 
 def parse_datetime(value: Any) -> datetime | None:

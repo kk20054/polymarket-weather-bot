@@ -5,12 +5,17 @@ from contextlib import nullcontext
 import hashlib
 import math
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .config import DATA_DIR, load_config
 from .forecast_time import persisted_prediction_cohort_status
+
+
+_INIT_LOCK = threading.Lock()
+_INITIALIZED_DB_PATHS: set[str] = set()
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -70,7 +75,7 @@ def connect_readonly(path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
-def init_v3_db(path: Path | None = None) -> None:
+def _init_v3_db_uncached(path: Path | None = None) -> None:
     with connect(path) as conn:
         conn.executescript(
             """
@@ -341,6 +346,27 @@ def init_v3_db(path: Path | None = None) -> None:
                 shares REAL,
                 amount REAL,
                 source TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS paper_exit_evaluations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                evaluation_key TEXT UNIQUE,
+                paper_order_id INTEGER NOT NULL,
+                checked_at TEXT NOT NULL,
+                policy_mode TEXT NOT NULL,
+                source_decision_id TEXT,
+                source_prediction_id INTEGER,
+                trigger TEXT,
+                action TEXT,
+                confirmation_count INTEGER,
+                model_probability REAL,
+                best_bid REAL,
+                best_bid_size REAL,
+                observed_high REAL,
+                quote_timestamp TEXT,
+                reasons_json TEXT,
                 raw_json TEXT,
                 created_at TEXT NOT NULL
             );
@@ -1430,10 +1456,12 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_token_status ON paper_orders(yes_token_id, lifecycle_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_orders_cohort ON paper_orders(cohort_run_id, opened_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_validation_status ON paper_validation_runs(status, started_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_orderbooks_token_id ON orderbooks(yes_token_id, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_profile_revision_no ON strategy_profile_revisions(profile_key, revision_no DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_strategy_profile_activation_scope ON strategy_profile_activation_events(scope, activation_id DESC)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_idempotency ON fills(idempotency_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_type, order_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_exit_order_checked ON paper_exit_evaluations(paper_order_id, id DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_created ON data_fetch_logs(created_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_fetch_logs_source_status ON data_fetch_logs(source, status)")
     conn.executescript(
@@ -1460,6 +1488,27 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         END;
         """
     )
+
+
+def init_v3_db(path: Path | None = None, *, force: bool = False) -> None:
+    """Initialize each database file once per process.
+
+    Collector hot paths call this guard before every upsert. Re-running the
+    complete DDL/migration script from concurrent pollers needlessly competes
+    for SQLite's single writer lock, so only the first caller for a database
+    path performs schema initialization. Migration tooling and tests may pass
+    ``force=True`` after intentionally changing schema metadata in-place.
+    """
+    cfg = load_config()
+    db_path = Path(path or cfg.v3_db_path).resolve()
+    cache_key = str(db_path).casefold()
+    if not force and cache_key in _INITIALIZED_DB_PATHS and db_path.exists():
+        return
+    with _INIT_LOCK:
+        if not force and cache_key in _INITIALIZED_DB_PATHS and db_path.exists():
+            return
+        _init_v3_db_uncached(db_path)
+        _INITIALIZED_DB_PATHS.add(cache_key)
 
 
 def dump_json(payload: Any) -> str:
@@ -1569,8 +1618,15 @@ def insert_orderbook(
         init_v3_db(path)
     bids = _levels(payload.get("bids"))
     asks = _levels(payload.get("asks"))
-    best_bid = max((level["price"] for level in bids), default=_num(payload.get("bestBid"), _num(payload.get("best_bid"), 0.0)))
-    best_ask = min((level["price"] for level in asks), default=_num(payload.get("bestAsk"), _num(payload.get("best_ask"), 0.0)))
+    has_clob_book = str(payload.get("snapshot_type") or "").lower() == "clob" or "bids" in payload or "asks" in payload
+    best_bid = max(
+        (level["price"] for level in bids),
+        default=0.0 if has_clob_book else _num(payload.get("bestBid"), _num(payload.get("best_bid"), 0.0)),
+    )
+    best_ask = min(
+        (level["price"] for level in asks),
+        default=0.0 if has_clob_book else _num(payload.get("bestAsk"), _num(payload.get("best_ask"), 0.0)),
+    )
     spread = _num(payload.get("spread"), best_ask - best_bid if best_ask and best_bid else 0.0)
     raw_response_hash = str(payload.get("raw_response_hash") or _json_hash(payload))
     snapshot_key = str(
@@ -4312,6 +4368,182 @@ def insert_fill_record(fill: dict[str, Any], path: Path | None = None) -> int:
         return _insert_fill_conn(conn, row)
 
 
+def record_paper_exit_evaluation(
+    evaluation: dict[str, Any],
+    path: Path | None = None,
+) -> dict[str, Any]:
+    init_v3_db(path)
+    now = utc_now()
+    order_id = int(evaluation.get("paper_order_id") or 0)
+    evaluation_key = str(
+        evaluation.get("evaluation_key")
+        or _stable_key(
+            "paper_exit_evaluation",
+            order_id,
+            evaluation.get("source_decision_id") or "",
+            evaluation.get("source_prediction_id") or "",
+            evaluation.get("quote_timestamp") or "",
+            evaluation.get("trigger") or "",
+        )
+    )
+    row = {
+        "evaluation_key": evaluation_key,
+        "paper_order_id": order_id,
+        "checked_at": str(evaluation.get("checked_at") or now),
+        "policy_mode": str(evaluation.get("policy_mode") or "hold_to_settlement"),
+        "source_decision_id": str(evaluation.get("source_decision_id") or ""),
+        "source_prediction_id": evaluation.get("source_prediction_id"),
+        "trigger": str(evaluation.get("trigger") or "none"),
+        "action": str(evaluation.get("action") or "hold"),
+        "confirmation_count": int(evaluation.get("confirmation_count") or 0),
+        "model_probability": _nullable_num(evaluation.get("model_probability")),
+        "best_bid": _nullable_num(evaluation.get("best_bid")),
+        "best_bid_size": _nullable_num(evaluation.get("best_bid_size")),
+        "observed_high": _nullable_num(evaluation.get("observed_high")),
+        "quote_timestamp": str(evaluation.get("quote_timestamp") or ""),
+        "reasons_json": dump_json(evaluation.get("reasons", [])),
+        "raw_json": dump_json(evaluation),
+        "created_at": now,
+    }
+    with connect(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO paper_exit_evaluations (
+                evaluation_key, paper_order_id, checked_at, policy_mode,
+                source_decision_id, source_prediction_id, trigger, action,
+                confirmation_count, model_probability, best_bid, best_bid_size,
+                observed_high, quote_timestamp, reasons_json, raw_json, created_at
+            ) VALUES (
+                :evaluation_key, :paper_order_id, :checked_at, :policy_mode,
+                :source_decision_id, :source_prediction_id, :trigger, :action,
+                :confirmation_count, :model_probability, :best_bid, :best_bid_size,
+                :observed_high, :quote_timestamp, :reasons_json, :raw_json, :created_at
+            )
+            ON CONFLICT(evaluation_key) DO UPDATE SET
+                checked_at=excluded.checked_at,
+                action=excluded.action,
+                confirmation_count=excluded.confirmation_count,
+                model_probability=excluded.model_probability,
+                best_bid=excluded.best_bid,
+                best_bid_size=excluded.best_bid_size,
+                observed_high=excluded.observed_high,
+                reasons_json=excluded.reasons_json,
+                raw_json=excluded.raw_json
+            """,
+            row,
+        )
+        stored = conn.execute(
+            "SELECT * FROM paper_exit_evaluations WHERE evaluation_key = ?",
+            (evaluation_key,),
+        ).fetchone()
+    return _decode_paper_exit_evaluation(dict(stored)) if stored else evaluation
+
+
+def latest_paper_exit_evaluation(
+    paper_order_id: int,
+    path: Path | None = None,
+) -> dict[str, Any] | None:
+    init_v3_db(path)
+    with connect(path) as conn:
+        row = conn.execute(
+            "SELECT * FROM paper_exit_evaluations WHERE paper_order_id = ? ORDER BY id DESC LIMIT 1",
+            (int(paper_order_id),),
+        ).fetchone()
+    return _decode_paper_exit_evaluation(dict(row)) if row else None
+
+
+def apply_paper_exit_record(
+    order_id: int,
+    exit_record: dict[str, Any],
+    *,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Close one open paper position using an auditable simulated SELL fill."""
+    init_v3_db(path)
+    now = utc_now()
+    exit_price = _nullable_num(exit_record.get("exit_price"))
+    if exit_price is None or exit_price <= 0:
+        return {"ok": False, "reason": "paper_exit_price_invalid", "paper_order_id": int(order_id)}
+    with connect(path) as conn:
+        raw_order = conn.execute("SELECT * FROM paper_orders WHERE id = ?", (int(order_id),)).fetchone()
+        if not raw_order:
+            return {"ok": False, "reason": "paper_order_not_found", "paper_order_id": int(order_id)}
+        order = _decode_paper_order(dict(raw_order))
+        if str(order.get("lifecycle_status") or "") != "open":
+            return {
+                "ok": True,
+                "status": "duplicate",
+                "reason": "paper_order_not_open",
+                "paper_order_id": int(order_id),
+            }
+        shares = _num(order.get("filled_shares"), _num(order.get("shares"), 0.0))
+        entry_value = _num(order.get("filled_amount"), 0.0)
+        if shares <= 0 or entry_value <= 0:
+            return {"ok": False, "reason": "paper_exit_position_invalid", "paper_order_id": int(order_id)}
+        proceeds = shares * exit_price
+        realized_pnl = proceeds - entry_value
+        closed_at = str(exit_record.get("closed_at") or now)
+        trigger = str(exit_record.get("trigger") or "model_guarded")
+        evidence_key = str(exit_record.get("evaluation_key") or _stable_key("paper_exit", order_id, closed_at, trigger))
+        fill = {
+            "idempotency_key": f"paper_exit:{order_id}:{evidence_key}",
+            "order_id": int(order_id),
+            "order_type": "paper_exit",
+            "decision_id": str(order.get("decision_id") or ""),
+            "market_id": str(order.get("market_id") or ""),
+            "yes_token_id": str(order.get("yes_token_id") or ""),
+            "fill_status": "filled",
+            "price": exit_price,
+            "shares": shares,
+            "amount": proceeds,
+            "source": "model_guarded_exit",
+            "created_at": closed_at,
+            "trigger": trigger,
+        }
+        fill_id = _insert_fill_conn(conn, _fill_row(fill, now))
+        order_raw = dict(order.get("raw") or {})
+        order_raw["exit"] = {
+            **exit_record,
+            "exit_price": exit_price,
+            "shares": shares,
+            "proceeds": proceeds,
+            "realized_pnl": realized_pnl,
+            "closed_at": closed_at,
+            "fill_id": fill_id,
+        }
+        conn.execute(
+            """
+            UPDATE paper_orders
+            SET status = 'paper_exited', lifecycle_status = 'exited',
+                mark_price = ?, unrealized_pnl = 0, realized_pnl = ?,
+                closed_at = ?, raw_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (exit_price, realized_pnl, closed_at, dump_json(order_raw), now, int(order_id)),
+        )
+        conn.execute(
+            "INSERT INTO risk_events (event_type, severity, message, raw_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                "paper_model_guarded_exit",
+                "info",
+                f"Paper order {int(order_id)} exited: {trigger}",
+                dump_json(order_raw["exit"]),
+                now,
+            ),
+        )
+    return {
+        "ok": True,
+        "status": "exited",
+        "paper_order_id": int(order_id),
+        "trigger": trigger,
+        "exit_price": exit_price,
+        "shares": shares,
+        "proceeds": round(proceeds, 8),
+        "realized_pnl": round(realized_pnl, 8),
+        "closed_at": closed_at,
+    }
+
+
 def persist_paper_order_fill_group(
     order_fill_pairs: list[tuple[dict[str, Any], dict[str, Any]]],
     path: Path | None = None,
@@ -4361,6 +4593,7 @@ def list_paper_orders(
     target_date: str | None = None,
     decision_id: str | None = None,
     status: str | None = None,
+    cohort_run_id: str | None = None,
     limit: int = 100,
     path: Path | None = None,
 ) -> list[dict[str, Any]]:
@@ -4368,26 +4601,31 @@ def list_paper_orders(
     where: list[str] = []
     params: list[Any] = []
     if city_key:
-        where.append("city_key = ?")
+        where.append("po.city_key = ?")
         params.append(city_key)
     if target_date:
-        where.append("target_date = ?")
+        where.append("po.target_date = ?")
         params.append(target_date)
     if decision_id:
-        where.append("decision_id = ?")
+        where.append("po.decision_id = ?")
         params.append(decision_id)
     if status:
-        where.append("status = ?")
+        where.append("po.status = ?")
         params.append(status)
+    if cohort_run_id:
+        where.append("po.cohort_run_id = ?")
+        params.append(cohort_run_id)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     bounded_limit = max(1, min(int(limit or 100), 1000))
     with connect(path) as conn:
         rows = conn.execute(
             f"""
-            SELECT *
-            FROM paper_orders
+            SELECT po.*, mb.bucket_label, mb.question AS market_question,
+                   mb.unit AS bucket_unit
+            FROM paper_orders po
+            LEFT JOIN market_buckets mb ON mb.bucket_key = po.bucket_key
             {clause}
-            ORDER BY datetime(COALESCE(opened_at, updated_at, created_at)) DESC, id DESC
+            ORDER BY datetime(COALESCE(po.opened_at, po.updated_at, po.created_at)) DESC, po.id DESC
             LIMIT ?
             """,
             (*params, bounded_limit),
@@ -4395,34 +4633,323 @@ def list_paper_orders(
     return [_decode_paper_order(dict(row)) for row in rows]
 
 
+def _parse_ledger_timestamp(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    try:
+        raw = str(value).strip()
+        if raw.replace(".", "", 1).isdigit():
+            epoch = float(raw)
+            if epoch > 100_000_000_000:
+                epoch /= 1000.0
+            return datetime.fromtimestamp(epoch, tz=timezone.utc)
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _paper_orderbook_history(
+    orders: list[dict[str, Any]],
+    *,
+    path: Path | None,
+) -> dict[str, list[dict[str, Any]]]:
+    tokens = sorted({str(order.get("yes_token_id") or "") for order in orders if order.get("yes_token_id")})
+    if not tokens:
+        return {}
+    placeholders = ",".join("?" for _ in tokens)
+    with connect(path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, yes_token_id, best_bid, best_ask, quote_timestamp, created_at
+            FROM orderbooks
+            WHERE yes_token_id IN ({placeholders})
+              AND best_bid IS NOT NULL
+            ORDER BY id
+            """,
+            tokens,
+        ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for raw_row in rows:
+        row = dict(raw_row)
+        quote_time = _parse_ledger_timestamp(row.get("quote_timestamp")) or _parse_ledger_timestamp(row.get("created_at"))
+        if quote_time is None or _nullable_num(row.get("best_bid")) is None:
+            continue
+        row["quote_datetime"] = quote_time
+        row["quote_time"] = quote_time.isoformat()
+        grouped.setdefault(str(row.get("yes_token_id") or ""), []).append(row)
+    for token_rows in grouped.values():
+        token_rows.sort(key=lambda item: (item["quote_datetime"], int(item.get("id") or 0)))
+    return grouped
+
+
+def _paper_run_row(
+    cohort_run_id: str | None,
+    orders: list[dict[str, Any]],
+    *,
+    path: Path | None,
+) -> dict[str, Any] | None:
+    run_id = str(cohort_run_id or "")
+    if not run_id:
+        order_runs = {str(order.get("cohort_run_id") or "") for order in orders if order.get("cohort_run_id")}
+        if len(order_runs) == 1:
+            run_id = next(iter(order_runs))
+    if not run_id:
+        return None
+    with connect(path) as conn:
+        row = conn.execute("SELECT * FROM paper_validation_runs WHERE run_id = ?", (run_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def _paper_equity_curve(
+    orders: list[dict[str, Any]],
+    quote_history: dict[str, list[dict[str, Any]]],
+    settlements_by_order: dict[int, dict[str, Any]],
+    *,
+    starting_bankroll: float,
+    started_at: str,
+    current_total_pnl: float,
+) -> list[dict[str, Any]]:
+    events: list[tuple[datetime, int, str, dict[str, Any]]] = []
+    for order in orders:
+        order_id = int(order.get("id") or 0)
+        opened = _parse_ledger_timestamp(order.get("opened_at") or order.get("created_at"))
+        if not order_id or opened is None:
+            continue
+        entry_mark = _nullable_num((order.get("execution_quote") or {}).get("best_bid"))
+        if entry_mark is None:
+            entry_mark = _num(order.get("mark_price"), _num(order.get("average_fill_price"), 0.0))
+        events.append((opened, 0, "open", {
+            "order_id": order_id,
+            "cost": _num(order.get("filled_amount"), 0.0),
+            "shares": _num(order.get("filled_shares"), 0.0),
+            "mark": entry_mark,
+        }))
+        settlement = settlements_by_order.get(order_id)
+        settled = _parse_ledger_timestamp((settlement or {}).get("settled_at"))
+        exited = (
+            _parse_ledger_timestamp(order.get("closed_at"))
+            if str(order.get("lifecycle_status") or "") == "exited"
+            else None
+        )
+        closed = settled or exited
+        for quote in quote_history.get(str(order.get("yes_token_id") or ""), []):
+            quote_time = quote["quote_datetime"]
+            if quote_time < opened or (closed is not None and quote_time >= closed):
+                continue
+            events.append((quote_time, 1, "mark", {
+                "order_id": order_id,
+                "mark": _num(quote.get("best_bid"), entry_mark),
+            }))
+        if settlement and settlement.get("settlement_status") == "resolved" and settled is not None:
+            events.append((settled, 2, "settle", {
+                "order_id": order_id,
+                "pnl": _num(settlement.get("pnl"), 0.0),
+            }))
+        elif exited is not None:
+            events.append((exited, 2, "exit", {
+                "order_id": order_id,
+                "pnl": _num(order.get("realized_pnl"), 0.0),
+            }))
+
+    events.sort(key=lambda item: (item[0], item[1]))
+    baseline_time = _parse_ledger_timestamp(started_at)
+    if baseline_time is None and events:
+        baseline_time = events[0][0]
+    if baseline_time is None:
+        return []
+
+    points: list[dict[str, Any]] = [{
+        "timestamp": baseline_time.isoformat(),
+        "pnl": 0.0,
+        "bankroll": round(starting_bankroll, 4),
+        "realized_pnl": 0.0,
+        "unrealized_pnl": 0.0,
+    }]
+    positions: dict[int, dict[str, float]] = {}
+    realized = 0.0
+    last_pnl: float | None = None
+    for event_time, _priority, event_type, payload in events:
+        order_id = int(payload["order_id"])
+        if event_type == "open":
+            positions[order_id] = {
+                "cost": float(payload["cost"]),
+                "shares": float(payload["shares"]),
+                "mark": float(payload["mark"]),
+            }
+        elif event_type == "mark" and order_id in positions:
+            positions[order_id]["mark"] = float(payload["mark"])
+        elif event_type in {"settle", "exit"}:
+            positions.pop(order_id, None)
+            realized += float(payload["pnl"])
+        unrealized = sum(position["shares"] * position["mark"] - position["cost"] for position in positions.values())
+        total_pnl = realized + unrealized
+        if last_pnl is not None and abs(total_pnl - last_pnl) < 0.00005 and event_type == "mark":
+            continue
+        points.append({
+            "timestamp": event_time.isoformat(),
+            "pnl": round(total_pnl, 4),
+            "bankroll": round(starting_bankroll + total_pnl, 4),
+            "realized_pnl": round(realized, 4),
+            "unrealized_pnl": round(unrealized, 4),
+        })
+        last_pnl = total_pnl
+
+    now = datetime.now(timezone.utc)
+    if not points or abs(_num(points[-1].get("pnl"), 0.0) - current_total_pnl) >= 0.00005:
+        points.append({
+            "timestamp": now.isoformat(),
+            "pnl": round(current_total_pnl, 4),
+            "bankroll": round(starting_bankroll + current_total_pnl, 4),
+            "realized_pnl": None,
+            "unrealized_pnl": None,
+        })
+    if len(points) <= 120:
+        return points
+    indexes = sorted({round(index * (len(points) - 1) / 119) for index in range(120)})
+    return [points[index] for index in indexes]
+
+
 def paper_execution_summary(
     city_key: str | None = None,
     target_date: str | None = None,
     *,
+    cohort_run_id: str | None = None,
     limit: int = 100,
     path: Path | None = None,
 ) -> dict[str, Any]:
-    orders = list_paper_orders(city_key=city_key, target_date=target_date, limit=limit, path=path)
-    settlements = list_settlements(
+    orders = list_paper_orders(
         city_key=city_key,
         target_date=target_date,
+        cohort_run_id=cohort_run_id,
         limit=limit,
         path=path,
     )
+    settlements = list_settlements(
+        city_key=city_key,
+        target_date=target_date,
+        cohort_run_id=cohort_run_id,
+        limit=limit,
+        path=path,
+    )
+    quote_history = _paper_orderbook_history(orders, path=path)
+    run_row = _paper_run_row(cohort_run_id, orders, path=path)
     status_counts: dict[str, int] = {}
     reason_counts: dict[str, int] = {}
     total_filled = 0.0
-    total_unrealized = 0.0
-    open_orders = 0
-    for order in orders:
+    settlements_by_order: dict[int, dict[str, Any]] = {}
+    for settlement in settlements:
+        order_id = int(settlement.get("paper_order_id") or 0)
+        if not order_id:
+            continue
+        current = settlements_by_order.get(order_id)
+        if current is None or settlement.get("settlement_status") == "resolved":
+            settlements_by_order[order_id] = settlement
+
+    now = datetime.now(timezone.utc)
+    enriched_orders: list[dict[str, Any]] = []
+    for source_order in orders:
+        order = dict(source_order)
         status = str(order.get("status") or "unknown")
         status_counts[status] = status_counts.get(status, 0) + 1
         for reason in order.get("risk_reasons") or []:
             reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + 1
         total_filled += _num(order.get("filled_amount"), 0.0)
-        total_unrealized += _num(order.get("unrealized_pnl"), 0.0)
-        if str(order.get("lifecycle_status") or "") == "open":
-            open_orders += 1
+
+        opened_at = _parse_ledger_timestamp(order.get("opened_at") or order.get("created_at"))
+        token_quotes = quote_history.get(str(order.get("yes_token_id") or ""), [])
+        eligible_quotes = [
+            quote for quote in token_quotes
+            if opened_at is None or quote["quote_datetime"] >= opened_at
+        ]
+        latest_quote = eligible_quotes[-1] if eligible_quotes else None
+        settlement = settlements_by_order.get(int(order.get("id") or 0))
+        resolved = bool(settlement and settlement.get("settlement_status") == "resolved")
+        early_exited = str(order.get("lifecycle_status") or "") == "exited" and not resolved
+        entry_price = _num(order.get("average_fill_price"), _num(order.get("limit_price"), 0.0))
+        entry_value = _num(order.get("filled_amount"), 0.0)
+        shares = _num(order.get("filled_shares"), _num(order.get("shares"), 0.0))
+        quote_time: datetime | None = None
+
+        if resolved:
+            mark_price = float(1 if settlement.get("outcome_yes") else 0)
+            mark_timestamp = str(settlement.get("settled_at") or order.get("closed_at") or "")
+            mark_source = "polymarket_settlement"
+            current_best_ask = None
+            pnl_value = _num(settlement.get("pnl"), _num(order.get("realized_pnl"), 0.0))
+            unrealized_pnl = 0.0
+            pnl_kind = "realized"
+            exit_price: float | None = mark_price
+            exit_time = mark_timestamp
+        elif early_exited:
+            exit_details = order.get("exit_details") or {}
+            mark_price = _num(exit_details.get("exit_price"), _num(order.get("mark_price"), entry_price))
+            mark_timestamp = str(exit_details.get("closed_at") or order.get("closed_at") or "")
+            mark_source = "model_guarded_sell"
+            current_best_ask = None
+            pnl_value = _num(order.get("realized_pnl"), shares * mark_price - entry_value)
+            unrealized_pnl = 0.0
+            pnl_kind = "realized_exit"
+            exit_price = mark_price
+            exit_time = mark_timestamp
+        else:
+            execution_quote = order.get("execution_quote") or {}
+            mark_price = _num(
+                (latest_quote or {}).get("best_bid"),
+                _num(order.get("mark_price"), _num(execution_quote.get("best_bid"), entry_price)),
+            )
+            current_best_ask = _nullable_num((latest_quote or {}).get("best_ask"))
+            if latest_quote:
+                quote_time = latest_quote["quote_datetime"]
+                mark_timestamp = str(latest_quote.get("quote_time") or "")
+                mark_source = "latest_orderbook_bid"
+            else:
+                mark_timestamp = str(execution_quote.get("quote_timestamp") or order.get("opened_at") or "")
+                quote_time = _parse_ledger_timestamp(mark_timestamp)
+                mark_source = "entry_orderbook_bid"
+            unrealized_pnl = shares * mark_price - entry_value
+            pnl_value = unrealized_pnl
+            pnl_kind = "unrealized"
+            exit_price = None
+            exit_time = ""
+
+        params = order.get("strategy_params_snapshot") or {}
+        exit_policy = (
+            ((params.get("parameters") or {}).get("exit_policy") or {}).get("mode")
+            or "hold_to_settlement"
+        )
+        mark_age_seconds = max(0.0, (now - quote_time).total_seconds()) if quote_time else None
+        mark_value = shares * mark_price
+        order.update({
+            "entry_price": round(entry_price, 6),
+            "entry_value": round(entry_value, 4),
+            "mark_price": round(mark_price, 6),
+            "current_best_ask": round(current_best_ask, 6) if current_best_ask is not None else None,
+            "mark_timestamp": mark_timestamp,
+            "mark_age_seconds": round(mark_age_seconds, 1) if mark_age_seconds is not None else None,
+            "mark_source": mark_source,
+            "mark_value": round(mark_value, 4),
+            "unrealized_pnl": round(unrealized_pnl, 4),
+            "pnl_value": round(pnl_value, 4),
+            "pnl_pct": round(pnl_value / entry_value, 6) if entry_value > 0 else None,
+            "pnl_kind": pnl_kind,
+            "exit_price": exit_price,
+            "exit_time": exit_time,
+            "exit_policy": exit_policy,
+            "force_exit_enabled": exit_policy == "model_guarded",
+            "exit_details": order.get("exit_details") or {},
+            "settlement": settlement,
+            "quote_is_stale": bool(mark_age_seconds is not None and mark_age_seconds > 600),
+        })
+        enriched_orders.append(order)
+
+    orders = enriched_orders
+    open_order_rows = [order for order in orders if order.get("pnl_kind") == "unrealized"]
+    open_orders = len(open_order_rows)
+    total_unrealized = sum(_num(order.get("unrealized_pnl"), 0.0) for order in open_order_rows)
+    exited_order_rows = [order for order in orders if order.get("pnl_kind") == "realized_exit"]
     resolved = [row for row in settlements if row.get("settlement_status") == "resolved"]
     provisional = [
         row
@@ -4440,21 +4967,53 @@ def paper_execution_summary(
         for row in resolved
         if row.get("market_brier_score") is not None
     ]
+    settlement_realized = sum(_num(row.get("pnl"), 0.0) for row in resolved)
+    exit_realized = sum(_num(row.get("realized_pnl"), 0.0) for row in exited_order_rows)
+    total_realized = settlement_realized + exit_realized
+    starting_bankroll = _num((run_row or {}).get("bankroll_usd"), 0.0)
+    if starting_bankroll <= 0 and orders:
+        oldest_order = min(
+            orders,
+            key=lambda row: _parse_ledger_timestamp(row.get("opened_at")) or datetime.max.replace(tzinfo=timezone.utc),
+        )
+        starting_bankroll = _num((oldest_order.get("sizing_snapshot") or {}).get("bankroll_usd"), 0.0)
+    open_cost = sum(_num(order.get("entry_value"), 0.0) for order in open_order_rows)
+    position_value = sum(_num(order.get("mark_value"), 0.0) for order in open_order_rows)
+    cash_available = starting_bankroll + total_realized - open_cost
+    total_pnl = total_realized + total_unrealized
+    equity = cash_available + position_value
+    started_at = str((run_row or {}).get("started_at") or "")
+    equity_curve = _paper_equity_curve(
+        orders,
+        quote_history,
+        settlements_by_order,
+        starting_bankroll=starting_bankroll,
+        started_at=started_at,
+        current_total_pnl=total_pnl,
+    )
     return {
         "ok": True,
         "execution_version": "paper-execution-v2",
         "city_key": city_key or "",
         "target_date": target_date or "",
+        "cohort_run_id": cohort_run_id or "",
         "count": len(orders),
         "open_orders": open_orders,
         "filled_amount": round(total_filled, 4),
         "unrealized_pnl": round(total_unrealized, 4),
+        "starting_bankroll": round(starting_bankroll, 4),
+        "cash_available": round(cash_available, 4),
+        "position_value": round(position_value, 4),
+        "equity": round(equity, 4),
+        "total_pnl": round(total_pnl, 4),
+        "equity_curve": equity_curve,
         "resolved_orders": len(resolved),
+        "exited_orders": len(exited_order_rows),
         "provisional_orders": len(provisional),
         "wins": wins,
         "losses": len(resolved) - wins,
         "win_rate": wins / len(resolved) if resolved else None,
-        "realized_pnl": round(sum(_num(row.get("pnl"), 0.0) for row in resolved), 4),
+        "realized_pnl": round(total_realized, 4),
         "brier_score": sum(brier_values) / len(brier_values) if brier_values else None,
         "market_brier_score": (
             sum(market_brier_values) / len(market_brier_values)
@@ -4582,6 +5141,7 @@ def list_settlements(
     city_key: str | None = None,
     target_date: str | None = None,
     status: str | None = None,
+    cohort_run_id: str | None = None,
     limit: int = 200,
     path: Path | None = None,
 ) -> list[dict[str, Any]]:
@@ -4597,6 +5157,9 @@ def list_settlements(
     if status:
         where.append("settlement_status = ?")
         params.append(status)
+    if cohort_run_id:
+        where.append("paper_order_id IN (SELECT id FROM paper_orders WHERE cohort_run_id = ?)")
+        params.append(cohort_run_id)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     with connect(path) as conn:
         rows = conn.execute(
@@ -4615,10 +5178,17 @@ def _decode_paper_order(row: dict[str, Any]) -> dict[str, Any]:
     row["execution_quote"] = _loads_obj(row.get("execution_quote_json"))
     row["cap_reasons"] = _loads_list(row.get("cap_reasons_json"))
     row["raw"] = _loads_obj(row.get("raw_json"))
+    row["exit_details"] = _loads_obj(row.get("raw_json")).get("exit", {})
     return row
 
 
 def _decode_settlement(row: dict[str, Any]) -> dict[str, Any]:
+    row["raw"] = _loads_obj(row.get("raw_json"))
+    return row
+
+
+def _decode_paper_exit_evaluation(row: dict[str, Any]) -> dict[str, Any]:
+    row["reasons"] = _loads_list(row.get("reasons_json"))
     row["raw"] = _loads_obj(row.get("raw_json"))
     return row
 

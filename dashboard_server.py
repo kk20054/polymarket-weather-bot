@@ -789,13 +789,16 @@ def _recommendation_display_high(prediction: dict, current_temp, unit: str) -> d
     )
     observed_high = _temperature_in_unit(raw.get("observed_floor"), unit)
     has_prediction = model_mu is not None or effective_mu is not None
-    values = [value for value in (model_mu, effective_mu, observed_high, current_temp) if value is not None] if has_prediction else []
+    predicted_high = model_mu if model_mu is not None else effective_mu
     return {
-        "display_high": max(values) if values else None,
+        # A weather focus compares observations with the model forecast. Current
+        # temperature and observed floor are evidence, not forecast inputs.
+        "display_high": predicted_high,
         "has_prediction": has_prediction,
         "model_mu": model_mu,
         "effective_mu": effective_mu,
         "observed_high": observed_high,
+        "display_high_basis": "model_mu" if model_mu is not None else "effective_mu",
     }
 
 
@@ -829,11 +832,19 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         metars = _latest_rows_by_city(
             [dict(row) for row in conn.execute(
                 """
+                WITH ranked AS (
+                    SELECT
+                        *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY city
+                            ORDER BY report_time DESC, id DESC
+                        ) AS city_rank
+                    FROM metar_reports
+                    WHERE city IS NOT NULL AND TRIM(city) != ''
+                )
                 SELECT *
-                FROM metar_reports
-                WHERE city IS NOT NULL AND TRIM(city) != ''
-                ORDER BY report_time DESC, id DESC
-                LIMIT 500
+                FROM ranked
+                WHERE city_rank = 1
                 """
             ).fetchall()],
             "report_time",
@@ -841,13 +852,21 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         china_live = _latest_rows_by_city(
             [dict(row) for row in conn.execute(
                 """
+                WITH ranked AS (
+                    SELECT
+                        *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY city
+                            ORDER BY observed_at DESC, id DESC
+                        ) AS city_rank
+                    FROM mesonet_observations
+                    WHERE network = 'china_live'
+                      AND city IS NOT NULL
+                      AND TRIM(city) != ''
+                )
                 SELECT *
-                FROM mesonet_observations
-                WHERE network = 'china_live'
-                  AND city IS NOT NULL
-                  AND TRIM(city) != ''
-                ORDER BY observed_at DESC, id DESC
-                LIMIT 100
+                FROM ranked
+                WHERE city_rank = 1
                 """
             ).fetchall()],
             "observed_at",
@@ -855,17 +874,25 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         forecast_runs = [
             dict(row) for row in conn.execute(
                 """
-                SELECT
-                    city,
-                    target_date,
-                    COALESCE(available_at, retrieved_at, created_at) AS forecast_time,
-                    source
-                FROM forecast_runs
-                WHERE target_date >= ?
-                  AND city IS NOT NULL
-                  AND TRIM(city) != ''
-                ORDER BY city, target_date, COALESCE(available_at, retrieved_at, created_at) DESC, id DESC
-                LIMIT 1500
+                WITH ranked AS (
+                    SELECT
+                        city,
+                        target_date,
+                        COALESCE(available_at, retrieved_at, created_at) AS forecast_time,
+                        source,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY city, target_date
+                            ORDER BY COALESCE(available_at, retrieved_at, created_at) DESC, id DESC
+                        ) AS city_date_rank
+                    FROM forecast_runs
+                    WHERE target_date >= ?
+                      AND city IS NOT NULL
+                      AND TRIM(city) != ''
+                )
+                SELECT city, target_date, forecast_time, source
+                FROM ranked
+                WHERE city_date_rank = 1
+                ORDER BY city, target_date
                 """,
                 (query_cutoff,),
             ).fetchall()
@@ -873,11 +900,20 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         predictions = [
             dict(row) for row in conn.execute(
                 """
+                WITH ranked AS (
+                    SELECT
+                        *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY city_key, target_date
+                            ORDER BY issued_at DESC, id DESC
+                        ) AS city_date_rank
+                    FROM daily_max_predictions
+                    WHERE target_date >= ?
+                )
                 SELECT *
-                FROM daily_max_predictions
-                WHERE target_date >= ?
-                ORDER BY target_date ASC, issued_at DESC, id DESC
-                LIMIT 500
+                FROM ranked
+                WHERE city_date_rank = 1
+                ORDER BY target_date ASC, city_key ASC
                 """,
                 (query_cutoff,),
             ).fetchall()
@@ -885,13 +921,22 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         events = [
             dict(row) for row in conn.execute(
                 """
+                WITH ranked AS (
+                    SELECT
+                        *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY city, target_date
+                            ORDER BY updated_at DESC, event_id DESC
+                        ) AS city_date_rank
+                    FROM polymarket_events
+                    WHERE target_date >= ?
+                      AND city IS NOT NULL
+                      AND TRIM(city) != ''
+                )
                 SELECT *
-                FROM polymarket_events
-                WHERE target_date >= ?
-                  AND city IS NOT NULL
-                  AND TRIM(city) != ''
-                ORDER BY city, target_date, updated_at DESC
-                LIMIT 1000
+                FROM ranked
+                WHERE city_date_rank = 1
+                ORDER BY city, target_date
                 """,
                 (query_cutoff,),
             ).fetchall()
@@ -899,6 +944,12 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         decisions = [
             dict(row) for row in conn.execute(
                 """
+                WITH latest_round AS (
+                    SELECT city_key, target_date, MAX(issued_at) AS issued_at
+                    FROM signal_decisions
+                    WHERE target_date >= ?
+                    GROUP BY city_key, target_date
+                )
                 SELECT
                     sd.*,
                     mb.event_url AS bucket_event_url,
@@ -910,10 +961,12 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
                     mb.station_id AS market_station_id,
                     mb.price AS bucket_price
                 FROM signal_decisions sd
+                JOIN latest_round lr
+                  ON lr.city_key = sd.city_key
+                 AND lr.target_date = sd.target_date
+                 AND lr.issued_at = sd.issued_at
                 LEFT JOIN market_buckets mb ON mb.bucket_key = sd.bucket_key
-                WHERE sd.target_date >= ?
                 ORDER BY sd.city_key, sd.target_date, sd.issued_at DESC, sd.edge DESC, sd.id DESC
-                LIMIT 1500
                 """,
                 (query_cutoff,),
             ).fetchall()
@@ -960,10 +1013,16 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             skipped["focus_prediction_or_temperature_missing"] += 1
             continue
         remaining = float(predicted_max) - float(current_temp)
-        near_peak_threshold = 3.6 if unit == "F" else 2.0
-        if abs(remaining) > near_peak_threshold:
+        near_peak_threshold = 1.5 if unit == "F" else 0.8
+        above_model_threshold = 0.5 if unit == "F" else 0.3
+        maximum_source_divergence = 3.6 if unit == "F" else 2.0
+        if remaining > near_peak_threshold:
             skipped["focus_not_near_predicted_max"] += 1
             continue
+        if remaining < -maximum_source_divergence:
+            skipped["focus_observation_model_divergence"] += 1
+            continue
+        focus_reason = "observed_above_model_high" if remaining < -above_model_threshold else "near_model_high"
         focus_items.append({
             "type": "weather_focus",
             "city_key": city,
@@ -983,7 +1042,10 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             "observation_source": observation_source,
             "prediction_issued_at": prediction.get("issued_at"),
             "remaining_to_max": round(remaining, 1),
-            "focus_reason": "near_predicted_daily_max",
+            "focus_reason": focus_reason,
+            "expected_high_basis": high_summary["display_high_basis"],
+            "observation_role": "auxiliary_trend" if observation_source == "china_live" else "settlement_station_observation",
+            "attention_only": True,
             "market_open": True,
             "market_end_at": event_state["end_at"],
             "polymarket_url": f"https://polymarket.com/event/{event_state['slug']}" if event_state["slug"] else None,
@@ -1102,6 +1164,7 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             "bucket_key": row.get("bucket_key"),
             "strategy_name": strategy_name,
             "strategy_label": {
+                "core_modal_v1": "Dynamic Modal Bucket",
                 "single_bucket_ev": "Single Bucket EV",
                 "ladder_grid": "Ladder Grid",
                 "tail_buying": "Tail Buying",
@@ -1189,8 +1252,10 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
         "filters": {
             "weather_focus": {
                 "observation_max_age_seconds": 30 * 60,
-                "near_predicted_max_c": 2.0,
-                "near_predicted_max_f": 3.6,
+                "near_predicted_max_c": 0.8,
+                "near_predicted_max_f": 1.5,
+                "maximum_source_divergence_c": 2.0,
+                "maximum_source_divergence_f": 3.6,
                 "trade_claim": False,
                 "open_market_required": True,
             },
@@ -4553,7 +4618,7 @@ async def paper_validation_status_api():
 
 @app.post("/api/paper-validation/start")
 async def paper_validation_start_api(request: PaperValidationStartRequest):
-    allowed_strategies = {"single_bucket_ev", "ladder_grid", "tail_buying"}
+    allowed_strategies = {"core_modal_v1", "single_bucket_ev", "ladder_grid", "tail_buying"}
     strategies = list(dict.fromkeys(request.strategies or ["single_bucket_ev"]))
     unknown = [strategy for strategy in strategies if strategy not in allowed_strategies]
     if unknown:
@@ -4888,8 +4953,18 @@ async def signal_decisions_build(city: str = "", target_date: str = "", limit: i
 
 
 @app.get("/api/paper-orders")
-async def paper_orders(city: str = "", target_date: str = "", limit: int = 100):
-    return paper_execution_summary(city or None, target_date or None, limit=limit)
+async def paper_orders(
+    city: str = "",
+    target_date: str = "",
+    cohort_run_id: str = "",
+    limit: int = 100,
+):
+    return paper_execution_summary(
+        city or None,
+        target_date or None,
+        cohort_run_id=cohort_run_id or None,
+        limit=limit,
+    )
 
 
 @app.post("/api/paper-orders/execute")

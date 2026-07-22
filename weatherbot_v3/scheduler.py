@@ -9,40 +9,52 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from .cli import run_china_weather_fetch, run_daily_max_build, run_gamma_structured_sync, run_hourly_consensus_build, run_market_buckets_sync, run_model_timing_reprice, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build, run_weathercom_fetch, run_wunderground_hourly_fetch
-from .china_weather import supported_china_live_cities
+from .cli import run_daily_max_build, run_gamma_structured_sync, run_hourly_consensus_build, run_market_buckets_sync, run_model_timing_reprice, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build, run_weathercom_fetch, run_wunderground_daily_rollup, run_wunderground_hourly_fetch
+from .china_weather import fetch_china_weather_city, supported_china_live_cities
 from .db import connect, log_data_fetch, utc_now
 from .env_utils import env_value
+from .market_buckets import refresh_cached_market_bucket_orderbooks
 from .metar import fetch_recent_hours
 from .paper_settlement import settle_open_paper_orders
+from .paper_exit import evaluate_open_paper_exits
 from .paper_validation import run_paper_validation_tick
 from .source_health import compact_source_health
 from .stations import enabled_station_rows, list_stations, sync_station_registry
 
 
-MAX_CITY_CONCURRENCY = int(os.getenv("WEATHERBOT_SCHEDULER_CITY_CONCURRENCY", "2") or "2")
-MAX_POLLER_CONCURRENCY = int(os.getenv("WEATHERBOT_SCHEDULER_POLLER_CONCURRENCY", "1") or "1")
+MAX_CITY_CONCURRENCY = int(os.getenv("WEATHERBOT_SCHEDULER_CITY_CONCURRENCY", "4") or "4")
+MAX_POLLER_CONCURRENCY = int(os.getenv("WEATHERBOT_SCHEDULER_POLLER_CONCURRENCY", "3") or "3")
+MAX_CRITICAL_POLLER_CONCURRENCY = int(os.getenv("WEATHERBOT_SCHEDULER_CRITICAL_POLLER_CONCURRENCY", "3") or "3")
+MAX_BACKGROUND_POLLER_CONCURRENCY = int(os.getenv("WEATHERBOT_SCHEDULER_BACKGROUND_POLLER_CONCURRENCY", "1") or "1")
 METAR_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_METAR_SECONDS", "300") or "300")
 FORECAST_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_SECONDS", "600") or "600")
 NWP_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_NWP_SECONDS", "3600") or "3600")
+NWP_ENSEMBLE_EVERY_N_RUNS = max(1, int(os.getenv("WEATHERBOT_SCHEDULER_ENSEMBLE_EVERY_N_RUNS", "6") or "6"))
+NWP_ENSEMBLE_MODELS = tuple(
+    item.strip()
+    for item in os.getenv("WEATHERBOT_SCHEDULER_ENSEMBLE_MODELS", "gfs_seamless").split(",")
+    if item.strip()
+)
+NWP_ENSEMBLE_FORECAST_DAYS = max(1, min(7, int(os.getenv("WEATHERBOT_SCHEDULER_ENSEMBLE_FORECAST_DAYS", "3") or "3")))
 HISTORICAL_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_HISTORICAL_SECONDS", "600") or "600")
 BASELINE_REFRESH_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_BASELINE_MULTIPLIER", "3") or "3")
 METAR_BACKGROUND_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_METAR_BACKGROUND_MULTIPLIER", "12") or "12")
 NWP_BACKGROUND_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_NWP_BACKGROUND_MULTIPLIER", "6") or "6")
 HISTORICAL_BACKGROUND_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_HISTORICAL_BACKGROUND_MULTIPLIER", "6") or "6")
 PWS_BACKGROUND_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_PWS_BACKGROUND_MULTIPLIER", "6") or "6")
-GAMMA_DISCOVERY_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_GAMMA_DISCOVERY_MULTIPLIER", "72") or "72")
+GAMMA_DISCOVERY_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_GAMMA_DISCOVERY_MULTIPLIER", "6") or "6")
 PWS_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PWS_SECONDS", "600") or "600")
 DERIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_DERIVE_SECONDS", "900") or "900")
 CHINA_LIVE_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_CHINA_LIVE_SECONDS", "60") or "60")
 GAMMA_ORDERBOOK_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_GAMMA_ORDERBOOK_SECONDS", "300") or "300")
+GAMMA_DISCOVERY_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_GAMMA_DISCOVERY_SECONDS", "3600") or "3600")
 MODEL_TIMING_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_MODEL_TIMING_SECONDS", "60") or "60")
 PAPER_SETTLEMENT_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PAPER_SETTLEMENT_SECONDS", "900") or "900")
 PAPER_EXECUTION_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PAPER_EXECUTION_SECONDS", "300") or "300")
 METAR_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_METAR_CITY_TIMEOUT", "120") or "120")
 FORECAST_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_CITY_TIMEOUT", "240") or "240")
 DERIVE_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_DERIVE_CITY_TIMEOUT", "300") or "300")
-CHINA_LIVE_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_CHINA_LIVE_CITY_TIMEOUT", "60") or "60")
+CHINA_LIVE_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_CHINA_LIVE_CITY_TIMEOUT", "15") or "15")
 PWS_OPTIONAL_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PWS_TIMEOUT", "30") or "30")
 PWS_AUTH_COOLDOWN_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PWS_AUTH_COOLDOWN", "3600") or "3600")
 MODEL_TIMING_WINDOWS_UTC = ((7, 1), (19, 1), (5, 1), (17, 1))
@@ -54,6 +66,7 @@ class PollerState:
     label: str
     interval_seconds: int
     initial_delay_seconds: int = 0
+    slot_group: str = "source"
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     task: asyncio.Task | None = None
     running: bool = False
@@ -91,6 +104,7 @@ class PollerState:
         return {
             "key": self.key,
             "label": self.label,
+            "slot_group": self.slot_group,
             "interval_seconds": self.interval_seconds,
             "initial_delay_seconds": self.initial_delay_seconds,
             "running": self.running or self.lock.locked(),
@@ -117,10 +131,18 @@ class WeatherBotScheduler:
         *,
         city_concurrency: int = MAX_CITY_CONCURRENCY,
         poller_concurrency: int = MAX_POLLER_CONCURRENCY,
+        critical_poller_concurrency: int = MAX_CRITICAL_POLLER_CONCURRENCY,
+        background_poller_concurrency: int = MAX_BACKGROUND_POLLER_CONCURRENCY,
     ):
         self.city_concurrency = max(1, int(city_concurrency or 2))
-        self.poller_concurrency = max(1, int(poller_concurrency or 1))
-        self._poller_slots = asyncio.Semaphore(self.poller_concurrency)
+        self.poller_concurrency = max(1, int(poller_concurrency or 3))
+        self.critical_poller_concurrency = max(1, int(critical_poller_concurrency or 3))
+        self.background_poller_concurrency = max(1, int(background_poller_concurrency or 1))
+        self._poller_slots = {
+            "critical": asyncio.Semaphore(self.critical_poller_concurrency),
+            "source": asyncio.Semaphore(self.poller_concurrency),
+            "background": asyncio.Semaphore(self.background_poller_concurrency),
+        }
         self._active_pollers: set[str] = set()
         self.started_at: str | None = None
         self.stop_event = asyncio.Event()
@@ -128,14 +150,15 @@ class WeatherBotScheduler:
         self._source_health_cache: dict[str, Any] | None = None
         self._source_health_cache_at = 0.0
         self.pollers: dict[str, PollerState] = {
-            "metar_poller": PollerState("metar_poller", "METAR", METAR_INTERVAL_SECONDS, 0),
-            "china_live_poller": PollerState("china_live_poller", "China Live", CHINA_LIVE_INTERVAL_SECONDS, 5),
+            "metar_poller": PollerState("metar_poller", "METAR", METAR_INTERVAL_SECONDS, 0, "critical"),
+            "china_live_poller": PollerState("china_live_poller", "China Live", CHINA_LIVE_INTERVAL_SECONDS, 5, "critical"),
             "forecast_poller": PollerState("forecast_poller", "Forecast", FORECAST_INTERVAL_SECONDS, 15),
-            "nwp_poller": PollerState("nwp_poller", "NWP", NWP_INTERVAL_SECONDS, 30),
+            "nwp_poller": PollerState("nwp_poller", "NWP", NWP_INTERVAL_SECONDS, 30, "background"),
             "historical_poller": PollerState("historical_poller", "Historical", HISTORICAL_INTERVAL_SECONDS, 90),
             "pws_poller": PollerState("pws_poller", "PWS", PWS_INTERVAL_SECONDS, 120),
-            "gamma_orderbook_poller": PollerState("gamma_orderbook_poller", "Orderbook", GAMMA_ORDERBOOK_INTERVAL_SECONDS, 45),
-            "derive_poller": PollerState("derive_poller", "Derived", DERIVE_INTERVAL_SECONDS, 420),
+            "gamma_orderbook_poller": PollerState("gamma_orderbook_poller", "Orderbook", GAMMA_ORDERBOOK_INTERVAL_SECONDS, 45, "critical"),
+            "gamma_discovery_poller": PollerState("gamma_discovery_poller", "Market Discovery", GAMMA_DISCOVERY_INTERVAL_SECONDS, 180, "background"),
+            "derive_poller": PollerState("derive_poller", "Derived", DERIVE_INTERVAL_SECONDS, 420, "background"),
             "paper_settlement_poller": PollerState("paper_settlement_poller", "Paper Settlement", PAPER_SETTLEMENT_INTERVAL_SECONDS, 600),
             "paper_execution_poller": PollerState("paper_execution_poller", "Paper Validation", PAPER_EXECUTION_INTERVAL_SECONDS, 720),
             "model_timing_poller": PollerState("model_timing_poller", "Model Timing", MODEL_TIMING_INTERVAL_SECONDS, 0),
@@ -185,7 +208,8 @@ class WeatherBotScheduler:
             queued_perf = time.perf_counter()
             state.waiting_for_slot = True
             try:
-                async with self._poller_slots:
+                slot = self._poller_slots.get(state.slot_group, self._poller_slots["source"])
+                async with slot:
                     state.waiting_for_slot = False
                     state.last_queue_wait_ms = round((time.perf_counter() - queued_perf) * 1000)
                     self._active_pollers.add(poller_key)
@@ -216,6 +240,8 @@ class WeatherBotScheduler:
                     result = await self._run_china_live_poller()
                 elif poller_key == "gamma_orderbook_poller":
                     result = await self._run_gamma_orderbook_poller()
+                elif poller_key == "gamma_discovery_poller":
+                    result = await self._run_gamma_discovery_poller()
                 elif poller_key == "model_timing_poller":
                     result = await self._run_model_timing_poller()
                 elif poller_key == "paper_settlement_poller":
@@ -278,6 +304,11 @@ class WeatherBotScheduler:
             "message": message,
             "city_concurrency": self.city_concurrency,
             "poller_concurrency": self.poller_concurrency,
+            "critical_poller_concurrency": self.critical_poller_concurrency,
+            "background_poller_concurrency": self.background_poller_concurrency,
+            "poller_groups": {
+                key: state.slot_group for key, state in self.pollers.items()
+            },
             "active_pollers": sorted(self._active_pollers),
             "waiting_pollers": sorted(key for key, state in self.pollers.items() if state.waiting_for_slot),
             "pollers": {key: state.status() for key, state in self.pollers.items()},
@@ -402,6 +433,7 @@ class WeatherBotScheduler:
 
     async def _run_nwp_poller(self) -> dict[str, Any]:
         run_count = self.pollers["nwp_poller"].run_count
+        ensemble_due = (run_count + 1) % NWP_ENSEMBLE_EVERY_N_RUNS == 0
         all_rows = await asyncio.to_thread(
             _collection_rows,
             include_background=_background_due(run_count, NWP_BACKGROUND_MULTIPLIER),
@@ -427,11 +459,26 @@ class WeatherBotScheduler:
                 ),
                 timeout=FORECAST_CITY_TIMEOUT_SECONDS,
             )
+            ensemble = None
+            if ensemble_due:
+                ensemble = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        run_openmeteo_fetch,
+                        city,
+                        ensemble=True,
+                        models_arg=",".join(NWP_ENSEMBLE_MODELS),
+                        limit_cities=1,
+                        forecast_days=NWP_ENSEMBLE_FORECAST_DAYS,
+                        refresh_readiness=False,
+                    ),
+                    timeout=FORECAST_CITY_TIMEOUT_SECONDS,
+                )
             return {
-                "ok": _payload_ok(openmeteo),
+                "ok": _payload_ok(openmeteo) and (not ensemble_due or _payload_ok(ensemble or {})),
                 "city": city,
                 "station_id": row.get("station_id"),
                 "openmeteo": openmeteo,
+                "ensemble": ensemble,
             }
 
         result = await _run_city_batch(
@@ -441,7 +488,14 @@ class WeatherBotScheduler:
             poller_key="nwp_poller",
             timeout_seconds=FORECAST_CITY_TIMEOUT_SECONDS,
         )
-        return {**result, **cadence}
+        return {
+            **result,
+            **cadence,
+            "ensemble_due": ensemble_due,
+            "ensemble_every_n_runs": NWP_ENSEMBLE_EVERY_N_RUNS,
+            "ensemble_models": list(NWP_ENSEMBLE_MODELS),
+            "ensemble_forecast_days": NWP_ENSEMBLE_FORECAST_DAYS,
+        }
 
     async def _run_historical_poller(self) -> dict[str, Any]:
         # Hong Kong keeps HKO as settlement truth, but VHHH WU history remains
@@ -462,6 +516,7 @@ class WeatherBotScheduler:
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
             target_date = _local_today(row)
+            previous_date = (datetime.fromisoformat(target_date).date() - timedelta(days=1)).isoformat()
             payload = await asyncio.to_thread(
                 run_wunderground_hourly_fetch,
                 city,
@@ -470,12 +525,20 @@ class WeatherBotScheduler:
                 dry_run=False,
                 sync_registry=False,
             )
+            daily_rollup = await asyncio.to_thread(
+                run_wunderground_daily_rollup,
+                city,
+                target_date=previous_date,
+                limit_cities=1,
+                dry_run=False,
+            )
             return {
-                "ok": _payload_ok(payload),
+                "ok": _payload_ok(payload) and _payload_ok(daily_rollup),
                 "city": city,
                 "station_id": row.get("station_id"),
                 "target_date": target_date,
                 "historical": payload,
+                "daily_truth_rollup": daily_rollup,
             }
 
         result = await _run_city_batch(
@@ -654,18 +717,42 @@ class WeatherBotScheduler:
         ]
         return await _run_city_batch(
             rows,
-            self.city_concurrency,
+            # HTTP latency dominates this poller. Database initialization is
+            # process-idempotent and each observation UPSERT is a short WAL
+            # transaction, so three bounded workers keep nine sources inside
+            # the minute cadence without creating an unbounded write burst.
+            min(3, self.city_concurrency),
             lambda row: asyncio.to_thread(
-                run_china_weather_fetch,
+                fetch_china_weather_city,
                 str(row.get("city_key") or row.get("city")),
-                refresh_readiness=False,
             ),
             poller_key="china_live_poller",
             timeout_seconds=CHINA_LIVE_CITY_TIMEOUT_SECONDS,
         )
 
     async def _run_gamma_orderbook_poller(self) -> dict[str, Any]:
-        run_count = self.pollers["gamma_orderbook_poller"].run_count
+        all_rows = await asyncio.to_thread(_collection_rows, include_background=True)
+        active_city_keys = await asyncio.to_thread(_active_market_city_keys)
+        rows = [
+            row for row in all_rows
+            if not active_city_keys
+            or str(row.get("city_key") or row.get("city") or "") in active_city_keys
+        ]
+        targets_by_city = {
+            str(row.get("city_key") or row.get("city") or ""): _target_dates_for_station(row)
+            for row in rows
+        }
+        result = await asyncio.to_thread(
+            refresh_cached_market_bucket_orderbooks,
+            targets_by_city=targets_by_city,
+            limit=10_000,
+            dry_run=False,
+        )
+        result["active_market_cities"] = len(targets_by_city)
+        return result
+
+    async def _run_gamma_discovery_poller(self) -> dict[str, Any]:
+        run_count = self.pollers["gamma_discovery_poller"].run_count
         full_discovery = _background_due(run_count, GAMMA_DISCOVERY_MULTIPLIER)
         all_rows = await asyncio.to_thread(_collection_rows, include_background=full_discovery)
         active_city_keys = await asyncio.to_thread(_active_market_city_keys)
@@ -757,12 +844,23 @@ class WeatherBotScheduler:
         return await asyncio.to_thread(run_model_timing_reprice, "", days_arg=2, dry_run=False)
 
     async def _run_paper_settlement_poller(self) -> dict[str, Any]:
-        return await asyncio.to_thread(
+        settlement = await asyncio.to_thread(
             settle_open_paper_orders,
             limit=1000,
             refresh_gamma=True,
             apply=True,
         )
+        exits = await asyncio.to_thread(
+            evaluate_open_paper_exits,
+            limit=1000,
+            apply=True,
+        )
+        return {
+            **settlement,
+            "ok": bool(settlement.get("ok", True)) and bool(exits.get("ok", True)),
+            "paper_exits": exits,
+            "exited_now": int(exits.get("exited_now") or 0),
+        }
 
     async def _run_paper_execution_poller(self) -> dict[str, Any]:
         return await asyncio.to_thread(run_paper_validation_tick, apply=True)
@@ -1016,10 +1114,19 @@ def _compact_city_payload(payload: Any) -> dict[str, Any]:
         "skipped",
         "reason",
         "error",
+        "message",
+        "provider",
+        "observed_at",
+        "fallback",
         "reports_fetched",
         "reports_upserted",
         "rows_fetched",
         "rows_upserted",
+        "rows_inserted",
+        "rows_updated",
+        "source_observation_new",
+        "source_observation_changed",
+        "source_unchanged",
         "rows_built",
         "stored",
         "stored_count",
@@ -1088,6 +1195,11 @@ def _compact_result(payload: dict[str, Any]) -> dict[str, Any]:
             "reports_upserted": payload_result.get("reports_upserted"),
             "reports_fetched": payload_result.get("reports_fetched"),
             "rows_upserted": payload_result.get("rows_upserted"),
+            "rows_inserted": payload_result.get("rows_inserted"),
+            "rows_updated": payload_result.get("rows_updated"),
+            "source_observation_new": payload_result.get("source_observation_new"),
+            "source_observation_changed": payload_result.get("source_observation_changed"),
+            "source_unchanged": payload_result.get("source_unchanged"),
             "failed": payload_result.get("failed") or payload_result.get("failed_cities"),
         })
     compact = {
@@ -1104,6 +1216,19 @@ def _compact_result(payload: dict[str, Any]) -> dict[str, Any]:
         "active_market_cities",
         "deferred_cities",
         "baseline_every_cycles",
+        "cached_buckets",
+        "tokens_requested",
+        "quotes_refreshed",
+        "quotes_missing",
+        "quote_timestamp_min",
+        "quote_timestamp_max",
+        "events_stored",
+        "markets_stored",
+        "orderbooks_stored",
+        "market_buckets_stored",
+        "active_orderbooks",
+        "discovery_scope",
+        "discovery_cities",
     ):
         if key in payload:
             compact[key] = payload[key]
@@ -1115,7 +1240,8 @@ def _poller_message(poller_key: str, result: dict[str, Any]) -> str:
         return (
             f"{poller_key} completed: {int(result.get('resolved_now') or 0)} resolved, "
             f"{int(result.get('provisional_now') or 0)} provisional, "
-            f"{int(result.get('pending_now') or 0)} pending"
+            f"{int(result.get('pending_now') or 0)} pending, "
+            f"{int(result.get('exited_now') or 0)} model exits"
         )
     if poller_key == "paper_execution_poller":
         return (
@@ -1125,12 +1251,29 @@ def _poller_message(poller_key: str, result: dict[str, Any]) -> str:
         )
     if poller_key == "gamma_orderbook_poller":
         return (
+            f"{poller_key} completed: {int(result.get('quotes_refreshed') or 0)} fresh books, "
+            f"{int(result.get('quotes_missing') or 0)} missing"
+            if _payload_ok(result)
+            else (
+                f"{poller_key} completed with {int(result.get('quotes_missing') or 0)} missing books"
+                if result.get("quotes_refreshed")
+                else f"{poller_key} failed: {result.get('error') or result.get('reason') or 'no fresh books'}"
+            )
+        )
+    if poller_key == "gamma_discovery_poller":
+        return (
             f"{poller_key} completed: {int(result.get('events_stored') or 0)} events, "
-            f"{int(result.get('orderbooks_stored') or 0)} structured books, "
-            f"{int(result.get('active_orderbooks') or 0)} active books, "
-            f"{len(result.get('book_gaps') or [])} book gaps"
+            f"{int(result.get('market_buckets_stored') or 0)} buckets"
             if _payload_ok(result)
             else f"{poller_key} completed with {len(result.get('failures') or [])} failures"
+        )
+    if poller_key == "china_live_poller":
+        summary = _compact_result(result)
+        new_points = sum(int(row.get("rows_inserted") or 0) for row in summary["city_results"])
+        unchanged = sum(1 for row in summary["city_results"] if row.get("source_unchanged") is True)
+        return (
+            f"{poller_key} completed: {new_points} new source points, {unchanged} unchanged, "
+            f"{summary['failed_cities']} failed"
         )
     summary = _compact_result(result)
     return (

@@ -109,7 +109,7 @@ class ProjectVerificationTests(unittest.TestCase):
 
     def test_runtime_probe_accepts_masked_api_settings_only(self):
         responses = iter([
-            {"stats": {}, "auto_simulation": {}, "live_trading": {}, "paper_validation": {}},
+            {"stats": {}, "auto_simulation": {}, "live_trading": {}},
             {"providers": [{
                 "key": "weather_com",
                 "label": "Weather.com",
@@ -121,11 +121,13 @@ class ProjectVerificationTests(unittest.TestCase):
                 "test_has_side_effect": False,
             }]},
             {"running": False},
+            {"status": "active"},
         ])
         with patch("weatherbot_v3.verification_agents._get_json", side_effect=lambda *_args, **_kwargs: next(responses)):
             runtime = probe_local_runtime()
         self.assertTrue(runtime["available"])
         self.assertTrue(runtime["api_settings_safe"])
+        self.assertTrue(runtime["paper_validation_active"])
 
     def test_model_gate_ignores_quarantined_history_and_accepts_stored_rounding(self):
         with tempfile.TemporaryDirectory() as tmp:

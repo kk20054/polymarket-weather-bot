@@ -14,7 +14,7 @@ CONFIG_PATH = ROOT / "config.json"
 ASIAN_CITY_PRIORITY = {
     "shanghai": {"rank": 1, "volume_usd": 246000, "settlement": "verified_wunderground", "mode": "fully_active"},
     "hong-kong": {"rank": 2, "volume_usd": 160000, "settlement": "hko_mismatch", "mode": "paper_only"},
-    "seoul": {"rank": 3, "volume_usd": 142000, "settlement": "verified_wunderground", "mode": "monitor_only"},
+    "seoul": {"rank": 3, "volume_usd": 142000, "settlement": "verified_wunderground", "mode": "paper_only"},
     "tokyo": {"rank": 4, "volume_usd": 113000, "settlement": "verified_wunderground", "mode": "fully_active"},
     "beijing": {"rank": 5, "volume_usd": 111000, "settlement": "verified_wunderground", "mode": "fully_active"},
     "singapore": {"rank": 6, "volume_usd": 68000, "settlement": "verified_wunderground", "mode": "fully_active"},
