@@ -45,6 +45,9 @@ class PaperExitTests(unittest.TestCase):
         guarded = validate_parameters({"exit_policy": {"mode": "model_guarded"}})
         self.assertEqual(guarded["exit_policy"]["mode"], "model_guarded")
         self.assertEqual(guarded["exit_policy"]["confirmations_required"], 2)
+        take_profit = validate_parameters({"exit_policy": {"mode": "model_guarded_take_profit"}})
+        self.assertEqual(take_profit["exit_policy"]["take_profit_min_roi"], 0.05)
+        self.assertEqual(take_profit["exit_policy"]["take_profit_min_ticks"], 1)
         with self.assertRaisesRegex(ValueError, "unsupported_exit_policy"):
             validate_parameters({"exit_policy": {"mode": "price_stop"}})
 
@@ -152,6 +155,78 @@ class PaperExitTests(unittest.TestCase):
         self.assertIn("sell_quote_stale", reasons)
         self.assertIn("insufficient_best_bid_depth", reasons)
 
+    def test_take_profit_exits_at_fresh_executable_best_bid(self):
+        path = test_db_path("paper_exit_take_profit")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        now = datetime.now(timezone.utc)
+        _guarded_order(
+            path,
+            now=now,
+            observed_high=31.0,
+            model_probability=0.35,
+            opened_at=now - timedelta(minutes=30),
+            mode="model_guarded_take_profit",
+            best_bid=0.22,
+        )
+
+        result = evaluate_open_paper_exits(apply=True, path=path, now=now)
+        order = list_paper_orders(path=path)[0]
+        evaluation = result["results"][0]["evaluation"]
+
+        self.assertEqual(result["exited_now"], 1)
+        self.assertEqual(evaluation["trigger"], "take_profit_target")
+        self.assertAlmostEqual(evaluation["executable_pnl"], 0.2)
+        self.assertAlmostEqual(evaluation["executable_roi"], 0.1)
+        self.assertEqual(order["lifecycle_status"], "exited")
+        self.assertAlmostEqual(float(order["realized_pnl"]), 0.2)
+
+    def test_take_profit_does_not_use_non_executable_mid_price(self):
+        path = test_db_path("paper_exit_take_profit_ignores_mid")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        now = datetime.now(timezone.utc)
+        _guarded_order(
+            path,
+            now=now,
+            observed_high=31.0,
+            model_probability=0.35,
+            opened_at=now - timedelta(minutes=30),
+            mode="model_guarded_take_profit",
+            best_bid=0.20,
+            best_ask=0.30,
+        )
+
+        result = evaluate_open_paper_exits(apply=True, path=path, now=now)
+        evaluation = result["results"][0]["evaluation"]
+
+        self.assertEqual(result["exited_now"], 0)
+        self.assertEqual(evaluation["trigger"], "none")
+        self.assertAlmostEqual(evaluation["executable_pnl"], 0.0)
+        self.assertEqual(list_paper_orders(path=path)[0]["lifecycle_status"], "open")
+
+    def test_take_profit_waits_for_hold_time_and_executable_depth(self):
+        path = test_db_path("paper_exit_take_profit_guards")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        now = datetime.now(timezone.utc)
+        _guarded_order(
+            path,
+            now=now,
+            observed_high=31.0,
+            model_probability=0.35,
+            opened_at=now - timedelta(minutes=5),
+            mode="model_guarded_take_profit",
+            best_bid=0.22,
+            best_bid_size=5,
+        )
+
+        result = evaluate_open_paper_exits(apply=True, path=path, now=now)
+        evaluation = result["results"][0]["evaluation"]
+
+        self.assertEqual(result["exited_now"], 0)
+        self.assertEqual(evaluation["trigger"], "take_profit_target")
+        self.assertIn("take_profit_minimum_hold_not_met", evaluation["reasons"])
+        self.assertIn("insufficient_best_bid_depth", evaluation["reasons"])
+        self.assertEqual(list_paper_orders(path=path)[0]["lifecycle_status"], "open")
+
 
 def _guarded_order(
     path: Path,
@@ -160,12 +235,16 @@ def _guarded_order(
     observed_high: float,
     model_probability: float,
     opened_at: datetime | None = None,
+    mode: str = "model_guarded",
+    best_bid: float = 0.10,
+    best_ask: float = 0.11,
+    best_bid_size: float = 100,
 ) -> tuple[int, str]:
     init_v3_db(path)
     parameters = deepcopy(DEFAULT_PARAMETERS)
     parameters["exit_policy"] = {
         **parameters["exit_policy"],
-        "mode": "model_guarded",
+        "mode": mode,
     }
     profile = create_strategy_profile_revision(parameters, profile_key="guarded-exit", path=path)
     revision = profile["revision_id"]
@@ -181,6 +260,7 @@ def _guarded_order(
             "bucket_direction": "exact",
             "bucket_low": 32.0,
             "bucket_high": 32.0,
+            "tick_size": 0.01,
             "strict_match_status": "matched",
         },
         path=path,
@@ -192,8 +272,8 @@ def _guarded_order(
         {
             "snapshot_key": "exit-book-first",
             "yes_token_id": "yes-exit",
-            "bids": [{"price": 0.10, "size": 100}],
-            "asks": [{"price": 0.11, "size": 100}],
+            "bids": [{"price": best_bid, "size": best_bid_size}],
+            "asks": [{"price": best_ask, "size": 100}],
             "quote_timestamp": now.isoformat(),
         },
         path=path,

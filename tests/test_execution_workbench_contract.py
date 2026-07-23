@@ -67,7 +67,10 @@ class ExecutionWorkbenchContractTests(unittest.TestCase):
         self.assertIn("模型概率连续失效", component)
         self.assertIn("模拟卖出价（买一）", component)
         self.assertIn("realized_exit", component)
-        self.assertIn('{"hold_to_settlement", "model_guarded"}', profiles)
+        self.assertIn('"model_guarded_take_profit"', profiles)
+        self.assertIn('type="radio"', component)
+        self.assertIn("Entry strategy (single choice to avoid duplicate exposure)", component)
+        self.assertIn("Mid-price gains never trigger an exit", component)
         self.assertIn("insufficient_best_bid_depth", exit_engine)
         self.assertNotIn("live_orders", exit_engine)
 

@@ -18,6 +18,7 @@ from weatherbot_v3.scheduler import (
     HISTORICAL_INTERVAL_SECONDS,
     NWP_ENSEMBLE_EVERY_N_RUNS,
     WeatherBotScheduler,
+    _bias_refresh_due,
     _compact_city_payload,
     _remaining_cycle_delay,
     _tiered_refresh_rows,
@@ -273,7 +274,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         ), patch("weatherbot_v3.scheduler.run_wunderground_hourly_fetch", side_effect=fake_fetch), patch(
             "weatherbot_v3.scheduler.run_wunderground_daily_rollup",
             return_value={"ok": True, "results": []},
-        ) as rollup:
+        ) as rollup, patch("weatherbot_v3.scheduler._bias_refresh_due", return_value=False):
             result = await WeatherBotScheduler(city_concurrency=2)._run_historical_poller()
 
         self.assertTrue(result["ok"])
@@ -294,7 +295,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "weatherbot_v3.scheduler.run_wunderground_daily_rollup",
             return_value={"ok": False, "failed": 1, "results": [{"reason": "insufficient_hourly_coverage"}]},
-        ):
+        ), patch("weatherbot_v3.scheduler._bias_refresh_due", return_value=False):
             result = await scheduler._run_historical_poller()
 
         self.assertTrue(result["ok"])
@@ -303,6 +304,51 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         payload = result["results"][0]["payload"]
         self.assertTrue(payload["daily_truth_ok"] is False)
         self.assertEqual(payload["daily_truth_failed"], 1)
+
+    async def test_historical_poller_refreshes_due_bias_table_once(self):
+        rows = [{"city_key": "chicago", "station_id": "KORD", "timezone": "America/Chicago"}]
+        trained = {
+            "generated_at": "2026-07-23T00:00:00+00:00",
+            "row_count": 6,
+            "city_count": 1,
+            "runtime_eligible_rows": 2,
+            "rows": [{"sample_dates": ["2026-07-21", "2026-07-22"]}],
+        }
+        with patch("weatherbot_v3.scheduler._enabled_rows", return_value=rows), patch(
+            "weatherbot_v3.scheduler._local_today", return_value="2026-07-23"
+        ), patch(
+            "weatherbot_v3.scheduler.run_wunderground_hourly_fetch",
+            return_value={"ok": True, "rows_upserted": 24},
+        ), patch(
+            "weatherbot_v3.scheduler.run_wunderground_daily_rollup",
+            return_value={"ok": True, "rows_upserted": 1},
+        ), patch(
+            "weatherbot_v3.scheduler._bias_refresh_due", return_value=True
+        ), patch(
+            "weatherbot_v3.scheduler.train_bias_table", return_value=trained
+        ) as train:
+            result = await WeatherBotScheduler(city_concurrency=1)._run_historical_poller()
+
+        train.assert_called_once_with()
+        self.assertEqual(result["calibration_refresh"]["status"], "updated")
+        self.assertEqual(result["calibration_refresh"]["latest_sample_date"], "2026-07-22")
+
+    async def test_bias_refresh_due_uses_generated_at_not_poller_count(self):
+        TEST_DB_DIR.mkdir(exist_ok=True)
+        path = TEST_DB_DIR / "bias_refresh_due.json"
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        path.write_text('{"generated_at":"2026-07-22T12:00:00+00:00"}', encoding="utf-8")
+
+        self.assertFalse(_bias_refresh_due(
+            output_path=path,
+            now=datetime(2026, 7, 23, 7, 0, tzinfo=timezone.utc),
+            max_age_hours=20,
+        ))
+        self.assertTrue(_bias_refresh_due(
+            output_path=path,
+            now=datetime(2026, 7, 23, 9, 0, tzinfo=timezone.utc),
+            max_age_hours=20,
+        ))
 
     async def test_metar_run_once_limits_concurrency_and_logs_per_city(self):
         db_path = test_db_path("scheduler_concurrency")

@@ -17,7 +17,8 @@ from .deb import bucket_excluded_by_observed_floor
 from .strategy_profiles import DEFAULT_PARAMETERS
 
 
-PAPER_EXIT_VERSION = "paper-exit-v1"
+PAPER_EXIT_VERSION = "paper-exit-v2"
+MANAGED_EXIT_MODES = {"model_guarded", "model_guarded_take_profit"}
 
 
 def evaluate_open_paper_exits(
@@ -27,7 +28,7 @@ def evaluate_open_paper_exits(
     path: Path | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Evaluate model-guarded paper exits without touching live orders."""
+    """Evaluate auditable paper exits against executable SELL quotes only."""
     checked_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     orders = [
         order
@@ -37,7 +38,7 @@ def evaluate_open_paper_exits(
     results: list[dict[str, Any]] = []
     for order in orders:
         policy = _exit_policy(order)
-        if policy["mode"] != "model_guarded":
+        if policy["mode"] not in MANAGED_EXIT_MODES:
             continue
         results.append(
             _evaluate_order(
@@ -102,12 +103,44 @@ def _evaluate_order(
     opened_at = _parse_timestamp(order.get("opened_at") or order.get("created_at"))
     held_minutes = (checked_at - opened_at).total_seconds() / 60.0 if opened_at else None
     shares = _number(order.get("filled_shares") or order.get("shares")) or 0.0
-    trigger = "observed_bucket_breach" if hard_breach else (
-        "model_probability_invalidated" if model_invalid else "none"
+    entry_cost = _number(order.get("filled_amount") or order.get("amount")) or 0.0
+    entry_price = _number(order.get("average_fill_price") or order.get("limit_price"))
+    if entry_price is None and shares > 0 and entry_cost > 0:
+        entry_price = entry_cost / shares
+    tick_size = _number(bucket.get("tick_size") or decision.get("tick_size"))
+    executable_proceeds = shares * best_bid if best_bid is not None and shares > 0 else None
+    executable_pnl = executable_proceeds - entry_cost if executable_proceeds is not None else None
+    executable_roi = executable_pnl / entry_cost if executable_pnl is not None and entry_cost > 0 else None
+    take_profit_enabled = policy["mode"] == "model_guarded_take_profit"
+    take_profit_min_usd = max(
+        float(policy["take_profit_min_usd"]),
+        entry_cost * float(policy["take_profit_min_roi"]),
+    )
+    take_profit_price_floor = (
+        entry_price + tick_size * int(policy["take_profit_min_ticks"])
+        if entry_price is not None and tick_size is not None and tick_size > 0
+        else None
+    )
+    take_profit_target = bool(
+        take_profit_enabled
+        and best_bid is not None
+        and take_profit_price_floor is not None
+        and best_bid + 1e-12 >= take_profit_price_floor
+        and executable_pnl is not None
+        and executable_pnl + 1e-12 >= take_profit_min_usd
+    )
+    trigger = (
+        "observed_bucket_breach"
+        if hard_breach
+        else "take_profit_target"
+        if take_profit_target
+        else "model_probability_invalidated"
+        if model_invalid
+        else "none"
     )
     reasons: list[str] = []
 
-    if not hard_breach and not model_invalid:
+    if not hard_breach and not model_invalid and not take_profit_target:
         reasons.append("exit_condition_not_met")
     if best_bid is None or best_bid <= 0:
         reasons.append("sell_bid_missing")
@@ -122,7 +155,7 @@ def _evaluate_order(
     elif best_bid_size + 1e-9 < shares:
         reasons.append("insufficient_best_bid_depth")
 
-    if model_invalid and not hard_breach:
+    if trigger == "model_probability_invalidated":
         if confirmation_count < int(policy["confirmations_required"]):
             reasons.append("model_exit_waiting_for_confirmation")
         if held_minutes is None or held_minutes < float(policy["min_hold_minutes"]):
@@ -132,12 +165,16 @@ def _evaluate_order(
             if best_bid + 1e-12 < required_bid:
                 reasons.append("sell_bid_below_model_fair_value")
 
-    actionable = hard_breach or model_invalid
+    if take_profit_target and not hard_breach:
+        if held_minutes is None or held_minutes < float(policy["take_profit_min_hold_minutes"]):
+            reasons.append("take_profit_minimum_hold_not_met")
+
+    actionable = hard_breach or model_invalid or take_profit_target
     action = "exit" if actionable and not reasons else "hold"
     evaluation = {
         "paper_order_id": order_id,
         "checked_at": checked_at.isoformat(),
-        "policy_mode": "model_guarded",
+        "policy_mode": str(policy["mode"]),
         "source_decision_id": str(decision.get("decision_id") or ""),
         "source_prediction_id": source_prediction_id,
         "trigger": trigger,
@@ -150,6 +187,14 @@ def _evaluate_order(
         "quote_timestamp": str(quote.get("quote_timestamp") or quote.get("created_at") or ""),
         "quote_age_seconds": quote_age,
         "held_minutes": held_minutes,
+        "entry_cost": entry_cost,
+        "entry_price": entry_price,
+        "tick_size": tick_size,
+        "take_profit_price_floor": take_profit_price_floor,
+        "take_profit_min_usd": take_profit_min_usd,
+        "executable_proceeds": executable_proceeds,
+        "executable_pnl": executable_pnl,
+        "executable_roi": executable_roi,
         "reasons": reasons,
         "policy": policy,
         "bucket": bucket,
@@ -161,7 +206,7 @@ def _evaluate_order(
         return {"ok": True, "action": action, "evaluation": evaluation}
     stored = record_paper_exit_evaluation(evaluation, path=path)
     if action != "exit":
-        return {"ok": True, "action": "hold", "evaluation": stored}
+        return {"ok": True, "action": "hold", "evaluation": {**stored, **evaluation}}
     exited = apply_paper_exit_record(
         order_id,
         {

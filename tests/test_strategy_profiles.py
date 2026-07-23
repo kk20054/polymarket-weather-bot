@@ -12,6 +12,7 @@ from weatherbot_v3.strategy_profiles import (
     activate_strategy_profile,
     create_strategy_profile_revision,
     get_active_strategy_profile,
+    validate_paper_strategy_selection,
 )
 
 
@@ -27,6 +28,13 @@ def test_db_path(name: str) -> Path:
 
 
 class StrategyProfileTests(unittest.TestCase):
+    def test_paper_entry_strategy_is_single_select_until_overlap_is_reconciled(self):
+        self.assertEqual(validate_paper_strategy_selection(["core_modal_v1"]), ["core_modal_v1"])
+        with self.assertRaisesRegex(ValueError, "paper_strategy_requires_exactly_one"):
+            validate_paper_strategy_selection(["core_modal_v1", "tail_buying"])
+        with self.assertRaisesRegex(ValueError, "unsupported_paper_strategy"):
+            validate_paper_strategy_selection(["unknown_strategy"])
+
     def test_canonical_hash_is_stable_and_parameter_change_creates_revision(self):
         path = test_db_path("strategy_profile_hash")
         self.addCleanup(lambda: path.unlink(missing_ok=True))

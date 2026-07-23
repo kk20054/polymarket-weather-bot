@@ -6,9 +6,11 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
+from .bias import DEFAULT_BIAS_TABLE, train_bias_table
 from .cli import run_daily_max_build, run_gamma_structured_sync, run_hourly_consensus_build, run_market_buckets_sync, run_model_timing_reprice, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build, run_weathercom_fetch, run_wunderground_daily_rollup, run_wunderground_hourly_fetch
 from .china_weather import fetch_china_weather_city, supported_china_live_cities
 from .db import connect, log_data_fetch, utc_now
@@ -37,6 +39,7 @@ NWP_ENSEMBLE_MODELS = tuple(
 )
 NWP_ENSEMBLE_FORECAST_DAYS = max(1, min(7, int(os.getenv("WEATHERBOT_SCHEDULER_ENSEMBLE_FORECAST_DAYS", "3") or "3")))
 HISTORICAL_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_HISTORICAL_SECONDS", "600") or "600")
+BIAS_RETRAIN_MAX_AGE_HOURS = float(os.getenv("WEATHERBOT_BIAS_RETRAIN_MAX_AGE_HOURS", "20") or "20")
 BASELINE_REFRESH_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_BASELINE_MULTIPLIER", "3") or "3")
 METAR_BACKGROUND_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_METAR_BACKGROUND_MULTIPLIER", "12") or "12")
 NWP_BACKGROUND_MULTIPLIER = int(os.getenv("WEATHERBOT_SCHEDULER_NWP_BACKGROUND_MULTIPLIER", "6") or "6")
@@ -562,10 +565,43 @@ class WeatherBotScheduler:
             for item in result.get("results") or []
             if isinstance(item, dict)
         )
+        calibration_refresh: dict[str, Any] = {
+            "status": "not_due",
+            "output_path": str(DEFAULT_BIAS_TABLE),
+        }
+        if _bias_refresh_due():
+            try:
+                trained = await asyncio.to_thread(train_bias_table)
+                rows_trained = list(trained.get("rows") or [])
+                latest_sample_date = max(
+                    (
+                        str(sample_date)
+                        for row in rows_trained
+                        for sample_date in (row.get("sample_dates") or [])
+                        if sample_date
+                    ),
+                    default="",
+                )
+                calibration_refresh = {
+                    "status": "updated",
+                    "generated_at": str(trained.get("generated_at") or ""),
+                    "row_count": int(trained.get("row_count") or len(rows_trained)),
+                    "city_count": int(trained.get("city_count") or 0),
+                    "runtime_eligible_rows": int(trained.get("runtime_eligible_rows") or 0),
+                    "latest_sample_date": latest_sample_date,
+                    "output_path": str(DEFAULT_BIAS_TABLE),
+                }
+            except Exception as exc:
+                calibration_refresh = {
+                    "status": "failed",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "output_path": str(DEFAULT_BIAS_TABLE),
+                }
         return {
             **result,
             **cadence,
             "daily_truth_failed_cities": daily_truth_failures,
+            "calibration_refresh": calibration_refresh,
         }
 
     async def _run_pws_poller(self) -> dict[str, Any]:
@@ -1236,6 +1272,7 @@ def _compact_result(payload: dict[str, Any]) -> dict[str, Any]:
         "deferred_cities",
         "baseline_every_cycles",
         "daily_truth_failed_cities",
+        "calibration_refresh",
         "cached_buckets",
         "tokens_requested",
         "quotes_refreshed",
@@ -1312,6 +1349,24 @@ def _parse_time(value: str) -> datetime | None:
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except Exception:
         return None
+
+
+def _bias_refresh_due(
+    *,
+    output_path: Path = DEFAULT_BIAS_TABLE,
+    now: datetime | None = None,
+    max_age_hours: float = BIAS_RETRAIN_MAX_AGE_HOURS,
+) -> bool:
+    """Refresh the leakage-free calibration artifact roughly once per day."""
+    try:
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        generated_at = _parse_time(str(payload.get("generated_at") or ""))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return True
+    if generated_at is None:
+        return True
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return (current - generated_at.astimezone(timezone.utc)).total_seconds() >= max(1.0, max_age_hours) * 3600
 
 
 _SCHEDULER: WeatherBotScheduler | None = None

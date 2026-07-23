@@ -29,7 +29,7 @@ type QueueItem = {
   decisions: SignalDecisionRecord[]
 }
 
-type ExitMode = 'hold_to_settlement' | 'model_guarded'
+type ExitMode = 'hold_to_settlement' | 'model_guarded' | 'model_guarded_take_profit'
 
 const STRATEGY_OPTIONS = [
   { key: 'core_modal_v1', zh: '动态核心温度桶', en: 'Dynamic modal bucket', helpZh: '仅选择模型概率最高的前两个温度桶；未满 20 个无泄漏样本的模型不参与权重，成熟模型按近期误差动态分配权重。', helpEn: 'Only consider the top two model buckets; models with fewer than 20 leakage-free pairs receive zero weight, while mature models are weighted by recent accuracy.' },
@@ -82,6 +82,11 @@ const REASON_LABELS_EN: Record<string, string> = {
 
 function tx(language: 'zh' | 'en', zh: string, en: string) {
   return language === 'zh' ? zh : en
+}
+
+function normalizeExitMode(value?: string): ExitMode {
+  if (value === 'model_guarded' || value === 'model_guarded_take_profit') return value
+  return 'hold_to_settlement'
 }
 
 function reasonText(reason?: string | null, language: 'zh' | 'en' = 'zh') {
@@ -418,6 +423,8 @@ function OrderRow({ order, language }: { order: PaperOrderRecord; language: 'zh'
               ? tx(language, '该订单已按 Polymarket 官方结果结算。', 'This order was settled from the official Polymarket outcome.')
               : exited
                 ? tx(language, '该订单已按模拟盘保护规则，以当时可成交的 YES 买一价卖出；盈亏已经实现。', 'This paper order exited under the guard rule at the executable YES best bid; PnL is realized.')
+                : order.exit_policy === 'model_guarded_take_profit'
+                  ? tx(language, '退出规则：达到可成交止盈门槛时按最新买一价卖出；否则继续使用实况穿桶与模型失效保护。页面中间价浮盈不会触发退出。', 'Exit rule: sell at the executable best bid after the take-profit threshold is met; otherwise retain observed-breach and model-invalidation protection. Mid-price gains never trigger an exit.')
                 : order.exit_policy === 'model_guarded'
                   ? tx(language, '退出规则：若实测最高温使温度桶不可能命中，立即按可成交买一价退出；若只是模型转弱，需连续两次确认且盘口价格合理。价格下跌本身不会触发。', 'Exit rule: an impossible bucket exits at an executable best bid; a model-only exit needs two confirmations and a rational quote. Price decline alone never triggers it.')
                   : tx(language, '退出规则：持有至 Polymarket 官方结算；当前没有盘中强制止损或自动卖出。', 'Exit rule: hold to official Polymarket settlement; no intraday forced stop or automatic sell is active.')}
@@ -469,10 +476,10 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
       setBankroll(String(validation?.bankroll_usd ?? 40))
       setMaxPerTrade(String(validation?.max_per_trade_usd ?? 2))
       if (validation?.strategies?.length) setSelectedStrategies(validation.strategies)
-      setExitMode((validation?.strategy_profile_snapshot?.parameters?.exit_policy?.mode === 'model_guarded') ? 'model_guarded' : 'hold_to_settlement')
+      setExitMode(normalizeExitMode(validation?.strategy_profile_snapshot?.parameters?.exit_policy?.mode))
       return
     }
-    setExitMode((activePaperProfile?.parameters?.exit_policy?.mode === 'model_guarded') ? 'model_guarded' : 'hold_to_settlement')
+    setExitMode(normalizeExitMode(activePaperProfile?.parameters?.exit_policy?.mode))
     const configuredStrategies = Object.entries(activePaperProfile?.parameters?.strategies ?? {})
       .filter(([, settings]) => settings.enabled === true)
       .map(([name]) => name)
@@ -518,19 +525,32 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
     mutationFn: async (action: 'start' | 'stop') => {
       if (action === 'stop') return stopPaperValidation()
       let revisionId = selectedRevisionId
-      if (activePaperProfile && activePaperProfile.parameters.exit_policy.mode !== exitMode) {
+      const enabledProfileStrategies = Object.entries(activePaperProfile?.parameters?.strategies ?? {})
+        .filter(([, settings]) => settings.enabled === true)
+        .map(([name]) => name)
+        .sort()
+      const strategySelectionChanged = enabledProfileStrategies.join('|') !== [...selectedStrategies].sort().join('|')
+      if (activePaperProfile && (
+        activePaperProfile.parameters.exit_policy.mode !== exitMode
+        || strategySelectionChanged
+      )) {
+        const strategySettings = Object.fromEntries(
+          Object.entries(activePaperProfile.parameters.strategies).map(([name, settings]) => [
+            name,
+            { ...settings, enabled: selectedStrategies.includes(name) },
+          ]),
+        )
         const revision = await createStrategyProfile({
           profile_key: activePaperProfile.profile_key,
           parameters: {
             ...activePaperProfile.parameters,
+            strategies: strategySettings,
             exit_policy: {
               ...activePaperProfile.parameters.exit_policy,
               mode: exitMode,
             },
           },
-          change_note: exitMode === 'model_guarded'
-            ? 'Enable paper-only model guarded exits'
-            : 'Use hold-to-settlement paper exits',
+          change_note: `Paper strategy ${selectedStrategies[0]} with exit mode ${exitMode}`,
           activate_scopes: ['signal_generation', 'paper_default'],
           confirm: true,
         })
@@ -562,9 +582,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
   const summary = ordersQuery.data
   const toggleStrategy = (strategy: string) => {
     if (validationActive) return
-    setSelectedStrategies(current => current.includes(strategy)
-      ? (current.length > 1 ? current.filter(item => item !== strategy) : current)
-      : [...current, strategy])
+    setSelectedStrategies([strategy])
   }
 
   return (
@@ -602,10 +620,10 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
               <label className="text-[9px] text-neutral-500">{tx(language, '单笔上限（USD）', 'Max per trade (USD)')}<input disabled={validationActive} type="number" min="0.1" step="0.1" value={maxPerTrade} onChange={event => setMaxPerTrade(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
             </div>
             <fieldset disabled={validationActive} className="space-y-1">
-              <legend className="mb-1 text-[9px] text-neutral-500">{tx(language, '入场策略（可组合）', 'Entry strategies (combinable)')}</legend>
+              <legend className="mb-1 text-[9px] text-neutral-500">{tx(language, '入场策略（单选，避免重复敞口）', 'Entry strategy (single choice to avoid duplicate exposure)')}</legend>
               {STRATEGY_OPTIONS.map(option => (
                 <label key={option.key} title={tx(language, option.helpZh, option.helpEn)} className="flex min-h-7 items-center gap-2 border border-neutral-800 px-2 text-[10px] text-neutral-300">
-                  <input type="checkbox" checked={selectedStrategies.includes(option.key)} onChange={() => toggleStrategy(option.key)} />
+                  <input type="radio" name="paper-entry-strategy" checked={selectedStrategies.includes(option.key)} onChange={() => toggleStrategy(option.key)} />
                   <span>{tx(language, option.zh, option.en)}</span><Info className="ml-auto h-3 w-3 text-neutral-600" />
                 </label>
               ))}
@@ -619,10 +637,13 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
               >
                 <option value="hold_to_settlement">{tx(language, '持有至 Polymarket 结算（当前可用）', 'Hold to Polymarket settlement (available)')}</option>
                 <option value="model_guarded">{tx(language, '模型保护退出（模拟盘）', 'Model-guarded exit (paper)')}</option>
+                <option value="model_guarded_take_profit">{tx(language, '盈利止盈 + 模型保护（模拟盘）', 'Take profit + model guard (paper)')}</option>
               </select>
             </label>
             <div className="text-[9px] leading-relaxed text-neutral-600">
-              {exitMode === 'model_guarded'
+              {exitMode === 'model_guarded_take_profit'
+                ? tx(language, '仅按新鲜盘口的可成交买一价计算：持仓至少 15 分钟，利润同时达到 5%、$0.05 且至少高于入场一档 tick，并有足够深度承接全部份额时止盈；实况穿桶和模型失效保护仍生效。只作用于下一批模拟。', 'Use only a fresh executable best bid: after 15 minutes, take profit when gain reaches 5%, $0.05, and at least one tick above entry, with enough depth for every share. Observed-breach and model guards remain active. Applies to the next paper cohort only.')
+                : exitMode === 'model_guarded'
                 ? tx(language, '实测最高温穿过本桶时立即模拟卖出；仅模型转弱时，需连续两次低于 8%，且买一价不低于模型公允价。新选择只对下一批模拟生效。', 'Exit immediately when the observed high makes the bucket impossible. A model-only exit needs two readings below 8% and a bid no worse than model fair value. This applies only to the next paper cohort.')
                 : tx(language, '持有至官方结算，不因短期价差或盘中价格波动自动卖出。', 'Hold to official settlement; short-term spread and price noise never trigger an automatic sell.')}
             </div>

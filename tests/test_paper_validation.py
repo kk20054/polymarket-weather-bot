@@ -183,11 +183,11 @@ class PaperValidationTests(unittest.TestCase):
         self.assertEqual(stopped["status"], "stopped")
         self.assertEqual(inactive["status"], "inactive")
 
-    def test_validation_run_persists_operator_strategy_combination_and_bankroll(self):
+    def test_validation_run_rejects_overlapping_strategy_combination(self):
         path = test_db_path("paper_validation_strategy_combination")
         self.addCleanup(lambda: path.unlink(missing_ok=True))
         init_v3_db(path)
-        started = start_paper_validation_run(
+        blocked = start_paper_validation_run(
             bankroll_usd=40,
             max_per_trade_usd=2,
             cities=["chicago", "atlanta"],
@@ -195,13 +195,20 @@ class PaperValidationTests(unittest.TestCase):
             path=path,
         )
 
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["reason"], "paper_strategy_requires_exactly_one")
+
+        started = start_paper_validation_run(
+            bankroll_usd=40,
+            max_per_trade_usd=2,
+            cities=["chicago", "atlanta"],
+            strategies=["single_bucket_ev"],
+            path=path,
+        )
         self.assertTrue(started["ok"])
         self.assertEqual(started["run"]["bankroll_usd"], 40)
         self.assertEqual(started["run"]["max_per_trade_usd"], 2)
-        self.assertEqual(
-            started["run"]["strategies"],
-            ["single_bucket_ev", "ladder_grid", "tail_buying"],
-        )
+        self.assertEqual(started["run"]["strategies"], ["single_bucket_ev"])
         self.assertTrue(started["run"]["strategy_revision_id"].startswith("spr_"))
 
     def test_cohort_cap_is_not_silently_replaced_by_global_max_bet(self):

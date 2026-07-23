@@ -13,6 +13,12 @@ STRATEGY_PROFILE_SCHEMA_VERSION = 1
 STRATEGY_ENGINE_VERSION = "weatherbot-strategy-v3"
 DEFAULT_PROFILE_KEY = "weatherbot_conservative"
 ALLOWED_SCOPES = {"signal_generation", "paper_default", "live_default"}
+PAPER_STRATEGY_NAMES = (
+    "core_modal_v1",
+    "single_bucket_ev",
+    "ladder_grid",
+    "tail_buying",
+)
 
 DEFAULT_PARAMETERS: dict[str, Any] = {
     "schema_version": STRATEGY_PROFILE_SCHEMA_VERSION,
@@ -64,6 +70,10 @@ DEFAULT_PARAMETERS: dict[str, Any] = {
         "confirmations_required": 2,
         "min_hold_minutes": 30,
         "max_quote_age_seconds": 300,
+        "take_profit_min_roi": 0.05,
+        "take_profit_min_usd": 0.05,
+        "take_profit_min_ticks": 1,
+        "take_profit_min_hold_minutes": 15,
     },
 }
 
@@ -117,14 +127,37 @@ def validate_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
         item["enabled"] = bool(item.get("enabled", True))
     ladder["atomic"] = True
     exit_policy = merged.get("exit_policy", {})
-    if exit_policy.get("mode") not in {"hold_to_settlement", "model_guarded"}:
+    if exit_policy.get("mode") not in {
+        "hold_to_settlement",
+        "model_guarded",
+        "model_guarded_take_profit",
+    }:
         raise ValueError("unsupported_exit_policy")
     _bounded(exit_policy, "model_probability_threshold", 0.0, 0.5)
     _bounded(exit_policy, "min_bid_over_model_edge", 0.0, 0.25)
     _bounded(exit_policy, "confirmations_required", 1, 10, integer=True)
     _bounded(exit_policy, "min_hold_minutes", 0, 1440, integer=True)
     _bounded(exit_policy, "max_quote_age_seconds", 30, 3600, integer=True)
+    _bounded(exit_policy, "take_profit_min_roi", 0.0, 1.0)
+    _bounded(exit_policy, "take_profit_min_usd", 0.0, 1000.0)
+    _bounded(exit_policy, "take_profit_min_ticks", 1, 100, integer=True)
+    _bounded(exit_policy, "take_profit_min_hold_minutes", 0, 1440, integer=True)
     return merged
+
+
+def validate_paper_strategy_selection(strategies: list[str] | None) -> list[str]:
+    """Keep a paper cohort on one entry policy until overlap allocation exists."""
+    selected = list(dict.fromkeys(
+        str(strategy or "").strip()
+        for strategy in (strategies or [])
+        if str(strategy or "").strip()
+    ))
+    unknown = [strategy for strategy in selected if strategy not in PAPER_STRATEGY_NAMES]
+    if unknown:
+        raise ValueError(f"unsupported_paper_strategy:{','.join(unknown)}")
+    if len(selected) != 1:
+        raise ValueError("paper_strategy_requires_exactly_one")
+    return selected
 
 
 def core_modal_v1_parameters() -> dict[str, Any]:

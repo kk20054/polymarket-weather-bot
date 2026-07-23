@@ -16,6 +16,7 @@ from .strategy_profiles import (
     ensure_default_strategy_profile,
     get_strategy_profile_revision,
     profile_snapshot,
+    validate_paper_strategy_selection,
 )
 
 
@@ -44,7 +45,10 @@ def start_paper_validation_run(
         return {"ok": False, "status": "blocked", "reason": "paper_validation_run_already_active", "run": active}
     now = datetime.now(timezone.utc)
     clean_cities = _default_cities(path=path) if cities is None else _unique(cities)
-    clean_strategies = _unique(strategies or ["single_bucket_ev"])
+    try:
+        clean_strategies = validate_paper_strategy_selection(strategies or ["single_bucket_ev"])
+    except ValueError as exc:
+        return {"ok": False, "status": "blocked", "reason": str(exc)}
     profile = (
         get_strategy_profile_revision(strategy_revision_id, path=path)
         if strategy_revision_id

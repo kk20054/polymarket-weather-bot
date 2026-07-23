@@ -82,6 +82,7 @@ from weatherbot_v3.strategy_profiles import (
     create_strategy_profile_revision,
     ensure_default_strategy_profile,
     list_strategy_profile_revisions,
+    validate_paper_strategy_selection,
 )
 
 
@@ -4686,11 +4687,10 @@ async def paper_validation_status_api():
 
 @app.post("/api/paper-validation/start")
 async def paper_validation_start_api(request: PaperValidationStartRequest):
-    allowed_strategies = {"core_modal_v1", "single_bucket_ev", "ladder_grid", "tail_buying"}
-    strategies = list(dict.fromkeys(request.strategies or ["single_bucket_ev"]))
-    unknown = [strategy for strategy in strategies if strategy not in allowed_strategies]
-    if unknown:
-        raise HTTPException(status_code=400, detail={"reason": "unsupported_paper_strategy", "strategies": unknown})
+    try:
+        strategies = validate_paper_strategy_selection(request.strategies or ["single_bucket_ev"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"reason": str(exc)}) from exc
     result = await asyncio.to_thread(
         start_paper_validation_run,
         duration_days=request.duration_days,

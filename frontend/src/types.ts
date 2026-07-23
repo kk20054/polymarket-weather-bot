@@ -1485,12 +1485,16 @@ export interface StrategyProfileParameters {
   }
   strategies: Record<string, Record<string, boolean | number>>
   exit_policy: {
-    mode: 'hold_to_settlement' | 'model_guarded' | string
+    mode: 'hold_to_settlement' | 'model_guarded' | 'model_guarded_take_profit' | string
     model_probability_threshold?: number
     min_bid_over_model_edge?: number
     confirmations_required?: number
     min_hold_minutes?: number
     max_quote_age_seconds?: number
+    take_profit_min_roi?: number
+    take_profit_min_usd?: number
+    take_profit_min_ticks?: number
+    take_profit_min_hold_minutes?: number
   }
 }
 

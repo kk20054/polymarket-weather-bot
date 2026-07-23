@@ -4496,7 +4496,7 @@ def apply_paper_exit_record(
             "price": exit_price,
             "shares": shares,
             "amount": proceeds,
-            "source": "model_guarded_exit",
+            "source": "paper_exit_v2",
             "created_at": closed_at,
             "trigger": trigger,
         }
@@ -4524,7 +4524,7 @@ def apply_paper_exit_record(
         conn.execute(
             "INSERT INTO risk_events (event_type, severity, message, raw_json, created_at) VALUES (?, ?, ?, ?, ?)",
             (
-                "paper_model_guarded_exit",
+                "paper_position_exit",
                 "info",
                 f"Paper order {int(order_id)} exited: {trigger}",
                 dump_json(order_raw["exit"]),
@@ -4887,7 +4887,7 @@ def paper_execution_summary(
             exit_details = order.get("exit_details") or {}
             mark_price = _num(exit_details.get("exit_price"), _num(order.get("mark_price"), entry_price))
             mark_timestamp = str(exit_details.get("closed_at") or order.get("closed_at") or "")
-            mark_source = "model_guarded_sell"
+            mark_source = "paper_exit_sell"
             current_best_ask = None
             pnl_value = _num(order.get("realized_pnl"), shares * mark_price - entry_value)
             unrealized_pnl = 0.0
@@ -4938,7 +4938,7 @@ def paper_execution_summary(
             "exit_price": exit_price,
             "exit_time": exit_time,
             "exit_policy": exit_policy,
-            "force_exit_enabled": exit_policy == "model_guarded",
+            "force_exit_enabled": exit_policy in {"model_guarded", "model_guarded_take_profit"},
             "exit_details": order.get("exit_details") or {},
             "settlement": settlement,
             "quote_is_stale": bool(mark_age_seconds is not None and mark_age_seconds > 600),
