@@ -81,7 +81,35 @@ FEISHU_WEBHOOK_URL=***
 
 ## 启动项目
 
-### 1. 后端
+### 推荐：桌面一键启动
+
+本机已经安装启动器后，双击桌面的 **WeatherBot 看板** 即可：
+
+1. 校验端口 `8765/5173` 上是否已是本项目，避免重复启动或误开旧版本；
+2. 缺少服务时隐藏启动 FastAPI 后端和 Vite 前端，并等待健康检查通过；
+3. 显式启动数据调度器；
+4. 用默认浏览器打开 <http://127.0.0.1:5173/>。
+
+重复点击不会再开第二套服务，也不会让 Vite 自动漂移到 `5174`。启动失败时会弹出明确提示；日志在：
+
+```text
+D:\WeatherBot\logs\launcher.log
+D:\WeatherBot\logs\backend.log
+D:\WeatherBot\logs\frontend.log
+```
+
+首次安装或重新生成启动器：
+
+```powershell
+cd C:\Users\Administrator\Documents\polymarket\weatherbot
+powershell -ExecutionPolicy Bypass -File .\scripts\install_weatherbot_launcher.ps1
+```
+
+启动器本体位于 `D:\WeatherBot\Launcher\WeatherBotLauncher.exe`，桌面只是快捷方式。它复用现有 `.venv`、`frontend/node_modules` 和 D 盘数据，不会把数据库或密钥打进 EXE。
+
+### 手动启动
+
+#### 1. 后端
 
 打开第一个 PowerShell：
 
@@ -90,7 +118,7 @@ cd C:\Users\Administrator\Documents\polymarket\weatherbot
 .\.venv\Scripts\python.exe -m uvicorn dashboard_server:app --host 127.0.0.1 --port 8765
 ```
 
-### 2. 前端
+#### 2. 前端
 
 打开第二个 PowerShell：
 
@@ -101,7 +129,7 @@ npm run dev -- --host 127.0.0.1 --port 5173
 
 浏览器打开：<http://127.0.0.1:5173/>
 
-### 3. 启动调度器
+#### 3. 启动调度器
 
 后端默认不会自动抓取。可在看板顶部点击“启动调度器”，或执行：
 

@@ -2,7 +2,7 @@
 
 ## Phase And Usability
 - Date: 2026-07-23. Phase 3/6 leakage-free calibration and controlled paper validation; observation and paper operation are available, live trading is not.
-- Runtime data remains under the project `data/` Junction to `D:\WeatherBot\data`. Backend `8765`, frontend `5173`, and the scheduler are running; `LIVE_TRADING=false`.
+- Runtime data remains under the project `data/` Junction to `D:\WeatherBot\data`; `LIVE_TRADING=false`. A native desktop launcher at `D:\WeatherBot\Launcher\WeatherBotLauncher.exe` now performs idempotent backend/frontend health checks, explicitly starts the scheduler, and opens the dashboard; backend startup itself remains lightweight.
 - Active revision `spr_2c5694b368eb394cf07d1bdc67dcd35b` runs only `core_modal_v1`: top-two modal buckets, 8% minimum effective edge, 15% fractional Kelly, 5% bankroll cap, authoritative truth, model agreement, liquidity and order-minimum gates.
 - A stale 31-member GFS run could previously shadow a fresh deterministic GFS run and leave US cities below the four-family gate. Source selection now keeps candidates in the newest 12-hour cohort before preferring ensemble members; fresh Chicago/Shanghai DEB rows again use GFS.
 - Leakage-safe D0/D+1 replay across 13 cohort cities and 2026-07-18..22 produced 113 valid cases from 130 requests: top-1 accuracy 27.43%, top-2 45.13%, multiclass Brier 0.6968, and zero historically executable trades. D0 top-2 was 50.82% versus D+1 38.46%; this supports continued paper study, not a profitability claim.
