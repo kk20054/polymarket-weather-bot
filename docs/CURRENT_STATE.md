@@ -7,7 +7,7 @@
 - A stale 31-member GFS run could previously shadow a fresh deterministic GFS run and leave US cities below the four-family gate. Source selection now keeps candidates in the newest 12-hour cohort before preferring ensemble members; fresh Chicago/Shanghai DEB rows again use GFS.
 - Leakage-safe D0/D+1 replay across 13 cohort cities and 2026-07-18..22 produced 113 valid cases from 130 requests: top-1 accuracy 27.43%, top-2 45.13%, multiclass Brier 0.6968, and zero historically executable trades. D0 top-2 was 50.82% versus D+1 38.46%; this supports continued paper study, not a profitability claim.
 - Active paper cohort `paper-20260721T094730Z-7705f78f` has `$40` bankroll, `$2` trade cap, `$6` daily cap, three orders/day and five open positions. Its apply-mode tick is healthy and currently has no fresh executable candidate.
-- Dashboard city browsing now groups correctly by continent, timezone or alphabet. Forecast/observation tables use compact cloud, precipitation and wind marks; METAR/WU pressure is normalized to hPa, bias pairing follows the PolyWX nearest-local-hour contract, and fetch logs are scoped and sorted for the selected city.
+- Dashboard city browsing now groups correctly by continent, timezone or alphabet. Forecast/observation tables use compact cloud, precipitation and wind marks; sticky headers now contain those marks during table scrolling in both themes. METAR/WU pressure is normalized to hPa, bias pairing follows the PolyWX nearest-local-hour contract, and fetch logs are scoped and sorted for the selected city.
 
 ## Production Blockers
 - Evidence: the replay has only four independent dates and no executable historical trades; positive net ROI/CLV and calibrated probability have not been demonstrated.

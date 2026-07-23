@@ -1396,7 +1396,7 @@ export function WeatherPanel({
   }
 
   return (
-    <div className="min-h-full min-w-0 space-y-2 overflow-x-hidden bg-transparent p-3 text-[11px] text-[#CBD2DC]">
+    <div className="weather-panel min-h-full min-w-0 space-y-2 overflow-x-hidden bg-transparent p-3 text-[11px] text-[#CBD2DC]">
       <div className="flex flex-wrap items-center gap-2">
         <EvidenceBadge label={tr(language, '预报', 'Forecast')} status={forecastStatus} detail={forecastPulseDetail} />
         <EvidenceBadge label="METAR" status={metarStatus} detail={metarPulseDetail} />
