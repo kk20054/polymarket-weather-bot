@@ -20,7 +20,9 @@ from .deb import bucket_probabilities, probability_mu_for_prediction
 from .forecasts.ensemble import (
     POLYWX_ALIGNED_ALGO,
     distribution_for_prediction as ensemble_distribution_for_prediction,
+    family_mixture_distribution_for_prediction,
 )
+from .orderbook_replay import best_level_size, parse_levels
 from .stations import get_station
 from .strategies import CoreModalStrategy, LadderGridStrategy, SingleBucketEVStrategy, TailBuyingStrategy
 from .strategy_profiles import ensure_default_strategy_profile, get_strategy_profile_revision, profile_snapshot
@@ -81,12 +83,14 @@ def build_signal_decisions(
         or prediction.get("deb_version")
         or ""
     )
-    # polywx_aligned_deb_v1 persists one weighted daily high per model family.
-    # Those six component means estimate mu/sigma; they are not independent
-    # ensemble members and must not become six discrete bucket spikes.
-    distribution = None
-    if forecast_algo != POLYWX_ALIGNED_ALGO:
-        distribution = ensemble_distribution_for_prediction(prediction, buckets)
+    # Model-family means are not independent votes. When a fresh real member
+    # ensemble exists, blend its empirical shape with calibrated kernels for
+    # deterministic families; otherwise retain the conservative global CDF.
+    distribution = (
+        family_mixture_distribution_for_prediction(prediction, buckets)
+        if forecast_algo == POLYWX_ALIGNED_ALGO
+        else ensemble_distribution_for_prediction(prediction, buckets)
+    )
     if not distribution:
         probability_mu, probability_mu_basis = probability_mu_for_prediction(prediction)
         distribution = bucket_probabilities(
@@ -421,10 +425,14 @@ def _list_market_buckets(city: str, target_date: str, *, limit: int, path: Path 
             dict(row)
             for row in conn.execute(
                 """
-                SELECT *
-                FROM market_buckets
-                WHERE city = ? AND target_date = ?
-                ORDER BY bucket_low, bucket_high, id
+                SELECT mb.*,
+                       ob.bids_json AS replay_bids_json,
+                       ob.asks_json AS replay_asks_json
+                FROM market_buckets mb
+                LEFT JOIN orderbooks ob
+                  ON ob.snapshot_key = mb.orderbook_snapshot_key
+                WHERE mb.city = ? AND mb.target_date = ?
+                ORDER BY mb.bucket_low, mb.bucket_high, mb.id
                 LIMIT ?
                 """,
                 (city, target_date, max(1, min(int(limit or 200), 1000))),
@@ -434,6 +442,11 @@ def _list_market_buckets(city: str, target_date: str, *, limit: int, path: Path 
         row["neg_risk"] = bool(row.get("neg_risk"))
         row["enable_order_book"] = bool(row.get("enable_order_book"))
         row["strict_match_reasons"] = _loads(row.get("strict_match_reasons"), [])
+        row["bids"] = parse_levels(row.pop("replay_bids_json", None), side="bids")
+        row["asks"] = parse_levels(row.pop("replay_asks_json", None), side="asks")
+        row["best_bid_size"] = best_level_size(row["bids"], side="bids")
+        row["best_ask_size"] = best_level_size(row["asks"], side="asks")
+        row["depth_basis"] = "price_levels" if row["bids"] or row["asks"] else "legacy_total_depth"
     return rows
 
 

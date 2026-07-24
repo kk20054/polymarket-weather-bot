@@ -5223,7 +5223,7 @@ class V3CoreTests(unittest.TestCase):
         for city, models in DEFAULT_CITY_MODELS.items():
             self.assertEqual(len(models), len(set(models)), city)
 
-    def test_openmeteo_previous_runs_use_archive_availability_for_no_leak_training(self):
+    def test_openmeteo_previous_runs_are_diagnostic_only_not_training_runs(self):
         db_path = test_db_path("openmeteo_previous_archive_contract")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         times = [
@@ -5259,11 +5259,14 @@ class V3CoreTests(unittest.TestCase):
                 """
             ).fetchone()
 
-        self.assertEqual(row["training_eligible"], 1)
-        self.assertEqual(row["availability_basis"], "archive_run_at")
-        self.assertEqual(row["available_at"], row["run_at"])
-        self.assertEqual(row["ineligibility_reason"], "")
-        self.assertIn("trusted_forecast_archive", json.loads(row["quality_flags"]))
+        self.assertEqual(row["training_eligible"], 0)
+        self.assertEqual(row["availability_basis"], "retrieved_at")
+        self.assertEqual(row["available_at"], "2026-07-21T00:00:00+00:00")
+        self.assertEqual(
+            row["ineligibility_reason"],
+            "previous_runs_is_fixed_lead_slice_not_single_model_run",
+        )
+        self.assertIn("diagnostic_only", json.loads(row["quality_flags"]))
 
     def test_openmeteo_snapshots_preserve_distinct_retrievals_within_same_hour(self):
         db_path = test_db_path("openmeteo_idempotent")
@@ -6102,7 +6105,7 @@ class V3CoreTests(unittest.TestCase):
                 bias_table=[],
             )
 
-        self.assertTrue(prediction["ok"])
+        self.assertTrue(prediction["ok"], prediction)
         self.assertEqual(prediction["snapshot_selection_mode"], "stitch_local_day")
         component = next(component for component in prediction["components"] if component["family"] == "gfs")
         self.assertEqual(component["daily_high_basis"], "latest_snapshot_per_member_valid_hour_as_of")
@@ -6127,12 +6130,19 @@ class V3CoreTests(unittest.TestCase):
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))
         target_date = "2026-07-16"
         model = "gfs_seamless"
-        times = ["2026-07-16T12:00:00Z", "2026-07-16T18:00:00Z"]
+        # Chicago local 2026-07-16 spans 05Z through 04Z the next day.
+        # D+1 latest-run selection must only accept a complete local day.
+        times = [
+            *[f"2026-07-16T{hour:02d}:00:00Z" for hour in range(5, 24)],
+            *[f"2026-07-17T{hour:02d}:00:00Z" for hour in range(0, 5)],
+        ]
 
         def payload(high: float) -> dict:
             hourly = {"time": times}
             for index in range(1, 6):
-                hourly[f"temperature_2m_member{index:02d}"] = [high - 1.0, high]
+                hourly[f"temperature_2m_member{index:02d}"] = [
+                    high - abs(hour_index - 12) * 0.1 for hour_index in range(24)
+                ]
             return {"hourly": hourly}
 
         def persist(snapshot_payload: dict, retrieved_at: str) -> int:
@@ -6160,7 +6170,7 @@ class V3CoreTests(unittest.TestCase):
                 bias_table=[],
             )
 
-        self.assertTrue(prediction["ok"])
+        self.assertTrue(prediction["ok"], prediction)
         self.assertEqual(prediction["snapshot_selection_mode"], "latest_run")
         component = next(component for component in prediction["components"] if component["family"] == "gfs")
         self.assertEqual(component["daily_high_basis"], "latest_forecast_run")
@@ -6234,7 +6244,7 @@ class V3CoreTests(unittest.TestCase):
 
         self.assertEqual(int(new_run["training_eligible"]), 0)
         self.assertEqual(new_run["ineligibility_reason"], "forecast_lead_negative")
-        self.assertTrue(prediction["ok"])
+        self.assertTrue(prediction["ok"], prediction)
         component = next(component for component in prediction["components"] if component["family"] == "gfs")
         self.assertEqual(component["source_run_ids"], [old_id, new_id])
         self.assertEqual(component["effective_available_at"], "2026-07-17T12:00:00+00:00")
@@ -8264,7 +8274,7 @@ class V3CoreTests(unittest.TestCase):
         self.assertAlmostEqual(row["mae_c"], 0.0)
         self.assertFalse(row["runtime_eligible"])
 
-    def test_bias_training_prefers_fixed_previous_day1_over_later_current_snapshot(self):
+    def test_bias_training_excludes_previous_run_slice_and_uses_real_snapshot(self):
         from weatherbot_v3.bias import train_bias_table
 
         path = test_db_path("bias_previous_day1")
@@ -8309,8 +8319,9 @@ class V3CoreTests(unittest.TestCase):
         row = next(item for item in payload["rows"] if item["model"] == "ecmwf")
 
         self.assertEqual(row["sample_count"], 1)
-        self.assertEqual(row["archived_previous_day1_samples"], 1)
-        self.assertAlmostEqual(row["additive_bias_c"], 1.0)
+        self.assertEqual(row["archived_previous_day1_samples"], 0)
+        self.assertAlmostEqual(row["additive_bias_c"], 5.0)
+        self.assertEqual(row["invalid_as_of_rows"], 1)
 
     def test_bias_training_replay_excludes_truth_on_or_after_target_date(self):
         from weatherbot_v3.bias import train_bias_table
@@ -8338,26 +8349,31 @@ class V3CoreTests(unittest.TestCase):
                     """,
                     (
                         f"run:{target_date}", "chicago", target_date,
-                        "openmeteo_previous_ecmwf_ifs025_day1", "ecmwf_ifs025",
+                        "openmeteo_ecmwf_ifs025", "ecmwf_ifs025",
                         (
                             datetime.fromisoformat(target_date)
                             .replace(tzinfo=timezone.utc)
                             .__sub__(timedelta(hours=19))
                             .isoformat()
                         ),
-                        now,
                         (
                             datetime.fromisoformat(target_date)
                             .replace(tzinfo=timezone.utc)
                             .__sub__(timedelta(hours=19))
                             .isoformat()
                         ),
-                        "archive_run_at",
+                        (
+                            datetime.fromisoformat(target_date)
+                            .replace(tzinfo=timezone.utc)
+                            .__sub__(timedelta(hours=19))
+                            .isoformat()
+                        ),
+                        "retrieved_at",
                         f"{target_date}T20:00:00+00:00",
                         39,
                         "America/Chicago",
                         "D+1", "C", forecast,
-                        1, "parsed", '["trusted_forecast_archive"]', now,
+                        1, "parsed", "[]", now,
                     ),
                 )
 

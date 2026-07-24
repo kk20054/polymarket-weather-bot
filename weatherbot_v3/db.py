@@ -1652,8 +1652,7 @@ def insert_orderbook(
                 bid_depth=excluded.bid_depth,
                 ask_depth=excluded.ask_depth,
                 quote_timestamp=excluded.quote_timestamp,
-                raw_json=excluded.raw_json,
-                created_at=excluded.created_at
+                raw_json=excluded.raw_json
             """,
             (
                 snapshot_key,

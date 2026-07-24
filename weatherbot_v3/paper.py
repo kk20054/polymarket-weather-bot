@@ -21,6 +21,12 @@ from .db import (
     signal_decision_prediction_cohort_statuses,
     upsert_paper_order_record,
 )
+from .orderbook_replay import (
+    executable_ask_shares,
+    select_orderbook_as_of,
+    snapshot_from_row,
+    walk_buy_limit,
+)
 from .polymarket import price_matches_tick
 
 
@@ -416,8 +422,8 @@ def execute_paper_ladder_group(
             max_spread_bps=max_spread_bps,
         )
         requested_shares = _num((order.get("derived") or {}).get("requested_shares"), 0.0) or 0.0
-        ask_depth = _num((row.get("orderbook_snapshot") or {}).get("ask_depth"), 0.0) or 0.0
-        if ask_depth + 1e-9 < requested_shares:
+        executable_shares = _available_ask_shares(row)
+        if executable_shares + 1e-9 < requested_shares:
             reasons.append("insufficient_depth_for_atomic_ladder")
         if reasons:
             grouped_reasons[str(row.get("decision_id") or row.get("bucket_key") or "")] = _unique(reasons)
@@ -593,29 +599,18 @@ def _decision_with_latest_quote(
     latest = None
     if token or market_id:
         with connect(path) as conn:
-            latest = conn.execute(
-                """
-                SELECT *
-                FROM orderbooks
-                WHERE (yes_token_id=? AND ? != '') OR (market_id=? AND ? != '')
-                ORDER BY COALESCE(NULLIF(quote_timestamp, ''), created_at) DESC, id DESC
-                LIMIT 1
-                """,
-                (token, token, market_id, market_id),
-            ).fetchone()
+            latest = select_orderbook_as_of(
+                conn,
+                decision_time=now,
+                yes_token_id=token,
+                market_id=market_id,
+            )
     original_snapshot = dict(decision.get("orderbook_snapshot") or {})
     if latest:
         row = dict(latest)
         snapshot = {
             **original_snapshot,
-            "snapshot_key": row.get("snapshot_key"),
-            "best_bid": row.get("best_bid"),
-            "best_ask": row.get("best_ask"),
-            "spread": row.get("spread"),
-            "bid_depth": row.get("bid_depth"),
-            "ask_depth": row.get("ask_depth"),
-            "quote_timestamp": row.get("quote_timestamp") or row.get("created_at"),
-            "source": row.get("snapshot_type") or "stored_orderbook",
+            **snapshot_from_row(row),
         }
         result["market_bid"] = row.get("best_bid")
         result["market_ask"] = row.get("best_ask")
@@ -645,6 +640,11 @@ def _decision_with_latest_quote(
         "spread": snapshot.get("spread"),
         "bid_depth": snapshot.get("bid_depth"),
         "ask_depth": snapshot.get("ask_depth"),
+        "best_bid_size": snapshot.get("best_bid_size"),
+        "best_ask_size": snapshot.get("best_ask_size"),
+        "bids": snapshot.get("bids") or [],
+        "asks": snapshot.get("asks") or [],
+        "depth_basis": snapshot.get("depth_basis"),
         "source": snapshot.get("source") or "signal_snapshot_fallback",
         "fallback": not bool(latest),
     }
@@ -716,7 +716,7 @@ def _risk_reasons(
     market_bid = _num(decision.get("market_bid"))
     tick_size = _num(decision.get("tick_size"))
     order_min_size = _num(decision.get("order_min_size"))
-    ask_depth = _num((decision.get("orderbook_snapshot") or {}).get("ask_depth"))
+    ask_depth = _available_ask_shares(decision)
     spread = _num((decision.get("orderbook_snapshot") or {}).get("spread"))
     book_age_seconds = _num((order.get("execution_quote") or {}).get("age_seconds"), _num(decision.get("book_age_seconds")))
     if market_ask is None or market_ask <= 0 or market_ask >= 1:
@@ -748,7 +748,7 @@ def _risk_reasons(
         reasons.append("order_min_size_missing")
     elif requested_shares + 1e-9 < order_min_size:
         reasons.append("below_order_min_size")
-    if ask_depth is None or ask_depth <= 0:
+    if ask_depth <= 0:
         reasons.append("ask_depth_missing")
     if book_age_seconds is None:
         reasons.append("orderbook_timestamp_missing_or_invalid")
@@ -777,13 +777,28 @@ def _risk_reasons(
 def _simulate_fill(decision: dict[str, Any], order: dict[str, Any]) -> dict[str, Any]:
     market_ask = _num(decision.get("market_ask"), 0.0) or 0.0
     market_bid = _num(decision.get("market_bid"), 0.0) or 0.0
-    ask_depth = _num((decision.get("orderbook_snapshot") or {}).get("ask_depth"), 0.0) or 0.0
+    snapshot = decision.get("orderbook_snapshot") or {}
     requested_shares = _num((order.get("derived") or {}).get("requested_shares"), 0.0) or 0.0
-    fill_shares = min(requested_shares, ask_depth)
-    fill_amount = fill_shares * market_ask
+    asks = snapshot.get("asks") or []
+    walked = walk_buy_limit(asks, limit_price=market_ask, requested_shares=requested_shares) if asks else None
+    if walked:
+        fill_shares = float(walked["filled_shares"])
+        fill_amount = float(walked["filled_amount"])
+        average_fill_price = float(walked["average_fill_price"])
+        fill_levels = walked["fills"]
+    else:
+        available = _available_ask_shares(decision)
+        fill_shares = min(requested_shares, available)
+        fill_amount = fill_shares * market_ask
+        average_fill_price = market_ask if fill_shares > 0 else 0.0
+        fill_levels = (
+            [{"price": market_ask, "shares": fill_shares, "amount": fill_amount}]
+            if fill_shares > 0
+            else []
+        )
     unfilled_amount = max(0.0, order["requested_amount"] - fill_amount)
     fill_status = "filled" if unfilled_amount <= 0.01 else "partial"
-    unrealized = (market_bid - market_ask) * fill_shares
+    unrealized = (market_bid - average_fill_price) * fill_shares
     return {
         "status": "paper_filled" if fill_status == "filled" else "paper_partial",
         "lifecycle_status": "open",
@@ -793,19 +808,33 @@ def _simulate_fill(decision: dict[str, Any], order: dict[str, Any]) -> dict[str,
         "filled_amount": round(fill_amount, 4),
         "filled_shares": round(fill_shares, 6),
         "unfilled_amount": round(unfilled_amount, 4),
-        "average_fill_price": round(market_ask, 6),
+        "average_fill_price": round(average_fill_price, 6),
         "mark_price": round(market_bid, 6),
         "unrealized_pnl": round(unrealized, 6),
         "realized_pnl": 0.0,
         "risk_reasons": [],
         "fill": {
-            "price": round(market_ask, 6),
+            "price": round(average_fill_price, 6),
             "shares": round(fill_shares, 6),
             "amount": round(fill_amount, 4),
+            "levels": fill_levels,
+            "depth_basis": snapshot.get("depth_basis") or "legacy_total_depth",
             "mark_price": round(market_bid, 6),
             "unrealized_pnl": round(unrealized, 6),
         },
     }
+
+
+def _available_ask_shares(decision: dict[str, Any]) -> float:
+    snapshot = decision.get("orderbook_snapshot") or {}
+    market_ask = _num(decision.get("market_ask"), 0.0) or 0.0
+    asks = snapshot.get("asks") or []
+    if asks and market_ask > 0:
+        return max(0.0, executable_ask_shares(asks, market_ask))
+    best_size = _num(snapshot.get("best_ask_size"))
+    if best_size is not None and best_size > 0:
+        return best_size
+    return max(0.0, _num(snapshot.get("ask_depth"), 0.0) or 0.0)
 
 
 def _requested_amount(amount: float | None, max_per_trade_usd: float) -> tuple[float, list[str]]:

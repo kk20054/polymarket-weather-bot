@@ -210,6 +210,11 @@ class StrategyBase:
                 "spread": spread,
                 "bid_depth": bucket.get("bid_depth"),
                 "ask_depth": bucket.get("ask_depth"),
+                "best_bid_size": bucket.get("best_bid_size"),
+                "best_ask_size": bucket.get("best_ask_size"),
+                "bids": bucket.get("bids") or [],
+                "asks": bucket.get("asks") or [],
+                "depth_basis": bucket.get("depth_basis") or "legacy_total_depth",
                 "quote_timestamp": bucket.get("quote_timestamp"),
                 "source": bucket.get("orderbook_source"),
                 "snapshot_key": bucket.get("orderbook_snapshot_key"),
@@ -347,7 +352,10 @@ def book_age_seconds_value(value: Any, *, as_of: Any = None) -> float | None:
     if parsed is None:
         return None
     reference = parse_datetime(as_of) or datetime.now(timezone.utc)
-    return max(0.0, (reference - parsed).total_seconds())
+    age_seconds = (reference - parsed).total_seconds()
+    if age_seconds < -5.0:
+        return None
+    return max(0.0, age_seconds)
 
 
 def parse_datetime(value: Any) -> datetime | None:

@@ -32,6 +32,16 @@ METAR_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_METAR_SECONDS", "30
 FORECAST_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_SECONDS", "600") or "600")
 NWP_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_NWP_SECONDS", "3600") or "3600")
 NWP_ENSEMBLE_EVERY_N_RUNS = max(1, int(os.getenv("WEATHERBOT_SCHEDULER_ENSEMBLE_EVERY_N_RUNS", "6") or "6"))
+NWP_ENSEMBLE_MAX_AGE_SECONDS = max(
+    NWP_INTERVAL_SECONDS,
+    int(
+        os.getenv(
+            "WEATHERBOT_SCHEDULER_ENSEMBLE_MAX_AGE_SECONDS",
+            str(NWP_INTERVAL_SECONDS * NWP_ENSEMBLE_EVERY_N_RUNS),
+        )
+        or str(NWP_INTERVAL_SECONDS * NWP_ENSEMBLE_EVERY_N_RUNS)
+    ),
+)
 NWP_ENSEMBLE_MODELS = tuple(
     item.strip()
     for item in os.getenv("WEATHERBOT_SCHEDULER_ENSEMBLE_MODELS", "gfs_seamless").split(",")
@@ -436,7 +446,6 @@ class WeatherBotScheduler:
 
     async def _run_nwp_poller(self) -> dict[str, Any]:
         run_count = self.pollers["nwp_poller"].run_count
-        ensemble_due = (run_count + 1) % NWP_ENSEMBLE_EVERY_N_RUNS == 0
         all_rows = await asyncio.to_thread(
             _collection_rows,
             include_background=_background_due(run_count, NWP_BACKGROUND_MULTIPLIER),
@@ -448,9 +457,12 @@ class WeatherBotScheduler:
             baseline_multiplier=NWP_BACKGROUND_MULTIPLIER,
             active_city_keys=active_city_keys or None,
         )
+        ensemble_due_by_city = await asyncio.to_thread(_ensemble_due_by_city, rows)
+        ensemble_due_cities = sorted(city for city, due in ensemble_due_by_city.items() if due)
 
         async def run_city(row: dict[str, Any]) -> dict[str, Any]:
             city = str(row.get("city_key") or row.get("city"))
+            ensemble_due = bool(ensemble_due_by_city.get(city, True))
             openmeteo = await asyncio.wait_for(
                 asyncio.to_thread(
                     run_openmeteo_fetch,
@@ -482,6 +494,7 @@ class WeatherBotScheduler:
                 "station_id": row.get("station_id"),
                 "openmeteo": openmeteo,
                 "ensemble": ensemble,
+                "ensemble_due": ensemble_due,
             }
 
         result = await _run_city_batch(
@@ -494,8 +507,10 @@ class WeatherBotScheduler:
         return {
             **result,
             **cadence,
-            "ensemble_due": ensemble_due,
+            "ensemble_due": bool(ensemble_due_cities),
+            "ensemble_due_cities": ensemble_due_cities,
             "ensemble_every_n_runs": NWP_ENSEMBLE_EVERY_N_RUNS,
+            "ensemble_max_age_seconds": NWP_ENSEMBLE_MAX_AGE_SECONDS,
             "ensemble_models": list(NWP_ENSEMBLE_MODELS),
             "ensemble_forecast_days": NWP_ENSEMBLE_FORECAST_DAYS,
         }
@@ -1349,6 +1364,48 @@ def _parse_time(value: str) -> datetime | None:
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except Exception:
         return None
+
+
+def _ensemble_due_by_city(
+    rows: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    max_age_seconds: int = NWP_ENSEMBLE_MAX_AGE_SECONDS,
+    path: Path | None = None,
+) -> dict[str, bool]:
+    """Use persisted ensemble age so service restarts do not reset cadence."""
+
+    cities = sorted({
+        str(row.get("city_key") or row.get("city") or "").strip()
+        for row in rows
+        if str(row.get("city_key") or row.get("city") or "").strip()
+    })
+    if not cities:
+        return {}
+    placeholders = ",".join("?" for _city in cities)
+    with connect(path) as conn:
+        latest_rows = conn.execute(
+            f"""
+            SELECT city, MAX(COALESCE(available_at, retrieved_at)) AS latest_at
+            FROM forecast_runs
+            WHERE city IN ({placeholders})
+              AND source LIKE 'openmeteo_ensemble_%'
+              AND COALESCE(parse_status, 'parsed') = 'parsed'
+            GROUP BY city
+            """,
+            tuple(cities),
+        ).fetchall()
+    latest_by_city = {
+        str(row["city"]): _parse_time(str(row["latest_at"] or ""))
+        for row in latest_rows
+    }
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    bounded_age = max(NWP_INTERVAL_SECONDS, int(max_age_seconds or NWP_ENSEMBLE_MAX_AGE_SECONDS))
+    due: dict[str, bool] = {}
+    for city in cities:
+        latest = latest_by_city.get(city)
+        due[city] = latest is None or (current - latest.astimezone(timezone.utc)).total_seconds() >= bounded_age
+    return due
 
 
 def _bias_refresh_due(

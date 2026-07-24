@@ -26,7 +26,7 @@ def _bucket(key, low, high, ask, bid):
         "tick_size": 0.01,
         "order_min_size": 5.0,
         "enable_order_book": True,
-        "quote_timestamp": "2099-07-20T12:00:00+00:00",
+        "quote_timestamp": "2026-07-20T12:00:00+00:00",
         "strict_match_status": "matched",
         "strict_match_reasons": [],
     }

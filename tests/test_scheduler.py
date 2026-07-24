@@ -7,7 +7,7 @@ import os
 import threading
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,10 +16,10 @@ from weatherbot_v3.metar import fetch_recent_hours
 from weatherbot_v3.scheduler import (
     FORECAST_INTERVAL_SECONDS,
     HISTORICAL_INTERVAL_SECONDS,
-    NWP_ENSEMBLE_EVERY_N_RUNS,
     WeatherBotScheduler,
     _bias_refresh_due,
     _compact_city_payload,
+    _ensemble_due_by_city,
     _remaining_cycle_delay,
     _tiered_refresh_rows,
 )
@@ -200,6 +200,8 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
     async def test_nwp_poller_skips_per_city_readiness_refresh(self):
         rows = [{"city_key": "chicago", "station_id": "KORD"}]
         with patch("weatherbot_v3.scheduler._enabled_rows", return_value=rows), patch(
+            "weatherbot_v3.scheduler._ensemble_due_by_city", return_value={"chicago": False}
+        ), patch(
             "weatherbot_v3.scheduler.run_openmeteo_fetch",
             return_value={"ok": True, "runs_upserted": 6},
         ) as fetch:
@@ -212,9 +214,10 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
     async def test_nwp_poller_persists_real_gfs_ensemble_on_bounded_cadence(self):
         rows = [{"city_key": "chicago", "station_id": "KORD", "tier": 1}]
         scheduler = WeatherBotScheduler(city_concurrency=1)
-        scheduler.pollers["nwp_poller"].run_count = NWP_ENSEMBLE_EVERY_N_RUNS - 1
         with patch("weatherbot_v3.scheduler._collection_rows", return_value=rows), patch(
             "weatherbot_v3.scheduler._active_market_city_keys", return_value={"chicago"}
+        ), patch(
+            "weatherbot_v3.scheduler._ensemble_due_by_city", return_value={"chicago": True}
         ), patch(
             "weatherbot_v3.scheduler.run_openmeteo_fetch",
             side_effect=[
@@ -231,6 +234,49 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(fetch.call_args_list[1].kwargs["ensemble"])
         self.assertEqual(fetch.call_args_list[1].kwargs["models_arg"], "gfs_seamless")
         self.assertFalse(fetch.call_args_list[1].kwargs["refresh_readiness"])
+
+    def test_ensemble_due_uses_persisted_age_across_scheduler_restarts(self):
+        path = test_db_path("scheduler_ensemble_age")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        init_v3_db(path)
+        now = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
+        with connect(path) as conn:
+            conn.execute(
+                """
+                INSERT INTO forecast_runs (
+                    run_key, city, target_date, source, model, retrieved_at,
+                    available_at, unit, mean_high, training_eligible, parse_status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "ensemble:fresh",
+                    "chicago",
+                    "2026-07-25",
+                    "openmeteo_ensemble_gfs_seamless",
+                    "gfs_seamless",
+                    (now - timedelta(hours=2)).isoformat(),
+                    (now - timedelta(hours=2)).isoformat(),
+                    "C",
+                    28.0,
+                    1,
+                    "parsed",
+                    now.isoformat(),
+                ),
+            )
+
+        rows = [
+            {"city_key": "chicago"},
+            {"city_key": "shanghai"},
+        ]
+        due = _ensemble_due_by_city(
+            rows,
+            now=now,
+            max_age_seconds=6 * 3600,
+            path=path,
+        )
+
+        self.assertFalse(due["chicago"])
+        self.assertTrue(due["shanghai"])
 
     async def test_pws_poller_skips_per_city_readiness_refresh(self):
         rows = [{"city_key": "chicago", "station_id": "KORD"}]

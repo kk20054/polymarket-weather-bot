@@ -588,6 +588,7 @@ def openmeteo_previous_runs_from_response(
     members_by_run: list[list[dict[str, Any]]] = []
     for day in _normalize_previous_days(previous_days):
         field = f"temperature_2m_previous_day{day}"
+        slice_hash = _stable_hash({"response_hash": raw_hash, "field": field})
         series = hourly.get(field) if isinstance(hourly, dict) else None
         if not isinstance(series, list) or not series:
             runs.append(_failed_previous_run(profile, model, target_date, day, raw_hash, source_url, retrieved, payload, [f"missing_{field}"]))
@@ -603,7 +604,7 @@ def openmeteo_previous_runs_from_response(
         high_point = max(hourly_points, key=lambda item: float(item.get("temperature_2m") or -999))
         run_at = _previous_run_at(target_date, profile.timezone, day)
         run = {
-            "run_key": f"openmeteo-previous:{profile.city}:{target_date}:{model}:{run_at.isoformat()}:{raw_hash[:16]}",
+            "run_key": f"openmeteo-previous:{profile.city}:{target_date}:{model}:{run_at.isoformat()}:{slice_hash[:16]}",
             "city": profile.city,
             "target_date": target_date,
             "source": f"openmeteo_previous_{model}_day{day}",
@@ -613,8 +614,8 @@ def openmeteo_previous_runs_from_response(
             "run_type": "forecast",
             "run_at": run_at.isoformat(),
             "retrieved_at": retrieved.isoformat() if retrieved else utc_now(),
-            "available_at": run_at.isoformat(),
-            "availability_basis": "archive_run_at",
+            "available_at": "",
+            "availability_basis": "fixed_lead_slice_diagnostic",
             "valid_at": str(high_point.get("valid_at") or ""),
             "horizon": f"D+{day}",
             "lead_hours": day * 24.0,
@@ -627,20 +628,21 @@ def openmeteo_previous_runs_from_response(
             "std_high": 0.0,
             "member_count": 1,
             "source_url": source_url,
-            "raw_response_hash": raw_hash,
+            "raw_response_hash": slice_hash,
             "data_license": "open-meteo-free-api",
             "quality_flags": [
                 "openmeteo_previous_runs",
                 "archived_model_output",
-                "trusted_forecast_archive",
+                "synthetic_fixed_lead_slice",
+                "diagnostic_only",
                 f"previous_day{day}",
             ],
             "parser_version": OPENMETEO_PREVIOUS_PARSER_VERSION,
             "parse_status": "parsed",
             "parse_warnings": [],
             "source_unit": "C",
-            "training_eligible": True,
-            "ineligibility_reason": "",
+            "training_eligible": False,
+            "ineligibility_reason": "previous_runs_is_fixed_lead_slice_not_single_model_run",
             "meta": {
                 "provider": "open-meteo",
                 "endpoint": "previous_runs",
@@ -648,6 +650,11 @@ def openmeteo_previous_runs_from_response(
                 "previous_day": day,
                 "target_local_date": target_date,
                 "raw_response_hash": raw_hash,
+                "slice_hash": slice_hash,
+                "time_semantics": (
+                    "each valid hour was forecast previous_dayN earlier; "
+                    "the local-day vector is not one model initialization"
+                ),
             },
         }
         member = {
@@ -703,10 +710,16 @@ def _runs_from_member_series(
         members: list[dict[str, Any]] = []
         highs: list[float] = []
         peak_valid_at = ""
+        member_hour_counts: dict[str, int] = {}
         for member_id, hourly_points in sorted(grouped.items()):
             temps = [float(point["temperature_2m"]) for point in hourly_points if point.get("temperature_2m") is not None]
             if not temps:
                 continue
+            member_hour_counts[member_id] = len({
+                str(point.get("valid_at") or "")
+                for point in hourly_points
+                if point.get("temperature_2m") is not None
+            })
             high = max(temps)
             high_point = max(hourly_points, key=lambda item: float(item.get("temperature_2m") or -999))
             peak_valid_at = max(peak_valid_at, str(high_point.get("valid_at") or ""))
@@ -725,6 +738,35 @@ def _runs_from_member_series(
             continue
         retrieved_hour = _floor_hour(retrieved)
         source = f"openmeteo_{model}" if endpoint_kind == "deterministic" else f"openmeteo_ensemble_{model}"
+        expected_hour_count = _expected_local_day_hours(target_date, profile.timezone)
+        minimum_hour_count = min(member_hour_counts.values(), default=0)
+        required_hour_count = max(1, math.ceil(expected_hour_count * 0.95))
+        lead_hours = _lead_hours(retrieved, peak_valid_at)
+        incomplete_ensemble_day = bool(
+            endpoint_kind == "ensemble"
+            and expected_hour_count > 0
+            and minimum_hour_count < required_hour_count
+        )
+        run_warnings = sorted(set([
+            *warnings,
+            *(
+                [
+                    (
+                        "incomplete_ensemble_local_day:"
+                        f"{minimum_hour_count}/{expected_hour_count}_hours"
+                    )
+                ]
+                if incomplete_ensemble_day
+                else []
+            ),
+        ]))
+        ineligibility_reason = ""
+        if incomplete_ensemble_day:
+            ineligibility_reason = (
+                "forecast_lead_negative"
+                if lead_hours is not None and lead_hours < 0
+                else "incomplete_ensemble_local_day"
+            )
         meta = {
             "provider": "open-meteo",
             "endpoint": endpoint_kind,
@@ -736,6 +778,10 @@ def _runs_from_member_series(
             "raw_response_hash": raw_hash,
             "temperature_storage": "converted_to_city_unit",
             "raw_temperature_unit": "C",
+            "expected_local_day_hours": expected_hour_count,
+            "minimum_member_hour_count": minimum_hour_count,
+            "member_hour_counts": member_hour_counts,
+            "local_day_coverage_complete": not incomplete_ensemble_day,
         }
         run = {
             "run_key": (
@@ -755,7 +801,7 @@ def _runs_from_member_series(
             "availability_basis": "retrieved_at",
             "valid_at": peak_valid_at,
             "horizon": _horizon(profile, target_date, retrieved),
-            "lead_hours": _lead_hours(retrieved, peak_valid_at),
+            "lead_hours": lead_hours,
             "latitude": profile.latitude,
             "longitude": profile.longitude,
             "station_id": profile.station_id,
@@ -767,13 +813,17 @@ def _runs_from_member_series(
             "source_url": source_url,
             "raw_response_hash": raw_hash,
             "data_license": "open-meteo-free-api",
-            "quality_flags": ["openmeteo_model_output", "run_time_inferred"],
+            "quality_flags": [
+                "openmeteo_model_output",
+                "run_time_inferred",
+                *(["incomplete_local_day_coverage"] if incomplete_ensemble_day else []),
+            ],
             "parser_version": OPENMETEO_PARSER_VERSION,
-            "parse_status": "parsed",
-            "parse_warnings": sorted(set(warnings)),
+            "parse_status": "partial" if incomplete_ensemble_day else "parsed",
+            "parse_warnings": run_warnings,
             "source_unit": "C",
-            "training_eligible": True,
-            "ineligibility_reason": "",
+            "training_eligible": not incomplete_ensemble_day,
+            "ineligibility_reason": ineligibility_reason,
             "meta": meta,
             "raw_response_summary": {
                 "latitude": payload.get("latitude"),
@@ -786,6 +836,17 @@ def _runs_from_member_series(
         runs.append(run)
         members_by_run.append(members)
     return runs, members_by_run
+
+
+def _expected_local_day_hours(target_date: str, timezone_name: str) -> int:
+    try:
+        local_date = datetime.strptime(str(target_date), "%Y-%m-%d").date()
+        zone = ZoneInfo(str(timezone_name or "UTC"))
+    except (ValueError, ZoneInfoNotFoundError):
+        return 24
+    start = datetime.combine(local_date, datetime_time.min, tzinfo=zone)
+    end = datetime.combine(local_date + timedelta(days=1), datetime_time.min, tzinfo=zone)
+    return int(round((end.astimezone(timezone.utc) - start.astimezone(timezone.utc)).total_seconds() / 3600.0))
 
 
 def _failed_openmeteo_run(

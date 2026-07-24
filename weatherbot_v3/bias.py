@@ -81,6 +81,9 @@ def train_bias_table(
             additive_bias = statistics.median(residuals) if residuals else 0.0
             corrected = [value - additive_bias for value in residuals]
             recent_corrected = corrected[-7:]
+            walk_forward = _walk_forward_errors(records)
+            walk_forward_values = [float(record["corrected_error_c"]) for record in walk_forward]
+            recent_walk_forward = walk_forward_values[-7:]
             truth_counts = Counter(str(record["truth_basis"]) for record in records)
             rows.append({
                 "city": city,
@@ -94,6 +97,11 @@ def train_bias_table(
                 "mae_c": _round_metric(_mae(corrected)),
                 "rmse_c": _round_metric(_rmse(corrected)),
                 "mae_7d_c": _round_metric(_mae(recent_corrected)),
+                "walk_forward_sample_count": len(walk_forward_values),
+                "walk_forward_mae_c": _round_metric(_mae(walk_forward_values)),
+                "walk_forward_rmse_c": _round_metric(_rmse(walk_forward_values)),
+                "walk_forward_mae_7d_c": _round_metric(_mae(recent_walk_forward)),
+                "walk_forward_dates": [record["target_date"] for record in walk_forward],
                 "sample_count": len(records),
                 "independent_dates": len(records),
                 "sample_dates": [record["target_date"] for record in records],
@@ -102,7 +110,8 @@ def train_bias_table(
                 "last_trained_at": now,
                 "bias_definition": "forecast_high_c_minus_truth_high_c",
                 "correction_application": "forecast_high_c_minus_additive_bias_c",
-                "lead_time_policy": "prefer_openmeteo_previous_day1_then_latest_pre_local_day",
+                "weight_error_metric": "walk_forward_mae_7d_c",
+                "lead_time_policy": "latest_real_snapshot_available_strictly_before_target_local_day",
                 "archived_previous_day1_samples": sum(
                     1 for record in records if record.get("forecast_snapshot_type") == "openmeteo_previous_day1"
                 ),
@@ -119,8 +128,13 @@ def train_bias_table(
         "source": "weatherbot_v3.bias.train_bias_table",
         "training_policy": {
             "truth_priority": ["hong_kong_observatory_daily_extract", "wunderground_daily", "iem_asos_approximation"],
-            "forecast_cutoff": "prefer fixed T+24 previous_day1; otherwise latest forecast as_of strictly before target local-day start",
+            "forecast_cutoff": "latest real forecast snapshot as_of strictly before target local-day start",
             "independent_sample": "one forecast snapshot per city/model/target_date",
+            "weight_error": "expanding-window bias correction; each target date is scored using prior dates only",
+            "excluded_archive_semantics": (
+                "Open-Meteo Previous Runs fields are fixed-lead slices across multiple "
+                "initializations and are diagnostic-only, not a single archived run"
+            ),
             "minimum_runtime_samples": BIAS_MIN_SAMPLE_COUNT,
             "as_of_date_exclusive": as_of_date_exclusive or "",
         },
@@ -251,6 +265,9 @@ def _residual_records_for_family(
         if model_family(row.get("source") or row.get("model") or "") != family:
             continue
         family_rows += 1
+        if _is_previous_run_slice(row):
+            invalid_as_of += 1
+            continue
         profile = SETTLEMENT_REGISTRY.get(city)
         if not forecast_source_matches_profile_location(row.get("source_url"), profile):
             location_mismatch_excluded += 1
@@ -277,8 +294,7 @@ def _residual_records_for_family(
         candidates.setdefault(target_date, []).append(row)
     records: list[dict[str, Any]] = []
     for target_date in sorted(candidates):
-        preferred = [row for row in candidates[target_date] if _is_previous_day1(row)]
-        selected = max(preferred or candidates[target_date], key=lambda row: (row["as_of"], int(row.get("id") or 0)))
+        selected = max(candidates[target_date], key=lambda row: (row["as_of"], int(row.get("id") or 0)))
         truth = truth_by_date[target_date]
         forecast_c = _to_c(float(selected["mean_high"]), str(selected.get("unit") or "C"))
         records.append({
@@ -289,7 +305,7 @@ def _residual_records_for_family(
             "truth_exact": bool(truth["exact"]),
             "residual_c": forecast_c - float(truth["high_c"]),
             "source": str(selected.get("source") or ""),
-            "forecast_snapshot_type": "openmeteo_previous_day1" if _is_previous_day1(selected) else "latest_pre_local_day",
+            "forecast_snapshot_type": "latest_pre_local_day",
             "forecast_run_id": int(selected.get("id") or 0),
             "forecast_as_of": selected["as_of"].isoformat(),
             "lead_hours": selected.get("lead_hours"),
@@ -304,10 +320,35 @@ def _residual_records_for_family(
     }
 
 
+def _walk_forward_errors(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Score each residual using a bias fitted only on earlier target dates."""
+
+    ordered = sorted(records, key=lambda row: str(row.get("target_date") or ""))
+    prior_residuals: list[float] = []
+    scored: list[dict[str, Any]] = []
+    for record in ordered:
+        residual = float(record["residual_c"])
+        if prior_residuals:
+            prior_bias = float(statistics.median(prior_residuals))
+            scored.append({
+                "target_date": str(record.get("target_date") or ""),
+                "forecast_run_id": int(record.get("forecast_run_id") or 0),
+                "prior_sample_count": len(prior_residuals),
+                "prior_bias_c": round(prior_bias, 4),
+                "corrected_error_c": residual - prior_bias,
+            })
+        prior_residuals.append(residual)
+    return scored
+
+
 def _is_previous_day1(row: dict[str, Any]) -> bool:
     source = str(row.get("source") or "").lower()
     horizon = str(row.get("horizon") or "").upper()
     return "openmeteo_previous_" in source and source.endswith("_day1") and horizon == "D+1"
+
+
+def _is_previous_run_slice(row: dict[str, Any]) -> bool:
+    return "openmeteo_previous_" in str(row.get("source") or "").lower()
 
 
 def _target_local_start_utc(target_date: str, timezone_name: str) -> datetime | None:

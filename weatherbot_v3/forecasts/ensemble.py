@@ -433,6 +433,127 @@ def distribution_for_prediction(prediction: dict[str, Any], buckets: list[dict[s
     return result
 
 
+def family_mixture_distribution_for_prediction(
+    prediction: dict[str, Any],
+    buckets: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Blend real ensemble members with calibrated deterministic family kernels."""
+
+    if str(prediction.get("forecast_algo") or prediction.get("method") or "") != POLYWX_ALIGNED_ALGO:
+        return None
+    components = [
+        component
+        for component in (prediction.get("components") or [])
+        if isinstance(component, dict) and float(component.get("weight") or 0.0) > 0.0
+    ]
+    has_member_ensemble = any(
+        "ensemble" in str(component.get("source") or "").lower()
+        and len(component.get("adjusted_daily_highs_c") or []) >= MIN_MEMBER_COUNT_FOR_SINGLE_FAMILY
+        for component in components
+    )
+    if not has_member_ensemble:
+        return None
+
+    rows: list[dict[str, Any]] = []
+    family_methods: dict[str, str] = {}
+    for bucket in buckets:
+        bounds = bucket_bounds_in_prediction_unit(bucket, "C")
+        if bounds is None:
+            continue
+        low, high = bounds
+        probability = 0.0
+        family_breakdown: dict[str, float] = {}
+        for component in components:
+            family = str(component.get("family") or component.get("source") or "unknown")
+            family_weight = float(component.get("weight") or 0.0)
+            highs = [
+                float(value)
+                for value in (component.get("adjusted_daily_highs_c") or [])
+                if _first_number(value) is not None
+            ]
+            is_real_ensemble = (
+                "ensemble" in str(component.get("source") or "").lower()
+                and len(highs) >= MIN_MEMBER_COUNT_FOR_SINGLE_FAMILY
+            )
+            if is_real_ensemble:
+                family_probability = sum(
+                    1.0 for value in highs if _sample_in_bucket(value, low, high)
+                ) / len(highs)
+                family_methods[family] = "empirical_members"
+            else:
+                center = _first_number(component.get("model_daily_high_c"))
+                if center is None:
+                    continue
+                sigma_c = max(
+                    SIGMA_FLOOR_C,
+                    _first_number(component.get("effective_mae_c"), component.get("mae_7d"))
+                    or UNCALIBRATED_SIGMA_C,
+                )
+                family_probability = _gaussian_mass(float(center), float(sigma_c), low, high)
+                family_methods[family] = "calibrated_gaussian_kernel"
+            contribution = family_weight * family_probability
+            family_breakdown[family] = contribution
+            probability += contribution
+        market_probability = _market_probability(bucket)
+        rows.append({
+            "bucket_key": bucket.get("bucket_key") or "",
+            "bucket_label": bucket.get("bucket_label") or "",
+            "bucket_low": None if math.isinf(low) and low < 0 else low,
+            "bucket_high": None if math.isinf(high) and high > 0 else high,
+            "bucket_direction": bucket.get("bucket_direction") or "",
+            "bucket_unit": str(prediction.get("unit") or "C").upper(),
+            "market_id": bucket.get("market_id") or "",
+            "yes_token_id": bucket.get("yes_token_id") or "",
+            "probability": probability,
+            "probability_raw": probability,
+            "family_contributions": family_breakdown,
+            "market_probability": market_probability,
+            "best_bid": _first_number(bucket.get("best_bid")),
+            "best_ask": _first_number(bucket.get("best_ask")),
+            "price": _first_number(bucket.get("price")),
+            "edge": None if market_probability is None else probability - market_probability,
+        })
+    total = sum(float(row.get("probability") or 0.0) for row in rows)
+    if total <= 0:
+        return None
+    for row in rows:
+        row["probability"] = float(row["probability"]) / total
+        row["probability_raw"] = row["probability"]
+        market_probability = row.get("market_probability")
+        row["edge"] = (
+            None
+            if market_probability is None
+            else float(row["probability"]) - float(market_probability)
+        )
+        row["family_contributions"] = {
+            family: value / total
+            for family, value in row["family_contributions"].items()
+        }
+    ranked = sorted(rows, key=lambda row: float(row.get("probability") or 0.0), reverse=True)
+    return {
+        "ok": True,
+        "method": "family-mixture-v1",
+        "items": rows,
+        "sum_probability": sum(float(row["probability"]) for row in rows),
+        "normalized": True,
+        "mu": prediction.get("mu"),
+        "sigma": prediction.get("sigma"),
+        "unit": str(prediction.get("unit") or "C").upper(),
+        "family_methods": family_methods,
+        "top_model": ranked[:5],
+    }
+
+
+def _gaussian_mass(mu: float, sigma: float, low: float, high: float) -> float:
+    lower = 0.0 if math.isinf(low) and low < 0 else _normal_cdf((low - mu) / sigma)
+    upper = 1.0 if math.isinf(high) and high > 0 else _normal_cdf((high - mu) / sigma)
+    return max(0.0, upper - lower)
+
+
+def _normal_cdf(value: float) -> float:
+    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+
 def previous_run_samples(
     city_key: str,
     target_date: str,
@@ -441,7 +562,7 @@ def previous_run_samples(
     models: list[str] | tuple[str, ...] | None = None,
     max_lead_days: int = 7,
 ) -> list[dict[str, Any]]:
-    """Return archived Previous Runs daily-high samples for walk-forward checks."""
+    """Return diagnostic fixed-lead slices; never use these as single-run training rows."""
     wanted_models = {str(model).strip().lower() for model in (models or []) if str(model).strip()}
     max_lead = max(1, min(int(max_lead_days or 7), 7))
     with connect(path) as conn:
@@ -458,7 +579,6 @@ def previous_run_samples(
                 JOIN forecast_members fm ON fm.run_id = fr.id
                 WHERE fr.city = ?
                   AND fr.target_date = ?
-                  AND COALESCE(fr.training_eligible, 0) = 1
                   AND COALESCE(fr.parse_status, 'parsed') = 'parsed'
                   AND fr.source LIKE 'openmeteo_previous_%'
                 ORDER BY fr.lead_hours ASC, fr.model, fm.member_id
@@ -468,14 +588,6 @@ def previous_run_samples(
         ]
     samples: list[dict[str, Any]] = []
     for row in rows:
-        assessment = assess_forecast_run(
-            row,
-            target_date=target_date,
-            timezone_name=str(row.get("timezone") or "UTC"),
-            require_training=True,
-        )
-        if not assessment["ok"]:
-            continue
         model = str(row.get("model") or "").lower()
         source = str(row.get("source") or "").lower()
         if wanted_models and model not in wanted_models and source not in wanted_models:
@@ -495,6 +607,8 @@ def previous_run_samples(
             "lead_hours": lead_hours,
             "run_at": row.get("run_at"),
             "retrieved_at": row.get("retrieved_at"),
+            "diagnostic_only": True,
+            "time_semantics": "fixed_lead_slice_not_single_model_run",
         })
     return samples
 
@@ -518,6 +632,7 @@ def previous_run_distribution_for_buckets(
     result = bucket_probabilities(samples, buckets)
     result["method"] = "openmeteo-previous-runs-v1"
     result["sample_count"] = len(samples)
+    result["diagnostic_only"] = True
     return result
 
 
@@ -731,7 +846,7 @@ def _latest_forecast_members(
                 WHERE fr.city = ?
                   AND fr.target_date = ?
                   AND UPPER(COALESCE(fr.station_id, '')) = ?
-                  AND COALESCE(fr.parse_status, 'parsed') = 'parsed'
+                  AND COALESCE(fr.parse_status, 'parsed') IN ('parsed', 'partial')
                   AND (fr.source LIKE 'openmeteo_%' OR fr.source = 'weathercom_v3_forecast')
                 ORDER BY COALESCE(fr.available_at, fr.retrieved_at) DESC, fr.id DESC, fm.member_id
                 """,
@@ -747,10 +862,26 @@ def _latest_forecast_members(
             # predicted daily-high hour has passed. Keep the run for point-level
             # stitching, where only hours still in the future at retrieval time
             # are eligible. Other ineligibility reasons remain fail-closed.
-            if not training_eligible and ineligibility_reason != "forecast_lead_negative":
+            if not training_eligible and ineligibility_reason not in {
+                "forecast_lead_negative",
+                "incomplete_ensemble_local_day",
+            }:
                 continue
+        assessment_row = row
+        if (
+            selection_mode == "stitch_local_day"
+            and str(row.get("parse_status") or "").lower() == "partial"
+            and ineligibility_reason in {
+                "forecast_lead_negative",
+                "incomplete_ensemble_local_day",
+            }
+        ):
+            # D+0 reconstruction evaluates each member-hour against its own
+            # availability time, so an incomplete aggregate day can be safely
+            # consumed without treating its partial max as a full-day max.
+            assessment_row = {**row, "parse_status": "parsed"}
         assessment = assess_forecast_run(
-            row,
+            assessment_row,
             as_of=as_of,
             target_date=target_date,
             timezone_name=profile.timezone,
@@ -1177,7 +1308,15 @@ def _mae_for(
             continue
         if int(row.get("sample_count") or 0) < BIAS_MIN_SAMPLE_COUNT:
             return None
-        for key in ("mae_7d_c", "mae_c", "mae", "rmse_c", "rmse"):
+        for key in (
+            "walk_forward_mae_7d_c",
+            "walk_forward_mae_c",
+            "mae_7d_c",
+            "mae_c",
+            "mae",
+            "rmse_c",
+            "rmse",
+        ):
             value = _first_number(row.get(key))
             if value is not None:
                 return round(float(value), 4)

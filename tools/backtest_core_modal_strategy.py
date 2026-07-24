@@ -6,6 +6,7 @@ import math
 import sqlite3
 import sys
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from statistics import fmean
@@ -21,6 +22,11 @@ from weatherbot_v3.bias import train_bias_table
 from weatherbot_v3.config import load_config
 from weatherbot_v3.deb import bucket_probabilities, build_daily_max_prediction, probability_mu_for_prediction
 from weatherbot_v3.paper_settlement import bucket_contains_celsius
+from weatherbot_v3.orderbook_replay import (
+    executable_ask_shares,
+    select_orderbook_as_of,
+    snapshot_from_row,
+)
 from weatherbot_v3.registry import get_city_profile
 from weatherbot_v3.strategies import CoreModalStrategy
 from weatherbot_v3.strategy_profiles import core_modal_v1_parameters
@@ -343,14 +349,12 @@ def _market_buckets_with_books(city: str, target_date: str, cutoff: str, db_path
             ).fetchall()
         ]
         for bucket in buckets:
-            book = conn.execute(
-                """
-                SELECT * FROM orderbooks
-                WHERE yes_token_id=? AND created_at<=?
-                ORDER BY created_at DESC, id DESC LIMIT 1
-                """,
-                (str(bucket.get("yes_token_id") or ""), cutoff),
-            ).fetchone()
+            book = select_orderbook_as_of(
+                conn,
+                decision_time=cutoff,
+                yes_token_id=str(bucket.get("yes_token_id") or ""),
+                market_id=str(bucket.get("market_id") or ""),
+            )
             if book is None:
                 bucket.update({
                     "best_bid": None,
@@ -359,21 +363,34 @@ def _market_buckets_with_books(city: str, target_date: str, cutoff: str, db_path
                     "quote_timestamp": "",
                     "bid_depth": None,
                     "ask_depth": None,
+                    "best_bid_size": None,
+                    "best_ask_size": None,
+                    "bids": [],
+                    "asks": [],
                     "orderbook_snapshot_key": "",
+                    "order_min_size": None,
+                    "tick_size": None,
+                    "enable_order_book": False,
                 })
                 continue
             row = dict(book)
+            snapshot = snapshot_from_row(row)
             bucket.update({
                 "best_bid": row.get("best_bid"),
                 "best_ask": row.get("best_ask"),
                 "spread": row.get("spread"),
                 "volume": row.get("volume"),
-                "order_min_size": row.get("order_min_size") or bucket.get("order_min_size"),
-                "tick_size": row.get("tick_size") or bucket.get("tick_size"),
+                "order_min_size": row.get("order_min_size") if _number(row.get("order_min_size")) else None,
+                "tick_size": row.get("tick_size") if _number(row.get("tick_size")) else None,
                 "enable_order_book": bool(row.get("enable_order_book")),
-                "quote_timestamp": row.get("quote_timestamp") or row.get("created_at"),
+                "quote_timestamp": snapshot.get("quote_timestamp"),
                 "bid_depth": row.get("bid_depth"),
                 "ask_depth": row.get("ask_depth"),
+                "best_bid_size": snapshot.get("best_bid_size"),
+                "best_ask_size": snapshot.get("best_ask_size"),
+                "bids": snapshot.get("bids") or [],
+                "asks": snapshot.get("asks") or [],
+                "depth_basis": snapshot.get("depth_basis"),
                 "orderbook_snapshot_key": row.get("snapshot_key"),
                 "orderbook_source": row.get("snapshot_type") or "stored_orderbook",
             })
@@ -390,9 +407,15 @@ def _executor_reasons(decision: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     ask = _number(decision.get("market_ask"))
     spread = _number((decision.get("orderbook_snapshot") or {}).get("spread"))
-    depth = _number((decision.get("orderbook_snapshot") or {}).get("ask_depth"))
+    snapshot = decision.get("orderbook_snapshot") or {}
     size = float(decision.get("position_size_usd") or 0.0)
     shares = size / ask if ask and ask > 0 else 0.0
+    asks = snapshot.get("asks") or []
+    depth = (
+        executable_ask_shares(asks, ask)
+        if asks and ask is not None
+        else _number(snapshot.get("best_ask_size"))
+    )
     minimum = _number(decision.get("order_min_size"))
     if ask is None or ask < cfg.min_price or ask > cfg.max_price:
         reasons.append("executor_price_outside_limits")
@@ -436,10 +459,14 @@ def _authoritative_days_before(city: str, station_id: str, target_date: str, db_
         ).fetchone()[0])
 
 
-def _readonly(path: Path) -> sqlite3.Connection:
+@contextmanager
+def _readonly(path: Path):
     conn = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True, timeout=30)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _checkpoint_utc(target_date: str, timezone_name: str, checkpoint: str) -> str:
