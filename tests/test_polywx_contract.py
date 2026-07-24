@@ -22,7 +22,7 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         self.assertIn("docs/CURRENT_STATE.md", agents)
         self.assertIn("docs/AGENTS_DETAIL_CN.md", agents)
         self.assertIn("Read only `docs/CURRENT_STATE.md`", agents)
-        self.assertIn("Git history is the project ledger", agents)
+        self.assertIn("Git history: the project ledger", agents)
         self.assertNotIn("PROJECT_PROGRESS_CN.md", agents)
         self.assertNotIn("PROGRESS_ARCHIVE_CN.md", agents)
         self.assertIn("state-print", cli)
@@ -41,7 +41,7 @@ class PolyWXDashboardContractTests(unittest.TestCase):
         agents = read_text("AGENTS.md")
         detail = read_text("docs/AGENTS_DETAIL_CN.md")
 
-        self.assertIn("Reference Fusion Architecture", agents)
+        self.assertIn("docs/AGENTS_DETAIL_CN.md", agents)
         self.assertIn("Reference Fusion Architecture", detail)
         for reference in (
             "punkpeye/awesome-mcp-servers",

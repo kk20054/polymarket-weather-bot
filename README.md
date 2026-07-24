@@ -4,6 +4,18 @@
 
 > 当前状态：可采集、可分析、可模拟；实盘保持锁定。历史证据尚未证明正收益，不应把“天气关注”或正概率差直接当成买入建议。
 
+## 项目入口
+
+本项目只维护三份默认入口，避免每轮重新阅读全部历史：
+
+| 文件 | 职责 |
+| --- | --- |
+| `AGENTS.md` | Codex/开发代理规则、安全边界和标准命令 |
+| `docs/CURRENT_STATE.md` | 当前 Phase、阻塞项和唯一下一步 |
+| `README.md` | 安装、启动、操作、策略含义和局限 |
+
+外部资料先查 `docs/SOURCE_REGISTER.csv`；架构、存储和详细 UI/算法规则按需读取 `docs/` 下的索引文档。Git 是唯一代码版本历史，不再复制“最新版/最终版”源码目录。
+
 ## 当前能力
 
 - 51 个工作台城市的机场站点、时区和结算规则注册表；尚未完成采集的城市会明确标为待接入。
@@ -48,8 +60,11 @@ Weather.com v3 原始预报会随调度器持续保存；Wunderground 前一日 
 | --- | --- |
 | `weatherbot_v3/` | 生产化采集、派生、策略、执行和风控 |
 | `dashboard_server.py` | FastAPI 与看板适配层 |
-| `frontend/src/` | React 看板 |
+| `frontend/src/` | 唯一可编辑的 React 生产看板 |
+| `dashboard/` | FastAPI 兼容静态页，不再新增功能 |
 | `tests/` | 单元、契约和集成测试 |
+| `scripts/dev.ps1` | 唯一标准启动命令 |
+| `scripts/check.ps1` | 唯一标准检查命令 |
 | `tools/` | 回放与只读诊断工具 |
 | `data/` | 本地运行数据 Junction，实际指向 `D:\WeatherBot\data` |
 | `legacy/` | 旧版，只读参考 |
@@ -80,6 +95,15 @@ FEISHU_WEBHOOK_URL=***
 没有某个可选密钥时，对应来源会明确降级或禁用，不会伪造数据。
 
 ## 启动项目
+
+标准命令：
+
+```powershell
+cd C:\Users\Administrator\Documents\polymarket\weatherbot
+.\scripts\dev.ps1
+```
+
+该命令调用同一个桌面启动器，因此命令行和桌面快捷方式不会形成两套启动逻辑。
 
 ### 推荐：桌面一键启动
 

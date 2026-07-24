@@ -73,10 +73,19 @@ Use external repositories as design inputs, not code to copy blindly. Every borr
 
 - `weatherbot_v3/`: production modules for config, DB, truth, forecast archives, distributions, qualification, execution, AI review, notifications, and CLI utilities.
 - `dashboard_server.py`: API and adapter layer only. Move business logic into `weatherbot_v3/` when practical.
-- `frontend/src/components/`: dashboard UI components.
+- `frontend/src/`: the only editable production dashboard. New UI work belongs here.
+- `dashboard/`: compatibility static UI served directly by FastAPI. Do not add features here; it is not a second frontend mainline.
+- `sites-dashboard/`: ignored experiment only. It must not become a runtime dependency.
 - `tests/`: core regression tests, especially `tests/test_v3_core.py`.
 - `legacy/`: read-only historical snapshot unless the user explicitly asks for legacy work.
 - `data/`, `.env`, `config.json`, `.venv/`, `frontend/dist/`, `node_modules/`, `backups/`, and `audits/`: local state or generated artifacts; do not commit.
+
+## Evidence And Release Discipline
+
+- Check `docs/SOURCE_REGISTER.csv` before new web research. Reuse evidence until its refresh rule expires or a source contract visibly changes.
+- Add a register row when a new external source becomes a durable project dependency. Do not register one-off search results that do not affect the implementation.
+- Git commits and tags are the only source-code release history. Do not create copied `latest`, `final`, `v2`, or dated source trees.
+- Generated launchers, frontend bundles, databases, caches, and reports are derived artifacts. They are never a second editable mainline.
 
 ## Agent Guardrails
 
@@ -107,7 +116,7 @@ Use external repositories as design inputs, not code to copy blindly. Every borr
 - Avoid decorative gradients, heavy chrome, and high-saturation panels unless a specific data state requires them.
 - Use straight edges. Containers, buttons, tabs, inputs, tables, and cards should be `rounded-none` or equivalent.
 - Top filter bar exposes City switching, Continent filtering, and a date switcher with previous/next/today controls.
-- City workbench tabs are exactly: `预报`, `METAR`, `历史`, `偏差统计`, `抓取日志`.
+- City workbench tabs are exactly: `预报`, `METAR`, `历史观测`, `偏差统计`, `抓取日志`.
 - Hourly chart target: Recharts `ResponsiveContainer`, 24-hour chart from `00:00` to `23:00`, METAR/real observation solid line, model forecast dashed line, residual bars near the bottom.
 - Tables use standard HTML tables with horizontal scrolling for wide schemas.
 - Do not copy PolyWX membership, voting, feedback, branding, or non-trading prompts. WeatherBot's right side remains the controlled execution workbench.
