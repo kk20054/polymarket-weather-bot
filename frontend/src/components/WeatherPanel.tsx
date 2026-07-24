@@ -664,6 +664,48 @@ type DebSourceRow = {
   warning?: string
 }
 
+type DebDisagreementRow = DebSourceRow & {
+  maeDisplay: number | null
+  positionPct: number
+  intervalStartPct: number
+  intervalWidthPct: number
+}
+
+type DebDisagreementAnalysis = {
+  rows: DebDisagreementRow[]
+  axisMin: number | null
+  axisMax: number | null
+  center: number | null
+  centerPct: number | null
+  spread: number | null
+  activeCount: number
+}
+
+type DebHistoryPoint = {
+  issuedAt: string
+  issuedAtMs: number
+  [key: string]: string | number | null
+}
+
+type DebHistorySeries = {
+  key: string
+  label: string
+  color: string
+}
+
+type DebHistoryAnalysis = {
+  points: DebHistoryPoint[]
+  series: DebHistorySeries[]
+  yMin: number | null
+  yMax: number | null
+}
+
+type DebHistorySnapshot =
+  | NonNullable<DailyMaxPredictionSummary['history']>[number]
+  | NonNullable<DailyMaxPredictionSummary['latest']>
+
+const DEB_MODEL_COLORS = ['#38BDF8', '#A78BFA', '#F59E0B', '#FB7185', '#34D399', '#F472B6', '#60A5FA', '#A3E635']
+
 function sourceShortLabel(source: unknown, family?: unknown) {
   const raw = String(family || source || '').toLowerCase()
   if (raw.includes('weathercom') || raw.includes('weather.com')) return 'v3'
@@ -705,6 +747,158 @@ function buildDebSourceRows(deb: DailyMaxPredictionSummary['latest'], unit: stri
       }
     })
     .sort((a, b) => Number(b.weight ?? 0) - Number(a.weight ?? 0))
+}
+
+function buildDebDisagreementAnalysis(
+  sourceRows: DebSourceRow[],
+  unit: string,
+  modelCenter?: number | null,
+): DebDisagreementAnalysis {
+  const predictions = sourceRows.filter(
+    (row): row is DebSourceRow & { mu: number } => row.mu !== null && Number.isFinite(row.mu),
+  )
+  if (predictions.length === 0) {
+    return {
+      rows: [],
+      axisMin: null,
+      axisMax: null,
+      center: null,
+      centerPct: null,
+      spread: null,
+      activeCount: 0,
+    }
+  }
+
+  const values = predictions.map(row => row.mu)
+  const minPrediction = Math.min(...values)
+  const maxPrediction = Math.max(...values)
+  const spread = maxPrediction - minPrediction
+  const padding = Math.max(unit.toUpperCase() === 'F' ? 0.75 : 0.4, spread * 0.15)
+  const axisMin = minPrediction - padding
+  const axisMax = maxPrediction + padding
+  const axisRange = Math.max(axisMax - axisMin, 0.1)
+  const weightedRows = predictions.filter(row => Number(row.weight ?? 0) > 0)
+  const totalWeight = weightedRows.reduce((total, row) => total + Number(row.weight ?? 0), 0)
+  const weightedCenter = totalWeight > 0
+    ? weightedRows.reduce((total, row) => total + row.mu * Number(row.weight ?? 0), 0) / totalWeight
+    : mean(values)
+  const center = modelCenter !== null && modelCenter !== undefined && Number.isFinite(modelCenter)
+    ? Number(modelCenter)
+    : weightedCenter
+  const toPct = (value: number) => Math.max(0, Math.min(100, ((value - axisMin) / axisRange) * 100))
+
+  return {
+    rows: predictions
+      .map(row => {
+        const maeDisplay = row.mae === null ? null : Math.abs(Number(convertDeltaUnit(row.mae, 'C', unit)))
+        const intervalStart = maeDisplay === null ? row.mu : row.mu - maeDisplay
+        const intervalEnd = maeDisplay === null ? row.mu : row.mu + maeDisplay
+        const intervalStartPct = toPct(intervalStart)
+        const intervalEndPct = toPct(intervalEnd)
+        return {
+          ...row,
+          maeDisplay,
+          positionPct: toPct(row.mu),
+          intervalStartPct,
+          intervalWidthPct: Math.max(0, intervalEndPct - intervalStartPct),
+        }
+      })
+      .sort((a, b) => a.mu - b.mu),
+    axisMin,
+    axisMax,
+    center,
+    centerPct: center === null ? null : toPct(center),
+    spread,
+    activeCount: predictions.filter(row => row.status === 'active' && Number(row.weight ?? 0) > 0).length,
+  }
+}
+
+function buildDebHistoryAnalysis(
+  prediction: DailyMaxPredictionSummary | null | undefined,
+  unit: string,
+): DebHistoryAnalysis {
+  const candidates = [
+    ...(prediction?.history ?? []),
+    ...(prediction?.latest ? [prediction.latest] : []),
+  ]
+  const snapshotsByKey = new Map<string, DebHistorySnapshot>()
+  candidates.forEach(snapshot => {
+    if (!snapshot?.issued_at || Number.isNaN(Date.parse(String(snapshot.issued_at)))) return
+    snapshotsByKey.set(String(snapshot.issued_at), snapshot)
+  })
+  const snapshots = [...snapshotsByKey.values()]
+    .sort((a, b) => String(a.issued_at).localeCompare(String(b.issued_at)))
+  const labels = new Set<string>()
+
+  for (const snapshot of snapshots) {
+    for (const component of snapshot.components ?? []) {
+      const source = String(component.source ?? component.family ?? '')
+      const family = String(component.family ?? source)
+      const rawMu = asNumber(component.model_daily_high_c) ?? asNumber(component.model_daily_high) ?? asNumber(component.peak_temp_c)
+      if (rawMu !== null) labels.add(sourceShortLabel(source, family))
+    }
+  }
+
+  const provisionalSeries = [...labels]
+    .sort((a, b) => a.localeCompare(b))
+    .map((label, index) => ({
+      key: `model_${index}`,
+      label,
+      color: DEB_MODEL_COLORS[index % DEB_MODEL_COLORS.length],
+    }))
+  const seriesByLabel = new Map(provisionalSeries.map(series => [series.label, series]))
+  const points = snapshots.map(snapshot => {
+    const issuedAt = String(snapshot.issued_at)
+    const point: DebHistoryPoint = { issuedAt, issuedAtMs: Date.parse(issuedAt) }
+    for (const component of snapshot.components ?? []) {
+      const source = String(component.source ?? component.family ?? '')
+      const family = String(component.family ?? source)
+      const label = sourceShortLabel(source, family)
+      const series = seriesByLabel.get(label)
+      if (!series) continue
+      const sourceUnit = component.model_daily_high_c !== undefined || component.peak_temp_c !== undefined
+        ? 'C'
+        : (snapshot.unit || unit)
+      const rawMu = asNumber(component.model_daily_high_c) ?? asNumber(component.model_daily_high) ?? asNumber(component.peak_temp_c)
+      if (rawMu !== null) point[series.key] = convertTempUnit(rawMu, sourceUnit, unit)
+    }
+    return point
+  })
+  const series = provisionalSeries.filter(item =>
+    points.filter(point => typeof point[item.key] === 'number' && Number.isFinite(point[item.key])).length >= 2,
+  )
+  const usablePoints = points.filter(point =>
+    series.some(item => typeof point[item.key] === 'number' && Number.isFinite(point[item.key])),
+  )
+  const values = usablePoints.flatMap(point =>
+    series
+      .map(item => point[item.key])
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value)),
+  )
+  if (usablePoints.length < 2 || series.length === 0 || values.length === 0) {
+    return { points: [], series: [], yMin: null, yMax: null }
+  }
+  const minValue = Math.min(...values)
+  const maxValue = Math.max(...values)
+  const padding = Math.max(unit.toUpperCase() === 'F' ? 1 : 0.5, (maxValue - minValue) * 0.12)
+  return {
+    points: usablePoints,
+    series,
+    yMin: minValue - padding,
+    yMax: maxValue + padding,
+  }
+}
+
+function formatDebHistoryTime(value: unknown, language: 'zh' | 'en') {
+  const date = new Date(typeof value === 'number' ? value : String(value ?? ''))
+  if (Number.isNaN(date.getTime())) return String(value ?? '--')
+  return new Intl.DateTimeFormat(language === 'zh' ? 'zh-CN' : 'en-US', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date)
 }
 
 function normalizePeakHour(value: unknown) {
@@ -2738,6 +2932,7 @@ function TemperatureDistributionPanel({
   language: 'zh' | 'en'
 }) {
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false)
+  const [sourceAnalysisView, setSourceAnalysisView] = useState<'history' | 'disagreement'>('history')
   const distribution = signal?.distribution
   const deb = dailyMaxPrediction?.latest
   const debUnit = deb?.unit || unit
@@ -2800,6 +2995,10 @@ function TemperatureDistributionPanel({
   const debVersionLabel = deb?.deb_version || distributionMethod || 'DEB-v1'
   const debUpdatedLabel = freshnessLabel(deb?.updated_at ?? deb?.issued_at)
   const sourceRows = buildDebSourceRows(deb, unit)
+  const sourceHistory = buildDebHistoryAnalysis(dailyMaxPrediction, unit)
+  const sourceDisagreement = buildDebDisagreementAnalysis(sourceRows, unit, forecastValue)
+  const hasSourceHistory = sourceHistory.points.length >= 2 && sourceHistory.series.length > 0
+  const activeSourceAnalysisView = hasSourceHistory && sourceAnalysisView === 'history' ? 'history' : 'disagreement'
   const buildWarnings = deb?.build_warnings ?? []
   useEffect(() => {
     if (!sourceDialogOpen) return
@@ -3110,57 +3309,248 @@ function TemperatureDistributionPanel({
           className="deb-source-backdrop fixed inset-0 z-50 flex items-center justify-center p-4"
           role="dialog"
           aria-modal="true"
-          aria-label={tr(language, 'DEB 模型来源与权重', 'DEB model sources and weights')}
+          aria-label={tr(language, 'DEB 模型分析', 'DEB model analysis')}
           onMouseDown={event => {
             if (event.currentTarget === event.target) setSourceDialogOpen(false)
           }}
         >
-          <section className="deb-source-dialog max-h-[80vh] w-full max-w-2xl overflow-hidden border border-[#2C3445] bg-[#161A22] shadow-2xl">
+          <section className="deb-source-dialog max-h-[84vh] w-full max-w-3xl overflow-hidden border border-[#2C3445] bg-[#161A22] shadow-2xl">
             <header className="flex items-center justify-between border-b border-[#2C3445] px-3 py-2">
               <div>
-                <div className="text-sm font-semibold text-[#F8FAFC]">{tr(language, '模型来源与权重', 'Model sources and weights')}</div>
-                <div className="text-[9px] text-[#7D8694]">Per-source weights (DEB) · {debVersionLabel}</div>
+                <div className="text-sm font-semibold text-[#F8FAFC]">{tr(language, '模型分析', 'Model analysis')}</div>
+                <div className="text-[9px] text-[#7D8694]">{tr(language, '预测轨迹、当前分歧与动态权重', 'Forecast paths, current disagreement, and dynamic weights')} · {debVersionLabel}</div>
               </div>
               <button type="button" onClick={() => setSourceDialogOpen(false)} className="inline-flex h-8 w-8 items-center justify-center border border-[#2C3445] text-[#9AA4B2] hover:bg-[#222A37]" aria-label={tr(language, '关闭', 'Close')}>
                 <X className="h-4 w-4" />
               </button>
             </header>
-            <div className="max-h-[calc(80vh-54px)] overflow-auto p-3">
-              {sourceRows.length === 0 ? (
-                <div className="py-10 text-center text-[11px] text-[#7D8694]">{tr(language, '暂无模型权重。', 'No source weights yet.')}</div>
-              ) : (
-                <div className="overflow-x-auto border border-[#2C3445]">
-                  <div className="min-w-[560px] divide-y divide-[#222A38] text-[10px]">
-                    <div className="grid grid-cols-[minmax(140px,1fr)_150px_110px_90px] gap-3 bg-[#1B212C] px-3 py-2 text-[#7D8694]">
-                      <span>{tr(language, '模型', 'Source')}</span>
-                      <span>{tr(language, '权重', 'Weight')}</span>
-                      <span className="text-right">{tr(language, '预测最高', 'Daily max')}</span>
-                      <span className="text-right">{tr(language, '近 7 日误差', '7d MAE')}</span>
-                    </div>
-                    {sourceRows.map(row => (
-                      <div key={row.key} className="grid grid-cols-[minmax(140px,1fr)_150px_110px_90px] items-center gap-3 px-3 py-2 text-[#CBD2DC]" title={`${row.role} | truth ${row.truthBasis}`}>
-                        <span className="min-w-0">
-                          <span className="block truncate font-semibold text-[#F8FAFC]">{row.label}</span>
-                          <span className={`block truncate text-[8px] ${row.status === 'active' ? 'text-emerald-300' : 'text-amber-300'}`} title={row.exclusionReason}>
-                            {row.status === 'active'
-                              ? tr(language, `动态权重 · ${row.calibrationSamples} 个样本`, `Dynamic weight · ${row.calibrationSamples} samples`)
-                              : row.status === 'provisional'
-                                ? tr(language, `仅展示 · 校准 ${row.calibrationSamples}/20`, `Display only · ${row.calibrationSamples}/20`)
-                                : tr(language, `积累校准 ${row.calibrationSamples}/20`, `Calibrating ${row.calibrationSamples}/20`)}
-                          </span>
-                        </span>
-                        <span className="flex items-center gap-2 tabular-nums">
-                          <span className="h-1.5 flex-1 bg-[#263044]">
-                            <span className="block h-full bg-[#5CB6F2]" style={{ width: `${Number(row.weight ?? 0) <= 0 ? 0 : Math.max(2, Math.min(100, Number(row.weight ?? 0) * 100))}%` }} />
-                          </span>
-                          <span className="w-10 text-right">{row.weight === null ? '--' : `${(row.weight * 100).toFixed(1)}%`}</span>
-                        </span>
-                        <span className="text-right tabular-nums">{fmtDualTemp(row.mu, unit)}</span>
-                        <span className="text-right tabular-nums">{row.mae === null ? '--' : `${row.mae.toFixed(2)}°C`}</span>
+            <div className="max-h-[calc(84vh-54px)] overflow-auto p-3">
+              {hasSourceHistory && (
+                <div className="mb-3 inline-grid grid-cols-2 border border-[#2C3445]" role="tablist" aria-label={tr(language, '模型分析视图', 'Model analysis view')}>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeSourceAnalysisView === 'history'}
+                    onClick={() => setSourceAnalysisView('history')}
+                    className={`min-h-8 px-3 text-[10px] ${activeSourceAnalysisView === 'history' ? 'bg-cyan-500/10 text-cyan-200' : 'text-[#7D8694] hover:bg-[#1B212C]'}`}
+                  >
+                    {tr(language, '预测轨迹', 'Forecast paths')}
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeSourceAnalysisView === 'disagreement'}
+                    onClick={() => setSourceAnalysisView('disagreement')}
+                    className={`min-h-8 border-l border-[#2C3445] px-3 text-[10px] ${activeSourceAnalysisView === 'disagreement' ? 'bg-cyan-500/10 text-cyan-200' : 'text-[#7D8694] hover:bg-[#1B212C]'}`}
+                  >
+                    {tr(language, '当前分歧', 'Current disagreement')}
+                  </button>
+                </div>
+              )}
+
+              {activeSourceAnalysisView === 'history' ? (
+                <section className="mb-3 border border-[#2C3445]" aria-label={tr(language, '逐模型预测轨迹', 'Per-model forecast paths')}>
+                  <div className="flex items-start justify-between gap-3 border-b border-[#2C3445] bg-[#1B212C] px-3 py-2">
+                    <div>
+                      <div className="text-[11px] font-semibold text-[#F8FAFC]">{tr(language, '逐模型预测轨迹', 'Per-model forecast paths')}</div>
+                      <div className="mt-0.5 text-[9px] text-[#7D8694]">
+                        {tr(language, '查看各模型对本日最高温的预测如何随新批次调整', 'See how each model revises today’s predicted high across runs')}
                       </div>
+                    </div>
+                    <span className="shrink-0 text-[9px] tabular-nums text-[#9AA4B2]">
+                      {sourceHistory.points.length} {tr(language, '批次', 'runs')} · {sourceHistory.series.length} {tr(language, '模型', 'models')}
+                    </span>
+                  </div>
+                  <div className="h-64 px-2 pt-3">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={sourceHistory.points} margin={{ top: 4, right: 12, bottom: 14, left: 2 }}>
+                        <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" vertical={false} />
+                        <XAxis
+                          dataKey="issuedAtMs"
+                          type="number"
+                          scale="time"
+                          domain={['dataMin', 'dataMax']}
+                          stroke="#7D8694"
+                          fontSize={9}
+                          tickLine={false}
+                          axisLine={false}
+                          minTickGap={32}
+                          tickFormatter={value => formatDebHistoryTime(value, language)}
+                        />
+                        <YAxis
+                          domain={[sourceHistory.yMin ?? 0, sourceHistory.yMax ?? 1]}
+                          stroke="#7D8694"
+                          fontSize={9}
+                          tickLine={false}
+                          axisLine={false}
+                          width={42}
+                          tickFormatter={value => `${Number(value).toFixed(1)}°`}
+                        />
+                        <Tooltip
+                          contentStyle={{ background: 'var(--tooltip-bg)', border: '1px solid var(--tooltip-border)', color: 'var(--tooltip-text)', fontSize: 10 }}
+                          labelStyle={{ color: 'var(--tooltip-text)' }}
+                          itemStyle={{ color: 'var(--tooltip-text)' }}
+                          labelFormatter={value => `${tr(language, '发布', 'Issued')} ${formatDebHistoryTime(value, language)}`}
+                          formatter={(value: any, name: any) => [fmtTemp(Number(value), unit), name]}
+                        />
+                        {sourceHistory.series.map(series => (
+                          <Line
+                            key={series.key}
+                            type="linear"
+                            dataKey={series.key}
+                            name={series.label}
+                            stroke={series.color}
+                            strokeWidth={1.75}
+                            dot={false}
+                            activeDot={{ r: 3 }}
+                            connectNulls={false}
+                            isAnimationActive={false}
+                          />
+                        ))}
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 border-t border-[#2C3445] px-3 py-2 text-[9px] text-[#9AA4B2]">
+                    {sourceHistory.series.map(series => (
+                      <span key={series.key} className="inline-flex items-center gap-1.5">
+                        <span className="h-0.5 w-3" style={{ backgroundColor: series.color }} />
+                        {series.label}
+                      </span>
                     ))}
                   </div>
+                </section>
+              ) : sourceDisagreement.rows.length > 0 ? (
+                <section className="mb-3 border border-[#2C3445]" aria-label={tr(language, '当前模型分歧', 'Current model disagreement')}>
+                  <div className="flex items-start justify-between gap-3 border-b border-[#2C3445] bg-[#1B212C] px-3 py-2">
+                    <div>
+                      <div className="text-[11px] font-semibold text-[#F8FAFC]">{tr(language, '当前模型分歧', 'Current model disagreement')}</div>
+                      <div className="mt-0.5 text-[9px] text-[#7D8694]">{tr(language, '比较最新批次的预测中心与误差范围', 'Compare the latest forecast centers and error ranges')}</div>
+                    </div>
+                    <span className="shrink-0 text-[9px] tabular-nums text-[#9AA4B2]">
+                      {sourceDisagreement.activeCount}/{sourceDisagreement.rows.length} {tr(language, '个动态权重模型', 'dynamically weighted')}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 divide-x divide-[#2C3445] border-b border-[#2C3445] text-[9px]">
+                    <div className="px-3 py-2">
+                      <div className="text-[#7D8694]">{tr(language, '预测跨度', 'Forecast spread')}</div>
+                      <div className="mt-1 tabular-nums text-[#F8FAFC]">{fmtDualDelta(sourceDisagreement.spread, unit)}</div>
+                    </div>
+                    <div className="px-3 py-2">
+                      <div className="text-[#7D8694]">{tr(language, 'DEB 加权中心', 'DEB weighted center')}</div>
+                      <div className="mt-1 tabular-nums text-[#F8FAFC]">{fmtDualTemp(sourceDisagreement.center, unit)}</div>
+                    </div>
+                    <div className="px-3 py-2">
+                      <div className="text-[#7D8694]">{tr(language, '来源覆盖', 'Source coverage')}</div>
+                      <div className="mt-1 tabular-nums text-[#F8FAFC]">{sourceDisagreement.rows.length}/{sourceRows.length}</div>
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <div className="min-w-[640px] px-3 py-2">
+                      <div className="mb-1 grid grid-cols-[86px_minmax(260px,1fr)_210px] gap-3 text-[8px] text-[#7D8694]">
+                        <span>{tr(language, '模型', 'Model')}</span>
+                        <span className="flex items-center justify-end gap-3">
+                          <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 bg-cyan-300" />{tr(language, '预测', 'Forecast')}</span>
+                          <span className="inline-flex items-center gap-1"><span className="h-1.5 w-4 bg-cyan-500/25" />± 7d MAE</span>
+                          <span className="inline-flex items-center gap-1"><span className="h-3 border-l border-dashed border-emerald-300" />DEB μ</span>
+                        </span>
+                        <span className="text-right">{tr(language, '可靠性', 'Reliability')}</span>
+                      </div>
+                      <div className="divide-y divide-[#222A38]">
+                        {sourceDisagreement.rows.map(row => (
+                          <div
+                            key={row.key}
+                            className="grid min-h-11 grid-cols-[86px_minmax(260px,1fr)_210px] items-center gap-3 py-1.5 text-[10px]"
+                            aria-label={`${row.label} ${fmtTemp(row.mu, unit)}`}
+                          >
+                            <span className="truncate font-semibold text-[#F8FAFC]">{row.label}</span>
+                            <span className="relative block h-7">
+                              <span className="absolute left-0 right-0 top-1/2 h-px bg-[#344052]" />
+                              {sourceDisagreement.centerPct !== null && (
+                                <span className="absolute bottom-0 top-0 border-l border-dashed border-emerald-300/70" style={{ left: `${sourceDisagreement.centerPct}%` }} />
+                              )}
+                              {row.maeDisplay !== null && (
+                                <span
+                                  className="absolute top-[11px] h-1.5 bg-cyan-500/25"
+                                  style={{ left: `${row.intervalStartPct}%`, width: `${row.intervalWidthPct}%` }}
+                                  title={`± ${Number(row.mae).toFixed(2)}°C`}
+                                />
+                              )}
+                              <span
+                                className={`absolute top-[8px] h-3 w-3 -translate-x-1/2 border-2 border-[#161A22] ${row.status === 'active' ? 'bg-cyan-300' : 'bg-amber-300'}`}
+                                style={{ left: `${row.positionPct}%` }}
+                                title={`${row.label}: ${fmtTemp(row.mu, unit)}`}
+                              />
+                            </span>
+                            <span className="min-w-0 text-right tabular-nums">
+                              <span className="block font-semibold text-[#F8FAFC]">{fmtTemp(row.mu, unit)}</span>
+                              <span className="block truncate text-[8px] text-[#7D8694]">
+                                {tr(language, '权重', 'w')} {row.weight === null ? '--' : `${(row.weight * 100).toFixed(1)}%`} · MAE {row.mae === null ? '--' : `${row.mae.toFixed(2)}°C`} · n={row.calibrationSamples}
+                              </span>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="grid grid-cols-[86px_minmax(260px,1fr)_210px] gap-3 border-t border-[#2C3445] pt-1 text-[8px] tabular-nums text-[#7D8694]">
+                        <span />
+                        <span className="flex justify-between">
+                          <span>{fmtTemp(sourceDisagreement.axisMin, unit)}</span>
+                          <span>{fmtTemp(sourceDisagreement.center, unit)}</span>
+                          <span>{fmtTemp(sourceDisagreement.axisMax, unit)}</span>
+                        </span>
+                        <span />
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              ) : (
+                <div className="mb-3 border border-[#2C3445] py-8 text-center text-[11px] text-[#7D8694]">
+                  {tr(language, '暂无可比较的当前模型预测。', 'No comparable current model forecasts.')}
                 </div>
+              )}
+
+              {sourceRows.length === 0 ? (
+                <div className="py-6 text-center text-[11px] text-[#7D8694]">{tr(language, '暂无当前模型权重。', 'No current source weights yet.')}</div>
+              ) : (
+                <section aria-label={tr(language, '当前模型来源明细', 'Current model source details')}>
+                  <div className="mb-1 flex items-center justify-between gap-2 text-[9px] text-[#7D8694]">
+                    <span>{tr(language, '当前来源明细', 'Current source details')}</span>
+                    <span>{tr(language, '按权重排序', 'Sorted by weight')}</span>
+                  </div>
+                  <div className="overflow-x-auto border border-[#2C3445]">
+                    <div className="min-w-[620px] divide-y divide-[#222A38] text-[10px]">
+                      <div className="grid grid-cols-[minmax(130px,1fr)_140px_110px_85px_55px] gap-3 bg-[#1B212C] px-3 py-2 text-[#7D8694]">
+                        <span>{tr(language, '模型', 'Source')}</span>
+                        <span>{tr(language, '权重', 'Weight')}</span>
+                        <span className="text-right">{tr(language, '预测最高', 'Daily max')}</span>
+                        <span className="text-right">{tr(language, '近 7 日误差', '7d MAE')}</span>
+                        <span className="text-right">{tr(language, '样本', 'Samples')}</span>
+                      </div>
+                      {sourceRows.map(row => (
+                        <div key={row.key} className="grid grid-cols-[minmax(130px,1fr)_140px_110px_85px_55px] items-center gap-3 px-3 py-2 text-[#CBD2DC]" title={`${row.role} | truth ${row.truthBasis}`}>
+                          <span className="min-w-0">
+                            <span className="block truncate font-semibold text-[#F8FAFC]">{row.label}</span>
+                            <span className={`block truncate text-[8px] ${row.status === 'active' ? 'text-emerald-300' : 'text-amber-300'}`} title={row.exclusionReason}>
+                              {row.status === 'active'
+                                ? tr(language, '动态权重', 'Dynamic weight')
+                                : row.status === 'provisional'
+                                  ? tr(language, '仅展示', 'Display only')
+                                  : tr(language, '积累校准', 'Calibrating')}
+                            </span>
+                          </span>
+                          <span className="flex items-center gap-2 tabular-nums">
+                            <span className="h-1.5 flex-1 bg-[#263044]">
+                              <span className="block h-full bg-[#5CB6F2]" style={{ width: `${Number(row.weight ?? 0) <= 0 ? 0 : Math.max(2, Math.min(100, Number(row.weight ?? 0) * 100))}%` }} />
+                            </span>
+                            <span className="w-10 text-right">{row.weight === null ? '--' : `${(row.weight * 100).toFixed(1)}%`}</span>
+                          </span>
+                          <span className="text-right tabular-nums">{fmtDualTemp(row.mu, unit)}</span>
+                          <span className="text-right tabular-nums">{row.mae === null ? '--' : `${row.mae.toFixed(2)}°C`}</span>
+                          <span className="text-right tabular-nums">n={row.calibrationSamples}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </section>
               )}
               {buildWarnings.length > 0 && (
                 <details className="mt-3 border border-[#2C3445] px-3 py-2 text-[10px] text-[#9AA4B2]">

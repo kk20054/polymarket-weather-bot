@@ -39,12 +39,15 @@ DEFAULT_PARAMETERS: dict[str, Any] = {
             "min_model_probability": 0.25,
             "max_model_rank": 2,
             "min_market_ask": 0.10,
-            "min_settlement_days": 20,
+            "min_paper_settlement_days": 10,
+            "min_live_settlement_days": 20,
             "require_authoritative_truth": True,
-            "min_component_calibration_days": 20,
+            "min_paper_component_calibration_days": 10,
+            "min_live_component_calibration_days": 20,
             "min_calibration_coverage": 0.80,
             "min_model_families": 4,
             "max_model_spread_c": 1.50,
+            "provisional_position_multiplier": 0.50,
         },
         "single_bucket_ev": {"enabled": True, "min_edge": 0.05},
         "ladder_grid": {
@@ -86,7 +89,7 @@ def canonical_parameters(parameters: dict[str, Any]) -> str:
 def validate_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(parameters, dict):
         raise ValueError("strategy_parameters_must_be_object")
-    merged = _deep_merge(DEFAULT_PARAMETERS, parameters)
+    merged = _deep_merge(DEFAULT_PARAMETERS, _migrate_legacy_parameters(parameters))
     if int(merged.get("schema_version") or 0) != STRATEGY_PROFILE_SCHEMA_VERSION:
         raise ValueError("unsupported_strategy_profile_schema")
 
@@ -108,12 +111,19 @@ def validate_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     _bounded(core_modal, "min_model_probability", 0.0, 1.0)
     _bounded(core_modal, "max_model_rank", 1, 2, integer=True)
     _bounded(core_modal, "min_market_ask", 0.01, 0.5)
-    _bounded(core_modal, "min_settlement_days", 0, 365, integer=True)
+    _bounded(core_modal, "min_paper_settlement_days", 0, 365, integer=True)
+    _bounded(core_modal, "min_live_settlement_days", 20, 365, integer=True)
+    if core_modal["min_live_settlement_days"] < core_modal["min_paper_settlement_days"]:
+        raise ValueError("core_modal_live_settlement_days_below_paper")
     core_modal["require_authoritative_truth"] = bool(core_modal.get("require_authoritative_truth", True))
-    _bounded(core_modal, "min_component_calibration_days", 0, 365, integer=True)
+    _bounded(core_modal, "min_paper_component_calibration_days", 0, 365, integer=True)
+    _bounded(core_modal, "min_live_component_calibration_days", 20, 365, integer=True)
+    if core_modal["min_live_component_calibration_days"] < core_modal["min_paper_component_calibration_days"]:
+        raise ValueError("core_modal_live_component_days_below_paper")
     _bounded(core_modal, "min_calibration_coverage", 0.0, 1.0)
     _bounded(core_modal, "min_model_families", 1, 20, integer=True)
     _bounded(core_modal, "max_model_spread_c", 0.1, 10.0)
+    _bounded(core_modal, "provisional_position_multiplier", 0.0, 1.0)
     _bounded(single, "min_edge", 0.0, 0.5)
     _bounded(ladder, "min_edge", 0.0, 0.5)
     _bounded(ladder, "neighbor_count", 1, 1, integer=True)
@@ -284,7 +294,24 @@ def get_active_strategy_profile(scope: str, *, path: Path | None = None) -> dict
 def ensure_default_strategy_profile(scope: str, *, path: Path | None = None) -> dict[str, Any]:
     active = get_active_strategy_profile(scope, path=path)
     if active:
-        return active
+        normalized = validate_parameters(active.get("parameters") or {})
+        if normalized == active.get("parameters"):
+            return active
+        revision = create_strategy_profile_revision(
+            normalized,
+            profile_key=str(active.get("profile_key") or DEFAULT_PROFILE_KEY),
+            created_by="system",
+            change_note="Migrate Core Modal paper/live maturity thresholds",
+            path=path,
+        )
+        activate_strategy_profile(
+            revision["revision_id"],
+            scope=scope,
+            actor="system",
+            reason="migrate Core Modal paper/live maturity thresholds",
+            path=path,
+        )
+        return get_active_strategy_profile(scope, path=path) or revision
     revision = create_strategy_profile_revision(
         DEFAULT_PARAMETERS,
         created_by="system",
@@ -372,6 +399,49 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
         else:
             result[key] = deepcopy(value)
     return result
+
+
+def _migrate_legacy_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
+    migrated = deepcopy(parameters)
+    strategies = migrated.get("strategies")
+    if not isinstance(strategies, dict):
+        return migrated
+    core_modal = strategies.get("core_modal_v1")
+    if not isinstance(core_modal, dict):
+        return migrated
+    _split_legacy_threshold(
+        core_modal,
+        legacy_key="min_settlement_days",
+        paper_key="min_paper_settlement_days",
+        live_key="min_live_settlement_days",
+    )
+    _split_legacy_threshold(
+        core_modal,
+        legacy_key="min_component_calibration_days",
+        paper_key="min_paper_component_calibration_days",
+        live_key="min_live_component_calibration_days",
+    )
+    return migrated
+
+
+def _split_legacy_threshold(
+    parameters: dict[str, Any],
+    *,
+    legacy_key: str,
+    paper_key: str,
+    live_key: str,
+) -> None:
+    if legacy_key not in parameters:
+        return
+    legacy_value = parameters.pop(legacy_key)
+    try:
+        legacy_days = int(legacy_value)
+    except (TypeError, ValueError):
+        legacy_days = legacy_value
+    paper_default = 10 if legacy_days == 20 else legacy_days
+    live_default = max(20, legacy_days) if isinstance(legacy_days, int) else legacy_days
+    parameters.setdefault(paper_key, paper_default)
+    parameters.setdefault(live_key, live_default)
 
 
 def _bounded(container: dict[str, Any], key: str, low: float, high: float, *, integer: bool = False) -> None:

@@ -22,7 +22,12 @@ from weatherbot_v3.paper_validation import (
     stop_paper_validation_run,
 )
 from weatherbot_v3.paper import execute_paper_decisions
-from weatherbot_v3.strategy_profiles import DEFAULT_PARAMETERS, create_strategy_profile_revision
+from weatherbot_v3.strategy_profiles import (
+    DEFAULT_PARAMETERS,
+    core_modal_v1_parameters,
+    create_strategy_profile_revision,
+)
+from weatherbot_v3.strategies.core_modal import CORE_MODAL_PROVISIONAL_CAUTION
 from weatherbot_v3.config import ASIAN_CITY_PRIORITY
 
 
@@ -409,6 +414,43 @@ class PaperValidationTests(unittest.TestCase):
         self.assertEqual(result["candidate_count"], 1)
         self.assertEqual(result["executed"], 0)
         self.assertEqual(list_paper_orders(path=path), [])
+
+    def test_provisional_core_modal_cohort_executes_at_half_exposure(self):
+        path = test_db_path("paper_validation_core_modal_provisional")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        profile = create_strategy_profile_revision(
+            core_modal_v1_parameters(),
+            profile_key="core-modal-provisional",
+            path=path,
+        )
+        started = start_paper_validation_run(
+            bankroll_usd=100,
+            max_per_trade_usd=10,
+            daily_max_usd=20,
+            cities=["chicago"],
+            strategies=["core_modal_v1"],
+            strategy_revision_id=profile["revision_id"],
+            path=path,
+        )
+        run = started["run"]
+        now = datetime.now(timezone.utc)
+        decision = _decision(
+            "core-modal-provisional",
+            now,
+            "yes-core-modal-provisional",
+            edge=0.2,
+            strategy="core_modal_v1",
+            revision_id=profile["revision_id"],
+        )
+        decision["cautions"] = [CORE_MODAL_PROVISIONAL_CAUTION]
+        upsert_signal_decision_record(decision, path=path)
+
+        result = run_paper_validation_tick(apply=True, run_id=run["run_id"], path=path)
+        order = list_paper_orders(cohort_run_id=run["run_id"], path=path)[0]
+
+        self.assertEqual(result["executed"], 1)
+        self.assertAlmostEqual(order["filled_amount"], 1.88, places=2)
+        self.assertEqual(order["sizing_snapshot"]["position_size_multiplier"], 0.5)
 
 
 def _decision(

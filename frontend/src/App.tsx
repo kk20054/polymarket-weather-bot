@@ -437,7 +437,7 @@ function cityKeyFromParam(value: string | null) {
 function cityContinent(cityKey?: string, cityName?: string) {
   const value = `${cityKey || ''} ${cityName || ''}`.toLowerCase()
   if (/london|paris|munich|madrid|milan|amsterdam|warsaw|helsinki|moscow|istanbul|ankara/.test(value)) return 'Europe'
-  if (/tokyo|seoul|shanghai|beijing|wuhan|singapore|taipei|hong|busan|chengdu|chongqing|guangzhou|jakarta|jeddah|karachi|kuala|lucknow|manila|qingdao|tel-aviv/.test(value)) return 'Asia'
+  if (/tokyo|seoul|shanghai|shenzhen|beijing|wuhan|singapore|taipei|hong|busan|chengdu|chongqing|guangzhou|jakarta|jeddah|karachi|kuala|lucknow|manila|qingdao|tel-aviv/.test(value)) return 'Asia'
   if (/sydney|wellington/.test(value)) return 'Pacific'
   if (/cape|lagos/.test(value)) return 'Africa'
   if (/new-york|nyc|chicago|miami|dallas|seattle|atlanta|toronto|sao|paulo|austin|denver|houston|los-angeles|san-francisco|mexico|panama|buenos/.test(value)) return 'Americas'

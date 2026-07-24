@@ -509,12 +509,23 @@ export interface DailyMaxPrediction {
   updated_at?: string | null
 }
 
+export interface DailyMaxPredictionHistoryItem {
+  id?: number
+  prediction_key?: string
+  issued_at?: string | null
+  mu?: number | null
+  sigma?: number | null
+  unit?: string
+  components?: Array<Record<string, unknown>>
+}
+
 export interface DailyMaxPredictionSummary {
   ok: boolean
   city_key?: string
   target_date?: string
   count: number
   latest?: DailyMaxPrediction | null
+  history?: DailyMaxPredictionHistoryItem[]
   quality_ok?: boolean
   quality_reasons?: string[]
   rejected_latest_id?: number | null

@@ -18,6 +18,7 @@ from .strategy_profiles import (
     profile_snapshot,
     validate_paper_strategy_selection,
 )
+from .strategies.core_modal import CORE_MODAL_PROVISIONAL_CAUTION
 
 
 PAPER_VALIDATION_VERSION = "paper-validation-v2"
@@ -280,6 +281,8 @@ def _run_paper_validation_tick_locked(
             float(strategy_config.get("group_exposure_multiplier", 0.60))
             if decision.get("ladder_group_id") else 1.0
         )
+        position_size_multiplier = _strategy_position_multiplier(decision, strategy_config)
+        exposure_multiplier *= position_size_multiplier
         sizing = size_for_cohort(
             sizing_decision.get("model_probability"),
             sizing_decision.get("market_ask"),
@@ -301,6 +304,7 @@ def _run_paper_validation_tick_locked(
             "strategy_name": decision.get("strategy_name"),
             "strategy_revision_id": run.get("strategy_revision_id"),
             "ladder_leg_count": leg_count,
+            "position_size_multiplier": position_size_multiplier,
         }
         preflight = execute_paper_decision_record(
             decision,
@@ -476,6 +480,19 @@ def _optional_number(value: Any) -> float | None:
 def _number_or_default(value: Any, default: float) -> float:
     number = _optional_number(value)
     return default if number is None else number
+
+
+def _strategy_position_multiplier(
+    decision: dict[str, Any],
+    strategy_config: dict[str, Any],
+) -> float:
+    if str(decision.get("strategy_name") or "") != "core_modal_v1":
+        return 1.0
+    cautions = {str(value) for value in (decision.get("cautions") or [])}
+    if CORE_MODAL_PROVISIONAL_CAUTION not in cautions:
+        return 1.0
+    configured = _number_or_default(strategy_config.get("provisional_position_multiplier"), 0.50)
+    return min(1.0, max(0.0, configured))
 
 
 def _unique_strings(values: list[str]) -> list[str]:

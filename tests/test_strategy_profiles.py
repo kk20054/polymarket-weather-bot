@@ -4,6 +4,8 @@ ensure_test_environment()
 
 import sqlite3
 import unittest
+import json
+from copy import deepcopy
 from pathlib import Path
 
 from weatherbot_v3.db import connect, init_v3_db, list_signal_decisions, upsert_signal_decision_record
@@ -11,7 +13,9 @@ from weatherbot_v3.strategy_profiles import (
     DEFAULT_PARAMETERS,
     activate_strategy_profile,
     create_strategy_profile_revision,
+    ensure_default_strategy_profile,
     get_active_strategy_profile,
+    validate_parameters,
     validate_paper_strategy_selection,
 )
 
@@ -28,6 +32,89 @@ def test_db_path(name: str) -> Path:
 
 
 class StrategyProfileTests(unittest.TestCase):
+    def test_legacy_core_modal_thresholds_migrate_to_paper_and_live_defaults(self):
+        parameters = validate_parameters({
+            "strategies": {
+                "core_modal_v1": {
+                    "min_settlement_days": 20,
+                    "min_component_calibration_days": 20,
+                },
+            },
+        })
+        core_modal = parameters["strategies"]["core_modal_v1"]
+
+        self.assertNotIn("min_settlement_days", core_modal)
+        self.assertNotIn("min_component_calibration_days", core_modal)
+        self.assertEqual(core_modal["min_paper_settlement_days"], 10)
+        self.assertEqual(core_modal["min_live_settlement_days"], 20)
+        self.assertEqual(core_modal["min_paper_component_calibration_days"], 10)
+        self.assertEqual(core_modal["min_live_component_calibration_days"], 20)
+        self.assertEqual(core_modal["provisional_position_multiplier"], 0.5)
+
+    def test_active_legacy_profile_is_migrated_as_a_new_immutable_revision(self):
+        path = test_db_path("strategy_profile_legacy_migration")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        init_v3_db(path)
+        legacy_parameters = deepcopy(DEFAULT_PARAMETERS)
+        core_modal = legacy_parameters["strategies"]["core_modal_v1"]
+        core_modal["min_settlement_days"] = core_modal.pop("min_live_settlement_days")
+        core_modal.pop("min_paper_settlement_days")
+        core_modal["min_component_calibration_days"] = core_modal.pop("min_live_component_calibration_days")
+        core_modal.pop("min_paper_component_calibration_days")
+        core_modal.pop("provisional_position_multiplier")
+        with connect(path) as conn:
+            conn.execute(
+                """
+                INSERT INTO strategy_profile_revisions (
+                    revision_id, profile_key, revision_no, parent_revision_id,
+                    schema_version, engine_version, content_sha256, parameters_json,
+                    strategy_names_json, validation_status, validation_report_json,
+                    code_commit_sha, created_by, change_note, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "spr_legacy_core_modal",
+                    "legacy-core-modal",
+                    1,
+                    None,
+                    1,
+                    "weatherbot-strategy-v3",
+                    "legacy-core-modal-hash",
+                    json.dumps(legacy_parameters),
+                    json.dumps([]),
+                    "validated",
+                    json.dumps({"ok": True}),
+                    "",
+                    "test",
+                    "legacy fixture",
+                    "2026-07-25T00:00:00+00:00",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO strategy_profile_activation_events (
+                    scope, revision_id, action, actor, reason, created_at
+                ) VALUES (?, ?, 'activate', ?, ?, ?)
+                """,
+                (
+                    "signal_generation",
+                    "spr_legacy_core_modal",
+                    "test",
+                    "legacy fixture",
+                    "2026-07-25T00:00:00+00:00",
+                ),
+            )
+
+        migrated = ensure_default_strategy_profile("signal_generation", path=path)
+        migrated_core = migrated["parameters"]["strategies"]["core_modal_v1"]
+
+        self.assertNotEqual(migrated["revision_id"], "spr_legacy_core_modal")
+        self.assertEqual(migrated["revision_no"], 2)
+        self.assertEqual(migrated["active_scopes"], ["signal_generation"])
+        self.assertEqual(migrated_core["min_paper_settlement_days"], 10)
+        self.assertEqual(migrated_core["min_live_settlement_days"], 20)
+        self.assertNotIn("min_settlement_days", migrated_core)
+
     def test_paper_entry_strategy_is_single_select_until_overlap_is_reconciled(self):
         self.assertEqual(validate_paper_strategy_selection(["core_modal_v1"]), ["core_modal_v1"])
         with self.assertRaisesRegex(ValueError, "paper_strategy_requires_exactly_one"):

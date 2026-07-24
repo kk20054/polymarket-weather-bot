@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, ExternalLink, FlaskConical, Info, ListChecks, Play, Settings2, ShieldAlert, Square } from 'lucide-react'
+import { ChevronDown, ExternalLink, FlaskConical, Info, ListChecks, Play, Settings2, Square } from 'lucide-react'
 import { createStrategyProfile, executePaperOrders, fetchPaperOrders, fetchStrategyProfiles, runPaperValidationTick, startPaperValidation, stopPaperValidation } from '../api'
 import { EquityChart } from './EquityChart'
 import type {
@@ -236,6 +236,10 @@ function DecisionRow({
   const eligible = queueItemEligible(item)
   const suggested = item.decisions.reduce((sum, row) => sum + Number(row.position_size_usd ?? 0), 0)
   const reasons = [...new Set(item.decisions.flatMap(row => row.gate_reasons ?? row.reasons ?? []))]
+    .filter(reason => reason !== 'live_trading_disabled')
+  const primaryReason = first.blocked_reason_primary === 'live_trading_disabled'
+    ? reasons[0]
+    : first.blocked_reason_primary ?? reasons[0]
   const eventUrl = String(first.evidence_links?.event_url ?? '')
 
   return (
@@ -283,7 +287,7 @@ function DecisionRow({
           </div>
           {!eligible && (
             <div className="text-[10px] leading-relaxed text-amber-300">
-              {reasonText(first.blocked_reason_primary ?? reasons[0], language)}
+              {reasonText(primaryReason, language)}
               {reasons.length > 1 && (
                 <details className="mt-1 text-neutral-500">
                   <summary className="cursor-pointer">{tx(language, '全部阻塞原因', 'All gate reasons')}</summary>
@@ -590,11 +594,11 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
       <div className="shrink-0 border-b border-neutral-800 bg-black/95 px-3 py-2">
         <div className="flex items-start justify-between gap-2">
           <div>
-            <div className="text-sm font-medium text-neutral-100">{tx(language, '模拟交易台', 'Paper trading')}</div>
+            <div className="text-sm font-medium text-neutral-100">{tx(language, '交易台', 'Trading desk')}</div>
             <div className="mt-0.5 text-[10px] text-neutral-600">{tx(language, 'Kelly 分配 → 盘口成交 → Polymarket 结算', 'Kelly sizing → order-book fill → Polymarket settlement')}</div>
           </div>
           <span className={`border px-1.5 py-0.5 text-[9px] ${liveAvailable ? 'border-green-500/30 text-green-300' : 'border-amber-500/30 text-amber-300'}`}>
-            {liveAvailable ? tx(language, '实盘待验收', 'Live pending review') : tx(language, '实盘锁定', 'Live locked')}
+            {liveAvailable ? tx(language, '实盘待验收', 'Live review') : tx(language, '实盘锁定', 'Live locked')}
           </span>
         </div>
         <div className="mt-1 flex items-center justify-between gap-2 text-[9px] text-neutral-600">
@@ -610,13 +614,13 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
           <div className="border border-neutral-800 p-2"><div className="text-neutral-600">{tx(language, '持仓 / 已结算 / 已保护退出', 'Open / settled / guarded')}</div><div className="mt-1 tabular-nums text-neutral-200">{summary?.open_orders ?? 0} / {summary?.resolved_orders ?? 0} / {summary?.exited_orders ?? 0}</div></div>
         </div>
         <button type="button" onClick={() => setSettingsOpen(value => !value)} className="mt-2 inline-flex min-h-8 w-full items-center justify-between border border-neutral-800 px-2 text-[10px] text-neutral-400 hover:bg-neutral-950">
-          <span className="inline-flex items-center gap-1"><Settings2 className="h-3.5 w-3.5" /> {tx(language, '自动模拟设置', 'Paper automation settings')}</span>
+          <span className="inline-flex items-center gap-1"><Settings2 className="h-3.5 w-3.5" /> {tx(language, '策略设置', 'Strategy settings')}</span>
           <ChevronDown className={`h-3.5 w-3.5 transition ${settingsOpen ? 'rotate-180' : ''}`} />
         </button>
         {settingsOpen && (
           <div className="mt-2 space-y-2 border border-neutral-800 bg-neutral-950/60 p-2">
             <div className="grid grid-cols-2 gap-2">
-              <label className="text-[9px] text-neutral-500">{tx(language, '模拟本金（USD）', 'Paper bankroll (USD)')}<input disabled={validationActive} type="number" min="1" step="1" value={bankroll} onChange={event => setBankroll(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
+              <label className="text-[9px] text-neutral-500">{tx(language, '本金（USD）', 'Bankroll (USD)')}<input disabled={validationActive} type="number" min="1" step="1" value={bankroll} onChange={event => setBankroll(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
               <label className="text-[9px] text-neutral-500">{tx(language, '单笔上限（USD）', 'Max per trade (USD)')}<input disabled={validationActive} type="number" min="0.1" step="0.1" value={maxPerTrade} onChange={event => setMaxPerTrade(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
             </div>
             <fieldset disabled={validationActive} className="space-y-1">
@@ -636,36 +640,36 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
                 onChange={event => setExitMode(event.target.value as ExitMode)}
               >
                 <option value="hold_to_settlement">{tx(language, '持有至 Polymarket 结算（当前可用）', 'Hold to Polymarket settlement (available)')}</option>
-                <option value="model_guarded">{tx(language, '模型保护退出（模拟盘）', 'Model-guarded exit (paper)')}</option>
-                <option value="model_guarded_take_profit">{tx(language, '盈利止盈 + 模型保护（模拟盘）', 'Take profit + model guard (paper)')}</option>
+                <option value="model_guarded">{tx(language, '模型保护退出', 'Model-guarded exit')}</option>
+                <option value="model_guarded_take_profit">{tx(language, '盈利止盈 + 模型保护', 'Take profit + model guard')}</option>
               </select>
             </label>
             <div className="text-[9px] leading-relaxed text-neutral-600">
               {exitMode === 'model_guarded_take_profit'
-                ? tx(language, '仅按新鲜盘口的可成交买一价计算：持仓至少 15 分钟，利润同时达到 5%、$0.05 且至少高于入场一档 tick，并有足够深度承接全部份额时止盈；实况穿桶和模型失效保护仍生效。只作用于下一批模拟。', 'Use only a fresh executable best bid: after 15 minutes, take profit when gain reaches 5%, $0.05, and at least one tick above entry, with enough depth for every share. Observed-breach and model guards remain active. Applies to the next paper cohort only.')
+                ? tx(language, '按可成交买一价止盈；实况穿桶与模型失效保护仍生效。下次启动生效。', 'Take profit at an executable best bid; observed-breach and model guards remain active. Applies on next start.')
                 : exitMode === 'model_guarded'
-                ? tx(language, '实测最高温穿过本桶时立即模拟卖出；仅模型转弱时，需连续两次低于 8%，且买一价不低于模型公允价。新选择只对下一批模拟生效。', 'Exit immediately when the observed high makes the bucket impossible. A model-only exit needs two readings below 8% and a bid no worse than model fair value. This applies only to the next paper cohort.')
+                ? tx(language, '实测最高温穿桶时退出；仅模型转弱时需连续两次确认。下次启动生效。', 'Exit when the observed high breaches the bucket; model weakness requires two confirmations. Applies on next start.')
                 : tx(language, '持有至官方结算，不因短期价差或盘中价格波动自动卖出。', 'Hold to official settlement; short-term spread and price noise never trigger an automatic sell.')}
             </div>
-            {!schedulerRunning && <div className="border border-amber-500/20 bg-amber-500/5 px-2 py-1.5 text-[9px] text-amber-300">{tx(language, '请先启动顶部调度器；自动模拟和结算由后端定时任务驱动。', 'Start the scheduler first; paper execution and settlement are driven by backend jobs.')}</div>}
+            {!schedulerRunning && <div className="border border-amber-500/20 bg-amber-500/5 px-2 py-1.5 text-[9px] text-amber-300">{tx(language, '请先启动顶部调度器。', 'Start the scheduler first.')}</div>}
             <button
               type="button"
               disabled={validationMutation.isPending || (!validationActive && (!schedulerRunning || selectedStrategies.length === 0))}
               onClick={() => validationMutation.mutate(validationActive ? 'stop' : 'start')}
               className={`inline-flex min-h-9 w-full items-center justify-center gap-1 border text-[10px] disabled:opacity-30 ${validationActive ? 'border-red-500/30 text-red-300 hover:bg-red-500/10' : 'border-green-500/30 bg-green-500/10 text-green-200 hover:bg-green-500/15'}`}
             >
-              {validationActive ? <><Square className="h-3 w-3" /> {tx(language, '停止自动模拟', 'Stop paper automation')}</> : <><Play className="h-3.5 w-3.5" /> {tx(language, '一键模拟', 'Start paper automation')}</>}
+              {validationActive ? <><Square className="h-3 w-3" /> {tx(language, '停止运行', 'Stop')}</> : <><Play className="h-3.5 w-3.5" /> {tx(language, '启动策略', 'Start strategy')}</>}
             </button>
           </div>
         )}
       </div>
 
-      <div className="grid shrink-0 grid-cols-2 border-b border-neutral-800" role="tablist" aria-label={tx(language, '模拟策略与订单', 'Paper strategies and orders')}>
+      <div className="grid shrink-0 grid-cols-2 border-b border-neutral-800" role="tablist" aria-label={tx(language, '策略与订单', 'Strategies and orders')}>
         <button type="button" role="tab" aria-selected={view === 'queue'} onClick={() => setView('queue')} className={`min-h-10 border-r border-neutral-800 px-3 text-left text-[11px] ${view === 'queue' ? 'bg-cyan-500/10 text-cyan-200' : 'text-neutral-500'}`}>
           <span className="inline-flex items-center gap-1"><ListChecks className="h-3.5 w-3.5" /> {tx(language, '策略队列', 'Strategy queue')}</span>
         </button>
         <button type="button" role="tab" aria-selected={view === 'orders'} onClick={() => setView('orders')} className={`min-h-10 px-3 text-left text-[11px] ${view === 'orders' ? 'bg-amber-500/10 text-amber-200' : 'text-neutral-500'}`}>
-          <span className="inline-flex items-center gap-1"><FlaskConical className="h-3.5 w-3.5" /> {tx(language, '模拟订单', 'Paper orders')}</span>
+          <span className="inline-flex items-center gap-1"><FlaskConical className="h-3.5 w-3.5" /> {tx(language, '订单', 'Orders')}</span>
         </button>
       </div>
 
@@ -685,7 +689,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
               onClick={() => executeMutation.mutate({ dryRun: false })}
               className="border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-30"
             >
-              {tx(language, '模拟当前可用策略', 'Execute eligible strategies')}
+              {tx(language, '执行当前策略', 'Execute strategy')}
             </button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
@@ -706,7 +710,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
       ) : (
         <div data-testid="paper-order-list" className="min-h-0 flex-1 overflow-y-auto">
           {ordersQuery.isLoading ? (
-            <div className="px-3 py-8 text-center text-[11px] text-neutral-600">{tx(language, '读取模拟订单…', 'Loading paper orders…')}</div>
+            <div className="px-3 py-8 text-center text-[11px] text-neutral-600">{tx(language, '读取订单…', 'Loading orders…')}</div>
           ) : summary?.orders?.length ? <>
             <section className="border-b border-neutral-800 px-3 py-3">
               <div className="mb-2 flex items-center justify-between gap-2">
@@ -724,14 +728,8 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
             </section>
             {summary.orders.map(order => <OrderRow key={order.id} order={order} language={language} />)}
           </> : (
-            <div className="px-3 py-8 text-center text-[11px] text-neutral-600">{tx(language, '暂无模拟订单', 'No paper orders')}</div>
+            <div className="px-3 py-8 text-center text-[11px] text-neutral-600">{tx(language, '暂无订单', 'No orders')}</div>
           )}
-        </div>
-      )}
-
-      {!liveAvailable && (
-        <div className="shrink-0 border-t border-neutral-800 px-3 py-2 text-[10px] text-neutral-600">
-          <span className="inline-flex items-center gap-1"><ShieldAlert className="h-3 w-3 text-amber-400" /> {tx(language, '所有操作仅写入本地模拟订单，不会提交实盘。', 'All actions write local paper orders only; no live orders are submitted.')}</span>
         </div>
       )}
     </div>

@@ -55,6 +55,7 @@ class StrategyBase:
         ladder_group_id: str = "",
         position_size_override: float | None = None,
         kelly_fraction_override: float | None = None,
+        position_size_multiplier: float = 1.0,
     ) -> Decision:
         cfg = load_config()
         model_probability = optional_float(probability_item.get("probability"))
@@ -132,8 +133,19 @@ class StrategyBase:
             kelly_multiplier=kelly_multiplier,
             bankroll_fraction_cap=bankroll_fraction_cap,
         )
+        clean_position_size_multiplier = min(1.0, max(0.0, float(position_size_multiplier)))
         kelly_fraction = sizing.kelly_fraction if kelly_fraction_override is None else round(max(0.0, float(kelly_fraction_override)), 8)
-        position_size = sizing.capped_position_size_usd if position_size_override is None else round(max(0.0, float(position_size_override)), 4)
+        position_size = (
+            round(sizing.capped_position_size_usd * clean_position_size_multiplier, 4)
+            if position_size_override is None
+            else round(max(0.0, float(position_size_override)), 4)
+        )
+        sizing_snapshot = sizing.snapshot()
+        sizing_snapshot.update({
+            "unscaled_final_position_size_usd": sizing.capped_position_size_usd,
+            "position_size_multiplier": clean_position_size_multiplier,
+            "final_position_size_usd": position_size,
+        })
         order_min_size = optional_float(bucket.get("order_min_size"))
         if (
             market_ask is not None
@@ -195,6 +207,7 @@ class StrategyBase:
             "strategy_name": self.strategy_name,
             "kelly_fraction": kelly_fraction,
             "position_size_usd": position_size,
+            "position_size_multiplier": clean_position_size_multiplier,
             "ladder_group_id": ladder_group_id,
             "strategy_revision_id": str(context.get("strategy_revision_id") or ""),
             "strategy_params_hash": str(context.get("strategy_params_hash") or ""),
@@ -203,7 +216,7 @@ class StrategyBase:
             "sizing_max_per_trade_usd": float(context.get("max_per_trade_usd") or 0.0),
             "kelly_multiplier": kelly_multiplier,
             "bankroll_fraction_cap": bankroll_fraction_cap,
-            "sizing_snapshot": sizing.snapshot(),
+            "sizing_snapshot": sizing_snapshot,
             "orderbook_snapshot": {
                 "best_bid": market_bid,
                 "best_ask": market_ask,

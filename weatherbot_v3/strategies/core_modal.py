@@ -14,6 +14,10 @@ from .base import (
 )
 
 
+CORE_MODAL_PROVISIONAL_CAUTION = "core_independent_samples_provisional"
+CORE_MODAL_LIVE_MATURITY_REASON = "core_live_maturity_below_min"
+
+
 class CoreModalStrategy(StrategyBase):
     """Trade at most one liquid bucket from the event's two model modes."""
 
@@ -22,12 +26,15 @@ class CoreModalStrategy(StrategyBase):
     min_model_probability = 0.25
     max_model_rank = 2
     min_market_ask = 0.10
-    min_independent_settlement_days = 20
+    min_paper_independent_settlement_days = 10
+    min_live_independent_settlement_days = 20
     require_authoritative_truth = True
-    min_component_calibration_days = 20
+    min_paper_component_calibration_days = 10
+    min_live_component_calibration_days = 20
     min_calibration_coverage = 0.80
     min_model_families = 4
     max_model_spread_c = 1.50
+    provisional_position_multiplier = 0.50
 
     def __init__(self, parameters: dict[str, Any] | None = None):
         self.parameters = dict(parameters or {})
@@ -35,20 +42,41 @@ class CoreModalStrategy(StrategyBase):
         self.min_model_probability = float(self.parameters.get("min_model_probability", self.min_model_probability))
         self.max_model_rank = int(self.parameters.get("max_model_rank", self.max_model_rank))
         self.min_market_ask = float(self.parameters.get("min_market_ask", self.min_market_ask))
-        self.min_independent_settlement_days = int(
-            self.parameters.get("min_settlement_days", self.min_independent_settlement_days)
+        (
+            self.min_paper_independent_settlement_days,
+            self.min_live_independent_settlement_days,
+        ) = _split_thresholds(
+            self.parameters,
+            paper_key="min_paper_settlement_days",
+            live_key="min_live_settlement_days",
+            legacy_key="min_settlement_days",
+            paper_default=self.min_paper_independent_settlement_days,
+            live_default=self.min_live_independent_settlement_days,
         )
+        self.min_independent_settlement_days = self.min_paper_independent_settlement_days
         self.require_authoritative_truth = bool(
             self.parameters.get("require_authoritative_truth", self.require_authoritative_truth)
         )
-        self.min_component_calibration_days = int(
-            self.parameters.get("min_component_calibration_days", self.min_component_calibration_days)
+        (
+            self.min_paper_component_calibration_days,
+            self.min_live_component_calibration_days,
+        ) = _split_thresholds(
+            self.parameters,
+            paper_key="min_paper_component_calibration_days",
+            live_key="min_live_component_calibration_days",
+            legacy_key="min_component_calibration_days",
+            paper_default=self.min_paper_component_calibration_days,
+            live_default=self.min_live_component_calibration_days,
         )
+        self.min_component_calibration_days = self.min_paper_component_calibration_days
         self.min_calibration_coverage = float(
             self.parameters.get("min_calibration_coverage", self.min_calibration_coverage)
         )
         self.min_model_families = int(self.parameters.get("min_model_families", self.min_model_families))
         self.max_model_spread_c = float(self.parameters.get("max_model_spread_c", self.max_model_spread_c))
+        self.provisional_position_multiplier = min(1.0, max(0.0, float(
+            self.parameters.get("provisional_position_multiplier", self.provisional_position_multiplier)
+        )))
 
     def evaluate(
         self,
@@ -80,6 +108,7 @@ class CoreModalStrategy(StrategyBase):
                 prediction,
                 context,
                 force_skip_reasons=event_reasons,
+                position_size_multiplier=self._position_multiplier(quality),
             )
             self._attach_metadata(decision, modal, modal, ranked, quality)
             return [decision]
@@ -99,6 +128,7 @@ class CoreModalStrategy(StrategyBase):
                 prediction,
                 context,
                 force_skip_reasons=unique(["core_no_qualified_top_bucket", *rejection_reasons]),
+                position_size_multiplier=self._position_multiplier(quality),
             )
             self._attach_metadata(decision, modal, modal, ranked, quality)
             return [decision]
@@ -113,6 +143,7 @@ class CoreModalStrategy(StrategyBase):
             prediction,
             context,
             min_edge=0.0,
+            position_size_multiplier=self._position_multiplier(quality),
         )
         self._attach_metadata(decision, chosen, modal, ranked, quality)
         return [decision]
@@ -223,30 +254,60 @@ class CoreModalStrategy(StrategyBase):
         ]
         families = sorted({str(component.get("family") or component.get("source") or "") for component in components if component.get("family") or component.get("source")})
         weight_total = sum(max(0.0, float(component.get("weight") or 0.0)) for component in components)
-        calibrated_weight = sum(
+        paper_calibrated_weight = sum(
+            max(0.0, float(component.get("weight") or 0.0))
+            for component in components
+            if self._paper_component_eligible(component)
+        )
+        live_calibrated_weight = sum(
             max(0.0, float(component.get("weight") or 0.0))
             for component in components
             if not bool(component.get("mae_imputed"))
-            and int(component.get("bias_sample_count") or 0) >= self.min_component_calibration_days
+            and int(component.get("bias_sample_count") or 0) >= self.min_live_component_calibration_days
         )
-        calibration_coverage = calibrated_weight / weight_total if weight_total > 0 else 0.0
+        calibration_coverage = paper_calibrated_weight / weight_total if weight_total > 0 else 0.0
+        live_calibration_coverage = live_calibrated_weight / weight_total if weight_total > 0 else 0.0
         family_highs_c = [
             fmean(float(value) for value in component.get("adjusted_daily_highs_c") or [])
             for component in components
             if component.get("adjusted_daily_highs_c")
         ]
         model_spread_c = max(family_highs_c) - min(family_highs_c) if len(family_highs_c) >= 2 else None
+        independent_settlement_days = int(context.get("independent_settlement_days") or 0)
+        if (
+            independent_settlement_days < self.min_paper_independent_settlement_days
+            or calibration_coverage + 1e-12 < self.min_calibration_coverage
+        ):
+            maturity_status = "insufficient"
+        elif (
+            independent_settlement_days < self.min_live_independent_settlement_days
+            or live_calibration_coverage + 1e-12 < self.min_calibration_coverage
+        ):
+            maturity_status = "provisional"
+        else:
+            maturity_status = "mature"
         return {
             "family_count": len(families),
             "families": families,
             "calibration_coverage": round(calibration_coverage, 8),
-            "calibrated_weight": round(calibrated_weight, 8),
+            "calibrated_weight": round(paper_calibrated_weight, 8),
+            "live_calibration_coverage": round(live_calibration_coverage, 8),
+            "live_calibrated_weight": round(live_calibrated_weight, 8),
             "weight_total": round(weight_total, 8),
             "model_spread_c": None if model_spread_c is None else round(model_spread_c, 4),
-            "independent_settlement_days": int(context.get("independent_settlement_days") or 0),
+            "independent_settlement_days": independent_settlement_days,
             "independent_settlement_basis": str(context.get("independent_settlement_basis") or "missing"),
             "independent_settlement_authoritative": bool(context.get("independent_settlement_authoritative")),
+            "maturity_status": maturity_status,
         }
+
+    def _paper_component_eligible(self, component: dict[str, Any]) -> bool:
+        sample_count = int(component.get("bias_sample_count") or 0)
+        if sample_count < self.min_paper_component_calibration_days:
+            return False
+        if not bool(component.get("mae_imputed")):
+            return True
+        return str(component.get("weight_status") or "").lower() == "provisional"
 
     def _quality_reasons(self, quality: dict[str, Any]) -> list[str]:
         reasons: list[str] = []
@@ -259,7 +320,7 @@ class CoreModalStrategy(StrategyBase):
             reasons.append("core_model_spread_unavailable")
         elif spread > self.max_model_spread_c + 1e-12:
             reasons.append("core_model_spread_too_wide")
-        if int(quality["independent_settlement_days"]) < self.min_independent_settlement_days:
+        if int(quality["independent_settlement_days"]) < self.min_paper_independent_settlement_days:
             reasons.append("core_independent_settlement_days_below_min")
         if self.require_authoritative_truth and not bool(quality["independent_settlement_authoritative"]):
             reasons.append("core_settlement_truth_not_authoritative")
@@ -273,6 +334,7 @@ class CoreModalStrategy(StrategyBase):
         *,
         force_skip_reasons: list[str] | None = None,
         extra_hard_blocks: list[str] | None = None,
+        position_size_multiplier: float = 1.0,
     ) -> Decision:
         return self.build_decision(
             item["bucket"],
@@ -282,7 +344,11 @@ class CoreModalStrategy(StrategyBase):
             min_edge=0.0,
             force_skip_reasons=force_skip_reasons,
             extra_hard_blocks=extra_hard_blocks,
+            position_size_multiplier=position_size_multiplier,
         )
+
+    def _position_multiplier(self, quality: dict[str, Any]) -> float:
+        return self.provisional_position_multiplier if quality.get("maturity_status") == "provisional" else 1.0
 
     def _attach_metadata(
         self,
@@ -292,6 +358,8 @@ class CoreModalStrategy(StrategyBase):
         ranked: list[dict[str, Any]],
         quality: dict[str, Any],
     ) -> None:
+        maturity_status = str(quality.get("maturity_status") or "insufficient")
+        position_size_multiplier = self._position_multiplier(quality)
         decision["core_modal"] = {
             "model_rank": int(chosen["rank"]),
             "modal_bucket_key": str(modal["bucket"].get("bucket_key") or ""),
@@ -301,16 +369,52 @@ class CoreModalStrategy(StrategyBase):
             "execution_buffer": chosen.get("execution_buffer"),
             "effective_edge": chosen.get("effective_edge"),
             "quality": quality,
+            "maturity_status": maturity_status,
+            "position_size_multiplier": position_size_multiplier,
             "thresholds": {
                 "max_model_rank": self.max_model_rank,
                 "min_model_probability": self.min_model_probability,
                 "min_effective_edge": self.min_effective_edge,
                 "min_market_ask": self.min_market_ask,
-                "min_independent_settlement_days": self.min_independent_settlement_days,
+                "min_independent_settlement_days": self.min_paper_independent_settlement_days,
+                "min_paper_independent_settlement_days": self.min_paper_independent_settlement_days,
+                "min_live_independent_settlement_days": self.min_live_independent_settlement_days,
                 "require_authoritative_truth": self.require_authoritative_truth,
-                "min_component_calibration_days": self.min_component_calibration_days,
+                "min_component_calibration_days": self.min_paper_component_calibration_days,
+                "min_paper_component_calibration_days": self.min_paper_component_calibration_days,
+                "min_live_component_calibration_days": self.min_live_component_calibration_days,
                 "min_calibration_coverage": self.min_calibration_coverage,
                 "min_model_families": self.min_model_families,
                 "max_model_spread_c": self.max_model_spread_c,
+                "provisional_position_multiplier": self.provisional_position_multiplier,
             },
         }
+        if maturity_status == "provisional":
+            decision["cautions"] = unique([*(decision.get("cautions") or []), CORE_MODAL_PROVISIONAL_CAUTION])
+            decision["gate_reasons"] = unique([
+                *(decision.get("gate_reasons") or []),
+                CORE_MODAL_LIVE_MATURITY_REASON,
+            ])
+            decision["reasons"] = list(decision["gate_reasons"])
+
+
+def _split_thresholds(
+    parameters: dict[str, Any],
+    *,
+    paper_key: str,
+    live_key: str,
+    legacy_key: str,
+    paper_default: int,
+    live_default: int,
+) -> tuple[int, int]:
+    legacy_value = parameters.get(legacy_key)
+    if legacy_value is None:
+        legacy_paper = paper_default
+        legacy_live = live_default
+    else:
+        legacy_days = int(legacy_value)
+        legacy_paper = paper_default if legacy_days == live_default else legacy_days
+        legacy_live = max(live_default, legacy_days)
+    paper_days = int(parameters.get(paper_key, legacy_paper))
+    live_days = max(live_default, paper_days, int(parameters.get(live_key, legacy_live)))
+    return paper_days, live_days

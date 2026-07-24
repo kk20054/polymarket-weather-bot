@@ -2082,12 +2082,35 @@ def daily_max_prediction_summary(city_key: str | None = None, target_date: str |
     cohort_contract = candidate.get("cohort_contract") if candidate else None
     quality_ok = bool(candidate) and bool((cohort_contract or {}).get("ok", True))
     latest = candidate if quality_ok else None
+    history = [
+        {
+            "id": row.get("id"),
+            "issued_at": row.get("issued_at"),
+            "mu": row.get("mu"),
+            "sigma": row.get("sigma"),
+            "components": [
+                {
+                    "source": component.get("source"),
+                    "family": component.get("family"),
+                    "model_daily_high_c": component.get("model_daily_high_c"),
+                    "weight": component.get("weight"),
+                    "mae_7d": component.get("mae_7d"),
+                    "bias_sample_count": component.get("bias_sample_count"),
+                    "weight_status": component.get("weight_status"),
+                }
+                for component in (row.get("components") or [])
+                if isinstance(component, dict)
+            ],
+        }
+        for row in rows[:48]
+    ]
     return {
         "ok": True,
         "city_key": city_key or "",
         "target_date": target_date or "",
         "count": len(rows),
         "latest": latest,
+        "history": history,
         "quality_ok": quality_ok,
         "quality_reasons": list((cohort_contract or {}).get("reasons") or []),
         "rejected_latest_id": candidate.get("id") if candidate and not quality_ok else None,
