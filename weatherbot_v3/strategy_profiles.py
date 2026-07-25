@@ -39,17 +39,17 @@ DEFAULT_PARAMETERS: dict[str, Any] = {
             "min_model_probability": 0.25,
             "max_model_rank": 2,
             "min_market_ask": 0.10,
-            "min_paper_settlement_days": 10,
+            "min_paper_settlement_days": 0,
             "min_live_settlement_days": 20,
             "require_authoritative_truth": True,
-            "min_paper_component_calibration_days": 10,
+            "min_paper_component_calibration_days": 0,
             "min_live_component_calibration_days": 20,
             "min_calibration_coverage": 0.80,
             "min_model_families": 4,
             "max_paper_model_spread_c": 4.50,
             "max_live_model_spread_c": 1.50,
             "max_model_spread_c": 1.50,
-            "provisional_position_multiplier": 0.50,
+            "provisional_position_multiplier": 1.00,
         },
         "single_bucket_ev": {"enabled": True, "min_edge": 0.05},
         "ladder_grid": {
@@ -444,7 +444,7 @@ def _split_legacy_threshold(
         legacy_days = int(legacy_value)
     except (TypeError, ValueError):
         legacy_days = legacy_value
-    paper_default = 10 if legacy_days == 20 else legacy_days
+    paper_default = 0 if legacy_days == 20 else legacy_days
     live_default = max(20, legacy_days) if isinstance(legacy_days, int) else legacy_days
     parameters.setdefault(paper_key, paper_default)
     parameters.setdefault(live_key, live_default)

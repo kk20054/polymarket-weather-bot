@@ -71,7 +71,7 @@ class DynamicModelWeightTests(unittest.TestCase):
             {"openmeteo_ensemble_gfs_seamless"},
         )
 
-    def test_unmatured_v3_is_excluded_while_collection_progress_remains_visible(self):
+    def test_unmatured_v3_keeps_prior_weight_while_collection_progress_remains_visible(self):
         rows = [
             component("weathercom_v3", prior=0.484, samples=7, mae=None),
             component("gfs", prior=0.152, samples=24, mae=0.9),
@@ -84,12 +84,12 @@ class DynamicModelWeightTests(unittest.TestCase):
         _apply_mae_adjusted_weights(rows)
 
         v3 = rows[0]
-        self.assertEqual(v3["weight"], 0.0)
-        self.assertEqual(v3["weight_status"], "collecting")
+        self.assertGreater(v3["weight"], 0.0)
+        self.assertEqual(v3["weight_status"], "prior_only")
         self.assertAlmostEqual(v3["calibration_progress"], 0.35)
-        active = rows[1:]
-        self.assertAlmostEqual(sum(row["weight"] for row in active), 1.0, places=9)
-        self.assertLessEqual(max(row["weight"] for row in active), DYNAMIC_WEIGHT_MAX_SHARE + 1e-9)
+        self.assertEqual(v3["performance_blend"], 0.0)
+        self.assertAlmostEqual(sum(row["weight"] for row in rows), 1.0, places=9)
+        self.assertLessEqual(max(row["weight"] for row in rows), DYNAMIC_WEIGHT_MAX_SHARE + 1e-9)
         self.assertGreater(rows[2]["weight"], rows[4]["weight"])
 
     def test_v3_enters_gradually_after_twenty_leakage_free_pairs(self):
@@ -107,21 +107,21 @@ class DynamicModelWeightTests(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["sample_maturity"], 0.5)
         self.assertLessEqual(rows[0]["weight"], DYNAMIC_WEIGHT_MAX_SHARE + 1e-9)
 
-    def test_core_quality_ignores_collecting_zero_weight_models(self):
+    def test_core_quality_keeps_prior_only_models_but_excludes_them_from_calibrated_coverage(self):
         strategy = CoreModalStrategy()
         prediction = {
             "components": [
-                {**component("weathercom_v3", prior=0.484, samples=7, mae=None), "weight": 0.0, "mae_imputed": True},
-                {**component("gfs", prior=0.25, samples=24, mae=0.8), "weight": 0.5, "mae_imputed": False},
-                {**component("ecmwf", prior=0.25, samples=24, mae=0.7), "weight": 0.5, "mae_imputed": False},
+                {**component("weathercom_v3", prior=0.484, samples=7, mae=None), "weight": 0.3, "mae_imputed": True},
+                {**component("gfs", prior=0.25, samples=24, mae=0.8), "weight": 0.35, "mae_imputed": False},
+                {**component("ecmwf", prior=0.25, samples=24, mae=0.7), "weight": 0.35, "mae_imputed": False},
             ],
         }
 
         quality = strategy._prediction_quality(prediction, {})
 
-        self.assertEqual(quality["families"], ["ecmwf", "gfs"])
-        self.assertEqual(quality["family_count"], 2)
-        self.assertAlmostEqual(quality["calibration_coverage"], 1.0)
+        self.assertEqual(quality["families"], ["ecmwf", "gfs", "weathercom_v3"])
+        self.assertEqual(quality["family_count"], 3)
+        self.assertAlmostEqual(quality["calibration_coverage"], 0.7)
 
 
 if __name__ == "__main__":

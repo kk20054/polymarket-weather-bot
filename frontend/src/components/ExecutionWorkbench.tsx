@@ -32,7 +32,7 @@ type QueueItem = {
 type ExitMode = 'hold_to_settlement' | 'model_guarded' | 'model_guarded_take_profit'
 
 const STRATEGY_OPTIONS = [
-  { key: 'core_modal_v1', zh: '动态核心温度桶', en: 'Dynamic modal bucket', helpZh: '仅选择模型概率最高的前两个温度桶；满 10 个无泄漏样本后进入半仓模拟并按近期误差动态加权，满 20 个后进入成熟校准。', helpEn: 'Only consider the top two model buckets; at 10 leakage-free pairs the model enters half-size paper weighting, and at 20 it reaches mature calibration.' },
+  { key: 'core_modal_v1', zh: '动态核心温度桶', en: 'Dynamic modal bucket', helpZh: '仅选择模型概率最高的前两个温度桶；所有可用模型从模拟开始即参与融合，配对样本越多，近期误差对权重的影响越大；20 个样本仍是实盘成熟门槛。', helpEn: 'Only consider the top two model buckets. Every available model participates in paper trading from the start; recent error influences its weight more as paired evidence grows. Twenty pairs remain the live-maturity threshold.' },
   { key: 'single_bucket_ev', zh: '单桶最高温', en: 'Single bucket', helpZh: '仅当盘口与风控闸门全部通过时，模拟买入概率优势最大的单个温度桶并持有至结算。', helpEn: 'Only after all book and risk gates pass, paper-buy the single bucket with the strongest probability advantage and hold to settlement.' },
   { key: 'ladder_grid', zh: '相邻三桶阶梯', en: 'Three-bucket ladder', helpZh: '中心桶与左右相邻桶作为原子组合，整组买入或整组跳过。', helpEn: 'Treat the center bucket and its two neighbors as an atomic group.' },
   { key: 'tail_buying', zh: '低价尾部', en: 'Low-price tail', helpZh: '仅观察/买入价格较低且概率差足够大的尾部桶。', helpEn: 'Watch or buy low-price tail buckets only when the probability gap is large enough.' },

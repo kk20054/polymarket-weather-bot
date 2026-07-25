@@ -8,6 +8,7 @@ from weatherbot_v3.strategies import CoreModalStrategy
 from weatherbot_v3.strategies.core_modal import (
     CORE_MODAL_LIVE_MATURITY_REASON,
     CORE_MODAL_PROVISIONAL_CAUTION,
+    CORE_MODAL_WIDE_SPREAD_CAUTION,
 )
 from weatherbot_v3.signals import build_signal_decisions
 from weatherbot_v3.strategy_profiles import core_modal_v1_parameters
@@ -94,7 +95,7 @@ def _provisional_prediction(sample_count=15):
     prediction = _prediction()
     for component in prediction["components"]:
         component["bias_sample_count"] = sample_count
-        component["mae_imputed"] = True
+        component["mae_imputed"] = False
         component["weight_status"] = "provisional"
     return prediction
 
@@ -147,7 +148,7 @@ class CoreModalStrategyTests(unittest.TestCase):
         self.assertEqual(decision["core_modal"]["model_rank"], 2)
         self.assertNotIn("core_modal_not_executable", decision["gate_reasons"])
 
-    def test_blocks_low_calibration_coverage(self):
+    def test_low_calibration_coverage_remains_paper_eligible_and_live_provisional(self):
         prediction = _prediction()
         for component in prediction["components"][:2]:
             component["mae_imputed"] = True
@@ -157,12 +158,13 @@ class CoreModalStrategyTests(unittest.TestCase):
 
         decision = CoreModalStrategy().evaluate_many(buckets, probabilities, prediction, _context())[0]
 
-        self.assertFalse(decision["paper_allowed"])
-        self.assertIn("core_calibration_coverage_below_min", decision["gate_reasons"])
+        self.assertTrue(decision["paper_allowed"])
+        self.assertNotIn("core_calibration_coverage_below_min", decision["gate_reasons"])
+        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["gate_reasons"])
         self.assertNotIn("core_modal_not_executable", decision["gate_reasons"])
         self.assertAlmostEqual(decision["core_modal"]["quality"]["calibration_coverage"], 0.6)
 
-    def test_blocks_wide_model_family_spread(self):
+    def test_wide_model_family_spread_is_paper_caution_and_live_block(self):
         prediction = _prediction()
         prediction["components"][-1]["adjusted_daily_highs_c"] = [35.0]
         buckets = [_bucket("modal", 29, 30, 0.20, 0.19)]
@@ -170,8 +172,10 @@ class CoreModalStrategyTests(unittest.TestCase):
 
         decision = CoreModalStrategy().evaluate_many(buckets, probabilities, prediction, _context())[0]
 
-        self.assertFalse(decision["paper_allowed"])
-        self.assertIn("core_model_spread_too_wide", decision["gate_reasons"])
+        self.assertTrue(decision["paper_allowed"])
+        self.assertNotIn("core_model_spread_too_wide", decision["gate_reasons"])
+        self.assertIn(CORE_MODAL_WIDE_SPREAD_CAUTION, decision["cautions"])
+        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["gate_reasons"])
 
     def test_paper_explores_model_spread_that_remains_live_blocked(self):
         prediction = _prediction()
@@ -188,11 +192,11 @@ class CoreModalStrategyTests(unittest.TestCase):
 
         self.assertTrue(decision["paper_allowed"])
         self.assertEqual(decision["core_modal"]["maturity_status"], "provisional")
-        self.assertEqual(decision["position_size_multiplier"], 0.5)
+        self.assertEqual(decision["position_size_multiplier"], 1.0)
         self.assertNotIn("core_model_spread_too_wide", decision["gate_reasons"])
         self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["gate_reasons"])
 
-    def test_blocks_paper_below_ten_independent_settlement_days(self):
+    def test_sparse_settlement_history_remains_paper_eligible(self):
         bucket = _bucket("modal", 29, 30, 0.20, 0.19)
         probabilities = {"modal": {"bucket_key": "modal", "probability": 0.40}}
 
@@ -203,11 +207,12 @@ class CoreModalStrategyTests(unittest.TestCase):
             _context(independent_settlement_days=9),
         )[0]
 
-        self.assertFalse(decision["paper_allowed"])
-        self.assertIn("core_independent_settlement_days_below_min", decision["gate_reasons"])
-        self.assertEqual(decision["core_modal"]["maturity_status"], "insufficient")
+        self.assertTrue(decision["paper_allowed"])
+        self.assertNotIn("core_independent_settlement_days_below_min", decision["gate_reasons"])
+        self.assertEqual(decision["core_modal"]["maturity_status"], "provisional")
+        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["gate_reasons"])
 
-    def test_10_to_19_independent_samples_are_provisional_at_half_size(self):
+    def test_10_to_19_independent_samples_are_provisional_at_normal_paper_size(self):
         bucket = _bucket("modal", 29, 30, 0.20, 0.19)
         probabilities = {"modal": {"bucket_key": "modal", "probability": 0.40}}
         strategy = CoreModalStrategy()
@@ -229,8 +234,8 @@ class CoreModalStrategyTests(unittest.TestCase):
         self.assertEqual(provisional["core_modal"]["maturity_status"], "provisional")
         self.assertEqual(provisional["core_modal"]["quality"]["calibration_coverage"], 1.0)
         self.assertEqual(provisional["core_modal"]["quality"]["live_calibration_coverage"], 0.0)
-        self.assertEqual(provisional["position_size_multiplier"], 0.5)
-        self.assertAlmostEqual(provisional["position_size_usd"], mature["position_size_usd"] * 0.5)
+        self.assertEqual(provisional["position_size_multiplier"], 1.0)
+        self.assertAlmostEqual(provisional["position_size_usd"], mature["position_size_usd"])
         self.assertIn(CORE_MODAL_PROVISIONAL_CAUTION, provisional["cautions"])
         self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, provisional["gate_reasons"])
         self.assertEqual(mature["core_modal"]["maturity_status"], "mature")
@@ -243,20 +248,20 @@ class CoreModalStrategyTests(unittest.TestCase):
             "min_component_calibration_days": 20,
         })
 
-        self.assertEqual(strategy.min_paper_independent_settlement_days, 10)
+        self.assertEqual(strategy.min_paper_independent_settlement_days, 0)
         self.assertEqual(strategy.min_live_independent_settlement_days, 20)
-        self.assertEqual(strategy.min_paper_component_calibration_days, 10)
+        self.assertEqual(strategy.min_paper_component_calibration_days, 0)
         self.assertEqual(strategy.min_live_component_calibration_days, 20)
 
     def test_preset_disables_exploratory_strategies(self):
         strategies = core_modal_v1_parameters()["strategies"]
 
         self.assertTrue(strategies["core_modal_v1"]["enabled"])
-        self.assertEqual(strategies["core_modal_v1"]["min_paper_settlement_days"], 10)
+        self.assertEqual(strategies["core_modal_v1"]["min_paper_settlement_days"], 0)
         self.assertEqual(strategies["core_modal_v1"]["min_live_settlement_days"], 20)
         self.assertEqual(strategies["core_modal_v1"]["max_paper_model_spread_c"], 4.5)
         self.assertEqual(strategies["core_modal_v1"]["max_live_model_spread_c"], 1.5)
-        self.assertEqual(strategies["core_modal_v1"]["provisional_position_multiplier"], 0.5)
+        self.assertEqual(strategies["core_modal_v1"]["provisional_position_multiplier"], 1.0)
         self.assertFalse(strategies["single_bucket_ev"]["enabled"])
         self.assertFalse(strategies["ladder_grid"]["enabled"])
         self.assertFalse(strategies["tail_buying"]["enabled"])

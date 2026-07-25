@@ -45,11 +45,11 @@ class StrategyProfileTests(unittest.TestCase):
 
         self.assertNotIn("min_settlement_days", core_modal)
         self.assertNotIn("min_component_calibration_days", core_modal)
-        self.assertEqual(core_modal["min_paper_settlement_days"], 10)
+        self.assertEqual(core_modal["min_paper_settlement_days"], 0)
         self.assertEqual(core_modal["min_live_settlement_days"], 20)
-        self.assertEqual(core_modal["min_paper_component_calibration_days"], 10)
+        self.assertEqual(core_modal["min_paper_component_calibration_days"], 0)
         self.assertEqual(core_modal["min_live_component_calibration_days"], 20)
-        self.assertEqual(core_modal["provisional_position_multiplier"], 0.5)
+        self.assertEqual(core_modal["provisional_position_multiplier"], 1.0)
 
     def test_active_legacy_profile_is_migrated_as_a_new_immutable_revision(self):
         path = test_db_path("strategy_profile_legacy_migration")
@@ -111,7 +111,7 @@ class StrategyProfileTests(unittest.TestCase):
         self.assertNotEqual(migrated["revision_id"], "spr_legacy_core_modal")
         self.assertEqual(migrated["revision_no"], 2)
         self.assertEqual(migrated["active_scopes"], ["signal_generation"])
-        self.assertEqual(migrated_core["min_paper_settlement_days"], 10)
+        self.assertEqual(migrated_core["min_paper_settlement_days"], 0)
         self.assertEqual(migrated_core["min_live_settlement_days"], 20)
         self.assertNotIn("min_settlement_days", migrated_core)
 

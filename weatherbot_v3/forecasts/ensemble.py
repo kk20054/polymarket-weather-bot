@@ -34,8 +34,9 @@ SIGMA_FLOOR_C = 0.5
 UNCALIBRATED_SIGMA_C = 1.2
 BIAS_MIN_SAMPLE_COUNT = 20
 FORECAST_SNAPSHOT_SELECTION_VERSION = "forecast-snapshot-selection-v2"
-# Paper calibration starts at 10 independent forecast/truth pairs. Bias
-# correction and live maturity remain on the stricter 20-sample contract.
+# Dynamic weighting starts as soon as a leakage-free forecast/truth pair is
+# available. Sparse models keep their prior share instead of disappearing;
+# live maturity remains on the stricter 20-sample contract.
 DYNAMIC_WEIGHT_MIN_SAMPLES = 10
 DYNAMIC_WEIGHT_FULL_SAMPLES = 40
 DYNAMIC_WEIGHT_PERFORMANCE_BLEND_MAX = 0.75
@@ -1353,62 +1354,80 @@ def _truth_basis(profile: CitySettlementProfile, target_date: str, path: Path | 
 
 
 def _apply_mae_adjusted_weights(components: list[dict[str, Any]]) -> None:
-    eligible: list[dict[str, Any]] = []
+    participants: list[dict[str, Any]] = []
+    calibrated: list[dict[str, Any]] = []
     for component in components:
         prior = max(0.0, float(component.get("weight_prior") or component.get("weight_raw") or 0.0))
         mae = _first_number(component.get("mae_7d"))
         sample_count = int(component.get("bias_sample_count") or 0)
-        component["weight_method"] = DYNAMIC_WEIGHT_METHOD
-        component["calibration_progress"] = round(min(1.0, sample_count / DYNAMIC_WEIGHT_MIN_SAMPLES), 4)
-        component["weight_eligible"] = bool(
-            prior > 0.0
-            and mae is not None
+        has_calibration = bool(
+            mae is not None
             and math.isfinite(float(mae))
-            and sample_count >= DYNAMIC_WEIGHT_MIN_SAMPLES
+            and sample_count > 0
         )
-        if not component["weight_eligible"]:
-            component["mae_imputed"] = True
-            component["effective_mae_c"] = None
-            component["weight_status"] = "collecting"
-            component["weight_exclusion_reason"] = (
-                "insufficient_leakage_free_pairs"
-                if sample_count < DYNAMIC_WEIGHT_MIN_SAMPLES
-                else "calibration_mae_missing"
+        component["weight_method"] = DYNAMIC_WEIGHT_METHOD
+        component["calibration_progress"] = round(min(1.0, sample_count / BIAS_MIN_SAMPLE_COUNT), 4)
+        component["weight_eligible"] = prior > 0.0
+        component["performance_eligible"] = has_calibration
+        if prior <= 0.0:
+            component["mae_imputed"] = not has_calibration
+            component["effective_mae_c"] = (
+                round(max(float(mae), DYNAMIC_WEIGHT_ERROR_FLOOR_C), 4)
+                if has_calibration
+                else UNCALIBRATED_SIGMA_C
             )
+            component["weight_status"] = "excluded"
+            component["weight_exclusion_reason"] = "model_prior_not_configured"
+            component["weight_caution"] = ""
             component["weight_raw"] = 0.0
             component["weight"] = 0.0
             component["weight_after_mae"] = 0.0
             continue
-        component["mae_imputed"] = False
-        component["effective_mae_c"] = round(max(float(mae), DYNAMIC_WEIGHT_ERROR_FLOOR_C), 4)
-        component["weight_status"] = "active"
-        component["weight_exclusion_reason"] = ""
-        eligible.append(component)
 
-    if not eligible:
-        # Preserve a display-only forecast for brand-new cities and regression
-        # replay fixtures. Core paper/live strategies still reject it because
-        # every component remains mae_imputed and calibration coverage is zero.
-        prior_total = sum(max(0.0, float(component.get("weight_prior") or 0.0)) for component in components) or 1.0
-        for component in components:
-            weight = max(0.0, float(component.get("weight_prior") or 0.0)) / prior_total
-            component["weight_raw"] = weight
-            component["weight"] = weight
-            component["weight_after_mae"] = weight
-            component["weight_status"] = "provisional"
-            component["weight_exclusion_reason"] = "all_components_uncalibrated_display_only"
+        component["mae_imputed"] = not has_calibration
+        component["weight_exclusion_reason"] = ""
+        if not has_calibration:
             component["effective_mae_c"] = UNCALIBRATED_SIGMA_C
+            component["weight_status"] = "prior_only"
+            component["weight_caution"] = "calibration_mae_missing_using_prior"
+        else:
+            component["effective_mae_c"] = round(max(float(mae), DYNAMIC_WEIGHT_ERROR_FLOOR_C), 4)
+            if sample_count >= BIAS_MIN_SAMPLE_COUNT:
+                component["weight_status"] = "active"
+                component["weight_caution"] = ""
+            elif sample_count >= DYNAMIC_WEIGHT_MIN_SAMPLES:
+                component["weight_status"] = "provisional"
+                component["weight_caution"] = "calibration_sample_is_provisional"
+            else:
+                component["weight_status"] = "collecting"
+                component["weight_caution"] = "calibration_sample_is_sparse"
+            calibrated.append(component)
+        participants.append(component)
+
+    if not participants:
         return
 
-    prior_total = sum(max(0.0, float(component.get("weight_prior") or 0.0)) for component in eligible) or 1.0
-    accuracy_scores = [1.0 / float(component["effective_mae_c"]) for component in eligible]
+    prior_total = sum(float(component.get("weight_prior") or 0.0) for component in participants) or 1.0
+    calibrated_prior_mass = sum(
+        float(component.get("weight_prior") or 0.0) / prior_total
+        for component in calibrated
+    )
+    accuracy_scores = [1.0 / float(component["effective_mae_c"]) for component in calibrated]
     accuracy_total = sum(accuracy_scores) or 1.0
+    accuracy_by_id = {
+        id(component): calibrated_prior_mass * accuracy_score / accuracy_total
+        for component, accuracy_score in zip(calibrated, accuracy_scores)
+    }
     combined_scores: list[float] = []
-    for component, accuracy_score in zip(eligible, accuracy_scores):
+    for component in participants:
         prior_share = max(0.0, float(component.get("weight_prior") or 0.0)) / prior_total
-        accuracy_share = accuracy_score / accuracy_total
+        accuracy_share = accuracy_by_id.get(id(component), prior_share)
         sample_count = int(component.get("bias_sample_count") or 0)
-        sample_maturity = min(1.0, sample_count / DYNAMIC_WEIGHT_FULL_SAMPLES)
+        sample_maturity = (
+            min(1.0, sample_count / DYNAMIC_WEIGHT_FULL_SAMPLES)
+            if bool(component.get("performance_eligible"))
+            else 0.0
+        )
         performance_blend = DYNAMIC_WEIGHT_PERFORMANCE_BLEND_MAX * sample_maturity
         score = ((1.0 - performance_blend) * prior_share) + (performance_blend * accuracy_share)
         component["dynamic_prior_share"] = round(prior_share, 8)
@@ -1418,7 +1437,7 @@ def _apply_mae_adjusted_weights(components: list[dict[str, Any]]) -> None:
         combined_scores.append(score)
 
     weights = _normalize_capped_weights(combined_scores, DYNAMIC_WEIGHT_MAX_SHARE)
-    for component, score, weight in zip(eligible, combined_scores, weights):
+    for component, score, weight in zip(participants, combined_scores, weights):
         component["weight_raw"] = score
         component["weight"] = weight
         component["weight_after_mae"] = weight
@@ -1473,10 +1492,12 @@ def _source_warnings(components: list[dict[str, Any]], algo: str) -> list[str]:
         warnings.append("missing_weathercom_v3")
     if not any(component.get("truth_basis") in {"wunderground_daily", "hong_kong_observatory_daily_extract"} for component in components):
         warnings.append("truth_basis_uses_approximation_or_none")
+    if algo == POLYWX_ALIGNED_ALGO and any(component.get("weight_status") == "prior_only" for component in components):
+        warnings.append("dynamic_weight_uses_prior_only_components")
     if algo == POLYWX_ALIGNED_ALGO and any(component.get("weight_status") == "collecting" for component in components):
-        warnings.append("uncalibrated_components_excluded_from_dynamic_weight")
+        warnings.append("dynamic_weight_uses_sparse_calibration_components")
     if algo == POLYWX_ALIGNED_ALGO and any(component.get("weight_status") == "provisional" for component in components):
-        warnings.append("uncalibrated_prior_fallback_display_only")
+        warnings.append("dynamic_weight_uses_provisional_calibration_components")
     return warnings
 
 

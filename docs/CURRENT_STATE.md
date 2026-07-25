@@ -2,21 +2,25 @@
 
 ## Current Layer
 - Date: 2026-07-25. Phase 3/6: leakage-safe calibration, real ensemble distributions and controlled paper validation.
-- Observation and revision-bound paper operation are available. `LIVE_TRADING=false`; no profitability claim.
+- Paper simulation uses immediate dynamic model weighting. Calibration maturity limits live trading only.
+- `LIVE_TRADING=false`; profitability is not yet proven.
 - Runtime data remains under the project `data/` Junction to `D:\WeatherBot\data`.
 
 ## Latest Evidence
-- `core_modal_v1` now separates paper and live maturity: 10-19 independent settlements are provisional paper candidates at 0.5x size; 20 remains the mature/live threshold.
-- Component MAE and dynamic weighting begin at 10 leakage-free pairs; additive bias correction and live maturity still require 20.
-- Active paper run: `paper-20260725T030230Z-6828a63a`, profile revision `spr_6404882c2553f33d03ef38da029b0106`, $40 bankroll, `hold_to_settlement`, live locked.
-- Shanghai V3 is active at `n=10` with 7-day MAE about `1.21°C`; the model dialog now prioritizes ranking, sample count, forecast high, weight and real MAE without repeated internal-status labels.
+- Every configured model with a prior weight participates from its first valid forecast.
+- Dynamic weight blends the prior with inverse-MAE performance as leakage-free pairs accumulate; the performance share ramps continuously with sample count.
+- Models without a settled MAE retain a nonzero prior-only weight instead of being silently removed.
+- Shanghai currently gives V3 about 42.9% at `n=10`, while JMA still receives about 7.1% before its first valid MAE.
+- Wide model disagreement is a paper caution, not a paper blocker. It remains a live-maturity blocker.
+- Active paper run: `paper-20260725T045941Z-2059361a`, profile revision `spr_e3462ea2aacb622e7335b2acab6b2c30`, $40 bankroll, `model_guarded` exit.
 - Real GFS ensemble snapshots persist 31 members. Orderbook replay remains point-in-time and rejects future or stale quotes.
-- Targeted strategy/exit/UI contract tests (31) and the frontend production build passed. Browser checks found no console error or horizontal page overflow.
+- Focused strategy tests and the frontend production build passed.
 
 ## Production Blockers
-- Profitability is still unproven; provisional paper permission is not a live-trading approval.
-- Authoritative truth, model agreement, market depth, spread, edge and order-size gates still apply after the 10-sample threshold.
-- Several cities and model families remain below mature calibration coverage; V3 has not yet produced a leakage-safe MAE for every city.
+- Executable paper orders still require valid bid/ask, acceptable spread, sufficient depth/order size, fresh quotes and positive edge.
+- Sparse calibration increases uncertainty; it no longer suppresses paper discovery but still blocks live approval.
+- Several cities and model families do not yet have enough settled truth to support a live-trading claim.
 
 ## Next Task
-- Let the active paper run collect decisions and settlements, then compare calibration, fill quality, ROI and drawdown by city, model family and lead time before changing live thresholds.
+- Keep the scheduler running and classify every skipped candidate as no-edge, quote/spread, order-minimum or stale-data.
+- Evaluate calibration, fill quality, ROI and drawdown before changing any live threshold.

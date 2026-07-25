@@ -15,6 +15,7 @@ from .base import (
 
 
 CORE_MODAL_PROVISIONAL_CAUTION = "core_independent_samples_provisional"
+CORE_MODAL_WIDE_SPREAD_CAUTION = "core_model_spread_high"
 CORE_MODAL_LIVE_MATURITY_REASON = "core_live_maturity_below_min"
 
 
@@ -26,17 +27,17 @@ class CoreModalStrategy(StrategyBase):
     min_model_probability = 0.25
     max_model_rank = 2
     min_market_ask = 0.10
-    min_paper_independent_settlement_days = 10
+    min_paper_independent_settlement_days = 0
     min_live_independent_settlement_days = 20
     require_authoritative_truth = True
-    min_paper_component_calibration_days = 10
+    min_paper_component_calibration_days = 0
     min_live_component_calibration_days = 20
     min_calibration_coverage = 0.80
     min_model_families = 4
     max_paper_model_spread_c = 4.50
     max_live_model_spread_c = 1.50
     max_model_spread_c = max_paper_model_spread_c
-    provisional_position_multiplier = 0.50
+    provisional_position_multiplier = 1.00
 
     def __init__(self, parameters: dict[str, Any] | None = None):
         self.parameters = dict(parameters or {})
@@ -284,11 +285,6 @@ class CoreModalStrategy(StrategyBase):
         model_spread_c = max(family_highs_c) - min(family_highs_c) if len(family_highs_c) >= 2 else None
         independent_settlement_days = int(context.get("independent_settlement_days") or 0)
         if (
-            independent_settlement_days < self.min_paper_independent_settlement_days
-            or calibration_coverage + 1e-12 < self.min_calibration_coverage
-        ):
-            maturity_status = "insufficient"
-        elif (
             independent_settlement_days < self.min_live_independent_settlement_days
             or live_calibration_coverage + 1e-12 < self.min_calibration_coverage
             or (
@@ -318,25 +314,15 @@ class CoreModalStrategy(StrategyBase):
         sample_count = int(component.get("bias_sample_count") or 0)
         if sample_count < self.min_paper_component_calibration_days:
             return False
-        if not bool(component.get("mae_imputed")):
-            return True
-        return str(component.get("weight_status") or "").lower() == "provisional"
+        return not bool(component.get("mae_imputed"))
 
     def _quality_reasons(self, quality: dict[str, Any]) -> list[str]:
         reasons: list[str] = []
         if int(quality["family_count"]) < self.min_model_families:
             reasons.append("core_model_family_count_below_min")
-        if float(quality["calibration_coverage"]) + 1e-12 < self.min_calibration_coverage:
-            reasons.append("core_calibration_coverage_below_min")
         spread = optional_float(quality.get("model_spread_c"))
         if spread is None:
             reasons.append("core_model_spread_unavailable")
-        elif spread > self.max_paper_model_spread_c + 1e-12:
-            reasons.append("core_model_spread_too_wide")
-        if int(quality["independent_settlement_days"]) < self.min_paper_independent_settlement_days:
-            reasons.append("core_independent_settlement_days_below_min")
-        if self.require_authoritative_truth and not bool(quality["independent_settlement_authoritative"]):
-            reasons.append("core_settlement_truth_not_authoritative")
         return reasons
 
     def _build_audit_decision(
@@ -411,6 +397,12 @@ class CoreModalStrategy(StrategyBase):
                 CORE_MODAL_LIVE_MATURITY_REASON,
             ])
             decision["reasons"] = list(decision["gate_reasons"])
+        spread = optional_float(quality.get("model_spread_c"))
+        if spread is not None and spread > self.max_paper_model_spread_c + 1e-12:
+            decision["cautions"] = unique([
+                *(decision.get("cautions") or []),
+                CORE_MODAL_WIDE_SPREAD_CAUTION,
+            ])
 
 
 def _split_thresholds(

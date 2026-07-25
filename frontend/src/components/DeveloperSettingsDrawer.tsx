@@ -58,7 +58,7 @@ const API_GROUPS: Array<{ label: string; keys: string[] }> = [
 const STRATEGY_META: Record<string, { label: string; description: string }> = {
   core_modal_v1: {
     label: '动态核心温度桶',
-    description: '只评估模型概率最高的前两个桶；成熟模型按近期无泄漏误差动态分配权重，样本不足的模型保持采集但不参与下单。',
+    description: '只评估模型概率最高的前两个桶；所有可用模型先按先验参与模拟，有真实配对误差后逐步动态调权，成熟度仅限制实盘。',
   },
   single_bucket_ev: {
     label: '单桶最高温',
