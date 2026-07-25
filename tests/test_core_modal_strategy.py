@@ -164,7 +164,7 @@ class CoreModalStrategyTests(unittest.TestCase):
 
     def test_blocks_wide_model_family_spread(self):
         prediction = _prediction()
-        prediction["components"][-1]["adjusted_daily_highs_c"] = [32.0]
+        prediction["components"][-1]["adjusted_daily_highs_c"] = [35.0]
         buckets = [_bucket("modal", 29, 30, 0.20, 0.19)]
         probabilities = {"modal": {"bucket_key": "modal", "probability": 0.40}}
 
@@ -172,6 +172,25 @@ class CoreModalStrategyTests(unittest.TestCase):
 
         self.assertFalse(decision["paper_allowed"])
         self.assertIn("core_model_spread_too_wide", decision["gate_reasons"])
+
+    def test_paper_explores_model_spread_that_remains_live_blocked(self):
+        prediction = _prediction()
+        prediction["components"][-1]["adjusted_daily_highs_c"] = [33.0]
+        buckets = [_bucket("modal", 29, 30, 0.20, 0.19)]
+        probabilities = {"modal": {"bucket_key": "modal", "probability": 0.40}}
+
+        decision = CoreModalStrategy().evaluate_many(
+            buckets,
+            probabilities,
+            prediction,
+            _context(independent_settlement_days=30),
+        )[0]
+
+        self.assertTrue(decision["paper_allowed"])
+        self.assertEqual(decision["core_modal"]["maturity_status"], "provisional")
+        self.assertEqual(decision["position_size_multiplier"], 0.5)
+        self.assertNotIn("core_model_spread_too_wide", decision["gate_reasons"])
+        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["gate_reasons"])
 
     def test_blocks_paper_below_ten_independent_settlement_days(self):
         bucket = _bucket("modal", 29, 30, 0.20, 0.19)
@@ -235,6 +254,8 @@ class CoreModalStrategyTests(unittest.TestCase):
         self.assertTrue(strategies["core_modal_v1"]["enabled"])
         self.assertEqual(strategies["core_modal_v1"]["min_paper_settlement_days"], 10)
         self.assertEqual(strategies["core_modal_v1"]["min_live_settlement_days"], 20)
+        self.assertEqual(strategies["core_modal_v1"]["max_paper_model_spread_c"], 4.5)
+        self.assertEqual(strategies["core_modal_v1"]["max_live_model_spread_c"], 1.5)
         self.assertEqual(strategies["core_modal_v1"]["provisional_position_multiplier"], 0.5)
         self.assertFalse(strategies["single_bucket_ev"]["enabled"])
         self.assertFalse(strategies["ladder_grid"]["enabled"])

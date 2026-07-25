@@ -34,7 +34,9 @@ SIGMA_FLOOR_C = 0.5
 UNCALIBRATED_SIGMA_C = 1.2
 BIAS_MIN_SAMPLE_COUNT = 20
 FORECAST_SNAPSHOT_SELECTION_VERSION = "forecast-snapshot-selection-v2"
-DYNAMIC_WEIGHT_MIN_SAMPLES = BIAS_MIN_SAMPLE_COUNT
+# Paper calibration starts at 10 independent forecast/truth pairs. Bias
+# correction and live maturity remain on the stricter 20-sample contract.
+DYNAMIC_WEIGHT_MIN_SAMPLES = 10
 DYNAMIC_WEIGHT_FULL_SAMPLES = 40
 DYNAMIC_WEIGHT_PERFORMANCE_BLEND_MAX = 0.75
 DYNAMIC_WEIGHT_MAX_SHARE = 0.45
@@ -1306,7 +1308,7 @@ def _mae_for(
             continue
         if profile is not None and int(row.get("location_version") or 1) != int(profile.location_version):
             continue
-        if int(row.get("sample_count") or 0) < BIAS_MIN_SAMPLE_COUNT:
+        if int(row.get("sample_count") or 0) < DYNAMIC_WEIGHT_MIN_SAMPLES:
             return None
         for key in (
             "walk_forward_mae_7d_c",

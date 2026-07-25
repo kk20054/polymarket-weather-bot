@@ -46,6 +46,8 @@ DEFAULT_PARAMETERS: dict[str, Any] = {
             "min_live_component_calibration_days": 20,
             "min_calibration_coverage": 0.80,
             "min_model_families": 4,
+            "max_paper_model_spread_c": 4.50,
+            "max_live_model_spread_c": 1.50,
             "max_model_spread_c": 1.50,
             "provisional_position_multiplier": 0.50,
         },
@@ -122,6 +124,10 @@ def validate_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("core_modal_live_component_days_below_paper")
     _bounded(core_modal, "min_calibration_coverage", 0.0, 1.0)
     _bounded(core_modal, "min_model_families", 1, 20, integer=True)
+    _bounded(core_modal, "max_paper_model_spread_c", 0.1, 10.0)
+    _bounded(core_modal, "max_live_model_spread_c", 0.1, 10.0)
+    if core_modal["max_live_model_spread_c"] > core_modal["max_paper_model_spread_c"]:
+        raise ValueError("core_modal_live_model_spread_above_paper")
     _bounded(core_modal, "max_model_spread_c", 0.1, 10.0)
     _bounded(core_modal, "provisional_position_multiplier", 0.0, 1.0)
     _bounded(single, "min_edge", 0.0, 0.5)

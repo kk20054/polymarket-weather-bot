@@ -47,10 +47,10 @@ class ExecutionWorkbenchContractTests(unittest.TestCase):
         self.assertIn("runId: started.run_id", component)
         self.assertIn("strategyRevisionId", component)
         self.assertIn("ladderGroupId", component)
-        self.assertIn("模拟当前可用策略", component)
-        self.assertIn("一键模拟", component)
+        self.assertIn("执行当前策略", component)
+        self.assertIn("启动策略", component)
         self.assertIn("startPaperValidation", component)
-        self.assertIn("暂无模拟订单", component)
+        self.assertIn("暂无订单", component)
         self.assertNotIn("模拟金额", component)
 
     def test_paper_exit_mode_is_revision_bound_and_explained_in_order_details(self):

@@ -706,6 +706,21 @@ type DebHistorySnapshot =
 
 const DEB_MODEL_COLORS = ['#38BDF8', '#A78BFA', '#F59E0B', '#FB7185', '#34D399', '#F472B6', '#60A5FA', '#A3E635']
 
+function debModelColor(label: string, index = 0) {
+  const colors: Record<string, string> = {
+    v3: '#F472B6',
+    ecmwf: '#38BDF8',
+    gfs: '#F59E0B',
+    icon: '#FB7185',
+    gem: '#A78BFA',
+    jma: '#34D399',
+    cma: '#F43F5E',
+    hrrr: '#60A5FA',
+    nbm: '#A3E635',
+  }
+  return colors[label.toLowerCase()] ?? DEB_MODEL_COLORS[index % DEB_MODEL_COLORS.length]
+}
+
 function sourceShortLabel(source: unknown, family?: unknown) {
   const raw = String(family || source || '').toLowerCase()
   if (raw.includes('weathercom') || raw.includes('weather.com')) return 'v3'
@@ -844,7 +859,7 @@ function buildDebHistoryAnalysis(
     .map((label, index) => ({
       key: `model_${index}`,
       label,
-      color: DEB_MODEL_COLORS[index % DEB_MODEL_COLORS.length],
+      color: debModelColor(label, index),
     }))
   const seriesByLabel = new Map(provisionalSeries.map(series => [series.label, series]))
   const points = snapshots.map(snapshot => {
@@ -2932,7 +2947,7 @@ function TemperatureDistributionPanel({
   language: 'zh' | 'en'
 }) {
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false)
-  const [sourceAnalysisView, setSourceAnalysisView] = useState<'history' | 'disagreement'>('history')
+  const [sourceAnalysisView, setSourceAnalysisView] = useState<'history' | 'disagreement'>('disagreement')
   const distribution = signal?.distribution
   const deb = dailyMaxPrediction?.latest
   const debUnit = deb?.unit || unit
@@ -3314,57 +3329,73 @@ function TemperatureDistributionPanel({
             if (event.currentTarget === event.target) setSourceDialogOpen(false)
           }}
         >
-          <section className="deb-source-dialog max-h-[84vh] w-full max-w-3xl overflow-hidden border border-[#2C3445] bg-[#161A22] shadow-2xl">
-            <header className="flex items-center justify-between border-b border-[#2C3445] px-3 py-2">
-              <div>
-                <div className="text-sm font-semibold text-[#F8FAFC]">{tr(language, '模型分析', 'Model analysis')}</div>
-                <div className="text-[9px] text-[#7D8694]">{tr(language, '预测轨迹、当前分歧与动态权重', 'Forecast paths, current disagreement, and dynamic weights')} · {debVersionLabel}</div>
-              </div>
-              <button type="button" onClick={() => setSourceDialogOpen(false)} className="inline-flex h-8 w-8 items-center justify-center border border-[#2C3445] text-[#9AA4B2] hover:bg-[#222A37]" aria-label={tr(language, '关闭', 'Close')}>
-                <X className="h-4 w-4" />
-              </button>
-            </header>
-            <div className="max-h-[calc(84vh-54px)] overflow-auto p-3">
-              {hasSourceHistory && (
-                <div className="mb-3 inline-grid grid-cols-2 border border-[#2C3445]" role="tablist" aria-label={tr(language, '模型分析视图', 'Model analysis view')}>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={activeSourceAnalysisView === 'history'}
-                    onClick={() => setSourceAnalysisView('history')}
-                    className={`min-h-8 px-3 text-[10px] ${activeSourceAnalysisView === 'history' ? 'bg-cyan-500/10 text-cyan-200' : 'text-[#7D8694] hover:bg-[#1B212C]'}`}
-                  >
-                    {tr(language, '预测轨迹', 'Forecast paths')}
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={activeSourceAnalysisView === 'disagreement'}
-                    onClick={() => setSourceAnalysisView('disagreement')}
-                    className={`min-h-8 border-l border-[#2C3445] px-3 text-[10px] ${activeSourceAnalysisView === 'disagreement' ? 'bg-cyan-500/10 text-cyan-200' : 'text-[#7D8694] hover:bg-[#1B212C]'}`}
-                  >
-                    {tr(language, '当前分歧', 'Current disagreement')}
-                  </button>
+          <section className="deb-source-dialog max-h-[88vh] w-full max-w-4xl overflow-hidden border border-[#2C3445] bg-[#161A22] shadow-2xl">
+            <header className="border-b border-[#2C3445] px-4 py-3">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-base font-semibold text-[#F8FAFC]">{tr(language, '模型分析', 'Model analysis')}</div>
+                  <div className="mt-1 text-[10px] text-[#7D8694]">
+                    {tr(language, '先看融合权重与误差，再查看每次预报如何修订', 'Read blend weights and errors first, then inspect forecast revisions')}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[9px] tabular-nums text-[#9AA4B2]">
+                    <span>{sourceRows.length} {tr(language, '个模型', 'models')}</span>
+                    <span>{tr(language, '融合中心', 'Blend center')} {fmtDualTemp(sourceDisagreement.center, unit)}</span>
+                    <span title={debVersionLabel}>{debVersionLabel}</span>
+                  </div>
                 </div>
-              )}
-
+                <button type="button" onClick={() => setSourceDialogOpen(false)} className="inline-flex h-9 w-9 shrink-0 items-center justify-center border border-[#2C3445] text-[#9AA4B2] hover:bg-[#222A37] hover:text-[#F8FAFC]" aria-label={tr(language, '关闭', 'Close')}>
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="mt-3 inline-flex border border-[#2C3445]" role="tablist" aria-label={tr(language, '模型分析视图', 'Model analysis view')}>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeSourceAnalysisView === 'disagreement'}
+                  onClick={() => setSourceAnalysisView('disagreement')}
+                  className={`min-h-9 px-4 text-[10px] font-medium ${activeSourceAnalysisView === 'disagreement' ? 'bg-[#2563EB] text-white' : 'text-[#9AA4B2] hover:bg-[#1B212C] hover:text-[#F8FAFC]'}`}
+                >
+                  {tr(language, '模型排名', 'Model ranking')}
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeSourceAnalysisView === 'history'}
+                  disabled={!hasSourceHistory}
+                  title={!hasSourceHistory ? tr(language, '至少需要两个真实预测批次', 'At least two real forecast runs are required') : undefined}
+                  onClick={() => setSourceAnalysisView('history')}
+                  className={`min-h-9 border-l border-[#2C3445] px-4 text-[10px] font-medium ${activeSourceAnalysisView === 'history' ? 'bg-[#2563EB] text-white' : 'text-[#9AA4B2] hover:bg-[#1B212C] hover:text-[#F8FAFC]'} disabled:cursor-not-allowed disabled:opacity-40`}
+                >
+                  {tr(language, '预测轨迹', 'Forecast paths')}
+                </button>
+              </div>
+            </header>
+            <div className="max-h-[calc(88vh-142px)] overflow-auto p-4">
               {activeSourceAnalysisView === 'history' ? (
-                <section className="mb-3 border border-[#2C3445]" aria-label={tr(language, '逐模型预测轨迹', 'Per-model forecast paths')}>
-                  <div className="flex items-start justify-between gap-3 border-b border-[#2C3445] bg-[#1B212C] px-3 py-2">
+                <section aria-label={tr(language, '逐模型预测轨迹', 'Per-model forecast paths')}>
+                  <div className="flex flex-wrap items-end justify-between gap-3">
                     <div>
-                      <div className="text-[11px] font-semibold text-[#F8FAFC]">{tr(language, '逐模型预测轨迹', 'Per-model forecast paths')}</div>
-                      <div className="mt-0.5 text-[9px] text-[#7D8694]">
-                        {tr(language, '查看各模型对本日最高温的预测如何随新批次调整', 'See how each model revises today’s predicted high across runs')}
+                      <div className="text-sm font-semibold text-[#F8FAFC]">{tr(language, '最高温预测轨迹', 'Daily-high forecast paths')}</div>
+                      <div className="mt-1 text-[10px] text-[#7D8694]">
+                        {tr(language, '每条线只使用真实保存的模型批次；阶梯变化代表一次新预报修订', 'Every line uses persisted model runs; each step is a new forecast revision')}
                       </div>
                     </div>
-                    <span className="shrink-0 text-[9px] tabular-nums text-[#9AA4B2]">
+                    <span className="text-[10px] tabular-nums text-[#9AA4B2]">
                       {sourceHistory.points.length} {tr(language, '批次', 'runs')} · {sourceHistory.series.length} {tr(language, '模型', 'models')}
                     </span>
                   </div>
-                  <div className="h-64 px-2 pt-3">
+                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-[10px] text-[#9AA4B2]">
+                    {sourceHistory.series.map(series => (
+                      <span key={series.key} className="inline-flex items-center gap-1.5">
+                        <span className="h-0.5 w-4" style={{ backgroundColor: series.color }} />
+                        <span className="font-medium uppercase">{series.label}</span>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mt-2 h-[300px] border-y border-[#2C3445] py-3">
                     <ResponsiveContainer width="100%" height="100%">
-                      <ComposedChart data={sourceHistory.points} margin={{ top: 4, right: 12, bottom: 14, left: 2 }}>
-                        <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" vertical={false} />
+                      <ComposedChart data={sourceHistory.points} margin={{ top: 8, right: 16, bottom: 8, left: 2 }}>
+                        <CartesianGrid stroke="var(--border)" strokeDasharray="3 5" vertical={false} />
                         <XAxis
                           dataKey="issuedAtMs"
                           type="number"
@@ -3374,7 +3405,7 @@ function TemperatureDistributionPanel({
                           fontSize={9}
                           tickLine={false}
                           axisLine={false}
-                          minTickGap={32}
+                          minTickGap={44}
                           tickFormatter={value => formatDebHistoryTime(value, language)}
                         />
                         <YAxis
@@ -3383,7 +3414,7 @@ function TemperatureDistributionPanel({
                           fontSize={9}
                           tickLine={false}
                           axisLine={false}
-                          width={42}
+                          width={44}
                           tickFormatter={value => `${Number(value).toFixed(1)}°`}
                         />
                         <Tooltip
@@ -3391,18 +3422,18 @@ function TemperatureDistributionPanel({
                           labelStyle={{ color: 'var(--tooltip-text)' }}
                           itemStyle={{ color: 'var(--tooltip-text)' }}
                           labelFormatter={value => `${tr(language, '发布', 'Issued')} ${formatDebHistoryTime(value, language)}`}
-                          formatter={(value: any, name: any) => [fmtTemp(Number(value), unit), name]}
+                          formatter={(value: any, name: any) => [fmtTemp(Number(value), unit), String(name).toUpperCase()]}
                         />
                         {sourceHistory.series.map(series => (
                           <Line
                             key={series.key}
-                            type="linear"
+                            type="stepAfter"
                             dataKey={series.key}
                             name={series.label}
                             stroke={series.color}
-                            strokeWidth={1.75}
+                            strokeWidth={2}
                             dot={false}
-                            activeDot={{ r: 3 }}
+                            activeDot={{ r: 4, strokeWidth: 0 }}
                             connectNulls={false}
                             isAnimationActive={false}
                           />
@@ -3410,151 +3441,107 @@ function TemperatureDistributionPanel({
                       </ComposedChart>
                     </ResponsiveContainer>
                   </div>
-                  <div className="flex flex-wrap gap-x-3 gap-y-1 border-t border-[#2C3445] px-3 py-2 text-[9px] text-[#9AA4B2]">
-                    {sourceHistory.series.map(series => (
-                      <span key={series.key} className="inline-flex items-center gap-1.5">
-                        <span className="h-0.5 w-3" style={{ backgroundColor: series.color }} />
-                        {series.label}
-                      </span>
-                    ))}
+                  <div className="mt-3 text-[10px] leading-relaxed text-[#7D8694]">
+                    {tr(language, '读图：线越稳定，说明模型在临近结算时修订越少；模型之间的垂直距离代表当前分歧。', 'How to read: a steadier line means fewer late revisions; vertical distance between models shows disagreement.')}
                   </div>
                 </section>
-              ) : sourceDisagreement.rows.length > 0 ? (
-                <section className="mb-3 border border-[#2C3445]" aria-label={tr(language, '当前模型分歧', 'Current model disagreement')}>
-                  <div className="flex items-start justify-between gap-3 border-b border-[#2C3445] bg-[#1B212C] px-3 py-2">
+              ) : sourceRows.length > 0 ? (
+                <section aria-label={tr(language, '模型融合权重排名', 'Model blend ranking')}>
+                  <div className="grid grid-cols-2 gap-px border border-[#2C3445] bg-[#2C3445] sm:grid-cols-4">
+                    <div className="bg-[#1B212C] px-3 py-2.5">
+                      <div className="text-[9px] text-[#7D8694]">{tr(language, '融合中心', 'Blend center')}</div>
+                      <div className="mt-1 text-sm font-semibold tabular-nums text-[#F8FAFC]">{fmtDualTemp(sourceDisagreement.center, unit)}</div>
+                    </div>
+                    <div className="bg-[#1B212C] px-3 py-2.5">
+                      <div className="text-[9px] text-[#7D8694]">{tr(language, '模型跨度', 'Model spread')}</div>
+                      <div className="mt-1 text-sm font-semibold tabular-nums text-[#F8FAFC]">{fmtDualDelta(sourceDisagreement.spread, unit)}</div>
+                    </div>
+                    <div className="bg-[#1B212C] px-3 py-2.5">
+                      <div className="text-[9px] text-[#7D8694]">{tr(language, '参与模型', 'Models in blend')}</div>
+                      <div className="mt-1 text-sm font-semibold tabular-nums text-[#F8FAFC]">{sourceDisagreement.activeCount}/{sourceRows.length}</div>
+                    </div>
+                    <div className="bg-[#1B212C] px-3 py-2.5">
+                      <div className="text-[9px] text-[#7D8694]">{tr(language, '误差可用', 'Auditable MAE')}</div>
+                      <div className="mt-1 text-sm font-semibold tabular-nums text-[#F8FAFC]">{sourceRows.filter(row => row.mae !== null).length}/{sourceRows.length}</div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap items-end justify-between gap-2">
                     <div>
-                      <div className="text-[11px] font-semibold text-[#F8FAFC]">{tr(language, '当前模型分歧', 'Current model disagreement')}</div>
-                      <div className="mt-0.5 text-[9px] text-[#7D8694]">{tr(language, '比较最新批次的预测中心与误差范围', 'Compare the latest forecast centers and error ranges')}</div>
-                    </div>
-                    <span className="shrink-0 text-[9px] tabular-nums text-[#9AA4B2]">
-                      {sourceDisagreement.activeCount}/{sourceDisagreement.rows.length} {tr(language, '个动态权重模型', 'dynamically weighted')}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 divide-x divide-[#2C3445] border-b border-[#2C3445] text-[9px]">
-                    <div className="px-3 py-2">
-                      <div className="text-[#7D8694]">{tr(language, '预测跨度', 'Forecast spread')}</div>
-                      <div className="mt-1 tabular-nums text-[#F8FAFC]">{fmtDualDelta(sourceDisagreement.spread, unit)}</div>
-                    </div>
-                    <div className="px-3 py-2">
-                      <div className="text-[#7D8694]">{tr(language, 'DEB 加权中心', 'DEB weighted center')}</div>
-                      <div className="mt-1 tabular-nums text-[#F8FAFC]">{fmtDualTemp(sourceDisagreement.center, unit)}</div>
-                    </div>
-                    <div className="px-3 py-2">
-                      <div className="text-[#7D8694]">{tr(language, '来源覆盖', 'Source coverage')}</div>
-                      <div className="mt-1 tabular-nums text-[#F8FAFC]">{sourceDisagreement.rows.length}/{sourceRows.length}</div>
-                    </div>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <div className="min-w-[640px] px-3 py-2">
-                      <div className="mb-1 grid grid-cols-[86px_minmax(260px,1fr)_210px] gap-3 text-[8px] text-[#7D8694]">
-                        <span>{tr(language, '模型', 'Model')}</span>
-                        <span className="flex items-center justify-end gap-3">
-                          <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 bg-cyan-300" />{tr(language, '预测', 'Forecast')}</span>
-                          <span className="inline-flex items-center gap-1"><span className="h-1.5 w-4 bg-cyan-500/25" />± 7d MAE</span>
-                          <span className="inline-flex items-center gap-1"><span className="h-3 border-l border-dashed border-emerald-300" />DEB μ</span>
-                        </span>
-                        <span className="text-right">{tr(language, '可靠性', 'Reliability')}</span>
+                      <div className="text-sm font-semibold text-[#F8FAFC]">{tr(language, '融合权重排名', 'Blend weight ranking')}</div>
+                      <div className="mt-1 text-[10px] text-[#7D8694]">
+                        {tr(language, '权重决定模型对 DEB 的影响，不等同于单独准确率排名', 'Weight controls influence on DEB; it is not a standalone accuracy score')}
                       </div>
-                      <div className="divide-y divide-[#222A38]">
-                        {sourceDisagreement.rows.map(row => (
-                          <div
-                            key={row.key}
-                            className="grid min-h-11 grid-cols-[86px_minmax(260px,1fr)_210px] items-center gap-3 py-1.5 text-[10px]"
-                            aria-label={`${row.label} ${fmtTemp(row.mu, unit)}`}
-                          >
-                            <span className="truncate font-semibold text-[#F8FAFC]">{row.label}</span>
-                            <span className="relative block h-7">
-                              <span className="absolute left-0 right-0 top-1/2 h-px bg-[#344052]" />
-                              {sourceDisagreement.centerPct !== null && (
-                                <span className="absolute bottom-0 top-0 border-l border-dashed border-emerald-300/70" style={{ left: `${sourceDisagreement.centerPct}%` }} />
-                              )}
-                              {row.maeDisplay !== null && (
-                                <span
-                                  className="absolute top-[11px] h-1.5 bg-cyan-500/25"
-                                  style={{ left: `${row.intervalStartPct}%`, width: `${row.intervalWidthPct}%` }}
-                                  title={`± ${Number(row.mae).toFixed(2)}°C`}
-                                />
-                              )}
-                              <span
-                                className={`absolute top-[8px] h-3 w-3 -translate-x-1/2 border-2 border-[#161A22] ${row.status === 'active' ? 'bg-cyan-300' : 'bg-amber-300'}`}
-                                style={{ left: `${row.positionPct}%` }}
-                                title={`${row.label}: ${fmtTemp(row.mu, unit)}`}
-                              />
-                            </span>
-                            <span className="min-w-0 text-right tabular-nums">
-                              <span className="block font-semibold text-[#F8FAFC]">{fmtTemp(row.mu, unit)}</span>
-                              <span className="block truncate text-[8px] text-[#7D8694]">
-                                {tr(language, '权重', 'w')} {row.weight === null ? '--' : `${(row.weight * 100).toFixed(1)}%`} · MAE {row.mae === null ? '--' : `${row.mae.toFixed(2)}°C`} · n={row.calibrationSamples}
-                              </span>
-                            </span>
+                    </div>
+                    <span className="text-[9px] text-[#7D8694]">{tr(language, '误差仅来自真实配对样本', 'MAE uses matched truth only')}</span>
+                  </div>
+
+                  <div className="mt-2 border-y border-[#2C3445]">
+                    {sourceRows.map((row, index) => {
+                      const modelColor = debModelColor(row.label, index)
+                      const weightPct = row.weight === null ? null : Math.max(0, Math.min(100, row.weight * 100))
+                      const maeDisplay = row.mae === null ? null : convertDeltaUnit(row.mae, 'C', unit)
+                      return (
+                        <article
+                          key={row.key}
+                          className="grid grid-cols-2 gap-3 border-b border-[#222A38] px-3 py-3 last:border-b-0 sm:grid-cols-[minmax(140px,1fr)_125px_minmax(180px,1.4fr)_140px]"
+                          title={[row.role, `truth ${row.truthBasis}`, row.exclusionReason, row.warning].filter(Boolean).join(' · ')}
+                        >
+                          <div className="col-span-2 flex min-w-0 items-center gap-3 sm:col-span-1">
+                            <span className="w-5 shrink-0 text-center text-xs font-semibold tabular-nums text-[#7D8694]">{index + 1}</span>
+                            <span className="h-2.5 w-2.5 shrink-0" style={{ backgroundColor: modelColor }} />
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-semibold uppercase text-[#F8FAFC]">{row.label}</div>
+                              <div className="mt-0.5 text-[9px] text-[#7D8694]">
+                                {tr(language, '样本', 'samples')} n={row.calibrationSamples}
+                              </div>
+                            </div>
                           </div>
-                        ))}
-                      </div>
-                      <div className="grid grid-cols-[86px_minmax(260px,1fr)_210px] gap-3 border-t border-[#2C3445] pt-1 text-[8px] tabular-nums text-[#7D8694]">
-                        <span />
-                        <span className="flex justify-between">
-                          <span>{fmtTemp(sourceDisagreement.axisMin, unit)}</span>
-                          <span>{fmtTemp(sourceDisagreement.center, unit)}</span>
-                          <span>{fmtTemp(sourceDisagreement.axisMax, unit)}</span>
-                        </span>
-                        <span />
-                      </div>
-                    </div>
+                          <div>
+                            <div className="text-[9px] text-[#7D8694]">{tr(language, '预测最高', 'Daily high')}</div>
+                            <div className="mt-1 text-xs font-semibold tabular-nums text-[#F8FAFC]">{fmtDualTemp(row.mu, unit)}</div>
+                          </div>
+                          <div>
+                            <div className="flex items-center justify-between gap-2 text-[9px] text-[#7D8694]">
+                              <span>{tr(language, '融合权重', 'Blend weight')}</span>
+                              <span className="tabular-nums text-[#CBD2DC]">{weightPct === null ? '--' : `${weightPct.toFixed(1)}%`}</span>
+                            </div>
+                            <div className="mt-2 h-1.5 bg-[#263044]">
+                              <span className="block h-full" style={{ width: `${weightPct ?? 0}%`, backgroundColor: modelColor }} />
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[9px] text-[#7D8694]">{tr(language, '近 7 日误差', '7-day MAE')}</div>
+                            {maeDisplay === null ? (
+                              <>
+                                <div className="mt-1 text-xs font-medium text-[#9AA4B2]">{tr(language, '待真实结算', 'Pending truth')}</div>
+                                <div className="mt-0.5 text-[9px] text-[#7D8694]">{tr(language, '暂无可审计误差', 'No auditable MAE yet')}</div>
+                              </>
+                            ) : (
+                              <>
+                                <div className="mt-1 text-xs font-semibold tabular-nums text-[#F8FAFC]">±{Number(maeDisplay).toFixed(2)}°{unit}</div>
+                                <div className="mt-0.5 text-[9px] text-[#7D8694]">{tr(language, '越低越稳定', 'Lower is better')}</div>
+                              </>
+                            )}
+                          </div>
+                        </article>
+                      )
+                    })}
+                  </div>
+
+                  <div className="mt-3 text-[10px] leading-relaxed text-[#7D8694]">
+                    {tr(language, '排名依据当前融合权重。样本数可以先参与模拟校准，但只有完成真实预测与结算配对后才显示误差。', 'Ranking follows current blend weight. Samples may support paper calibration, but MAE appears only after forecasts are matched to settled truth.')}
                   </div>
                 </section>
               ) : (
-                <div className="mb-3 border border-[#2C3445] py-8 text-center text-[11px] text-[#7D8694]">
-                  {tr(language, '暂无可比较的当前模型预测。', 'No comparable current model forecasts.')}
+                <div className="py-10 text-center text-[11px] text-[#7D8694]">
+                  {tr(language, '暂无可比较的模型数据。', 'No comparable model data yet.')}
                 </div>
               )}
 
-              {sourceRows.length === 0 ? (
-                <div className="py-6 text-center text-[11px] text-[#7D8694]">{tr(language, '暂无当前模型权重。', 'No current source weights yet.')}</div>
-              ) : (
-                <section aria-label={tr(language, '当前模型来源明细', 'Current model source details')}>
-                  <div className="mb-1 flex items-center justify-between gap-2 text-[9px] text-[#7D8694]">
-                    <span>{tr(language, '当前来源明细', 'Current source details')}</span>
-                    <span>{tr(language, '按权重排序', 'Sorted by weight')}</span>
-                  </div>
-                  <div className="overflow-x-auto border border-[#2C3445]">
-                    <div className="min-w-[620px] divide-y divide-[#222A38] text-[10px]">
-                      <div className="grid grid-cols-[minmax(130px,1fr)_140px_110px_85px_55px] gap-3 bg-[#1B212C] px-3 py-2 text-[#7D8694]">
-                        <span>{tr(language, '模型', 'Source')}</span>
-                        <span>{tr(language, '权重', 'Weight')}</span>
-                        <span className="text-right">{tr(language, '预测最高', 'Daily max')}</span>
-                        <span className="text-right">{tr(language, '近 7 日误差', '7d MAE')}</span>
-                        <span className="text-right">{tr(language, '样本', 'Samples')}</span>
-                      </div>
-                      {sourceRows.map(row => (
-                        <div key={row.key} className="grid grid-cols-[minmax(130px,1fr)_140px_110px_85px_55px] items-center gap-3 px-3 py-2 text-[#CBD2DC]" title={`${row.role} | truth ${row.truthBasis}`}>
-                          <span className="min-w-0">
-                            <span className="block truncate font-semibold text-[#F8FAFC]">{row.label}</span>
-                            <span className={`block truncate text-[8px] ${row.status === 'active' ? 'text-emerald-300' : 'text-amber-300'}`} title={row.exclusionReason}>
-                              {row.status === 'active'
-                                ? tr(language, '动态权重', 'Dynamic weight')
-                                : row.status === 'provisional'
-                                  ? tr(language, '仅展示', 'Display only')
-                                  : tr(language, '积累校准', 'Calibrating')}
-                            </span>
-                          </span>
-                          <span className="flex items-center gap-2 tabular-nums">
-                            <span className="h-1.5 flex-1 bg-[#263044]">
-                              <span className="block h-full bg-[#5CB6F2]" style={{ width: `${Number(row.weight ?? 0) <= 0 ? 0 : Math.max(2, Math.min(100, Number(row.weight ?? 0) * 100))}%` }} />
-                            </span>
-                            <span className="w-10 text-right">{row.weight === null ? '--' : `${(row.weight * 100).toFixed(1)}%`}</span>
-                          </span>
-                          <span className="text-right tabular-nums">{fmtDualTemp(row.mu, unit)}</span>
-                          <span className="text-right tabular-nums">{row.mae === null ? '--' : `${row.mae.toFixed(2)}°C`}</span>
-                          <span className="text-right tabular-nums">n={row.calibrationSamples}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </section>
-              )}
               {buildWarnings.length > 0 && (
-                <details className="mt-3 border border-[#2C3445] px-3 py-2 text-[10px] text-[#9AA4B2]">
-                  <summary className="cursor-pointer">{tr(language, `数据提示（${buildWarnings.length}）`, `Data notes (${buildWarnings.length})`)}</summary>
+                <details className="mt-4 border-t border-[#2C3445] pt-3 text-[10px] text-[#9AA4B2]">
+                  <summary className="cursor-pointer select-none hover:text-[#F8FAFC]">{tr(language, `数据说明（${buildWarnings.length}）`, `Data notes (${buildWarnings.length})`)}</summary>
                   <ul className="mt-2 space-y-1 font-mono text-[9px] leading-relaxed">
                     {buildWarnings.map(warning => <li key={warning} className="break-all">{warning}</li>)}
                   </ul>

@@ -33,7 +33,9 @@ class CoreModalStrategy(StrategyBase):
     min_live_component_calibration_days = 20
     min_calibration_coverage = 0.80
     min_model_families = 4
-    max_model_spread_c = 1.50
+    max_paper_model_spread_c = 4.50
+    max_live_model_spread_c = 1.50
+    max_model_spread_c = max_paper_model_spread_c
     provisional_position_multiplier = 0.50
 
     def __init__(self, parameters: dict[str, Any] | None = None):
@@ -73,7 +75,14 @@ class CoreModalStrategy(StrategyBase):
             self.parameters.get("min_calibration_coverage", self.min_calibration_coverage)
         )
         self.min_model_families = int(self.parameters.get("min_model_families", self.min_model_families))
-        self.max_model_spread_c = float(self.parameters.get("max_model_spread_c", self.max_model_spread_c))
+        legacy_spread = float(self.parameters.get("max_model_spread_c", self.max_live_model_spread_c))
+        self.max_paper_model_spread_c = float(
+            self.parameters.get("max_paper_model_spread_c", self.max_paper_model_spread_c)
+        )
+        self.max_live_model_spread_c = float(
+            self.parameters.get("max_live_model_spread_c", legacy_spread)
+        )
+        self.max_model_spread_c = self.max_paper_model_spread_c
         self.provisional_position_multiplier = min(1.0, max(0.0, float(
             self.parameters.get("provisional_position_multiplier", self.provisional_position_multiplier)
         )))
@@ -282,6 +291,10 @@ class CoreModalStrategy(StrategyBase):
         elif (
             independent_settlement_days < self.min_live_independent_settlement_days
             or live_calibration_coverage + 1e-12 < self.min_calibration_coverage
+            or (
+                model_spread_c is not None
+                and model_spread_c > self.max_live_model_spread_c + 1e-12
+            )
         ):
             maturity_status = "provisional"
         else:
@@ -318,7 +331,7 @@ class CoreModalStrategy(StrategyBase):
         spread = optional_float(quality.get("model_spread_c"))
         if spread is None:
             reasons.append("core_model_spread_unavailable")
-        elif spread > self.max_model_spread_c + 1e-12:
+        elif spread > self.max_paper_model_spread_c + 1e-12:
             reasons.append("core_model_spread_too_wide")
         if int(quality["independent_settlement_days"]) < self.min_paper_independent_settlement_days:
             reasons.append("core_independent_settlement_days_below_min")
@@ -385,7 +398,9 @@ class CoreModalStrategy(StrategyBase):
                 "min_live_component_calibration_days": self.min_live_component_calibration_days,
                 "min_calibration_coverage": self.min_calibration_coverage,
                 "min_model_families": self.min_model_families,
-                "max_model_spread_c": self.max_model_spread_c,
+                "max_model_spread_c": self.max_paper_model_spread_c,
+                "max_paper_model_spread_c": self.max_paper_model_spread_c,
+                "max_live_model_spread_c": self.max_live_model_spread_c,
                 "provisional_position_multiplier": self.provisional_position_multiplier,
             },
         }

@@ -7,11 +7,11 @@
 
 ## Latest Evidence
 - `core_modal_v1` now separates paper and live maturity: 10-19 independent settlements are provisional paper candidates at 0.5x size; 20 remains the mature/live threshold.
-- Component calibration uses the same split: paper may use a provisional component from 10 samples, while live still requires 20 and non-imputed MAE.
-- Active paper run: `paper-20260724T165032Z-c5158ac8`, profile revision `spr_34fca82e96190f1888ff4f0124cc232a`, $50 bankroll, live locked.
-- Shanghai V3 is present and accumulating (`n=10` on 2026-07-25). The DEB model dialog now exposes real revision paths, current disagreement, weights and sample counts.
+- Component MAE and dynamic weighting begin at 10 leakage-free pairs; additive bias correction and live maturity still require 20.
+- Active paper run: `paper-20260725T030230Z-6828a63a`, profile revision `spr_6404882c2553f33d03ef38da029b0106`, $40 bankroll, `hold_to_settlement`, live locked.
+- Shanghai V3 is active at `n=10` with 7-day MAE about `1.21°C`; the model dialog now prioritizes ranking, sample count, forecast high, weight and real MAE without repeated internal-status labels.
 - Real GFS ensemble snapshots persist 31 members. Orderbook replay remains point-in-time and rejects future or stale quotes.
-- Targeted strategy tests (30) and the frontend production build passed. Browser checks found no console error or horizontal page overflow.
+- Targeted strategy/exit/UI contract tests (31) and the frontend production build passed. Browser checks found no console error or horizontal page overflow.
 
 ## Production Blockers
 - Profitability is still unproven; provisional paper permission is not a live-trading approval.

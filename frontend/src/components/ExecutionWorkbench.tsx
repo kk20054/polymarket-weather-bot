@@ -32,7 +32,7 @@ type QueueItem = {
 type ExitMode = 'hold_to_settlement' | 'model_guarded' | 'model_guarded_take_profit'
 
 const STRATEGY_OPTIONS = [
-  { key: 'core_modal_v1', zh: '动态核心温度桶', en: 'Dynamic modal bucket', helpZh: '仅选择模型概率最高的前两个温度桶；未满 20 个无泄漏样本的模型不参与权重，成熟模型按近期误差动态分配权重。', helpEn: 'Only consider the top two model buckets; models with fewer than 20 leakage-free pairs receive zero weight, while mature models are weighted by recent accuracy.' },
+  { key: 'core_modal_v1', zh: '动态核心温度桶', en: 'Dynamic modal bucket', helpZh: '仅选择模型概率最高的前两个温度桶；满 10 个无泄漏样本后进入半仓模拟并按近期误差动态加权，满 20 个后进入成熟校准。', helpEn: 'Only consider the top two model buckets; at 10 leakage-free pairs the model enters half-size paper weighting, and at 20 it reaches mature calibration.' },
   { key: 'single_bucket_ev', zh: '单桶最高温', en: 'Single bucket', helpZh: '仅当盘口与风控闸门全部通过时，模拟买入概率优势最大的单个温度桶并持有至结算。', helpEn: 'Only after all book and risk gates pass, paper-buy the single bucket with the strongest probability advantage and hold to settlement.' },
   { key: 'ladder_grid', zh: '相邻三桶阶梯', en: 'Three-bucket ladder', helpZh: '中心桶与左右相邻桶作为原子组合，整组买入或整组跳过。', helpEn: 'Treat the center bucket and its two neighbors as an atomic group.' },
   { key: 'tail_buying', zh: '低价尾部', en: 'Low-price tail', helpZh: '仅观察/买入价格较低且概率差足够大的尾部桶。', helpEn: 'Watch or buy low-price tail buckets only when the probability gap is large enough.' },
@@ -639,9 +639,9 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
                 disabled={validationActive}
                 onChange={event => setExitMode(event.target.value as ExitMode)}
               >
-                <option value="hold_to_settlement">{tx(language, '持有至 Polymarket 结算（当前可用）', 'Hold to Polymarket settlement (available)')}</option>
-                <option value="model_guarded">{tx(language, '模型保护退出', 'Model-guarded exit')}</option>
-                <option value="model_guarded_take_profit">{tx(language, '盈利止盈 + 模型保护', 'Take profit + model guard')}</option>
+                <option value="hold_to_settlement">{tx(language, '持有至结算', 'Hold to settlement')}</option>
+                <option value="model_guarded">{tx(language, '模型失效退出', 'Model invalidation exit')}</option>
+                <option value="model_guarded_take_profit">{tx(language, '止盈 + 模型失效退出', 'Take profit + model invalidation')}</option>
               </select>
             </label>
             <div className="text-[9px] leading-relaxed text-neutral-600">
