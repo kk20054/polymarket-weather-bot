@@ -35,6 +35,7 @@ class LadderGridStrategy(StrategyBase):
         selected = self._select_ladder_buckets(buckets, prediction)
         if len(selected) != 3:
             return []
+        required_min_edge = max(self.min_edge, float(context.get("min_trade_edge") or 0.08))
         enriched: list[tuple[dict[str, Any], dict[str, Any], float, float]] = []
         for bucket in selected:
             probability = probabilities.get(str(bucket.get("bucket_key") or ""), {})
@@ -43,7 +44,7 @@ class LadderGridStrategy(StrategyBase):
             if model_probability is None or ask is None:
                 return []
             edge = model_probability - ask
-            if edge < self.min_edge:
+            if edge < required_min_edge:
                 return []
             enriched.append((bucket, probability, model_probability, ask))
 
@@ -71,7 +72,7 @@ class LadderGridStrategy(StrategyBase):
                 probability,
                 prediction,
                 context,
-                min_edge=self.min_edge,
+                min_edge=required_min_edge,
                 ladder_group_id=group_id,
                 position_size_override=allocation,
             )

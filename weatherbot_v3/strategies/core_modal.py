@@ -210,7 +210,11 @@ class CoreModalStrategy(StrategyBase):
         if ask is None or ask + 1e-12 < self.min_market_ask:
             reasons.append("core_price_below_min")
         effective_edge = optional_float(item.get("effective_edge"))
-        if effective_edge is None or effective_edge + 1e-12 < self.min_effective_edge:
+        required_min_edge = max(
+            self.min_effective_edge,
+            float(context.get("min_trade_edge") or 0.08),
+        )
+        if effective_edge is None or effective_edge + 1e-12 < required_min_edge:
             reasons.append("core_effective_edge_below_min")
         return unique(reasons)
 

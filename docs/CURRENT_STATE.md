@@ -16,7 +16,10 @@
 - Active paper run: `paper-20260725T045941Z-2059361a`, profile revision `spr_e3462ea2aacb622e7335b2acab6b2c30`, $40 bankroll, `model_guarded` exit.
 - Real GFS ensemble snapshots persist 31 members. Orderbook replay remains point-in-time and rejects future or stale quotes.
 - The latest paper candidate passed model edge checks but was skipped when execution revalidation found a stale/widened orderbook.
-- Focused dynamic-weight and walk-forward calibration tests passed.
+- The global minimum executable edge defaults to 8% and is editable in Strategy Settings; execution revalidation uses the same threshold.
+- Bias correction now begins at 10 leakage-safe pairs with zero-prior shrinkage `n/(n+10)` and a +/-2.5 C cap before bucket probabilities are calculated.
+- Visual Crossing Pro is ready as an optional paper/history calibration provider with masked settings and payload validation; it cannot unlock live truth.
+- Focused strategy, settings, dynamic-weight and walk-forward calibration tests passed.
 
 ## Production Blockers
 - Executable paper orders still require valid bid/ask, acceptable spread, sufficient depth/order size, fresh quotes and positive edge.
@@ -25,4 +28,4 @@
 
 ## Next Task
 - Keep the scheduler running and classify every skipped candidate as no-edge, quote/spread, order-minimum or stale-data.
-- Evaluate calibration, fill quality, ROI and drawdown before changing any live threshold.
+- Next calibration upgrade: segment residuals by D+0/D+1/D+2 lead time and validate with walk-forward replay before changing the live path.

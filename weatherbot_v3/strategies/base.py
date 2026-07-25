@@ -101,6 +101,8 @@ class StrategyBase:
         if model_probability is None:
             hard_blocks.append("model_probability_missing")
         low_price_tail_ask = context_number(context, "low_price_tail_ask", 0.05)
+        global_min_trade_edge = context_number(context, "min_trade_edge", 0.08)
+        required_min_edge = max(float(min_edge), global_min_trade_edge)
         max_spread_bps = context_number(context, "max_spread_bps", 500.0)
         stale_book_seconds = context_number(context, "stale_book_seconds", 300.0)
         min_bias_sample_days = int(context_number(context, "min_bias_sample_days", 7.0))
@@ -119,7 +121,7 @@ class StrategyBase:
             hard_blocks.append("forecast_algo_not_supported")
         if int(prediction.get("bias_sample_count") or 0) < min_bias_sample_days:
             gate_reasons.append("insufficient_bias_samples")
-        if edge is None or edge < float(min_edge):
+        if edge is None or edge < required_min_edge:
             skip_reasons.append("edge_below_min")
         skip_reasons.extend(force_skip_reasons or [])
         hard_blocks.extend(extra_hard_blocks or [])

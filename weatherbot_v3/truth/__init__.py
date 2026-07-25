@@ -276,8 +276,12 @@ def get_actual_observation(
 
 def provider_is_live_calibration_eligible(provider: str, confidence: float) -> bool:
     cfg = load_config()
-    if provider in {"nws_station", "visual_crossing_station", "aviationweather_station"}:
+    if provider in {"nws_station", "aviationweather_station"}:
         return confidence >= 0.7
+    # Visual Crossing is useful for paper calibration and historical backfill,
+    # but it is not the market's named settlement source by itself.
+    if provider == "visual_crossing_station":
+        return False
     if provider == "open_meteo_archive":
         return bool(cfg.open_meteo_actual_allowed_for_live)
     return False
@@ -389,7 +393,7 @@ def _from_visual_crossing(
                 round(float(days[0]["tempmax"]), 1), "visual_crossing_station",
                 source_url, 1, 0.82, True, "", {"day": days[0]},
                 retrieved_at=datetime.now(timezone.utc).isoformat(),
-                quality_flags=("station_mode", "paid_historical_provider"),
+                quality_flags=("station_mode", "paid_historical_provider", "paper_calibration_only"),
             )
         return _empty_obs(city, city_name, date_str, station, unit, "visual_crossing_station", source_url, "visual_crossing_no_tempmax")
     except Exception as exc:

@@ -8392,16 +8392,18 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(row["location_mismatch_excluded_rows"], 0)
         self.assertEqual(payload["training_policy"]["as_of_date_exclusive"], "2026-07-01")
 
-    def test_low_sample_bias_mae_cannot_change_runtime_weights(self):
+    def test_paper_bias_uses_shrinkage_after_ten_samples(self):
         from weatherbot_v3.forecasts.ensemble import _bias_for, _mae_for
 
-        low_sample = [{"icao": "KORD", "model": "ecmwf", "sample_count": 9, "mae_7d_c": 0.2}]
-        paper_ready = [{"icao": "KORD", "model": "ecmwf", "sample_count": 10, "mae_7d_c": 0.3}]
-        mature = [{"icao": "KORD", "model": "ecmwf", "sample_count": 20, "mae_7d_c": 0.4}]
+        low_sample = [{"icao": "KORD", "model": "ecmwf", "sample_count": 9, "mae_7d_c": 0.2, "additive_bias_c": 2.0}]
+        paper_ready = [{"icao": "KORD", "model": "ecmwf", "sample_count": 10, "mae_7d_c": 0.3, "additive_bias_c": 2.0}]
+        mature = [{"icao": "KORD", "model": "ecmwf", "sample_count": 20, "mae_7d_c": 0.4, "additive_bias_c": 4.0}]
 
         self.assertIsNone(_mae_for(low_sample, "KORD", "ecmwf"))
         self.assertAlmostEqual(_mae_for(paper_ready, "KORD", "ecmwf"), 0.3)
-        self.assertEqual(_bias_for(paper_ready, "KORD", "ecmwf"), (0.0, 10))
+        self.assertEqual(_bias_for(low_sample, "KORD", "ecmwf"), (0.0, 9))
+        self.assertEqual(_bias_for(paper_ready, "KORD", "ecmwf"), (1.0, 10))
+        self.assertEqual(_bias_for(mature, "KORD", "ecmwf"), (2.5, 20))
         self.assertAlmostEqual(_mae_for(mature, "KORD", "ecmwf"), 0.4)
         stale_tokyo = [{"icao": "RJTT", "model": "ecmwf", "sample_count": 30, "additive_bias_c": -1.5}]
         self.assertEqual(_bias_for(stale_tokyo, "RJTT", "ecmwf", profile=SETTLEMENT_REGISTRY["tokyo"]), (0.0, 0))

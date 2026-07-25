@@ -428,6 +428,7 @@ def _fresh_quote_gate_reasons(
     strategy_parameters: dict[str, Any],
 ) -> list[str]:
     reasons: list[str] = []
+    global_min_trade_edge = _number_or_default(decision_policy.get("min_trade_edge"), 0.08)
     max_spread_bps = _number_or_default(decision_policy.get("max_spread_bps"), 500.0)
     stale_book_seconds = _number_or_default(decision_policy.get("stale_book_seconds"), 300.0)
     for row in rows:
@@ -445,7 +446,10 @@ def _fresh_quote_gate_reasons(
         edge = probability - ask
         row["market_implied_probability"] = ask
         row["edge"] = edge
-        min_edge = _number_or_default(strategy_config.get("min_edge"), 0.0)
+        min_edge = max(
+            global_min_trade_edge,
+            _number_or_default(strategy_config.get("min_edge"), 0.0),
+        )
         if edge + 1e-12 < min_edge:
             reasons.append("edge_below_min_after_reprice")
         if strategy_name == "tail_buying" and ask > _number_or_default(strategy_config.get("max_ask"), 0.15) + 1e-12:

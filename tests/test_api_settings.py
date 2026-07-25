@@ -100,6 +100,22 @@ class ApiSettingsTests(unittest.TestCase):
         self.assertNotIn(secret, str(result))
         self.assertEqual(session.calls[0][2]["params"]["apiKey"], secret)
 
+    def test_visual_crossing_connection_requires_daily_max_payload(self):
+        success = test_api_setting(
+            "visual_crossing",
+            "candidate-secret",
+            session=_Session(_Response({"days": [{"tempmax": 31.2}]})),
+        )
+        self.assertTrue(success["ok"])
+
+        malformed = test_api_setting(
+            "visual_crossing",
+            "candidate-secret",
+            session=_Session(_Response({"days": [{}]})),
+        )
+        self.assertFalse(malformed["ok"])
+        self.assertIn("tempmax", malformed["message"])
+
     def test_unauthorized_provider_is_reported_in_plain_language(self):
         session = _Session(_Response({}, status_code=401))
         result = test_api_setting("weather_com", "bad-key", session=session)

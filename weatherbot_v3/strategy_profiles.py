@@ -23,6 +23,7 @@ PAPER_STRATEGY_NAMES = (
 DEFAULT_PARAMETERS: dict[str, Any] = {
     "schema_version": STRATEGY_PROFILE_SCHEMA_VERSION,
     "decision_policy": {
+        "min_trade_edge": 0.08,
         "max_spread_bps": 500.0,
         "stale_book_seconds": 300.0,
         "min_bias_sample_days": 7,
@@ -98,6 +99,7 @@ def validate_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     decision = merged["decision_policy"]
     sizing = merged["sizing"]
     strategies = merged["strategies"]
+    _bounded(decision, "min_trade_edge", 0.0, 0.5)
     _bounded(decision, "max_spread_bps", 0.0, 5000.0)
     _bounded(decision, "stale_book_seconds", 30.0, 3600.0)
     _bounded(decision, "min_bias_sample_days", 0, 365, integer=True)
@@ -307,14 +309,14 @@ def ensure_default_strategy_profile(scope: str, *, path: Path | None = None) -> 
             normalized,
             profile_key=str(active.get("profile_key") or DEFAULT_PROFILE_KEY),
             created_by="system",
-            change_note="Migrate Core Modal paper/live maturity thresholds",
+            change_note="Migrate strategy profile defaults",
             path=path,
         )
         activate_strategy_profile(
             revision["revision_id"],
             scope=scope,
             actor="system",
-            reason="migrate Core Modal paper/live maturity thresholds",
+            reason="migrate strategy profile defaults",
             path=path,
         )
         return get_active_strategy_profile(scope, path=path) or revision

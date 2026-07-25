@@ -46,7 +46,7 @@ interface PanelProps {
 
 const NAV_ITEMS: Array<{ key: SettingsSection; label: string; icon: typeof Settings2 }> = [
   { key: 'sources', label: '连接服务', icon: KeyRound },
-  { key: 'strategy', label: '模拟策略', icon: SlidersHorizontal },
+  { key: 'strategy', label: '策略设置', icon: SlidersHorizontal },
   { key: 'advanced', label: '高级设置', icon: Settings2 },
 ]
 
@@ -433,7 +433,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
     onSuccess: (_revision, variables) => {
       setActivationTarget(null)
       setMessage(variables.scope === 'paper_default'
-        ? '模拟策略版本已更新。需要等待同版本信号重建后，策略队列才会出现可执行候选。'
+        ? '策略版本已更新。需要等待同版本信号重建后，策略队列才会出现可执行候选。'
         : '信号策略版本已更新，将在下一轮派生任务重建信号。')
       queryClient.invalidateQueries({ queryKey: ['strategy-profiles'] })
     },
@@ -469,7 +469,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
         </div>
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-semibold text-neutral-100">设置</h1>
-          <div className="text-[10px] text-neutral-500">连接数据服务，管理模拟策略</div>
+          <div className="text-[10px] text-neutral-500">连接数据服务，管理交易策略</div>
         </div>
         <div className={`hidden items-center gap-1 border px-2 py-1 text-[10px] sm:inline-flex ${liveLocked ? 'border-amber-500/30 text-amber-300' : 'border-green-500/30 text-green-300'}`}>
           <LockKeyhole className="h-3.5 w-3.5" /> {liveStatusText}
@@ -526,9 +526,19 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
 
                 <div className="mb-2 mt-6 text-[11px] font-semibold text-neutral-300">盘口与证据闸门</div>
                 <div className="border-y border-neutral-800">
-                  <SettingNumber label="最大价差" description="超过该 spread 的候选只观察，不进入模拟成交。" value={draft.decision_policy.max_spread_bps} min={0} max={5000} step={10} suffix="bps" onChange={value => update(['decision_policy', 'max_spread_bps'], value)} />
+                  <SettingNumber
+                    label="最低交易优势"
+                    description="校正后模型概率减去当前买入价的共同下限；核心策略还会扣除 tick 与半档价差作为执行缓冲。"
+                    value={Number(((draft.decision_policy.min_trade_edge ?? 0.08) * 100).toFixed(2))}
+                    min={0}
+                    max={50}
+                    step={1}
+                    suffix="%"
+                    onChange={value => update(['decision_policy', 'min_trade_edge'], value / 100)}
+                  />
+                  <SettingNumber label="最大价差" description="超过该 spread 的候选只观察，不进入交易队列。" value={draft.decision_policy.max_spread_bps} min={0} max={5000} step={10} suffix="bps" onChange={value => update(['decision_policy', 'max_spread_bps'], value)} />
                   <SettingNumber label="盘口有效期" description="成交前会读取最新本地盘口；超过该时间则拒绝。" value={draft.decision_policy.stale_book_seconds} min={30} max={3600} step={30} suffix="秒" onChange={value => update(['decision_policy', 'stale_book_seconds'], value)} />
-                  <SettingNumber label="实盘最少校准日" description="只影响实盘准备度；模拟盘保留这些候选，用于继续积累独立结算样本。" value={draft.decision_policy.min_bias_sample_days} min={0} max={365} step={1} suffix="天" onChange={value => update(['decision_policy', 'min_bias_sample_days'], value)} />
+                  <SettingNumber label="成熟校准门槛" description="用于判断策略是否积累了足够独立结算样本；研究队列仍会继续收集候选。" value={draft.decision_policy.min_bias_sample_days} min={0} max={365} step={1} suffix="天" onChange={value => update(['decision_policy', 'min_bias_sample_days'], value)} />
                   <SettingNumber label="低价尾部阈值" description="低于该价格的桶会进入更严格的尾部概率检查。" value={draft.decision_policy.low_price_tail_ask} min={0} max={0.5} step={0.01} onChange={value => update(['decision_policy', 'low_price_tail_ask'], value)} />
                 </div>
 
@@ -547,7 +557,6 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                         </div>
                         {Boolean(parameters.enabled) && (
                           <div className="mt-3 border-l-2 border-blue-500/40 pl-3">
-                            {'min_edge' in parameters && <SettingNumber label="最低概率优势" description="模型概率减去市场买入价后的最低差值。" value={Number(parameters.min_edge)} min={0} max={0.5} step={0.01} onChange={value => update(['strategies', name, 'min_edge'], value)} />}
                             {'max_ask' in parameters && <SettingNumber label="最高买价" description="尾部策略不会追价到该值以上。" value={Number(parameters.max_ask)} min={0.01} max={0.5} step={0.01} onChange={value => update(['strategies', name, 'max_ask'], value)} />}
                             {'group_exposure_multiplier' in parameters && <SettingNumber label="组合仓位折扣" description="相邻三桶总仓位相对单桶建议仓位的折扣。" value={Number(parameters.group_exposure_multiplier)} min={0} max={1} step={0.05} onChange={value => update(['strategies', name, 'group_exposure_multiplier'], value)} />}
                             {'min_settlement_days' in parameters && <SettingNumber label="最低独立结算日" description="尾部策略需要更长的历史证据。" value={Number(parameters.min_settlement_days)} min={0} max={365} step={1} suffix="天" onChange={value => update(['strategies', name, 'min_settlement_days'], value)} />}
@@ -618,7 +627,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                   <summary className="cursor-pointer px-3 py-3 text-[11px] font-medium text-neutral-300 hover:bg-neutral-900/40">当前运行状态</summary>
                   <div className="border-t border-neutral-800 px-3">
                     <StatusLine label="信号策略" value={shortRevision(activeSignal?.revision_id)} tone="green" detail={humanizeChangeNote(activeSignal?.change_note)} />
-                    <StatusLine label="模拟策略" value={shortRevision(activePaper?.revision_id)} tone="green" detail={humanizeChangeNote(activePaper?.change_note)} />
+                    <StatusLine label="交易策略" value={shortRevision(activePaper?.revision_id)} tone="green" detail={humanizeChangeNote(activePaper?.change_note)} />
                     <StatusLine label="数据调度" value={schedulerQuery.data?.running ? '运行中' : '已停止'} tone={schedulerQuery.data?.running ? 'green' : 'amber'} />
                     <StatusLine label="实盘" value={liveStatusText} tone={liveLocked ? 'amber' : 'green'} />
                   </div>
@@ -638,7 +647,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                         <div className="mt-1 text-[9px] text-neutral-600">{profile.created_at ? new Date(profile.created_at).toLocaleString('zh-CN', { hour12: false }) : '--'}</div>
                         <div className="mt-3 flex flex-wrap gap-2">
                           <button type="button" disabled={profile.active_scopes.includes('signal_generation') || activationMutation.isPending} onClick={() => setActivationTarget({ revision: profile, scope: 'signal_generation' })} className="min-h-8 border border-neutral-700 px-2.5 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">用于信号</button>
-                          <button type="button" disabled={profile.active_scopes.includes('paper_default') || activationMutation.isPending} onClick={() => setActivationTarget({ revision: profile, scope: 'paper_default' })} className="min-h-8 border border-neutral-700 px-2.5 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">用于模拟</button>
+                          <button type="button" disabled={profile.active_scopes.includes('paper_default') || activationMutation.isPending} onClick={() => setActivationTarget({ revision: profile, scope: 'paper_default' })} className="min-h-8 border border-neutral-700 px-2.5 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">用于交易队列</button>
                           <button type="button" onClick={() => { setDraft(cloneParameters(profile.parameters)); setDraftBaseRevision(profile.revision_id); setSection('strategy'); setMessage(`已从 ${shortRevision(profile.revision_id)} 创建本地草稿。`) }} className="ml-auto inline-flex min-h-8 items-center gap-1 border border-neutral-700 px-2.5 text-[10px] text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200">调整此版本 <ChevronRight className="h-3.5 w-3.5" /></button>
                         </div>
                       </div>

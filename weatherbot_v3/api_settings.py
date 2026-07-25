@@ -152,6 +152,15 @@ def test_api_setting(
                 timeout=(5, 20),
             )
             _raise_for_provider(response)
+            payload = response.json()
+            days = payload.get("days") if isinstance(payload, dict) else None
+            if (
+                not isinstance(days, list)
+                or not days
+                or not isinstance(days[0], dict)
+                or days[0].get("tempmax") is None
+            ):
+                raise ValueError("visual_crossing_response_missing_tempmax")
             message = "连接成功，已读取 Visual Crossing 历史天气接口。"
         elif provider_key == "feishu":
             response = client.post(
@@ -185,6 +194,7 @@ def test_api_setting(
         friendly = {
             "pws_connection_ok_but_no_station_found": "密钥已通过请求，但没有找到可用的附近个人站。",
             "weather_com_response_missing_hourly_data": "接口已响应，但返回内容不含逐小时预报。",
+            "visual_crossing_response_missing_tempmax": "接口已响应，但返回内容不含日最高温 tempmax。",
         }.get(reason, "连接失败，请检查密钥、网络或服务权限。")
         return _test_result(provider_key, False, "failed", friendly, _duration_ms(started), reason=reason)
 

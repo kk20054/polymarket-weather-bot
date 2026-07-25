@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from .env_utils import env_value
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,7 +103,10 @@ def load_config() -> V3Config:
     file_cfg = _read_config()
 
     def get(name: str, default: Any = None) -> Any:
-        return os.getenv(name, file_cfg.get(name.lower(), file_cfg.get(name, default)))
+        env = env_value(name)
+        if env != "":
+            return env
+        return file_cfg.get(name.lower(), file_cfg.get(name, default))
 
     max_bet = _float(get("MAX_BET", file_cfg.get("max_bet", 2.0)), 2.0)
     return V3Config(

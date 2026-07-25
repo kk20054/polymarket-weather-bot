@@ -141,6 +141,7 @@ def build_signal_decisions(
         "evidence": evidence,
         "station_live_reasons": station_live_reasons,
         "forecast_algo": forecast_algo,
+        "min_trade_edge": decision_policy.get("min_trade_edge", 0.08),
         "max_spread_bps": decision_policy.get("max_spread_bps", MAX_SPREAD_BPS),
         "stale_book_seconds": decision_policy.get("stale_book_seconds", STALE_BOOK_SECONDS),
         "min_bias_sample_days": decision_policy.get("min_bias_sample_days", MIN_BIAS_SAMPLE_DAYS),

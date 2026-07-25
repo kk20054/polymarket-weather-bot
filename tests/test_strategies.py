@@ -17,6 +17,7 @@ def _context(**overrides):
         "max_spread_bps": 500.0,
         "stale_book_seconds": 300.0,
         "min_bias_sample_days": 7,
+        "min_trade_edge": 0.08,
         "bankroll": 1000.0,
         "kelly_multiplier": 0.15,
         "max_per_trade_usd": 100.0,
@@ -69,7 +70,7 @@ def _bucket(key, low, high, ask, bid=0.09, direction="range"):
 
 
 class StrategyTests(unittest.TestCase):
-    def test_single_bucket_ev_uses_five_point_edge_threshold(self):
+    def test_single_bucket_ev_uses_global_eight_point_edge_threshold(self):
         strategy = SingleBucketEVStrategy()
         decision = strategy.evaluate(
             _bucket("mid", 89.0, 91.0, 0.20, 0.195),
@@ -89,6 +90,15 @@ class StrategyTests(unittest.TestCase):
         )
         self.assertEqual(skipped["paper_decision"], "skip")
         self.assertIn("edge_below_min", skipped["gate_reasons"])
+
+        stricter = strategy.evaluate(
+            _bucket("stricter", 89.0, 91.0, 0.20, 0.195),
+            {"bucket_key": "stricter", "probability": 0.30},
+            _prediction(),
+            _context(min_trade_edge=0.12),
+        )
+        self.assertEqual(stricter["paper_decision"], "skip")
+        self.assertIn("edge_below_min", stricter["gate_reasons"])
 
     def test_single_bucket_ev_blocks_orders_below_market_minimum(self):
         bucket = _bucket("large-minimum", 89.0, 91.0, 0.20, 0.195)

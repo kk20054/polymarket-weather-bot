@@ -36,7 +36,8 @@ class TailBuyingStrategy(StrategyBase):
             return None
         if ask > self.max_ask:
             return None
-        if model_probability - ask < self.min_edge:
+        required_min_edge = max(self.min_edge, float(context.get("min_trade_edge") or 0.08))
+        if model_probability - ask < required_min_edge:
             return None
         extra_reasons = []
         independent_days = int(context.get("independent_settlement_days") or 0)
@@ -47,7 +48,7 @@ class TailBuyingStrategy(StrategyBase):
             probability,
             prediction,
             context,
-            min_edge=self.min_edge,
+            min_edge=required_min_edge,
             allow_low_price_tail=True,
             extra_gate_reasons=extra_reasons,
             force_skip_reasons=extra_reasons,
@@ -56,7 +57,7 @@ class TailBuyingStrategy(StrategyBase):
             decision["position_size_usd"] = min(float(decision["position_size_usd"] or 0.0), self.max_order_usd)
         decision["tail_buying"] = {
             "max_ask": self.max_ask,
-            "min_edge": self.min_edge,
+            "min_edge": required_min_edge,
             "independent_settlement_days": independent_days,
             "min_independent_settlement_days": self.min_independent_settlement_days,
             "single_order_cap_usd": self.max_order_usd,

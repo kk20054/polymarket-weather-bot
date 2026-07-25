@@ -33,6 +33,10 @@ MIN_MEMBER_COUNT_FOR_SINGLE_FAMILY = 5
 SIGMA_FLOOR_C = 0.5
 UNCALIBRATED_SIGMA_C = 1.2
 BIAS_MIN_SAMPLE_COUNT = 20
+BIAS_PAPER_MIN_SAMPLE_COUNT = 10
+BIAS_SHRINKAGE_PRIOR_SAMPLES = 10
+BIAS_MAX_ABS_C = 2.5
+BIAS_RUNTIME_METHOD = "zero_prior_shrinkage_v1"
 FORECAST_SNAPSHOT_SELECTION_VERSION = "forecast-snapshot-selection-v2"
 # Dynamic weighting starts as soon as a leakage-free forecast/truth pair is
 # available. Sparse models keep their prior share instead of disappearing;
@@ -991,6 +995,17 @@ def _components_from_rows(
             "model_daily_high_c": round(sum(adjusted_c) / len(adjusted_c), 4),
             "bias_correction_c": round(bias_c, 4),
             "bias_sample_count": int(sample_count),
+            "bias_method": BIAS_RUNTIME_METHOD,
+            "bias_status": (
+                "shrinkage_active"
+                if sample_count >= BIAS_PAPER_MIN_SAMPLE_COUNT
+                else ("collecting" if sample_count > 0 else "missing")
+            ),
+            "bias_shrinkage_factor": round(
+                sample_count / (sample_count + BIAS_SHRINKAGE_PRIOR_SAMPLES),
+                4,
+            ) if sample_count >= BIAS_PAPER_MIN_SAMPLE_COUNT else 0.0,
+            "bias_applied_before_probability": True,
             "mae_7d": _mae_for(bias_table, profile.station_id, family, profile=profile),
             "truth_basis": _truth_basis(profile, target_date, path),
             "retrieved_at": str(first.get("retrieved_at") or ""),
@@ -1274,9 +1289,15 @@ def _bias_for(
             if profile is not None and int(row.get("location_version") or 1) != int(profile.location_version):
                 continue
             sample_count = int(row.get("sample_count") or 0)
-            if sample_count < BIAS_MIN_SAMPLE_COUNT:
+            if sample_count < BIAS_PAPER_MIN_SAMPLE_COUNT:
                 return 0.0, sample_count
-            return float(row.get("additive_bias_c") or 0.0), sample_count
+            raw_bias = float(row.get("additive_bias_c") or 0.0)
+            shrinkage = sample_count / (sample_count + BIAS_SHRINKAGE_PRIOR_SAMPLES)
+            effective_bias = max(
+                -BIAS_MAX_ABS_C,
+                min(BIAS_MAX_ABS_C, raw_bias * shrinkage),
+            )
+            return round(effective_bias, 4), sample_count
     return 0.0, 0
 
 
@@ -1312,7 +1333,7 @@ def _mae_for(
         # Paper weighting learns from the first leakage-free forecast/truth
         # pair. Sample thresholds describe maturity and live eligibility; they
         # must not make a real sparse error metric disappear.
-        if int(row.get("sample_count") or 0) <= 0:
+        if int(row.get("sample_count") or 0) < DYNAMIC_WEIGHT_MIN_SAMPLES:
             return None
         for key in (
             "walk_forward_mae_7d_c",
