@@ -10,11 +10,13 @@
 - Every configured model with a prior weight participates from its first valid forecast.
 - Dynamic weight blends the prior with inverse-MAE performance as leakage-free pairs accumulate; the performance share ramps continuously with sample count.
 - Models without a settled MAE retain a nonzero prior-only weight instead of being silently removed.
-- Shanghai currently gives V3 about 42.9% at `n=10`, while JMA still receives about 7.1% before its first valid MAE.
+- Shanghai D+0 currently predicts `34.50 +/- 1.20 C`; D+1 predicts `32.68 +/- 2.19 C`.
+- Shanghai currently gives V3 about 42.9% at `n=10`; JMA's 8 real pairs now move it from the 7.3% prior to about 8.3%.
 - Wide model disagreement is a paper caution, not a paper blocker. It remains a live-maturity blocker.
 - Active paper run: `paper-20260725T045941Z-2059361a`, profile revision `spr_e3462ea2aacb622e7335b2acab6b2c30`, $40 bankroll, `model_guarded` exit.
 - Real GFS ensemble snapshots persist 31 members. Orderbook replay remains point-in-time and rejects future or stale quotes.
-- Focused strategy tests and the frontend production build passed.
+- The latest paper candidate passed model edge checks but was skipped when execution revalidation found a stale/widened orderbook.
+- Focused dynamic-weight and walk-forward calibration tests passed.
 
 ## Production Blockers
 - Executable paper orders still require valid bid/ask, acceptable spread, sufficient depth/order size, fresh quotes and positive edge.

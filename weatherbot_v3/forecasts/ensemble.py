@@ -1309,7 +1309,10 @@ def _mae_for(
             continue
         if profile is not None and int(row.get("location_version") or 1) != int(profile.location_version):
             continue
-        if int(row.get("sample_count") or 0) < DYNAMIC_WEIGHT_MIN_SAMPLES:
+        # Paper weighting learns from the first leakage-free forecast/truth
+        # pair. Sample thresholds describe maturity and live eligibility; they
+        # must not make a real sparse error metric disappear.
+        if int(row.get("sample_count") or 0) <= 0:
             return None
         for key in (
             "walk_forward_mae_7d_c",

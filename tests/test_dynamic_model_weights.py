@@ -6,6 +6,7 @@ from weatherbot_v3.forecasts.ensemble import (
     DYNAMIC_WEIGHT_MAX_SHARE,
     _apply_mae_adjusted_weights,
     _best_source_group,
+    _mae_for,
 )
 from weatherbot_v3.strategies.core_modal import CoreModalStrategy
 
@@ -91,6 +92,29 @@ class DynamicModelWeightTests(unittest.TestCase):
         self.assertAlmostEqual(sum(row["weight"] for row in rows), 1.0, places=9)
         self.assertLessEqual(max(row["weight"] for row in rows), DYNAMIC_WEIGHT_MAX_SHARE + 1e-9)
         self.assertGreater(rows[2]["weight"], rows[4]["weight"])
+
+    def test_sparse_real_error_changes_paper_weight_from_first_pair(self):
+        bias_rows = [{
+            "icao": "ZSPD",
+            "model": "jma",
+            "sample_count": 1,
+            "walk_forward_mae_7d_c": 0.5,
+            "location_version": 1,
+        }]
+        mae = _mae_for(bias_rows, "ZSPD", "jma")
+        rows = [
+            component("weathercom_v3", prior=0.484, samples=1, mae=2.0),
+            component("jma", prior=0.073, samples=1, mae=mae),
+            component("gfs", prior=0.152, samples=0, mae=None),
+        ]
+
+        _apply_mae_adjusted_weights(rows)
+
+        self.assertEqual(mae, 0.5)
+        self.assertEqual(rows[1]["weight_status"], "collecting")
+        self.assertGreater(rows[1]["performance_blend"], 0.0)
+        self.assertGreater(rows[1]["weight"], rows[1]["dynamic_prior_share"])
+        self.assertAlmostEqual(sum(row["weight"] for row in rows), 1.0, places=9)
 
     def test_v3_enters_gradually_after_twenty_leakage_free_pairs(self):
         rows = [
