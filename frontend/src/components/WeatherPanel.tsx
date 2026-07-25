@@ -11,7 +11,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { ExternalLink, History, SlidersHorizontal, X } from 'lucide-react'
+import { ExternalLink, HelpCircle, History, SlidersHorizontal, X } from 'lucide-react'
 import { HourlyTemperatureChart, type HourlyChartRow } from './HourlyTemperatureChart'
 import { ForecastRevisionDialog } from './ForecastRevisionDialog'
 import type { BucketProbabilitySummary, CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlyBiasSourceStats, HourlyBiasStats, HourlyConsensusSummary, HourlySourcePoint, HourlySourceSeries, Layer7QueryState, Layer7ResourceState, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
@@ -3332,15 +3332,32 @@ function TemperatureDistributionPanel({
           <section className="deb-source-dialog max-h-[88vh] w-full max-w-4xl overflow-hidden border border-[#2C3445] bg-[#161A22] shadow-2xl">
             <header className="border-b border-[#2C3445] px-4 py-3">
               <div className="flex items-start justify-between gap-4">
-                <div className="min-w-0">
+                <div className="flex min-w-0 items-center gap-2">
                   <div className="text-base font-semibold text-[#F8FAFC]">{tr(language, '模型分析', 'Model analysis')}</div>
-                  <div className="mt-1 text-[10px] text-[#7D8694]">
-                    {tr(language, '先看融合权重与误差，再查看每次预报如何修订', 'Read blend weights and errors first, then inspect forecast revisions')}
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[9px] tabular-nums text-[#9AA4B2]">
-                    <span>{sourceRows.length} {tr(language, '个模型', 'models')}</span>
-                    <span>{tr(language, '融合中心', 'Blend center')} {fmtDualTemp(sourceDisagreement.center, unit)}</span>
-                    <span title={debVersionLabel}>{debVersionLabel}</span>
+                  <div className="group relative">
+                    <button
+                      type="button"
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-full text-[#7D8694] transition-colors hover:bg-[#222A37] hover:text-[#F8FAFC] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#3B82F6]"
+                      aria-label={tr(language, '模型分析说明', 'About model analysis')}
+                      aria-describedby="deb-model-analysis-help"
+                    >
+                      <HelpCircle className="h-4 w-4" />
+                    </button>
+                    <div
+                      id="deb-model-analysis-help"
+                      role="tooltip"
+                      className="weatherbot-tooltip pointer-events-none invisible absolute left-0 top-full z-[70] mt-2 w-72 border p-3 text-[10px] leading-relaxed opacity-0 shadow-2xl transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+                    >
+                      <p>{tr(language, '先看融合权重与误差，再查看每次预报如何修订。', 'Read blend weights and errors first, then inspect forecast revisions.')}</p>
+                      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-[#2C3445] pt-2 tabular-nums">
+                        <dt className="text-[#7D8694]">{tr(language, '模型', 'Models')}</dt>
+                        <dd>{sourceRows.length}</dd>
+                        <dt className="text-[#7D8694]">{tr(language, '融合中心', 'Blend center')}</dt>
+                        <dd>{fmtDualTemp(sourceDisagreement.center, unit)}</dd>
+                        <dt className="text-[#7D8694]">{tr(language, '算法', 'Algorithm')}</dt>
+                        <dd className="break-all font-mono text-[9px]">{debVersionLabel}</dd>
+                      </dl>
+                    </div>
                   </div>
                 </div>
                 <button type="button" onClick={() => setSourceDialogOpen(false)} className="inline-flex h-9 w-9 shrink-0 items-center justify-center border border-[#2C3445] text-[#9AA4B2] hover:bg-[#222A37] hover:text-[#F8FAFC]" aria-label={tr(language, '关闭', 'Close')}>
@@ -3373,16 +3390,28 @@ function TemperatureDistributionPanel({
             <div className="max-h-[calc(88vh-142px)] overflow-auto p-4">
               {activeSourceAnalysisView === 'history' ? (
                 <section aria-label={tr(language, '逐模型预测轨迹', 'Per-model forecast paths')}>
-                  <div className="flex flex-wrap items-end justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-semibold text-[#F8FAFC]">{tr(language, '最高温预测轨迹', 'Daily-high forecast paths')}</div>
-                      <div className="mt-1 text-[10px] text-[#7D8694]">
-                        {tr(language, '每条线只使用真实保存的模型批次；阶梯变化代表一次新预报修订', 'Every line uses persisted model runs; each step is a new forecast revision')}
+                  <div className="flex items-center gap-2">
+                    <div className="text-sm font-semibold text-[#F8FAFC]">{tr(language, '最高温预测轨迹', 'Daily-high forecast paths')}</div>
+                    <div className="group relative">
+                      <button
+                        type="button"
+                        className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[#7D8694] transition-colors hover:bg-[#222A37] hover:text-[#F8FAFC] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#3B82F6]"
+                        aria-label={tr(language, '预测轨迹说明', 'About forecast paths')}
+                        aria-describedby="deb-forecast-path-help"
+                      >
+                        <HelpCircle className="h-3.5 w-3.5" />
+                      </button>
+                      <div
+                        id="deb-forecast-path-help"
+                        role="tooltip"
+                        className="weatherbot-tooltip pointer-events-none invisible absolute left-0 top-full z-[70] mt-2 w-72 border p-3 text-[10px] leading-relaxed opacity-0 shadow-2xl transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+                      >
+                        <p>{tr(language, '每条线只使用已保存的真实模型批次，阶梯变化代表一次新预报修订。线越稳定，说明临近结算时修订越少；模型间的垂直距离代表分歧。', 'Each line uses persisted model runs. A step is a new revision; steadier lines mean fewer late revisions, and vertical distance shows disagreement.')}</p>
+                        <p className="mt-2 border-t border-[#2C3445] pt-2 tabular-nums text-[#9AA4B2]">
+                          {sourceHistory.points.length} {tr(language, '批次', 'runs')} · {sourceHistory.series.length} {tr(language, '模型', 'models')}
+                        </p>
                       </div>
                     </div>
-                    <span className="text-[10px] tabular-nums text-[#9AA4B2]">
-                      {sourceHistory.points.length} {tr(language, '批次', 'runs')} · {sourceHistory.series.length} {tr(language, '模型', 'models')}
-                    </span>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-[10px] text-[#9AA4B2]">
                     {sourceHistory.series.map(series => (
@@ -3441,9 +3470,6 @@ function TemperatureDistributionPanel({
                       </ComposedChart>
                     </ResponsiveContainer>
                   </div>
-                  <div className="mt-3 text-[10px] leading-relaxed text-[#7D8694]">
-                    {tr(language, '读图：线越稳定，说明模型在临近结算时修订越少；模型之间的垂直距离代表当前分歧。', 'How to read: a steadier line means fewer late revisions; vertical distance between models shows disagreement.')}
-                  </div>
                 </section>
               ) : sourceRows.length > 0 ? (
                 <section aria-label={tr(language, '模型融合权重排名', 'Model blend ranking')}>
@@ -3466,14 +3492,25 @@ function TemperatureDistributionPanel({
                     </div>
                   </div>
 
-                  <div className="mt-4 flex flex-wrap items-end justify-between gap-2">
-                    <div>
-                      <div className="text-sm font-semibold text-[#F8FAFC]">{tr(language, '融合权重排名', 'Blend weight ranking')}</div>
-                      <div className="mt-1 text-[10px] text-[#7D8694]">
-                        {tr(language, '权重决定模型对 DEB 的影响，不等同于单独准确率排名', 'Weight controls influence on DEB; it is not a standalone accuracy score')}
+                  <div className="mt-4 flex items-center gap-2">
+                    <div className="text-sm font-semibold text-[#F8FAFC]">{tr(language, '融合权重排名', 'Blend weight ranking')}</div>
+                    <div className="group relative">
+                      <button
+                        type="button"
+                        className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[#7D8694] transition-colors hover:bg-[#222A37] hover:text-[#F8FAFC] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#3B82F6]"
+                        aria-label={tr(language, '融合权重说明', 'About blend weights')}
+                        aria-describedby="deb-blend-ranking-help"
+                      >
+                        <HelpCircle className="h-3.5 w-3.5" />
+                      </button>
+                      <div
+                        id="deb-blend-ranking-help"
+                        role="tooltip"
+                        className="weatherbot-tooltip pointer-events-none invisible absolute left-0 top-full z-[70] mt-2 w-72 border p-3 text-[10px] leading-relaxed opacity-0 shadow-2xl transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+                      >
+                        {tr(language, '权重决定模型对 DEB 的影响，不等同于单独准确率排名。误差只使用无泄漏预测与真实结算的配对样本；样本可以先参与模拟校准，完成结算配对后才显示误差。', 'Weight controls influence on DEB, not standalone accuracy. Error uses leakage-safe forecast/truth pairs; samples may enter paper calibration before settled MAE is available.')}
                       </div>
                     </div>
-                    <span className="text-[9px] text-[#7D8694]">{tr(language, '误差仅来自真实配对样本', 'MAE uses matched truth only')}</span>
                   </div>
 
                   <div className="mt-2 border-y border-[#2C3445]">
@@ -3527,10 +3564,6 @@ function TemperatureDistributionPanel({
                         </article>
                       )
                     })}
-                  </div>
-
-                  <div className="mt-3 text-[10px] leading-relaxed text-[#7D8694]">
-                    {tr(language, '排名依据当前融合权重。样本数可以先参与模拟校准，但只有完成真实预测与结算配对后才显示误差。', 'Ranking follows current blend weight. Samples may support paper calibration, but MAE appears only after forecasts are matched to settled truth.')}
                   </div>
                 </section>
               ) : (
