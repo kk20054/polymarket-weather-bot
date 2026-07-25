@@ -35,6 +35,17 @@ OPENMETEO_HOURLY_FIELDS = (
     "precipitation_probability",
 )
 OPENMETEO_DEFAULT_CITY_PRIORITY = ("chicago", "tokyo", "atlanta", "nyc", "dallas")
+CHINA_CITY_KEYS = {
+    "beijing",
+    "chengdu",
+    "chongqing",
+    "guangzhou",
+    "hong-kong",
+    "qingdao",
+    "shanghai",
+    "shenzhen",
+    "wuhan",
+}
 
 CONUS_MODELS = (
     "ecmwf_ifs025",
@@ -94,7 +105,7 @@ def model_allowlist_for_city(city_key: str) -> list[str]:
         return list(GLOBAL_MODELS)
     if profile.region == "us":
         return list(CONUS_MODELS)
-    if profile.city in {"shanghai", "beijing", "wuhan", "qingdao", "shenzhen", "hong-kong"}:
+    if profile.city in CHINA_CITY_KEYS:
         return list(CHINA_MODELS)
     if profile.city == "tokyo":
         return list(TOKYO_MODELS)
@@ -449,7 +460,7 @@ def previous_run_models_for_city(city_key: str) -> list[str]:
         return common
     if profile.region == "us":
         return [*common, "ncep_hrrr_conus"]
-    if profile.city in {"shanghai", "beijing", "wuhan", "qingdao", "shenzhen", "hong-kong"}:
+    if profile.city in CHINA_CITY_KEYS:
         return [*common, "cma_grapes_global"]
     return common
 

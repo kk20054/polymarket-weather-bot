@@ -36,6 +36,25 @@ DEFAULT_CITY_MODELS = {
 }
 
 
+def bias_models_for_city(city: str) -> tuple[str, ...]:
+    """Return model families for every registered city, including new catalog entries."""
+
+    key = str(city or "").strip().lower()
+    configured = DEFAULT_CITY_MODELS.get(key)
+    if configured:
+        return configured
+    profile = SETTLEMENT_REGISTRY.get(key)
+    models = list(COMMON_MODELS)
+    if profile and profile.region == "us":
+        models.extend(("hrrr", "nbm"))
+    if profile and (
+        profile.station_id.upper().startswith("Z")
+        or profile.city == "hong-kong"
+    ):
+        models.append("cma")
+    return tuple(dict.fromkeys(models))
+
+
 def train_bias_table(
     *,
     cities: list[str] | None = None,
@@ -68,7 +87,7 @@ def train_bias_table(
             path,
             before_date=as_of_date_exclusive,
         )
-        for family in DEFAULT_CITY_MODELS.get(city, COMMON_MODELS):
+        for family in bias_models_for_city(city):
             records, audit = _residual_records_for_family(
                 city,
                 family,
@@ -156,7 +175,7 @@ def _selected_cities(cities: list[str] | None, path: Path | None) -> list[str]:
         enabled = [
             str(row["city_key"])
             for row in conn.execute("SELECT city_key FROM stations WHERE enabled = 1 ORDER BY tier, city_key").fetchall()
-            if str(row["city_key"] or "") in DEFAULT_CITY_MODELS
+            if str(row["city_key"] or "") in SETTLEMENT_REGISTRY
         ]
     return enabled or list(DEFAULT_CITY_MODELS)
 

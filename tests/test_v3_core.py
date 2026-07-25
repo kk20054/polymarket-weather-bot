@@ -5174,6 +5174,11 @@ class V3CoreTests(unittest.TestCase):
             self.assertIn("inferred_run_at", meta)
 
         self.assertIn("jma_seamless", model_allowlist_for_city("shanghai"))
+        self.assertIn("jma_seamless", model_allowlist_for_city("chongqing"))
+        self.assertIn("cma_grapes_global", model_allowlist_for_city("chongqing"))
+        from weatherbot_v3.openmeteo import previous_run_models_for_city
+
+        self.assertIn("cma_grapes_global", previous_run_models_for_city("chongqing"))
 
     def test_openmeteo_ensemble_members_are_persistable(self):
         payload = {
@@ -5218,10 +5223,27 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(payload["results"][0]["models_selected"], ["gfs_seamless"])
 
     def test_bias_model_families_are_unique_per_city(self):
-        from weatherbot_v3.bias import DEFAULT_CITY_MODELS
+        from weatherbot_v3.bias import DEFAULT_CITY_MODELS, bias_models_for_city
 
         for city, models in DEFAULT_CITY_MODELS.items():
             self.assertEqual(len(models), len(set(models)), city)
+        self.assertIn("weathercom_v3", bias_models_for_city("wellington"))
+        self.assertIn("cma", bias_models_for_city("chongqing"))
+
+    def test_bias_city_selection_includes_new_enabled_registry_cities(self):
+        from weatherbot_v3.bias import _selected_cities
+
+        db_path = test_db_path("bias_new_registry_cities")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        init_v3_db(db_path)
+        sync_station_registry(db_path)
+        with connect(db_path) as conn:
+            conn.execute(
+                "UPDATE stations SET enabled = 1 WHERE city_key IN ('wellington', 'chongqing')"
+            )
+        selected = _selected_cities(None, db_path)
+        self.assertIn("wellington", selected)
+        self.assertIn("chongqing", selected)
 
     def test_openmeteo_previous_runs_are_diagnostic_only_not_training_runs(self):
         db_path = test_db_path("openmeteo_previous_archive_contract")

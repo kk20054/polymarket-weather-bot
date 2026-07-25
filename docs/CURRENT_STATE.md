@@ -18,6 +18,7 @@
 - The latest paper candidate passed model edge checks but was skipped when execution revalidation found a stale/widened orderbook.
 - The global minimum executable edge defaults to 8% and is editable in Strategy Settings; execution revalidation uses the same threshold.
 - Bias correction now begins at 10 leakage-safe pairs with zero-prior shrinkage `n/(n+10)` and a +/-2.5 C cap before bucket probabilities are calculated.
+- Bias training now covers every enabled registry city, including Wellington and Chongqing; their five available model families each have 6 independent settled pairs instead of 0.
 - Visual Crossing Pro is ready as an optional paper/history calibration provider with masked settings and payload validation; it cannot unlock live truth.
 - Focused strategy, settings, dynamic-weight and walk-forward calibration tests passed.
 
