@@ -23,18 +23,6 @@ from .stations import apply_market_probe_result, list_stations, sync_station_reg
 GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
 CLOB_BASE_URL = "https://clob.polymarket.com"
 PARSER_VERSION = "polymarket-gamma-structured-v1"
-ASIAN_CITY_KEYS = (
-    "shanghai",
-    "beijing",
-    "hong-kong",
-    "tokyo",
-    "seoul",
-    "taipei",
-    "wuhan",
-    "qingdao",
-    "shenzhen",
-    "singapore",
-)
 
 
 class GammaClient:
@@ -517,11 +505,13 @@ def upsert_polymarket_orderbook(
 def _selected_station_rows(cities: list[str] | None, *, path: Path | None = None) -> list[dict[str, Any]]:
     rows = list_stations(path)
     requested = {str(city or "").strip().lower() for city in (cities or []) if str(city or "").strip()}
-    if not requested:
-        requested = set(ASIAN_CITY_KEYS)
     return [
         row for row in rows
-        if str(row.get("city_key") or row.get("city") or "").lower() in requested
+        if (
+            str(row.get("city_key") or row.get("city") or "").lower() in requested
+            if requested
+            else bool(row.get("enabled"))
+        )
     ]
 
 

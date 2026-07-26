@@ -112,7 +112,9 @@ class StrategyTests(unittest.TestCase):
 
         self.assertEqual(decision["paper_decision"], "skip")
         self.assertFalse(decision["paper_allowed"])
-        self.assertIn("below_order_min_size", decision["gate_reasons"])
+        self.assertIn("order_minimum_exceeds_trade_cap", decision["gate_reasons"])
+        self.assertEqual(decision["minimum_executable_amount_usd"], 100.0)
+        self.assertEqual(decision["trade_cap_usd"], 50.0)
 
     def test_ladder_grid_builds_three_bucket_atomic_group(self):
         buckets = [
@@ -164,8 +166,10 @@ class StrategyTests(unittest.TestCase):
             _prediction(),
             _context(independent_settlement_days=3),
         )
-        self.assertEqual(thin_history["paper_decision"], "skip")
-        self.assertIn("tail_independent_settlement_days_below_20", thin_history["gate_reasons"])
+        self.assertEqual(thin_history["paper_decision"], "buy")
+        self.assertTrue(thin_history["paper_allowed"])
+        self.assertIn("tail_live_maturity_below_min", thin_history["gate_reasons"])
+        self.assertEqual(thin_history["tail_buying"]["live_maturity_status"], "provisional")
 
     def test_tail_buying_daily_candidate_cap(self):
         buckets = [_bucket(f"tail-{i}", 80.0 + i, 81.0 + i, 0.10, 0.095) for i in range(6)]

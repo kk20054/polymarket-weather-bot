@@ -43,17 +43,6 @@ IEM_DATA_FIELDS = (
     "wxcodes",
     "metar",
 )
-DEFAULT_BACKFILL_CITY_PRIORITY = (
-    "chicago",
-    "tokyo",
-    "atlanta",
-    "nyc",
-    "dallas",
-    "miami",
-    "seattle",
-)
-
-
 def refresh_metar_reports(
     cities: list[str] | None = None,
     *,
@@ -237,7 +226,7 @@ def iem_user_agent() -> str:
 def station_rows_for_metar_backfill(
     cities: list[str] | None = None,
     *,
-    limit: int = 5,
+    limit: int = 0,
 ) -> list[dict[str, Any]]:
     rows = list_stations()
     if not rows:
@@ -251,22 +240,10 @@ def station_rows_for_metar_backfill(
             if str(row.get("city_key") or row.get("city") or "").lower() in requested
             or str(row.get("station_id") or "").lower() in requested
         ]
-    by_city = {str(row.get("city_key") or row.get("city") or "").lower(): row for row in rows}
-    selected: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for city in DEFAULT_BACKFILL_CITY_PRIORITY:
-        row = by_city.get(city)
-        if row and city not in seen:
-            selected.append(row)
-            seen.add(city)
-    for row in rows:
-        city = str(row.get("city_key") or row.get("city") or "").lower()
-        if city and city not in seen:
-            selected.append(row)
-            seen.add(city)
-        if len(selected) >= max(1, int(limit or 5)):
-            break
-    return selected[: max(1, int(limit or 5))]
+    selected = [row for row in rows if bool(row.get("enabled"))]
+    selected.sort(key=lambda row: (int(row.get("tier") or 999), str(row.get("city_key") or "")))
+    bounded = int(limit or 0)
+    return selected if bounded <= 0 else selected[:bounded]
 
 
 def iem_station_candidates(station_row: dict[str, Any]) -> list[str]:
@@ -293,7 +270,7 @@ def iem_station_candidates(station_row: dict[str, Any]) -> list[str]:
 def probe_iem_stations(
     cities: list[str] | None = None,
     *,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     output_path: str | Path | None = None,
     session: requests.Session | None = None,
     now_utc: datetime | None = None,
@@ -385,7 +362,7 @@ def backfill_iem_asos_metars(
     *,
     days: int = 30,
     dry_run: bool = False,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     session: requests.Session | None = None,
     raw_dir: str | Path | None = None,
     probe_report_path: str | Path | None = None,
@@ -958,7 +935,12 @@ def _iem_url_preview(params: list[tuple[str, Any]]) -> str:
 
 def _select_profiles(cities: list[str] | None) -> list[CitySettlementProfile]:
     if not cities:
-        return list(SETTLEMENT_REGISTRY.values())
+        enabled = [
+            str(row.get("city_key") or "").strip().lower()
+            for row in list_stations()
+            if bool(row.get("enabled"))
+        ]
+        return [SETTLEMENT_REGISTRY[city] for city in enabled if city in SETTLEMENT_REGISTRY]
     selected: list[CitySettlementProfile] = []
     for city in cities:
         key = str(city or "").strip().lower()

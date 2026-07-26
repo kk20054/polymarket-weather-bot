@@ -294,10 +294,14 @@ function RecommendationCard({
   language: UiLanguage
 }) {
   const isWeatherFocus = item.type === 'weather_focus'
+  const isTradeCandidate = item.type === 'trade_candidate'
   const isObservationOnly = item.type === 'observation_only'
   const age = ageSecondsLabel(item.metar_age_seconds)
   const verified = item.verification_status || (item.settlement_rule_verified_at ? 'verified' : 'unverified')
   const blocker = item.blocked_reasons?.[0] ? reasonLabel(item.blocked_reasons[0]) : (item.paper_allowed ? 'paper allowed' : 'watch')
+  const modelProbability = Number(item.model_probability)
+  const marketAsk = Number(item.market_ask)
+  const edgePercent = Number(item.edge_percent ?? (Number(item.edge) * 100))
   const focusDelta = Number(item.remaining_to_max)
   const focusReason = item.focus_reason === 'observed_above_model_high'
     ? (language === 'zh'
@@ -306,8 +310,12 @@ function RecommendationCard({
     : (language === 'zh'
         ? `接近模型高点 ${Number.isFinite(focusDelta) ? Math.max(0, focusDelta).toFixed(1) : '--'}°`
         : `Near model high ${Number.isFinite(focusDelta) ? Math.max(0, focusDelta).toFixed(1) : '--'}°`)
-  const cardTone = selected
-    ? 'border-amber-400/60 bg-amber-400/15 text-amber-50'
+  const cardTone = selected && isTradeCandidate
+    ? 'border-cyan-400/70 bg-cyan-400/15 text-cyan-50'
+    : selected
+      ? 'border-amber-400/60 bg-amber-400/15 text-amber-50'
+      : isTradeCandidate
+        ? 'border-cyan-500/40 bg-cyan-500/10 text-neutral-100 hover:border-cyan-400/75'
     : isObservationOnly
       ? 'border-neutral-700 bg-neutral-900/50 text-neutral-200 hover:border-neutral-500'
       : 'border-amber-500/35 bg-amber-500/10 text-neutral-100 hover:border-amber-400/70'
@@ -320,7 +328,18 @@ function RecommendationCard({
           ? ''
           : `${language === 'zh' ? '距离预计最高' : 'Below forecast high'} ${Number(item.remaining_to_max).toFixed(1)}°${item.deb_unit || ''}`,
       ].filter(Boolean).join('\n')
-    : [
+    : isTradeCandidate
+      ? [
+          item.strategy_label || item.strategy_name || (language === 'zh' ? '策略候选' : 'Strategy candidate'),
+          `${language === 'zh' ? '模型概率' : 'Model'} ${Number.isFinite(modelProbability) ? `${(modelProbability * 100).toFixed(1)}%` : '--'}`,
+          `${language === 'zh' ? '卖一价' : 'Ask'} ${Number.isFinite(marketAsk) ? `${(marketAsk * 100).toFixed(1)}¢` : '--'}`,
+          `${language === 'zh' ? '优势' : 'Edge'} ${Number.isFinite(edgePercent) ? `${edgePercent >= 0 ? '+' : ''}${edgePercent.toFixed(1)}%` : '--'}`,
+          `METAR age ${age}`,
+          `verified ${verified}`,
+          item.blocked_reasons?.length ? item.blocked_reasons.map(reasonLabel).join(', ') : blocker,
+          item.polymarket_url || '',
+        ].filter(Boolean).join('\n')
+      : [
         `METAR age ${age}`,
         `verified ${verified}`,
         item.blocked_reasons?.length ? item.blocked_reasons.map(reasonLabel).join(', ') : blocker,
@@ -343,11 +362,23 @@ function RecommendationCard({
     >
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0 truncate text-[12px] font-semibold">{item.city_name}</div>
+        {isTradeCandidate && <div className="max-w-[92px] truncate text-[9px] text-cyan-200">{item.bucket_label || '--'}</div>}
       </div>
-      <div className="mt-0.5 flex items-center gap-3 text-[10px] tabular-nums">
-        <span className="text-amber-200">{language === 'zh' ? '现在' : 'Now'} {tempLabel(item.current_temp, item.current_temp_unit)}</span>
-        <span className="text-amber-200">{language === 'zh' ? '预计最高' : 'Forecast high'} {tempLabel(item.deb_mu, item.deb_unit)}</span>
-      </div>
+      {isTradeCandidate ? (
+        <div className="mt-0.5 flex items-center gap-2 text-[10px] tabular-nums">
+          <span className="text-neutral-300">{Number.isFinite(modelProbability) ? `${(modelProbability * 100).toFixed(1)}%` : '--'}</span>
+          <span className="text-neutral-500">/</span>
+          <span className="text-neutral-300">{Number.isFinite(marketAsk) ? `${(marketAsk * 100).toFixed(1)}¢` : '--'}</span>
+          <span className={Number.isFinite(edgePercent) && edgePercent > 0 ? 'font-semibold text-cyan-300' : 'text-neutral-400'}>
+            {Number.isFinite(edgePercent) ? `${edgePercent >= 0 ? '+' : ''}${edgePercent.toFixed(1)}%` : '--'}
+          </span>
+        </div>
+      ) : (
+        <div className="mt-0.5 flex items-center gap-3 text-[10px] tabular-nums">
+          <span className="text-amber-200">{language === 'zh' ? '现在' : 'Now'} {tempLabel(item.current_temp, item.current_temp_unit)}</span>
+          <span className="text-amber-200">{language === 'zh' ? '预计最高' : 'Forecast high'} {tempLabel(item.deb_mu, item.deb_unit)}</span>
+        </div>
+      )}
     </div>
   )
 }
@@ -1429,7 +1460,10 @@ function App() {
   const selectedTradingStatus = resolveCityTradingStatus(selectedCityMeta?.key, selectedCityMeta?.verificationStatus, cityStatusMap, selectedCityMeta?.cityScope)
   const selectedStatusConfig = selectedCityMeta?.key ? (cityStatusMap[selectedCityMeta.key] ?? ROUND5_STATUS_FALLBACK[selectedCityMeta.key]) : undefined
   const recommendations = data?.recommendations ?? null
-  const recommendedItems = recommendations?.focus_items ?? []
+  const strategyRecommendationItems = (recommendations?.items ?? []).filter(item => item.type === 'trade_candidate')
+  const weatherFocusItems = recommendations?.focus_items ?? []
+  const hasStrategyRecommendations = strategyRecommendationItems.length > 0
+  const recommendedItems = hasStrategyRecommendations ? strategyRecommendationItems : weatherFocusItems
   useEffect(() => {
     const pollers = schedulerStatus?.pollers ?? {}
     let shouldRefreshDashboard = false
@@ -1843,10 +1877,17 @@ function App() {
         </aside>
 
         <section className="order-1 min-w-0 min-h-[720px] overflow-hidden xl:order-2 xl:flex xl:min-h-0 xl:flex-col">
-          <div className="shrink-0 border-b border-amber-500/20 bg-amber-500/10 px-3 py-1.5">
+          <div className={`shrink-0 border-b px-3 py-1.5 ${hasStrategyRecommendations ? 'border-cyan-500/20 bg-cyan-500/10' : 'border-amber-500/20 bg-amber-500/10'}`}>
             <div className="flex flex-wrap items-center gap-3">
-              <div className="flex shrink-0 items-center gap-2" title={uiLanguage === 'zh' ? '天气临界关注；交易判断请以右侧策略队列为准。' : 'Weather threshold watch; use the strategy queue for trade decisions.'}>
-                <span className="text-[11px] font-semibold text-amber-300">{copy.recommendations}</span>
+              <div
+                className="flex shrink-0 items-center gap-2"
+                title={hasStrategyRecommendations
+                  ? (uiLanguage === 'zh' ? '已通过后端策略与 paper 交易闸门的最新候选。' : 'Latest candidates that passed strategy and paper execution gates.')
+                  : (uiLanguage === 'zh' ? '天气临界关注；交易判断请以右侧策略队列为准。' : 'Weather threshold watch; use the strategy queue for trade decisions.')}
+              >
+                <span className={`text-[11px] font-semibold ${hasStrategyRecommendations ? 'text-cyan-300' : 'text-amber-300'}`}>
+                  {hasStrategyRecommendations ? (uiLanguage === 'zh' ? '策略候选' : 'Strategy candidates') : copy.recommendations}
+                </span>
               </div>
               {recommendedItems.length > 0 ? (
                 <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto">
@@ -1864,7 +1905,7 @@ function App() {
                   ))}
                 </div>
               ) : (
-                <div className="text-[11px] text-amber-200/80">{copy.noRecommendations}</div>
+                <div className={`text-[11px] ${hasStrategyRecommendations ? 'text-cyan-200/80' : 'text-amber-200/80'}`}>{copy.noRecommendations}</div>
               )}
             </div>
           </div>

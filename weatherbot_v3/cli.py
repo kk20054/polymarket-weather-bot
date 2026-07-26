@@ -125,7 +125,7 @@ def run_hourly_consensus_build(
     target_date: str = "",
     *,
     days_arg: int | None = None,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     force_rebuild: bool = False,
     refresh_readiness: bool = True,
 ) -> dict:
@@ -173,7 +173,7 @@ def run_daily_max_build(
     days_arg: int | None = None,
     dry_run: bool = False,
     issued_at: str = "",
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     refresh_readiness: bool = True,
 ) -> dict:
     from .deb import build_daily_max_predictions
@@ -241,7 +241,7 @@ def run_metar_backfill(
     dry_run: bool = False,
     probe_stations: bool = False,
     all_cities: bool = False,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     output_path: str = "",
 ) -> dict:
     from .metar import backfill_iem_asos_metars, probe_iem_stations
@@ -277,7 +277,7 @@ def run_openmeteo_fetch(
     models_arg: str = "",
     dry_run: bool = False,
     all_cities: bool = False,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     forecast_days: int = 7,
     refresh_readiness: bool = True,
 ) -> dict:
@@ -307,7 +307,7 @@ def run_weathercom_fetch(
     *,
     dry_run: bool = False,
     all_cities: bool = False,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     forecast_days: int = 3,
     refresh_readiness: bool = True,
 ) -> dict:
@@ -341,7 +341,7 @@ def run_openmeteo_previous_runs(
     models_arg: str = "",
     dry_run: bool = False,
     all_cities: bool = False,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
 ) -> dict:
     from .openmeteo import fetch_openmeteo_previous_runs
 
@@ -398,7 +398,7 @@ def run_pws_fetch(
     *,
     dry_run: bool = False,
     all_cities: bool = False,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     station_limit: int = 5,
     refresh_readiness: bool = True,
 ) -> dict:
@@ -429,7 +429,7 @@ def run_history_backfill(
     end_date: str = "",
     dry_run: bool = False,
     all_cities: bool = False,
-    limit_cities: int = 7,
+    limit_cities: int = 0,
 ) -> dict:
     from .history import fetch_open_meteo_historical_backfill
 
@@ -525,7 +525,7 @@ def run_market_buckets_sync(
     target_date: str = "",
     active_weather: bool = False,
     dry_run: bool = False,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     fetch_orderbooks: bool = True,
     refresh_readiness: bool = True,
 ) -> dict:
@@ -598,7 +598,7 @@ def run_signal_decisions_build(
     *,
     days_arg: int | None = None,
     dry_run: bool = False,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     limit: int = 200,
     strategy_revision_id: str = "",
     refresh_readiness: bool = True,
@@ -734,10 +734,10 @@ def _cli_date_window(
     return [(today - timedelta(days=offset)).isoformat() for offset in range(count)]
 
 
-def _default_layer_city_keys(limit_cities: int = 5) -> list[str]:
-    preferred = ["chicago", "tokyo", "atlanta", "nyc", "dallas"]
-    limit = max(1, int(limit_cities or len(preferred)))
-    return preferred[:limit]
+def _default_layer_city_keys(limit_cities: int = 0) -> list[str]:
+    enabled = _enabled_layer_city_keys()
+    limit = int(limit_cities or 0)
+    return enabled if limit <= 0 else enabled[:limit]
 
 
 def _enabled_layer_city_keys() -> list[str]:
@@ -754,7 +754,7 @@ def _enabled_layer_city_keys() -> list[str]:
 
 
 def _target_dates_from_db(cities: list[str], days: int, *, forecast_only: bool = False) -> list[tuple[str, str]]:
-    selected_cities = cities or _default_layer_city_keys(5)
+    selected_cities = cities or _enabled_layer_city_keys()
     per_city_limit = max(1, int(days or 1))
     targets: list[tuple[str, str]] = []
     with connect() as conn:
@@ -948,7 +948,7 @@ def run_iem_asos_truth_fetch(
     end_date: str = "",
     days: int = 1,
     all_cities: bool = False,
-    limit_cities: int = 10,
+    limit_cities: int = 0,
     dry_run: bool = False,
 ) -> dict:
     from .truth.iem_asos import fetch_iem_asos_range
@@ -960,7 +960,9 @@ def run_iem_asos_truth_fetch(
         wanted = {item.lower() for item in requested}
         rows = [row for row in rows if str(row.get("city_key") or "").lower() in wanted or str(row.get("station_id") or "").lower() in wanted]
     elif not all_cities:
-        rows = [row for row in rows if row.get("enabled")][: max(1, int(limit_cities or 10))]
+        rows = [row for row in rows if row.get("enabled")]
+        if limit_cities > 0:
+            rows = rows[:limit_cities]
     targets = sorted(set(_cli_date_window(target_date=target_date, start_date=start_date, end_date=end_date, days=days)))
     results = []
     for row in rows:
@@ -1055,7 +1057,7 @@ def run_wunderground_truth_fetch(
     end_date: str = "",
     days: int = 1,
     all_cities: bool = False,
-    limit_cities: int = 10,
+    limit_cities: int = 0,
     dry_run: bool = False,
     force_rebuild: bool = False,
 ) -> dict:
@@ -1068,7 +1070,9 @@ def run_wunderground_truth_fetch(
         wanted = {item.lower() for item in requested}
         rows = [row for row in rows if str(row.get("city_key") or "").lower() in wanted or str(row.get("station_id") or "").lower() in wanted]
     elif not all_cities:
-        rows = [row for row in rows if row.get("enabled")][: max(1, int(limit_cities or 10))]
+        rows = [row for row in rows if row.get("enabled")]
+        if limit_cities > 0:
+            rows = rows[:limit_cities]
     targets = _cli_date_window(target_date=target_date, start_date=start_date, end_date=end_date, days=days)
     results = []
     hourly_rows_upserted = 0
@@ -1113,7 +1117,7 @@ def run_wunderground_hourly_fetch(
     end_date: str = "",
     days: int = 1,
     all_cities: bool = False,
-    limit_cities: int = 10,
+    limit_cities: int = 0,
     dry_run: bool = False,
     sync_registry: bool = True,
 ) -> dict:
@@ -1127,7 +1131,9 @@ def run_wunderground_hourly_fetch(
         wanted = {item.lower() for item in requested}
         rows = [row for row in rows if str(row.get("city_key") or "").lower() in wanted or str(row.get("station_id") or "").lower() in wanted]
     elif not all_cities:
-        rows = [row for row in rows if row.get("enabled")][: max(1, int(limit_cities or 10))]
+        rows = [row for row in rows if row.get("enabled")]
+        if limit_cities > 0:
+            rows = rows[:limit_cities]
     targets = _cli_date_window(target_date=target_date, start_date=start_date, end_date=end_date, days=days)
     results = []
     rows_upserted = 0
@@ -1170,7 +1176,7 @@ def run_wunderground_daily_rollup(
     end_date: str = "",
     days: int = 30,
     all_cities: bool = False,
-    limit_cities: int = 10,
+    limit_cities: int = 0,
     min_distinct_hours: int = 18,
     dry_run: bool = False,
     force_rebuild: bool = False,
@@ -1188,7 +1194,9 @@ def run_wunderground_daily_rollup(
             or str(row.get("station_id") or "").lower() in wanted
         ]
     elif not all_cities:
-        rows = [row for row in rows if row.get("enabled")][: max(1, int(limit_cities or 10))]
+        rows = [row for row in rows if row.get("enabled")]
+        if limit_cities > 0:
+            rows = rows[:limit_cities]
     targets = _cli_date_window(
         target_date=target_date,
         start_date=start_date,
@@ -1415,6 +1423,9 @@ def run_production_refresh(
     bounded_limit = max(1, min(int(limit or 50), 500))
     target_date = (start_date or end_date or "").strip()
     recent_metar_hours = max(24.0, min(float(bounded_days) * 24.0, 96.0))
+    selected_cities = _cities_from_arg(cities) or _enabled_layer_city_keys()
+    selected_cities_arg = ",".join(selected_cities)
+    selected_city_count = max(1, len(selected_cities))
     stages = []
 
     def emit_progress() -> None:
@@ -1438,39 +1449,60 @@ def run_production_refresh(
         emit_progress()
 
     run_stage("contracts_sync", sync_settlement_contracts)
-    run_stage("forecast_backfill", lambda: run_forecast_backfill(cities, bounded_days))
+    run_stage("forecast_backfill", lambda: run_forecast_backfill(selected_cities_arg, bounded_days))
     run_stage(
         "openmeteo_fetch",
-        lambda: run_openmeteo_fetch(cities, forecast_days=min(bounded_days + 2, 7), limit_cities=5),
+        lambda: run_openmeteo_fetch(
+            selected_cities_arg,
+            forecast_days=min(bounded_days + 2, 7),
+            limit_cities=selected_city_count,
+        ),
     )
     run_stage(
         "weathercom_fetch",
-        lambda: run_weathercom_fetch(cities, forecast_days=min(bounded_days + 2, 7), limit_cities=5),
+        lambda: run_weathercom_fetch(
+            selected_cities_arg,
+            forecast_days=min(bounded_days + 2, 7),
+            limit_cities=selected_city_count,
+        ),
     )
-    run_stage("metar_refresh", lambda: _run_recent_metar_refresh(cities, recent_metar_hours))
+    run_stage("metar_refresh", lambda: _run_recent_metar_refresh(selected_cities_arg, recent_metar_hours))
     run_stage(
         "hourly_consensus",
-        lambda: run_hourly_consensus_build(cities, target_date=target_date, days_arg=None if target_date else bounded_days),
+        lambda: run_hourly_consensus_build(
+            selected_cities_arg,
+            target_date=target_date,
+            days_arg=None if target_date else bounded_days,
+        ),
     )
     run_stage(
         "daily_max_build",
-        lambda: run_daily_max_build(cities, target_date=target_date, days_arg=None if target_date else bounded_days),
+        lambda: run_daily_max_build(
+            selected_cities_arg,
+            target_date=target_date,
+            days_arg=None if target_date else bounded_days,
+        ),
     )
     run_stage(
         "market_buckets_sync",
         lambda: run_market_buckets_sync(
             bounded_limit,
-            cities_arg=cities,
+            cities_arg=selected_cities_arg,
             days_arg=bounded_days,
             target_date=target_date,
             active_weather=True,
-            limit_cities=5,
+            limit_cities=selected_city_count,
             fetch_orderbooks=True,
         ),
     )
     run_stage(
         "signal_decisions_build",
-        lambda: run_signal_decisions_build(cities, target_date=target_date, days_arg=None if target_date else bounded_days, limit=bounded_limit),
+        lambda: run_signal_decisions_build(
+            selected_cities_arg,
+            target_date=target_date,
+            days_arg=None if target_date else bounded_days,
+            limit=bounded_limit,
+        ),
     )
     if scan_signals:
         run_stage("signal_scan", run_legacy_signal_scan)
@@ -1601,7 +1633,7 @@ def main() -> None:
     parser.add_argument("--all-cities", action="store_true", help="Apply supported city commands to all station rows")
     parser.add_argument("--dry-run", action="store_true", help="Parse and report without writing rows where supported")
     parser.add_argument("--probe-stations", action="store_true", help="Probe IEM ASOS station= candidates before METAR backfill")
-    parser.add_argument("--limit-cities", type=int, default=5, help="Maximum default cities for METAR probe/backfill")
+    parser.add_argument("--limit-cities", type=int, default=0, help="Optional enabled-city cap; 0 means all enabled cities")
     parser.add_argument("--ensemble", action="store_true", help="Fetch Open-Meteo ensemble endpoint where supported")
     parser.add_argument("--forecast-days", type=int, default=7, help="Forecast days for Open-Meteo fetch")
     parser.add_argument("--previous-days", default="1,2,3", help="Comma-separated Open-Meteo Previous Runs lead days, 1-7")

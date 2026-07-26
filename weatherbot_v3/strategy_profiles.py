@@ -64,7 +64,7 @@ DEFAULT_PARAMETERS: dict[str, Any] = {
             "enabled": True,
             "max_ask": 0.15,
             "min_edge": 0.10,
-            "min_settlement_days": 20,
+            "min_live_settlement_days": 20,
             "max_order_usd": 50.0,
             "daily_candidate_cap": 5,
         },
@@ -138,7 +138,7 @@ def validate_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     _bounded(ladder, "group_exposure_multiplier", 0.0, 1.0)
     _bounded(tail, "max_ask", 0.01, 0.5)
     _bounded(tail, "min_edge", 0.0, 0.5)
-    _bounded(tail, "min_settlement_days", 0, 365, integer=True)
+    _bounded(tail, "min_live_settlement_days", 0, 365, integer=True)
     _bounded(tail, "max_order_usd", 0.1, 1000.0)
     _bounded(tail, "daily_candidate_cap", 1, 100, integer=True)
     for item in (core_modal, single, ladder, tail):
@@ -415,20 +415,23 @@ def _migrate_legacy_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(strategies, dict):
         return migrated
     core_modal = strategies.get("core_modal_v1")
-    if not isinstance(core_modal, dict):
-        return migrated
-    _split_legacy_threshold(
-        core_modal,
-        legacy_key="min_settlement_days",
-        paper_key="min_paper_settlement_days",
-        live_key="min_live_settlement_days",
-    )
-    _split_legacy_threshold(
-        core_modal,
-        legacy_key="min_component_calibration_days",
-        paper_key="min_paper_component_calibration_days",
-        live_key="min_live_component_calibration_days",
-    )
+    if isinstance(core_modal, dict):
+        _split_legacy_threshold(
+            core_modal,
+            legacy_key="min_settlement_days",
+            paper_key="min_paper_settlement_days",
+            live_key="min_live_settlement_days",
+        )
+        _split_legacy_threshold(
+            core_modal,
+            legacy_key="min_component_calibration_days",
+            paper_key="min_paper_component_calibration_days",
+            live_key="min_live_component_calibration_days",
+        )
+    tail_buying = strategies.get("tail_buying")
+    if isinstance(tail_buying, dict) and "min_settlement_days" in tail_buying:
+        tail_buying.setdefault("min_live_settlement_days", tail_buying["min_settlement_days"])
+        tail_buying.pop("min_settlement_days", None)
     return migrated
 
 

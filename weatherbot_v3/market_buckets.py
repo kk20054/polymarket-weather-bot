@@ -298,7 +298,7 @@ def sync_active_weather_market_buckets(
     cities: list[str] | None = None,
     target_dates: list[str] | None = None,
     days: int = 3,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     limit: int = 200,
     fetch_orderbooks: bool = True,
     dry_run: bool = False,
@@ -788,11 +788,9 @@ def _selected_stations(cities: list[str], *, limit_cities: int) -> list[dict[str
             or _slugify(str(row.get("city_name") or "")) in requested
         ]
     else:
-        preferred = ["chicago", "tokyo", "atlanta", "nyc", "dallas"]
-        by_key = {_slugify(str(row.get("city_key") or row.get("city") or "")): row for row in stations}
-        rows = [by_key[key] for key in preferred if key in by_key]
-        rows.extend(row for row in stations if row not in rows)
-    return rows[: max(1, min(int(limit_cities or 5), 50))]
+        rows = [row for row in stations if bool(row.get("enabled"))]
+    limit = int(limit_cities or 0)
+    return rows if limit <= 0 else rows[: max(1, min(limit, 500))]
 
 
 def _active_weather_markets_from_event(event: dict[str, Any]) -> list[dict[str, Any]]:

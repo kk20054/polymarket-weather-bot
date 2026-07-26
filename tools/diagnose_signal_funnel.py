@@ -499,20 +499,28 @@ def diagnose(start_date: str, end_date: str, *, path: Path | None = None) -> dic
         elif position + 1e-9 < minimum_cost:
             risk_budget_shortfall += 1
 
+    coverage_forbidden_patterns = {
+        "weatherbot_v3/cli.py": ("limit_cities: int = 10",),
+        "weatherbot_v3/history.py": ('["chicago", "tokyo", "atlanta", "nyc", "dallas"]',),
+        "weatherbot_v3/metar.py": ("DEFAULT_BACKFILL_CITY_PRIORITY",),
+        "weatherbot_v3/openmeteo.py": ('["chicago", "tokyo", "atlanta", "nyc", "dallas"]',),
+        "weatherbot_v3/weathercom.py": ('["chicago", "tokyo", "atlanta", "nyc", "dallas"]',),
+        "weatherbot_v3/market_buckets.py": ('["chicago", "tokyo", "atlanta", "nyc", "dallas"]',),
+        "weatherbot_v3/polymarket_gamma.py": ("ASIAN_CITY_KEYS",),
+        "weatherbot_v3/pws.py": ('["chicago", "tokyo", "atlanta", "nyc", "dallas"]',),
+    }
     hardcode_evidence = {}
-    for relative in (
-        "weatherbot_v3/cli.py",
-        "weatherbot_v3/openmeteo.py",
-        "weatherbot_v3/market_buckets.py",
-        "weatherbot_v3/polymarket_gamma.py",
-        "weatherbot_v3/bias.py",
-    ):
+    for relative, patterns in coverage_forbidden_patterns.items():
         text = (ROOT / relative).read_text(encoding="utf-8")
         hardcode_evidence[relative] = {
-            "contains_legacy_five_city_literal": all(
-                f'"{city}"' in text for city in ("chicago", "tokyo", "atlanta", "nyc", "dallas")
-            )
+            pattern: pattern in text
+            for pattern in patterns
         }
+    coverage_driven_only_by_enabled = not any(
+        present
+        for evidence in hardcode_evidence.values()
+        for present in evidence.values()
+    )
 
     expected_city_dates = len(enabled) * (
         (date.fromisoformat(end_date) - date.fromisoformat(start_date)).days + 1
@@ -552,7 +560,7 @@ def diagnose(start_date: str, end_date: str, *, path: Path | None = None) -> dic
         "deterministic_member_zero": dict(deterministic_member_zero),
         "missing_adjusted_daily_highs": dict(missing_adjusted),
         "h1": {
-            "coverage_driven_only_by_stations_enabled": False,
+            "coverage_driven_only_by_stations_enabled": coverage_driven_only_by_enabled,
             "hardcode_evidence": hardcode_evidence,
         },
         "h2": {
@@ -628,11 +636,23 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "## 4. H1-H5 结论",
         "",
-        f"- **H1 确认**：覆盖范围并非完全由 `stations.enabled` 驱动；旧五城默认仍存在于采集/手动刷新路径。",
-        f"- **H2 当前未触发、但契约有缺陷**：本窗口确定性组件均声明 `member_count=1`；模型家族参与不应依赖 ensemble 成员数。",
+        (
+            "- **H1 修复后否定**：默认采集、truth、市场与决策覆盖均由 `stations.enabled` 驱动。"
+            if report["h1"]["coverage_driven_only_by_stations_enabled"]
+            else "- **H1 确认**：仍存在绕过 `stations.enabled` 的默认城市范围。"
+        ),
+        (
+            "- **H2 确认触发**：确定性模型被 `member_count` 契约排除。"
+            if report["h2"]["currently_excludes_deterministic_models"]
+            else "- **H2 当前未触发、但契约已修复**：模型家族参与已与 ensemble 成员数解耦。"
+        ),
         f"- **H3 否定为主因**：family<4 为 {report['h3']['family_count_below_4_city_dates']} 个城市日；spread 不可算为 {report['h3']['spread_unavailable_city_dates']}。",
         f"- **H4 主要是真实盘口/风险约束**：最低订单本身超过交易上限 {report['h4']['order_minimum_exceeds_trade_cap']} 行；Kelly 预算低于交易所最小订单 {report['h4']['risk_budget_below_exchange_minimum']} 行。",
-        f"- **H5 确认**：后端当前可见 {report['h5']['visible_backend_rows']} 行，但前端是否消费交易 items={report['h5']['frontend_consumes_trade_items']}。",
+        (
+            f"- **H5 修复后否定**：后端当前可见 {report['h5']['visible_backend_rows']} 行，前端已消费交易 `items`。"
+            if report["h5"]["frontend_consumes_trade_items"]
+            else f"- **H5 确认**：后端当前可见 {report['h5']['visible_backend_rows']} 行，但前端未消费交易 `items`。"
+        ),
         "",
         "## 5. 根因分类",
         "",

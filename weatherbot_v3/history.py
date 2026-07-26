@@ -14,6 +14,7 @@ import requests
 from .config import DATA_DIR
 from .db import log_data_fetch, upsert_mesonet_observation, utc_now
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
+from .stations import list_stations
 
 
 HISTORY_CACHE_PATH = DATA_DIR / "weather_history_cache.json"
@@ -184,7 +185,7 @@ def fetch_open_meteo_historical_backfill(
     start_date: str = "",
     end_date: str = "",
     dry_run: bool = False,
-    limit_cities: int = 7,
+    limit_cities: int = 0,
     session: requests.Session | None = None,
     history_cache_path: Path = HISTORY_CACHE_PATH,
 ) -> dict[str, Any]:
@@ -456,20 +457,14 @@ def _select_history_profiles(cities: list[str] | None, *, limit_cities: int) -> 
     requested = [str(city or "").strip().lower() for city in (cities or []) if str(city or "").strip()]
     if requested:
         return [SETTLEMENT_REGISTRY[city] for city in requested if city in SETTLEMENT_REGISTRY]
-    priority = ("chicago", "tokyo", "atlanta", "nyc", "dallas", "shanghai", "hong-kong")
-    profiles: list[CitySettlementProfile] = []
-    seen: set[str] = set()
-    for city in priority:
-        if city in SETTLEMENT_REGISTRY:
-            profiles.append(SETTLEMENT_REGISTRY[city])
-            seen.add(city)
-    for city, profile in SETTLEMENT_REGISTRY.items():
-        if city not in seen:
-            profiles.append(profile)
-            seen.add(city)
-        if len(profiles) >= max(1, int(limit_cities or 7)):
-            break
-    return profiles[: max(1, int(limit_cities or 7))]
+    enabled = [
+        str(row.get("city_key") or "").strip().lower()
+        for row in list_stations()
+        if bool(row.get("enabled"))
+    ]
+    profiles = [SETTLEMENT_REGISTRY[city] for city in enabled if city in SETTLEMENT_REGISTRY]
+    limit = int(limit_cities or 0)
+    return profiles if limit <= 0 else profiles[:limit]
 
 
 def _local_openmeteo_time_to_utc(value: Any, timezone_name: str) -> str:

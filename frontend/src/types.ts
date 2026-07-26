@@ -840,8 +840,11 @@ export interface DashboardRecommendationItem {
   settlement_station_id?: string
   verification_status?: string
   settlement_rule_verified_at?: string | null
+  recommendation_class?: string
   metar_age_seconds?: number | null
   metar_report_time?: string | null
+  forecast_age_seconds?: number | null
+  forecast_time?: string | null
   current_temp?: number | null
   current_temp_unit?: string
   target_date?: string
@@ -850,6 +853,22 @@ export interface DashboardRecommendationItem {
   deb_unit?: string
   bucket_label?: string | null
   bucket_key?: string | null
+  strategy_name?: string
+  strategy_label?: string
+  kelly_fraction?: number | null
+  position_size_usd?: number | null
+  ladder_group_id?: string
+  sub_buckets?: Array<{
+    bucket_key?: string | null
+    bucket_label?: string | null
+    model_probability?: number | null
+    market_ask?: number | null
+    edge?: number | null
+    kelly_fraction?: number | null
+    position_size_usd?: number | null
+    paper_allowed?: boolean
+    blocked_reasons?: string[]
+  }>
   edge?: number | null
   edge_percent?: number | null
   model_probability?: number | null

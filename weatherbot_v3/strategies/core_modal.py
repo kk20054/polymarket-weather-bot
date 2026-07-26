@@ -262,8 +262,8 @@ class CoreModalStrategy(StrategyBase):
             component for component in (prediction.get("components") or [])
             if (
                 isinstance(component, dict)
-                and int(component.get("member_count") or 0) > 0
                 and float(component.get("weight") or 0.0) > 0.0
+                and self._component_highs_c(component)
             )
         ]
         families = sorted({str(component.get("family") or component.get("source") or "") for component in components if component.get("family") or component.get("source")})
@@ -281,11 +281,7 @@ class CoreModalStrategy(StrategyBase):
         )
         calibration_coverage = paper_calibrated_weight / weight_total if weight_total > 0 else 0.0
         live_calibration_coverage = live_calibrated_weight / weight_total if weight_total > 0 else 0.0
-        family_highs_c = [
-            fmean(float(value) for value in component.get("adjusted_daily_highs_c") or [])
-            for component in components
-            if component.get("adjusted_daily_highs_c")
-        ]
+        family_highs_c = [fmean(self._component_highs_c(component)) for component in components]
         model_spread_c = max(family_highs_c) - min(family_highs_c) if len(family_highs_c) >= 2 else None
         independent_settlement_days = int(context.get("independent_settlement_days") or 0)
         if (
@@ -313,6 +309,32 @@ class CoreModalStrategy(StrategyBase):
             "independent_settlement_authoritative": bool(context.get("independent_settlement_authoritative")),
             "maturity_status": maturity_status,
         }
+
+    @staticmethod
+    def _component_highs_c(component: dict[str, Any]) -> list[float]:
+        """Return model evidence independently from ensemble-member availability."""
+        for key in (
+            "adjusted_daily_highs_c",
+            "member_daily_highs_c",
+            "member_daily_highs",
+        ):
+            values = [
+                number
+                for value in (component.get(key) or [])
+                if (number := optional_float(value)) is not None
+            ]
+            if values:
+                return values
+        for key in (
+            "model_daily_high_c",
+            "model_daily_high",
+            "daily_high_c",
+            "mu",
+        ):
+            value = optional_float(component.get(key))
+            if value is not None:
+                return [value]
+        return []
 
     def _paper_component_eligible(self, component: dict[str, Any]) -> bool:
         sample_count = int(component.get("bias_sample_count") or 0)

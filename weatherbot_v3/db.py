@@ -3639,8 +3639,14 @@ def upsert_signal_decision(signal_id: int, decision: dict[str, Any], path: Path 
         conn.execute("UPDATE signals SET decision_json = ? WHERE id = ?", (dump_json(decision), signal_id))
 
 
-def upsert_signal_decision_record(decision: dict[str, Any], path: Path | None = None) -> int:
-    init_v3_db(path)
+def upsert_signal_decision_record(
+    decision: dict[str, Any],
+    path: Path | None = None,
+    *,
+    initialize_db: bool = True,
+) -> int:
+    if initialize_db:
+        init_v3_db(path)
     now = utc_now()
     decision_id = str(decision.get("decision_id") or _stable_key(
         "signal_decision",

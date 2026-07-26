@@ -16,6 +16,7 @@ from .db import insert_forecast_runs, log_data_fetch, utc_now
 from .env_utils import env_value, redact_secret_text, redact_secrets
 from .forecasts.ensemble import convert_temperature
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
+from .stations import list_stations
 
 
 WEATHERCOM_FORECAST_URL = os.getenv(
@@ -37,7 +38,7 @@ def fetch_weathercom_forecasts(
     cities: list[str] | None = None,
     *,
     dry_run: bool = False,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     forecast_days: int = 3,
     session: requests.Session | None = None,
     retrieved_at: str | None = None,
@@ -393,8 +394,16 @@ def _api_key() -> str:
 
 def _select_profiles(cities: list[str] | None, *, limit_cities: int) -> list[CitySettlementProfile]:
     requested = {str(city or "").strip().lower() for city in (cities or []) if str(city or "").strip()}
-    profiles = [profile for profile in SETTLEMENT_REGISTRY.values() if not requested or profile.city in requested]
-    return profiles[: max(1, int(limit_cities or 5))]
+    if requested:
+        return [profile for profile in SETTLEMENT_REGISTRY.values() if profile.city in requested]
+    enabled = [
+        str(row.get("city_key") or "").strip().lower()
+        for row in list_stations()
+        if bool(row.get("enabled"))
+    ]
+    profiles = [SETTLEMENT_REGISTRY[city] for city in enabled if city in SETTLEMENT_REGISTRY]
+    limit = int(limit_cities or 0)
+    return profiles if limit <= 0 else profiles[:limit]
 
 
 def _target_dates_from_retrieved(profile: CitySettlementProfile, retrieved: datetime, forecast_days: int) -> list[str]:

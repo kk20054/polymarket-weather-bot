@@ -45,9 +45,11 @@ def build_signal_decisions(
     dry_run: bool = False,
     limit: int = 200,
     strategy_revision_id: str | None = None,
+    initialize_db: bool = True,
     path: Path | None = None,
 ) -> dict[str, Any]:
-    init_v3_db(path)
+    if initialize_db:
+        init_v3_db(path)
     city = str(city_key or "").strip().lower()
     date = str(target_date or "").strip()
     if not city or not date:
@@ -174,7 +176,7 @@ def build_signal_decisions(
     stored = 0
     if not dry_run:
         for decision in decisions:
-            upsert_signal_decision_record(decision, path=path)
+            upsert_signal_decision_record(decision, path=path, initialize_db=False)
             stored += 1
     status_counts: dict[str, int] = {}
     paper_counts: dict[str, int] = {}
@@ -216,6 +218,7 @@ def build_signal_decisions_for_targets(
     strategy_revision_id: str | None = None,
     path: Path | None = None,
 ) -> dict[str, Any]:
+    init_v3_db(path)
     results = [
         build_signal_decisions(
             city,
@@ -223,6 +226,7 @@ def build_signal_decisions_for_targets(
             dry_run=dry_run,
             limit=limit,
             strategy_revision_id=strategy_revision_id,
+            initialize_db=False,
             path=path,
         )
         for city, date in targets

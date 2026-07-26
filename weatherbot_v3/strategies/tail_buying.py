@@ -9,7 +9,7 @@ class TailBuyingStrategy(StrategyBase):
     strategy_name = "tail_buying"
     min_edge = 0.10
     max_ask = 0.15
-    min_independent_settlement_days = 20
+    min_live_independent_settlement_days = 20
     max_order_usd = 50.0
     daily_candidate_cap = 5
 
@@ -17,8 +17,11 @@ class TailBuyingStrategy(StrategyBase):
         self.parameters = dict(parameters or {})
         self.min_edge = float(self.parameters.get("min_edge", self.min_edge))
         self.max_ask = float(self.parameters.get("max_ask", self.max_ask))
-        self.min_independent_settlement_days = int(
-            self.parameters.get("min_settlement_days", self.min_independent_settlement_days)
+        self.min_live_independent_settlement_days = int(
+            self.parameters.get(
+                "min_live_settlement_days",
+                self.parameters.get("min_settlement_days", self.min_live_independent_settlement_days),
+            )
         )
         self.max_order_usd = float(self.parameters.get("max_order_usd", self.max_order_usd))
         self.daily_candidate_cap = int(self.parameters.get("daily_candidate_cap", self.daily_candidate_cap))
@@ -41,8 +44,9 @@ class TailBuyingStrategy(StrategyBase):
             return None
         extra_reasons = []
         independent_days = int(context.get("independent_settlement_days") or 0)
-        if independent_days < self.min_independent_settlement_days:
-            extra_reasons.append("tail_independent_settlement_days_below_20")
+        live_mature = independent_days >= self.min_live_independent_settlement_days
+        if not live_mature:
+            extra_reasons.append("tail_live_maturity_below_min")
         decision = self.build_decision(
             bucket,
             probability,
@@ -51,7 +55,6 @@ class TailBuyingStrategy(StrategyBase):
             min_edge=required_min_edge,
             allow_low_price_tail=True,
             extra_gate_reasons=extra_reasons,
-            force_skip_reasons=extra_reasons,
         )
         if decision.get("position_size_usd") is not None:
             decision["position_size_usd"] = min(float(decision["position_size_usd"] or 0.0), self.max_order_usd)
@@ -59,7 +62,8 @@ class TailBuyingStrategy(StrategyBase):
             "max_ask": self.max_ask,
             "min_edge": required_min_edge,
             "independent_settlement_days": independent_days,
-            "min_independent_settlement_days": self.min_independent_settlement_days,
+            "min_live_independent_settlement_days": self.min_live_independent_settlement_days,
+            "live_maturity_status": "mature" if live_mature else "provisional",
             "single_order_cap_usd": self.max_order_usd,
             "daily_candidate_cap": self.daily_candidate_cap,
         }

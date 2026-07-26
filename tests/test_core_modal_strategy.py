@@ -253,6 +253,18 @@ class CoreModalStrategyTests(unittest.TestCase):
         self.assertEqual(strategy.min_paper_component_calibration_days, 0)
         self.assertEqual(strategy.min_live_component_calibration_days, 20)
 
+    def test_deterministic_runs_count_as_model_families_without_ensemble_members(self):
+        prediction = _prediction()
+        for component in prediction["components"]:
+            component["member_count"] = 0
+
+        quality = CoreModalStrategy()._prediction_quality(prediction, _context())
+
+        self.assertEqual(quality["family_count"], 5)
+        self.assertEqual(len(quality["families"]), 5)
+        self.assertIsNotNone(quality["model_spread_c"])
+        self.assertGreater(quality["model_spread_c"], 0)
+
     def test_preset_disables_exploratory_strategies(self):
         strategies = core_modal_v1_parameters()["strategies"]
 

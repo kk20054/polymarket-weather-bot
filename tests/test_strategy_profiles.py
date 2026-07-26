@@ -51,6 +51,19 @@ class StrategyProfileTests(unittest.TestCase):
         self.assertEqual(core_modal["min_live_component_calibration_days"], 20)
         self.assertEqual(core_modal["provisional_position_multiplier"], 1.0)
 
+    def test_legacy_tail_history_threshold_migrates_to_live_only(self):
+        parameters = validate_parameters({
+            "strategies": {
+                "tail_buying": {
+                    "min_settlement_days": 20,
+                },
+            },
+        })
+        tail = parameters["strategies"]["tail_buying"]
+
+        self.assertNotIn("min_settlement_days", tail)
+        self.assertEqual(tail["min_live_settlement_days"], 20)
+
     def test_active_legacy_profile_is_migrated_as_a_new_immutable_revision(self):
         path = test_db_path("strategy_profile_legacy_migration")
         self.addCleanup(lambda: path.unlink(missing_ok=True))

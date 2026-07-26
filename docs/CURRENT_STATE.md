@@ -1,12 +1,19 @@
 # WeatherBot Current State
 
 ## Current Layer
-- Date: 2026-07-25. Phase 3/6: leakage-safe calibration, real ensemble distributions and controlled paper validation.
+- Date: 2026-07-26. Phase 3/6: leakage-safe calibration, real ensemble distributions and controlled paper validation.
 - Paper simulation uses immediate dynamic model weighting. Calibration maturity limits live trading only.
 - `LIVE_TRADING=false`; profitability is not yet proven.
 - Runtime data remains under the project `data/` Junction to `D:\WeatherBot\data`.
 
 ## Latest Evidence
+- Signal funnel audit covers 49 enabled cities x 3 target dates: 147/147 have DEB and components, 146/147 have at least four model families, all 147 have a computable model spread, and 1,617 buckets strict-match.
+- Deterministic runs now count as participating model families when they carry a positive weight and forecast evidence. `member_count` is reserved for distribution/sigma evidence.
+- All default collector, truth, market and decision coverage is driven by `stations.enabled`; legacy five-city/default-limit paths were removed.
+- During the latest three target dates, 7 cities produced 8 executable paper candidates: Amsterdam, Chicago, Karachi, Moscow, Singapore, Wellington and Wuhan.
+- The latest round for those dates currently has zero paper candidates. Every rejection is classified as data gap, strict-match failure, untradeable book/order minimum, or genuine no-edge; there is no unknown bucket.
+- The current future operational window has one visible paper candidate (Amsterdam 2026-07-27). The dashboard now consumes strategy candidates instead of hiding them behind weather-focus cards.
+- Tail strategy's 20-day independent-settlement requirement is a live-maturity rule only. It does not suppress paper discovery.
 - Every configured model with a prior weight participates from its first valid forecast.
 - Dynamic weight blends the prior with inverse-MAE performance as leakage-free pairs accumulate; the performance share ramps continuously with sample count.
 - Models without a settled MAE retain a nonzero prior-only weight instead of being silently removed.
@@ -23,10 +30,12 @@
 - Focused strategy, settings, dynamic-weight and walk-forward calibration tests passed.
 
 ## Production Blockers
-- Executable paper orders still require valid bid/ask, acceptable spread, sufficient depth/order size, fresh quotes and positive edge.
+- Executable paper orders still require valid bid/ask, acceptable spread, sufficient depth/order size, fresh quotes and positive edge. These thresholds were not lowered.
+- The latest runtime verification is blocked by stale `hourly_consensus`, decisions older than 30 minutes and one stale/future-dated orderbook candidate.
+- Current dominant decision reasons are invalid bid/ask, wide spread, stale book, exchange minimum above the risk budget, and genuine edge below the configured minimum.
 - Sparse calibration increases uncertainty; it no longer suppresses paper discovery but still blocks live approval.
 - Several cities and model families do not yet have enough settled truth to support a live-trading claim.
 
 ## Next Task
-- Keep the scheduler running and classify every skipped candidate as no-edge, quote/spread, order-minimum or stale-data.
+- Refresh hourly consensus, decisions and CLOB quotes, then rerun `tools/diagnose_signal_funnel.py` without changing risk thresholds.
 - Next calibration upgrade: segment residuals by D+0/D+1/D+2 lead time and validate with walk-forward replay before changing the live path.

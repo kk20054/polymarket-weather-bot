@@ -200,7 +200,7 @@ class MarketBucketsSyncRequest(BaseModel):
     days: int = 3
     target_date: str = ""
     limit: int = 200
-    limit_cities: int = 5
+    limit_cities: int = 0
     dry_run: bool = False
     fetch_orderbooks: bool = True
 

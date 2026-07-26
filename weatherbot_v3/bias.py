@@ -177,7 +177,7 @@ def _selected_cities(cities: list[str] | None, path: Path | None) -> list[str]:
             for row in conn.execute("SELECT city_key FROM stations WHERE enabled = 1 ORDER BY tier, city_key").fetchall()
             if str(row["city_key"] or "") in SETTLEMENT_REGISTRY
         ]
-    return enabled or list(DEFAULT_CITY_MODELS)
+    return enabled
 
 
 def _truth_by_date(

@@ -14,6 +14,7 @@ import requests
 
 from .db import insert_forecast_runs, log_data_fetch, utc_now
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
+from .stations import list_stations
 
 
 OPENMETEO_FORECAST_URL = os.getenv("OPENMETEO_FORECAST_URL", "https://api.open-meteo.com/v1/forecast")
@@ -34,7 +35,6 @@ OPENMETEO_HOURLY_FIELDS = (
     "precipitation",
     "precipitation_probability",
 )
-OPENMETEO_DEFAULT_CITY_PRIORITY = ("chicago", "tokyo", "atlanta", "nyc", "dallas")
 CHINA_CITY_KEYS = {
     "beijing",
     "chengdu",
@@ -123,7 +123,7 @@ def fetch_openmeteo_forecasts(
     ensemble: bool = False,
     models: list[str] | tuple[str, ...] | None = None,
     dry_run: bool = False,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     forecast_days: int = 7,
     session: requests.Session | None = None,
     retrieved_at: str | None = None,
@@ -268,7 +268,7 @@ def fetch_openmeteo_previous_runs(
     models: list[str] | None = None,
     previous_days: list[int] | None = None,
     dry_run: bool = False,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     session: requests.Session | None = None,
     retrieved_at: str | None = None,
     sleep_seconds: float | None = None,
@@ -1149,21 +1149,15 @@ def openmeteo_user_agent() -> str:
 def _select_profiles(cities: list[str] | None, *, limit_cities: int) -> list[CitySettlementProfile]:
     requested = [str(city or "").strip().lower() for city in (cities or []) if str(city or "").strip()]
     if requested:
-        profiles = [SETTLEMENT_REGISTRY[city] for city in requested if city in SETTLEMENT_REGISTRY]
-        return profiles
-    profiles: list[CitySettlementProfile] = []
-    seen: set[str] = set()
-    for city in OPENMETEO_DEFAULT_CITY_PRIORITY:
-        if city in SETTLEMENT_REGISTRY:
-            profiles.append(SETTLEMENT_REGISTRY[city])
-            seen.add(city)
-    for city, profile in SETTLEMENT_REGISTRY.items():
-        if city not in seen:
-            profiles.append(profile)
-            seen.add(city)
-        if len(profiles) >= max(1, int(limit_cities or 5)):
-            break
-    return profiles[: max(1, int(limit_cities or 5))]
+        return [SETTLEMENT_REGISTRY[city] for city in requested if city in SETTLEMENT_REGISTRY]
+    enabled = [
+        str(row.get("city_key") or "").strip().lower()
+        for row in list_stations()
+        if bool(row.get("enabled"))
+    ]
+    profiles = [SETTLEMENT_REGISTRY[city] for city in enabled if city in SETTLEMENT_REGISTRY]
+    limit = int(limit_cities or 0)
+    return profiles if limit <= 0 else profiles[:limit]
 
 
 def _convert_optional_temperature(value: Any, target_unit: str) -> float | None:

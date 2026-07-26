@@ -14,6 +14,7 @@ import requests
 from .db import log_data_fetch, upsert_mesonet_observation, utc_now
 from .env_utils import env_value, redact_secret_text, redact_secrets
 from .registry import SETTLEMENT_REGISTRY, CitySettlementProfile
+from .stations import list_stations
 
 
 PWS_NETWORK = "wunderground_pws"
@@ -27,7 +28,7 @@ def fetch_wunderground_pws(
     cities: list[str] | None = None,
     *,
     dry_run: bool = False,
-    limit_cities: int = 5,
+    limit_cities: int = 0,
     station_limit: int = 5,
     session: requests.Session | None = None,
 ) -> dict[str, Any]:
@@ -324,11 +325,17 @@ def _request_json(client: requests.Session, url: str, params: dict[str, Any]) ->
 
 def _select_profiles(cities: list[str] | None, *, limit_cities: int) -> list[CitySettlementProfile]:
     requested = {str(city or "").strip().lower() for city in (cities or []) if str(city or "").strip()}
-    profiles = [
-        profile for profile in SETTLEMENT_REGISTRY.values()
-        if not requested or profile.city in requested
-    ]
-    return profiles[: max(1, int(limit_cities or 5))]
+    if requested:
+        profiles = [profile for profile in SETTLEMENT_REGISTRY.values() if profile.city in requested]
+    else:
+        enabled = [
+            str(row.get("city_key") or "").strip().lower()
+            for row in list_stations()
+            if bool(row.get("enabled"))
+        ]
+        profiles = [SETTLEMENT_REGISTRY[city] for city in enabled if city in SETTLEMENT_REGISTRY]
+    limit = int(limit_cities or 0)
+    return profiles if limit <= 0 else profiles[:limit]
 
 
 def _configured_station_ids(profile: CitySettlementProfile) -> list[str]:

@@ -149,15 +149,30 @@ class StrategyBase:
             "final_position_size_usd": position_size,
         })
         order_min_size = optional_float(bucket.get("order_min_size"))
+        minimum_executable_amount_usd = None
+        if market_ask is not None and market_ask > 0 and order_min_size is not None and order_min_size > 0:
+            minimum_executable_amount_usd = round(market_ask * order_min_size, 4)
+        trade_cap_usd = round(float(sizing.hard_cap_usd), 4)
+        sizing_snapshot.update({
+            "minimum_executable_amount_usd": minimum_executable_amount_usd,
+            "trade_cap_usd": trade_cap_usd,
+        })
         if (
-            market_ask is not None
-            and market_ask > 0
-            and order_min_size is not None
-            and order_min_size > 0
-            and position_size / market_ask + 1e-9 < order_min_size
+            minimum_executable_amount_usd is not None
+            and position_size + 1e-9 < minimum_executable_amount_usd
         ):
-            skip_reasons.append("below_order_min_size")
-        if position_size <= 0:
+            if minimum_executable_amount_usd > trade_cap_usd + 1e-9:
+                skip_reasons.append("order_minimum_exceeds_trade_cap")
+            else:
+                skip_reasons.append("risk_budget_below_exchange_minimum")
+        if (
+            position_size <= 0
+            and edge is not None
+            and edge + 1e-12 >= required_min_edge
+            and market_ask is not None
+            and 0 < market_ask < 1
+            and model_probability is not None
+        ):
             skip_reasons.append("non_positive_kelly_size")
 
         gate_reasons.extend(hard_blocks)
@@ -236,6 +251,8 @@ class StrategyBase:
             },
             "tick_size": bucket.get("tick_size"),
             "order_min_size": bucket.get("order_min_size"),
+            "minimum_executable_amount_usd": minimum_executable_amount_usd,
+            "trade_cap_usd": trade_cap_usd,
             "neg_risk": bool(bucket.get("neg_risk")),
             "book_age_seconds": book_age_seconds,
             "spread_bps": spread_bps,

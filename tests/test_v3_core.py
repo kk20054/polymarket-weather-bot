@@ -1020,12 +1020,20 @@ class V3CoreTests(unittest.TestCase):
         ])
         self.assertTrue(payload["stages"][9]["skipped"])
         forecast.assert_called_once_with("nyc", 2)
-        openmeteo.assert_called_once_with("nyc", forecast_days=4, limit_cities=5)
-        weathercom.assert_called_once_with("nyc", forecast_days=4, limit_cities=5)
+        openmeteo.assert_called_once_with("nyc", forecast_days=4, limit_cities=1)
+        weathercom.assert_called_once_with("nyc", forecast_days=4, limit_cities=1)
         metar.assert_called_once_with("nyc", 48.0)
         hourly.assert_called_once_with("nyc", target_date="2026-06-27", days_arg=None)
         daily_max.assert_called_once_with("nyc", target_date="2026-06-27", days_arg=None)
-        buckets.assert_called_once()
+        buckets.assert_called_once_with(
+            5,
+            cities_arg="nyc",
+            days_arg=2,
+            target_date="2026-06-27",
+            active_weather=True,
+            limit_cities=1,
+            fetch_orderbooks=True,
+        )
         decisions.assert_called_once_with("nyc", target_date="2026-06-27", days_arg=None, limit=5)
         signal_scan.assert_not_called()
         migrate.assert_called_once()
@@ -4364,8 +4372,11 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(payload["matched"], 1)
         self.assertEqual(rows[0]["market_id"], "market-cli")
 
-    def test_production_action_executes_whitelisted_market_buckets_sync(self):
-        with patch("weatherbot_v3.production_actions.run_market_buckets_sync") as mocked_sync:
+    def test_production_action_executes_enabled_city_market_buckets_sync(self):
+        with patch(
+            "weatherbot_v3.production_actions._enabled_layer_city_keys",
+            return_value=["wellington", "chongqing"],
+        ), patch("weatherbot_v3.production_actions.run_market_buckets_sync") as mocked_sync:
             mocked_sync.return_value = {"ok": True, "stored": 3}
             with patch("weatherbot_v3.production_actions.build_data_readiness") as mocked_readiness:
                 mocked_readiness.return_value = {
@@ -4383,7 +4394,14 @@ class V3CoreTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "executed")
-        mocked_sync.assert_called_once_with(3)
+        mocked_sync.assert_called_once_with(
+            3,
+            cities_arg="wellington,chongqing",
+            days_arg=1,
+            target_date="",
+            active_weather=True,
+            limit_cities=2,
+        )
         self.assertEqual(result["payload"]["stored"], 3)
 
     def test_production_action_requires_operator_confirmation_for_bulk_review(self):
