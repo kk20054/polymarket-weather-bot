@@ -291,6 +291,13 @@ def event_to_rows(event: dict[str, Any], station: dict[str, Any], target_date: s
         "slug": str(event.get("slug") or ""),
         "city": city,
         "target_date": target_date,
+        "market_close_at": str(
+            event.get("endDate")
+            or event.get("endDateIso")
+            or first_market.get("endDate")
+            or first_market.get("endDateIso")
+            or ""
+        ),
         "resolution_station": resolution_station.upper(),
         "resolution_source": resolution_source,
         "resolution_source_url": source_url,
@@ -355,14 +362,15 @@ def upsert_polymarket_event(
         conn.execute(
             """
             INSERT INTO polymarket_events (
-                event_id, slug, city, target_date, resolution_station,
+                event_id, slug, city, target_date, market_close_at, resolution_station,
                 resolution_source, resolution_source_url, settlement_unit,
                 volume_24h, open_interest, buckets_json, raw_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(event_id) DO UPDATE SET
                 slug=excluded.slug,
                 city=excluded.city,
                 target_date=excluded.target_date,
+                market_close_at=excluded.market_close_at,
                 resolution_station=excluded.resolution_station,
                 resolution_source=excluded.resolution_source,
                 resolution_source_url=excluded.resolution_source_url,
@@ -378,6 +386,7 @@ def upsert_polymarket_event(
                 str(row.get("slug") or ""),
                 str(row.get("city") or ""),
                 str(row.get("target_date") or ""),
+                str(row.get("market_close_at") or ""),
                 str(row.get("resolution_station") or ""),
                 str(row.get("resolution_source") or ""),
                 str(row.get("resolution_source_url") or ""),

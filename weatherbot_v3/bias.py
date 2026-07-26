@@ -104,6 +104,20 @@ def train_bias_table(
             walk_forward_values = [float(record["corrected_error_c"]) for record in walk_forward]
             recent_walk_forward = walk_forward_values[-7:]
             truth_counts = Counter(str(record["truth_basis"]) for record in records)
+            lead_calibrations = {
+                lead_bucket: _calibration_summary(lead_records)
+                for lead_bucket in sorted({
+                    str(record.get("lead_bucket") or "unknown")
+                    for record in records
+                })
+                if (
+                    lead_records := [
+                        record
+                        for record in records
+                        if str(record.get("lead_bucket") or "unknown") == lead_bucket
+                    ]
+                )
+            }
             rows.append({
                 "city": city,
                 "icao": profile.station_id,
@@ -124,6 +138,7 @@ def train_bias_table(
                 "sample_count": len(records),
                 "independent_dates": len(records),
                 "sample_dates": [record["target_date"] for record in records],
+                "lead_calibrations": lead_calibrations,
                 "truth_basis_counts": dict(sorted(truth_counts.items())),
                 "lookback_days": lookback_days,
                 "last_trained_at": now,
@@ -301,6 +316,7 @@ def _residual_records_for_family(
         if not assessment["ok"]:
             invalid_as_of += 1
             continue
+        row["assessed_horizon"] = str(assessment.get("horizon_bucket") or "unknown")
         as_of = parse_utc(assessment.get("available_at"))
         cutoff = _target_local_start_utc(target_date, timezone_name)
         if as_of is None or cutoff is None:
@@ -329,6 +345,7 @@ def _residual_records_for_family(
             "forecast_as_of": selected["as_of"].isoformat(),
             "lead_hours": selected.get("lead_hours"),
             "horizon": selected.get("horizon"),
+            "lead_bucket": str(selected.get("assessed_horizon") or "unknown"),
         })
     return records, {
         "candidate_rows": family_rows,
@@ -358,6 +375,23 @@ def _walk_forward_errors(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             })
         prior_residuals.append(residual)
     return scored
+
+
+def _calibration_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    residuals = [float(record["residual_c"]) for record in records]
+    additive_bias = statistics.median(residuals) if residuals else 0.0
+    corrected = [value - additive_bias for value in residuals]
+    walk_forward = _walk_forward_errors(records)
+    walk_forward_values = [float(record["corrected_error_c"]) for record in walk_forward]
+    return {
+        "additive_bias_c": round(float(additive_bias), 4),
+        "sample_count": len(records),
+        "mae_c": _round_metric(_mae(corrected)),
+        "mae_7d_c": _round_metric(_mae(corrected[-7:])),
+        "walk_forward_mae_c": _round_metric(_mae(walk_forward_values)),
+        "walk_forward_mae_7d_c": _round_metric(_mae(walk_forward_values[-7:])),
+        "sample_dates": [str(record.get("target_date") or "") for record in records],
+    }
 
 
 def _is_previous_day1(row: dict[str, Any]) -> bool:

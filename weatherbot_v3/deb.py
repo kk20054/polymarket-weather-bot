@@ -49,6 +49,9 @@ GLOBAL_DEB_WEIGHTS = {
     "openmeteo_icon_seamless": 0.25,
 }
 
+MIN_BUCKET_PROBABILITY = 1e-9
+PROBABILITY_CONTRACT_VERSION = "gaussian-cdf-normalized-v2"
+
 
 def normal_cdf(value: float, mu: float, sigma: float, sigma_floor: float | None = None) -> float:
     sigma_safe = sigma_with_floor(sigma, sigma_floor or 0.0)
@@ -148,14 +151,19 @@ def bucket_probabilities(
         }
         items.append(item)
 
-    if normalize and raw_sum > 0:
+    if normalize and items:
+        # Keep every market outcome representable. Exact zeros create
+        # pathological log-loss and make persisted distributions impossible
+        # to compare with a clean Gaussian reconstruction.
+        for item in items:
+            raw_probability = float(item.get("probability_raw") or 0.0)
+            item["probability_raw"] = max(MIN_BUCKET_PROBABILITY, raw_probability)
+        raw_sum = sum(float(item["probability_raw"]) for item in items)
         for item in items:
             probability = float(item["probability_raw"]) / raw_sum
             market_probability = item.get("market_probability")
             item["probability"] = probability
             item["edge"] = None if market_probability is None else probability - float(market_probability)
-    elif normalize and raw_sum <= 0:
-        notes.append("zero_probability_mass")
 
     if excluded_by_observed_floor:
         notes.append("conditioned_on_observed_daily_max")
@@ -174,6 +182,7 @@ def bucket_probabilities(
     return {
         "ok": bool(items),
         "method": "gaussian-cdf-v1",
+        "probability_contract_version": PROBABILITY_CONTRACT_VERSION,
         "mu": float(mu),
         "sigma": sigma_safe,
         "unit": prediction_unit,
@@ -562,7 +571,10 @@ def latest_bucket_probabilities(
         buckets,
         unit=str(prediction.get("unit") or "C"),
         sigma_floor=_optional_float(prediction.get("sigma_floor")),
-        observed_floor=_optional_float(prediction.get("observed_floor")),
+        # Persist the unconditional Gaussian distribution. The intraday
+        # observed maximum is an execution eligibility fact, not a second
+        # probability model; strategies block physically eliminated buckets.
+        observed_floor=None,
         normalize=True,
     )
     distribution.update({

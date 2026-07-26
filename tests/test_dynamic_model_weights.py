@@ -72,7 +72,7 @@ class DynamicModelWeightTests(unittest.TestCase):
             {"openmeteo_ensemble_gfs_seamless"},
         )
 
-    def test_unmatured_v3_keeps_prior_weight_while_collection_progress_remains_visible(self):
+    def test_unmatured_v3_is_the_cold_start_source_while_other_models_remain_diagnostic(self):
         rows = [
             component("weathercom_v3", prior=0.484, samples=7, mae=None),
             component("gfs", prior=0.152, samples=24, mae=0.9),
@@ -85,15 +85,13 @@ class DynamicModelWeightTests(unittest.TestCase):
         _apply_mae_adjusted_weights(rows)
 
         v3 = rows[0]
-        self.assertGreater(v3["weight"], 0.0)
-        self.assertEqual(v3["weight_status"], "prior_only")
-        self.assertAlmostEqual(v3["calibration_progress"], 0.35)
-        self.assertEqual(v3["performance_blend"], 0.0)
+        self.assertEqual(v3["weight"], 1.0)
+        self.assertEqual(v3["weight_status"], "cold_start_v3_only")
         self.assertAlmostEqual(sum(row["weight"] for row in rows), 1.0, places=9)
-        self.assertLessEqual(max(row["weight"] for row in rows), DYNAMIC_WEIGHT_MAX_SHARE + 1e-9)
-        self.assertGreater(rows[2]["weight"], rows[4]["weight"])
+        self.assertTrue(all(row["weight"] == 0.0 for row in rows[1:]))
+        self.assertTrue(all(row["weight_status"] == "diagnostic_only" for row in rows[1:]))
 
-    def test_sparse_real_error_changes_paper_weight_from_first_pair(self):
+    def test_sparse_error_does_not_override_v3_cold_start_before_maturity(self):
         bias_rows = [{
             "icao": "ZSPD",
             "model": "jma",
@@ -110,10 +108,10 @@ class DynamicModelWeightTests(unittest.TestCase):
 
         _apply_mae_adjusted_weights(rows)
 
-        self.assertEqual(mae, 0.5)
-        self.assertEqual(rows[1]["weight_status"], "collecting")
-        self.assertGreater(rows[1]["performance_blend"], 0.0)
-        self.assertGreater(rows[1]["weight"], rows[1]["dynamic_prior_share"])
+        self.assertIsNone(mae)
+        self.assertEqual(rows[0]["weight"], 1.0)
+        self.assertEqual(rows[1]["weight_status"], "diagnostic_only")
+        self.assertEqual(rows[1]["weight"], 0.0)
         self.assertAlmostEqual(sum(row["weight"] for row in rows), 1.0, places=9)
 
     def test_v3_enters_gradually_after_twenty_leakage_free_pairs(self):

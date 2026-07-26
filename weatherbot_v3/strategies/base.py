@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..config import load_config
+from ..deb import bucket_excluded_by_observed_floor
 from ..sizing import size_position
 
 
@@ -105,6 +106,14 @@ class StrategyBase:
         bankroll_fraction_cap = context_number(context, "bankroll_fraction_cap", 0.05)
         if not allow_low_price_tail and is_low_price_tail(bucket, market_ask, threshold=low_price_tail_ask):
             hard_blocks.append("low_price_tail_bucket")
+        if bucket_excluded_by_observed_floor(
+            bucket,
+            prediction_unit=str(prediction.get("unit") or "C"),
+            observed_floor=optional_float(prediction.get("observed_floor")),
+        ):
+            hard_blocks.append("bucket_eliminated_by_observed_high")
+        if context.get("d0_peak_window_enforced") and not context.get("d0_peak_window_ok"):
+            hard_blocks.append("d0_outside_peak_decision_window")
         if spread_bps is not None and spread_bps > max_spread_bps + 1e-9:
             hard_blocks.append("spread_too_wide")
         if book_age_seconds is None:
@@ -211,6 +220,8 @@ class StrategyBase:
             "forecast_algo": forecast_algo,
             "model_probability": model_probability,
             "market_ask": market_ask,
+            "decision_time_ask": market_ask,
+            "quote_age_at_decision_seconds": book_age_seconds,
             "market_bid": market_bid,
             "market_mid": market_mid,
             "market_implied_probability": market_probability,

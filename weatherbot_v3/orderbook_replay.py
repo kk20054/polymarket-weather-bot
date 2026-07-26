@@ -85,9 +85,23 @@ def select_orderbook_as_of(
         SELECT *
         FROM orderbooks
         WHERE ((yes_token_id = ? AND ? != '') OR (market_id = ? AND ? != ''))
-          AND julianday(COALESCE(NULLIF(quote_timestamp, ''), created_at)) <= julianday(?)
+          AND julianday(
+                CASE
+                  WHEN length(trim(COALESCE(quote_timestamp, ''))) >= 13
+                       AND trim(quote_timestamp) NOT GLOB '*[^0-9]*'
+                    THEN datetime(CAST(quote_timestamp AS REAL) / 1000.0, 'unixepoch')
+                  ELSE COALESCE(NULLIF(quote_timestamp, ''), created_at)
+                END
+              ) <= julianday(?)
         ORDER BY
-          julianday(COALESCE(NULLIF(quote_timestamp, ''), created_at)) DESC,
+          julianday(
+            CASE
+              WHEN length(trim(COALESCE(quote_timestamp, ''))) >= 13
+                   AND trim(quote_timestamp) NOT GLOB '*[^0-9]*'
+                THEN datetime(CAST(quote_timestamp AS REAL) / 1000.0, 'unixepoch')
+              ELSE COALESCE(NULLIF(quote_timestamp, ''), created_at)
+            END
+          ) DESC,
           id DESC
         LIMIT 1
         """,

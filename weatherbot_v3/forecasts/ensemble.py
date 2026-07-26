@@ -41,7 +41,7 @@ FORECAST_SNAPSHOT_SELECTION_VERSION = "forecast-snapshot-selection-v2"
 # Dynamic weighting starts as soon as a leakage-free forecast/truth pair is
 # available. Sparse models keep their prior share instead of disappearing;
 # live maturity remains on the stricter 20-sample contract.
-DYNAMIC_WEIGHT_MIN_SAMPLES = 10
+DYNAMIC_WEIGHT_MIN_SAMPLES = 20
 DYNAMIC_WEIGHT_FULL_SAMPLES = 40
 DYNAMIC_WEIGHT_PERFORMANCE_BLEND_MAX = 0.75
 DYNAMIC_WEIGHT_MAX_SHARE = 0.45
@@ -60,8 +60,10 @@ POLYWX_ALIGNED_MODEL_WEIGHTS = {
     "gfs": 0.152,
     "ecmwf": 0.104,
     "icon": 0.095,
-    "gem": 0.093,
-    "jma": 0.073,
+    # Retained as diagnostic model families. Historical evidence rejects
+    # fixed production priors for both, especially across China stations.
+    "gem": 0.0,
+    "jma": 0.0,
 }
 
 
@@ -272,12 +274,26 @@ def build_ensemble_prediction(
         as_of=cohort_as_of,
     )
     components = list(cohort.get("components") or [])
-    usable = [component for component in components if component["member_count"] > 0 and component["family"] in region_model_weights(profile)]
+    usable = [
+        component
+        for component in components
+        if component["member_count"] > 0
+        and component["family"] in region_model_weights(profile)
+    ]
     _normalize_component_weights(usable, algo)
     active_components = [component for component in usable if float(component.get("weight") or 0.0) > 0.0]
-    usable_families = {component["family"] for component in active_components}
+    # Source sufficiency and fusion participation are separate contracts.
+    # During V3 cold start, other valid model families remain diagnostic-only;
+    # they still prove that the input cohort is complete even though their
+    # production weight is zero.
+    available_families = {component["family"] for component in usable}
+    active_families = {component["family"] for component in active_components}
+    available_members = sum(int(component["member_count"]) for component in usable)
     total_members = sum(int(component["member_count"]) for component in active_components)
-    if len(usable_families) < MIN_FAMILIES_FOR_ENSEMBLE and total_members < MIN_MEMBER_COUNT_FOR_SINGLE_FAMILY:
+    if (
+        len(available_families) < MIN_FAMILIES_FOR_ENSEMBLE
+        and available_members < MIN_MEMBER_COUNT_FOR_SINGLE_FAMILY
+    ):
         return {
             "ok": False,
             "city_key": city_key,
@@ -286,8 +302,10 @@ def build_ensemble_prediction(
                 "insufficient_ensemble_sources",
                 *(cohort.get("warnings") or []),
             ],
-            "families": sorted(usable_families),
-            "member_count": total_members,
+            "families": sorted(available_families),
+            "active_families": sorted(active_families),
+            "member_count": available_members,
+            "active_member_count": total_members,
             "components": usable,
             "excluded_components": cohort.get("excluded") or [],
             "cohort_as_of": cohort.get("cohort_as_of") or "",
@@ -349,6 +367,8 @@ def build_ensemble_prediction(
         "weight_method": DYNAMIC_WEIGHT_METHOD if algo == POLYWX_ALIGNED_ALGO else "fixed_region_prior_v1",
         "model_weights": {component["source"]: component["weight"] for component in usable},
         "member_count": len(samples_unit),
+        "available_model_families": sorted(available_families),
+        "active_model_families": sorted(active_families),
         "components": usable,
         "excluded_components": cohort.get("excluded") or [],
         "cohort_as_of": cohort.get("cohort_as_of") or issued,
@@ -941,7 +961,18 @@ def _components_from_rows(
             continue
         first = best_source[0]
         unit = str(first.get("unit") or profile.unit or "C").upper()
-        bias_c, sample_count = _bias_for(bias_table, profile.station_id, family, profile=profile)
+        lead_bucket = str(
+            first.get("assessed_horizon")
+            or first.get("horizon")
+            or "unknown"
+        ).strip().lower()
+        bias_c, sample_count = _bias_for(
+            bias_table,
+            profile.station_id,
+            family,
+            profile=profile,
+            lead_bucket=lead_bucket,
+        )
         bias_unit = convert_temperature_delta(bias_c, "C", unit)
         archive = (
             _archived_daily_high(best_source, profile, target_date)
@@ -995,6 +1026,7 @@ def _components_from_rows(
             "model_daily_high_c": round(sum(adjusted_c) / len(adjusted_c), 4),
             "bias_correction_c": round(bias_c, 4),
             "bias_sample_count": int(sample_count),
+            "bias_lead_bucket": lead_bucket,
             "bias_method": BIAS_RUNTIME_METHOD,
             "bias_status": (
                 "shrinkage_active"
@@ -1006,7 +1038,13 @@ def _components_from_rows(
                 4,
             ) if sample_count >= BIAS_PAPER_MIN_SAMPLE_COUNT else 0.0,
             "bias_applied_before_probability": True,
-            "mae_7d": _mae_for(bias_table, profile.station_id, family, profile=profile),
+            "mae_7d": _mae_for(
+                bias_table,
+                profile.station_id,
+                family,
+                profile=profile,
+                lead_bucket=lead_bucket,
+            ),
             "truth_basis": _truth_basis(profile, target_date, path),
             "retrieved_at": str(first.get("retrieved_at") or ""),
             "available_at": str(first.get("available_at") or ""),
@@ -1281,6 +1319,7 @@ def _bias_for(
     family: str,
     *,
     profile: CitySettlementProfile | None = None,
+    lead_bucket: str | None = None,
 ) -> tuple[float, int]:
     station = str(station_id or "").upper()
     fam = str(family or "").lower()
@@ -1288,10 +1327,11 @@ def _bias_for(
         if str(row.get("icao") or row.get("station_id") or "").upper() == station and str(row.get("model") or "").lower() == fam:
             if profile is not None and int(row.get("location_version") or 1) != int(profile.location_version):
                 continue
-            sample_count = int(row.get("sample_count") or 0)
+            calibration = _lead_calibration(row, lead_bucket)
+            sample_count = int(calibration.get("sample_count") or 0)
             if sample_count < BIAS_PAPER_MIN_SAMPLE_COUNT:
                 return 0.0, sample_count
-            raw_bias = float(row.get("additive_bias_c") or 0.0)
+            raw_bias = float(calibration.get("additive_bias_c") or 0.0)
             shrinkage = sample_count / (sample_count + BIAS_SHRINKAGE_PRIOR_SAMPLES)
             effective_bias = max(
                 -BIAS_MAX_ABS_C,
@@ -1320,6 +1360,7 @@ def _mae_for(
     family: str,
     *,
     profile: CitySettlementProfile | None = None,
+    lead_bucket: str | None = None,
 ) -> float | None:
     station = str(station_id or "").upper()
     fam = str(family or "").lower()
@@ -1330,10 +1371,11 @@ def _mae_for(
             continue
         if profile is not None and int(row.get("location_version") or 1) != int(profile.location_version):
             continue
+        calibration = _lead_calibration(row, lead_bucket)
         # Paper weighting learns from the first leakage-free forecast/truth
         # pair. Sample thresholds describe maturity and live eligibility; they
         # must not make a real sparse error metric disappear.
-        if int(row.get("sample_count") or 0) < DYNAMIC_WEIGHT_MIN_SAMPLES:
+        if int(calibration.get("sample_count") or 0) < DYNAMIC_WEIGHT_MIN_SAMPLES:
             return None
         for key in (
             "walk_forward_mae_7d_c",
@@ -1344,13 +1386,23 @@ def _mae_for(
             "rmse_c",
             "rmse",
         ):
-            value = _first_number(row.get(key))
+            value = _first_number(calibration.get(key))
             if value is not None:
                 return round(float(value), 4)
-        bias = _first_number(row.get("additive_bias_c"))
+        bias = _first_number(calibration.get("additive_bias_c"))
         if bias is not None:
             return round(abs(float(bias)), 4)
     return None
+
+
+def _lead_calibration(row: dict[str, Any], lead_bucket: str | None) -> dict[str, Any]:
+    bucket = str(lead_bucket or "").strip().lower()
+    calibrations = row.get("lead_calibrations")
+    if bucket and isinstance(calibrations, dict):
+        selected = calibrations.get(bucket)
+        if isinstance(selected, dict):
+            return selected
+    return row
 
 
 def _truth_basis(profile: CitySettlementProfile, target_date: str, path: Path | None) -> str:
@@ -1431,6 +1483,22 @@ def _apply_mae_adjusted_weights(components: list[dict[str, Any]]) -> None:
     if not participants:
         return
 
+    v3 = next(
+        (component for component in participants if component.get("family") == "weathercom_v3"),
+        None,
+    )
+    if v3 is not None and int(v3.get("bias_sample_count") or 0) < BIAS_MIN_SAMPLE_COUNT:
+        for component in participants:
+            selected = component is v3
+            component["weight_raw"] = 1.0 if selected else 0.0
+            component["weight"] = 1.0 if selected else 0.0
+            component["weight_after_mae"] = component["weight"]
+            component["weight_status"] = "cold_start_v3_only" if selected else "diagnostic_only"
+            component["weight_caution"] = (
+                "station_lead_calibration_collecting" if selected else "excluded_during_v3_cold_start"
+            )
+        return
+
     prior_total = sum(float(component.get("weight_prior") or 0.0) for component in participants) or 1.0
     calibrated_prior_mass = sum(
         float(component.get("weight_prior") or 0.0) / prior_total
@@ -1460,7 +1528,14 @@ def _apply_mae_adjusted_weights(components: list[dict[str, Any]]) -> None:
         component["performance_blend"] = round(performance_blend, 4)
         combined_scores.append(score)
 
-    weights = _normalize_capped_weights(combined_scores, DYNAMIC_WEIGHT_MAX_SHARE)
+    normalized_priors = [
+        max(0.0, float(component.get("weight_prior") or 0.0)) / prior_total
+        for component in participants
+    ]
+    weights = _normalize_capped_weights(
+        combined_scores,
+        max(DYNAMIC_WEIGHT_MAX_SHARE, max(normalized_priors, default=0.0)),
+    )
     for component, score, weight in zip(participants, combined_scores, weights):
         component["weight_raw"] = score
         component["weight"] = weight

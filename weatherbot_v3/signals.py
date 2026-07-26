@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import load_config
 from .db import (
@@ -17,11 +18,6 @@ from .db import (
     upsert_signal_decision_record,
 )
 from .deb import bucket_probabilities, probability_mu_for_prediction
-from .forecasts.ensemble import (
-    POLYWX_ALIGNED_ALGO,
-    distribution_for_prediction as ensemble_distribution_for_prediction,
-    family_mixture_distribution_for_prediction,
-)
 from .orderbook_replay import best_level_size, parse_levels
 from .stations import get_station
 from .strategies import CoreModalStrategy, LadderGridStrategy, SingleBucketEVStrategy, TailBuyingStrategy
@@ -85,30 +81,25 @@ def build_signal_decisions(
         or prediction.get("deb_version")
         or ""
     )
-    # Model-family means are not independent votes. When a fresh real member
-    # ensemble exists, blend its empirical shape with calibrated kernels for
-    # deterministic families; otherwise retain the conservative global CDF.
-    distribution = (
-        family_mixture_distribution_for_prediction(prediction, buckets)
-        if forecast_algo == POLYWX_ALIGNED_ALGO
-        else ensemble_distribution_for_prediction(prediction, buckets)
+    # One probability contract serves persistence, replay and the dashboard.
+    # Family/member mixtures remain diagnostic inputs to mu/sigma; production
+    # bucket probabilities are the clean Gaussian reconstruction.
+    probability_mu, probability_mu_basis = probability_mu_for_prediction(prediction)
+    distribution = bucket_probabilities(
+        probability_mu,
+        float(prediction["sigma"]),
+        buckets,
+        unit=str(prediction.get("unit") or "C"),
+        sigma_floor=_optional_float(prediction.get("sigma_floor")),
+        observed_floor=None,
+        normalize=True,
     )
-    if not distribution:
-        probability_mu, probability_mu_basis = probability_mu_for_prediction(prediction)
-        distribution = bucket_probabilities(
-            probability_mu,
-            float(prediction["sigma"]),
-            buckets,
-            unit=str(prediction.get("unit") or "C"),
-            sigma_floor=_optional_float(prediction.get("sigma_floor")),
-            observed_floor=_optional_float(prediction.get("observed_floor")),
-            normalize=True,
-        )
-        distribution.update({
-            "probability_mu_basis": probability_mu_basis,
-            "model_mu": _optional_float(prediction.get("model_mu")),
-            "effective_mu": _optional_float(prediction.get("effective_mu")) or _optional_float(prediction.get("mu")),
-        })
+    distribution.update({
+        "probability_mu_basis": probability_mu_basis,
+        "model_mu": _optional_float(prediction.get("model_mu")),
+        "effective_mu": _optional_float(prediction.get("effective_mu")) or _optional_float(prediction.get("mu")),
+        "observed_floor": _optional_float(prediction.get("observed_floor")),
+    })
     probabilities = {
         str(item.get("bucket_key") or ""): item
         for item in distribution.get("items") or []
@@ -116,6 +107,13 @@ def build_signal_decisions(
     }
     evidence = _evidence_links(city, date, prediction, buckets, path)
     station_live_reasons = _station_live_gate_reasons(city, path)
+    station = get_station(city, path) or {}
+    decision_time = datetime.now(timezone.utc).isoformat()
+    peak_window = d0_peak_decision_window(
+        prediction,
+        timezone_name=str(station.get("settlement_timezone") or station.get("timezone") or "UTC"),
+        as_of=decision_time,
+    )
     cfg = load_config()
     profile = (
         get_strategy_profile_revision(requested_revision, path=path)
@@ -136,7 +134,7 @@ def build_signal_decisions(
     strategy_parameters = profile_parameters["strategies"]
     settlement_evidence = _independent_settlement_evidence(city, path, prediction)
     context = {
-        "decision_time": datetime.now(timezone.utc).isoformat(),
+        "decision_time": decision_time,
         "decision_version": DECISION_VERSION,
         "single_bucket_id_version": SINGLE_BUCKET_ID_VERSION,
         "distribution": distribution,
@@ -158,6 +156,9 @@ def build_signal_decisions(
         "strategy_revision_id": profile["revision_id"],
         "strategy_params_hash": profile["content_sha256"],
         "strategy_params_snapshot": profile_snapshot(profile),
+        "d0_peak_window_enforced": peak_window["enforced"],
+        "d0_peak_window_ok": peak_window["ok"],
+        "d0_peak_window": peak_window,
     }
     strategy_builders = (
         ("core_modal_v1", CoreModalStrategy),
@@ -470,6 +471,70 @@ def _select_prediction(predictions: list[dict[str, Any]], issued_at_hour: str | 
         if _hour_key(prediction.get("issued_at")) == target:
             return prediction
     return eligible[0]
+
+
+def d0_peak_decision_window(
+    prediction: dict[str, Any],
+    *,
+    timezone_name: str,
+    as_of: str,
+) -> dict[str, Any]:
+    """Return the deployable D+0 sampling window without affecting replay days."""
+
+    decision_utc = _parse_datetime(as_of)
+    target_text = str(prediction.get("target_date") or "")
+    peak_text = str(prediction.get("peak_hour") or "").strip()
+    try:
+        target = datetime.fromisoformat(target_text).date()
+        zone = ZoneInfo(timezone_name or "UTC")
+        local_now = (decision_utc or datetime.now(timezone.utc)).astimezone(zone)
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        return {
+            "enforced": False,
+            "ok": True,
+            "reason": "peak_window_metadata_unavailable",
+            "target_date": target_text,
+            "peak_hour": peak_text,
+        }
+    if target < local_now.date():
+        return {
+            "enforced": False,
+            "ok": True,
+            "reason": "historical_replay",
+            "target_date": target_text,
+            "peak_hour": peak_text,
+        }
+    if target > local_now.date():
+        return {
+            "enforced": False,
+            "ok": True,
+            "reason": "forecast_lead",
+            "target_date": target_text,
+            "peak_hour": peak_text,
+        }
+    try:
+        peak_clock = time.fromisoformat(peak_text[:5])
+    except (TypeError, ValueError):
+        return {
+            "enforced": True,
+            "ok": False,
+            "reason": "d0_peak_hour_missing_or_invalid",
+            "target_date": target_text,
+            "peak_hour": peak_text,
+            "decision_local": local_now.isoformat(),
+        }
+    peak_local = datetime.combine(target, peak_clock, tzinfo=zone)
+    hours_before_peak = (peak_local - local_now).total_seconds() / 3600.0
+    ok = 2.0 <= hours_before_peak <= 3.0
+    return {
+        "enforced": True,
+        "ok": ok,
+        "reason": "peak_window" if ok else "outside_peak_window",
+        "target_date": target_text,
+        "peak_hour": peak_text,
+        "decision_local": local_now.isoformat(),
+        "hours_before_peak": round(hours_before_peak, 4),
+    }
 
 
 def _evidence_links(

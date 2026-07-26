@@ -128,7 +128,7 @@ class DebGaussianTests(unittest.TestCase):
         self.assertTrue(math.isfinite(result["sigma"]))
         self.assertTrue(math.isfinite(item["probability"]))
 
-    def test_observed_celsius_max_removes_impossible_lower_buckets(self):
+    def test_observed_celsius_max_marks_impossible_buckets_with_numerical_floor(self):
         result = bucket_probabilities(
             38.5,
             1.7,
@@ -143,8 +143,13 @@ class DebGaussianTests(unittest.TestCase):
         )
 
         probabilities = {item["bucket_key"]: item["probability"] for item in result["items"]}
-        self.assertEqual(probabilities["37"], 0.0)
-        self.assertEqual(probabilities["38"], 0.0)
+        excluded = {item["bucket_key"]: item["observed_floor_excluded"] for item in result["items"]}
+        self.assertGreater(probabilities["37"], 0.0)
+        self.assertGreater(probabilities["38"], 0.0)
+        self.assertLess(probabilities["37"], 1e-8)
+        self.assertLess(probabilities["38"], 1e-8)
+        self.assertTrue(excluded["37"])
+        self.assertTrue(excluded["38"])
         self.assertGreater(probabilities["39"], 0.0)
         self.assertGreater(probabilities["40+"], 0.0)
         self.assertAlmostEqual(result["sum_probability"], 1.0, places=6)
@@ -166,7 +171,10 @@ class DebGaussianTests(unittest.TestCase):
         )
 
         probabilities = {item["bucket_key"]: item["probability"] for item in result["items"]}
-        self.assertEqual(probabilities["78-79"], 0.0)
+        excluded = {item["bucket_key"]: item["observed_floor_excluded"] for item in result["items"]}
+        self.assertGreater(probabilities["78-79"], 0.0)
+        self.assertLess(probabilities["78-79"], 1e-8)
+        self.assertTrue(excluded["78-79"])
         self.assertGreater(probabilities["80-81"], 0.0)
         self.assertGreater(probabilities["82+"], 0.0)
         self.assertAlmostEqual(result["sum_probability"], 1.0, places=6)

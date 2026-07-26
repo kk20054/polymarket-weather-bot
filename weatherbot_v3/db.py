@@ -864,6 +864,7 @@ def _init_v3_db_uncached(path: Path | None = None) -> None:
                 slug TEXT UNIQUE,
                 city TEXT,
                 target_date TEXT,
+                market_close_at TEXT,
                 resolution_station TEXT,
                 resolution_source TEXT,
                 resolution_source_url TEXT,
@@ -964,6 +965,8 @@ def _init_v3_db_uncached(path: Path | None = None) -> None:
                 forecast_algo TEXT,
                 model_probability REAL,
                 market_ask REAL,
+                decision_time_ask REAL,
+                quote_age_at_decision_seconds REAL,
                 market_bid REAL,
                 market_mid REAL,
                 market_implied_probability REAL,
@@ -1004,6 +1007,25 @@ def _init_v3_db_uncached(path: Path | None = None) -> None:
                 gate_reasons_json TEXT,
                 raw_json TEXT,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS candidate_preclose_quotes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_key TEXT UNIQUE,
+                decision_id TEXT,
+                market_id TEXT,
+                token_id TEXT,
+                city_key TEXT,
+                target_date TEXT,
+                market_close_at TEXT,
+                captured_at TEXT,
+                quote_timestamp TEXT,
+                best_bid REAL,
+                best_ask REAL,
+                source TEXT,
+                status TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS model_reprice_events (
@@ -1256,6 +1278,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "forecast_algo": "TEXT",
             "model_probability": "REAL",
             "market_ask": "REAL",
+            "decision_time_ask": "REAL",
+            "quote_age_at_decision_seconds": "REAL",
             "market_bid": "REAL",
             "market_mid": "REAL",
             "market_implied_probability": "REAL",
@@ -1289,6 +1313,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "market_bucket_probs_json": "TEXT",
             "edge_by_bucket_json": "TEXT",
             "gate_reasons_json": "TEXT",
+        },
+        "polymarket_events": {
+            "market_close_at": "TEXT",
         },
         "paper_orders": {
             "decision_id": "TEXT",
@@ -1460,6 +1487,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_strategy ON signal_decisions(strategy_name)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_ladder_group ON signal_decisions(ladder_group_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_decisions_strategy_revision ON signal_decisions(strategy_revision_id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_candidate_preclose_snapshot ON candidate_preclose_quotes(snapshot_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_candidate_preclose_token_time ON candidate_preclose_quotes(token_id, captured_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_candidate_preclose_market_close ON candidate_preclose_quotes(market_id, market_close_at)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_model_reprice_event_key ON model_reprice_events(event_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_model_reprice_city_date ON model_reprice_events(city_key, target_date)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_orders_idempotency ON paper_orders(idempotency_key)")
@@ -3786,6 +3816,10 @@ def upsert_signal_decision_record(
         "forecast_algo": str(decision.get("forecast_algo") or decision.get("algo") or decision.get("deb_version") or ""),
         "model_probability": _nullable_num(decision.get("model_probability")),
         "market_ask": _nullable_num(decision.get("market_ask")),
+        "decision_time_ask": _nullable_num(decision.get("decision_time_ask", decision.get("market_ask"))),
+        "quote_age_at_decision_seconds": _nullable_num(
+            decision.get("quote_age_at_decision_seconds", decision.get("book_age_seconds"))
+        ),
         "market_bid": _nullable_num(decision.get("market_bid")),
         "market_mid": _nullable_num(decision.get("market_mid")),
         "market_implied_probability": _nullable_num(decision.get("market_implied_probability")),
@@ -3835,6 +3869,7 @@ def upsert_signal_decision_record(
                 target_date, issued_at, token_id, yes_token_id, bucket_direction,
                 bucket_lower, bucket_upper, mu, sigma, deb_version, forecast_algo,
                 model_probability, market_ask, market_bid, market_mid,
+                decision_time_ask, quote_age_at_decision_seconds,
                 market_implied_probability, edge, edge_percent, strategy_name,
                 kelly_fraction, position_size_usd, ladder_group_id, orderbook_snapshot_json,
                 strategy_revision_id, strategy_params_hash, strategy_params_snapshot_json,
@@ -3851,6 +3886,7 @@ def upsert_signal_decision_record(
                 :target_date, :issued_at, :token_id, :yes_token_id, :bucket_direction,
                 :bucket_lower, :bucket_upper, :mu, :sigma, :deb_version, :forecast_algo,
                 :model_probability, :market_ask, :market_bid, :market_mid,
+                :decision_time_ask, :quote_age_at_decision_seconds,
                 :market_implied_probability, :edge, :edge_percent, :strategy_name,
                 :kelly_fraction, :position_size_usd, :ladder_group_id, :orderbook_snapshot_json,
                 :strategy_revision_id, :strategy_params_hash, :strategy_params_snapshot_json,
@@ -3882,6 +3918,11 @@ def upsert_signal_decision_record(
                 forecast_algo=excluded.forecast_algo,
                 model_probability=excluded.model_probability,
                 market_ask=excluded.market_ask,
+                decision_time_ask=COALESCE(signal_decisions.decision_time_ask, excluded.decision_time_ask),
+                quote_age_at_decision_seconds=COALESCE(
+                    signal_decisions.quote_age_at_decision_seconds,
+                    excluded.quote_age_at_decision_seconds
+                ),
                 market_bid=excluded.market_bid,
                 market_mid=excluded.market_mid,
                 market_implied_probability=excluded.market_implied_probability,
