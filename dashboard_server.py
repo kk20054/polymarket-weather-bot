@@ -51,6 +51,7 @@ from weatherbot_v3.deb import build_daily_max_predictions, latest_bucket_probabi
 from weatherbot_v3.distribution import build_event_distribution
 from weatherbot_v3.executor import LIVE_EXECUTION_PRODUCTION_READY, LiveExecutor
 from weatherbot_v3.forecast_archive import build_forecast_archive_manifest
+from weatherbot_v3.forward_validation import forward_validation_summary
 from weatherbot_v3.history import fetch_open_meteo_history, load_history_cache, market_history_points, merge_history_points
 from weatherbot_v3.hourly import forecast_hourly_points, forecast_revision_history, hourly_consensus_points, hourly_consensus_summary
 from weatherbot_v3.migration import migrate_legacy_signals
@@ -4376,6 +4377,7 @@ def build_dashboard_payload():
             "observation_only_count": 0,
             "message": "recommendation_cache_warming",
         },
+        "forward_validation": forward_validation_summary(),
         "events": events,
         "fetch_log": fetch_log,
     }
@@ -4439,6 +4441,7 @@ def _minimal_dashboard_payload(reason: str = "cache_warming"):
         "city_statuses": asian_city_priority_config(),
         "city_evidence": _build_city_evidence_payload(city_series, [], fetch_log),
         "recommendations": _recommendations_payload(),
+        "forward_validation": forward_validation_summary(),
         "events": events,
         "fetch_log": fetch_log,
         "_meta": {"cache": "warming", "reason": reason, "generated_at": now},

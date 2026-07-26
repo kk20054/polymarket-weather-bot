@@ -204,6 +204,11 @@ class ProbabilityClvContractTests(unittest.TestCase):
             timezone_name="Asia/Shanghai",
             as_of="2026-07-26T04:30:00+00:00",
         )
+        cross_day = d0_peak_decision_window(
+            {"target_date": "2026-07-27", "peak_hour": "00:00"},
+            timezone_name="Asia/Shanghai",
+            as_of="2026-07-26T13:30:00+00:00",
+        )
 
         self.assertTrue(inside["enforced"])
         self.assertTrue(inside["ok"])
@@ -212,6 +217,9 @@ class ProbabilityClvContractTests(unittest.TestCase):
         self.assertFalse(too_early["ok"])
         self.assertFalse(next_day["enforced"])
         self.assertTrue(next_day["ok"])
+        self.assertTrue(cross_day["enforced"])
+        self.assertTrue(cross_day["ok"])
+        self.assertEqual(cross_day["reason"], "cross_day_peak_window")
 
 
 if __name__ == "__main__":

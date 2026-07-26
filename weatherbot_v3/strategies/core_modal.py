@@ -254,30 +254,38 @@ class CoreModalStrategy(StrategyBase):
         return unique(reasons)
 
     def _prediction_quality(self, prediction: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        components = [
+        evidence_components = [
             component for component in (prediction.get("components") or [])
             if (
                 isinstance(component, dict)
-                and float(component.get("weight") or 0.0) > 0.0
+                and str(component.get("weight_status") or "").strip().lower() != "excluded"
                 and self._component_highs_c(component)
             )
         ]
-        families = sorted({str(component.get("family") or component.get("source") or "") for component in components if component.get("family") or component.get("source")})
-        weight_total = sum(max(0.0, float(component.get("weight") or 0.0)) for component in components)
+        weighted_components = [
+            component for component in evidence_components
+            if float(component.get("weight") or 0.0) > 0.0
+        ]
+        families = sorted({
+            str(component.get("family") or component.get("source") or "")
+            for component in evidence_components
+            if component.get("family") or component.get("source")
+        })
+        weight_total = sum(max(0.0, float(component.get("weight") or 0.0)) for component in weighted_components)
         paper_calibrated_weight = sum(
             max(0.0, float(component.get("weight") or 0.0))
-            for component in components
+            for component in weighted_components
             if self._paper_component_eligible(component)
         )
         live_calibrated_weight = sum(
             max(0.0, float(component.get("weight") or 0.0))
-            for component in components
+            for component in weighted_components
             if not bool(component.get("mae_imputed"))
             and int(component.get("bias_sample_count") or 0) >= self.min_live_component_calibration_days
         )
         calibration_coverage = paper_calibrated_weight / weight_total if weight_total > 0 else 0.0
         live_calibration_coverage = live_calibrated_weight / weight_total if weight_total > 0 else 0.0
-        family_highs_c = [fmean(self._component_highs_c(component)) for component in components]
+        family_highs_c = [fmean(self._component_highs_c(component)) for component in evidence_components]
         model_spread_c = max(family_highs_c) - min(family_highs_c) if len(family_highs_c) >= 2 else None
         independent_settlement_days = int(context.get("independent_settlement_days") or 0)
         if (

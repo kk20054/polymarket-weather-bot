@@ -45,7 +45,7 @@ import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
 import { useT, type I18nLanguage } from './i18n/useT'
-import type { BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommendationItem, DataReadiness, Layer7QueryState, Layer7ResourceState, PaperValidationStatus, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerStatus } from './types'
+import type { BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommendationItem, DataReadiness, ForwardValidationSummary, Layer7QueryState, Layer7ResourceState, PaperValidationStatus, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerStatus } from './types'
 
 type TradeMode = 'paper' | 'live'
 type UiLanguage = 'zh' | 'en'
@@ -379,6 +379,50 @@ function RecommendationCard({
           <span className="text-amber-200">{language === 'zh' ? '预计最高' : 'Forecast high'} {tempLabel(item.deb_mu, item.deb_unit)}</span>
         </div>
       )}
+    </div>
+  )
+}
+
+function ForwardValidationStrip({
+  summary,
+  language,
+}: {
+  summary?: ForwardValidationSummary
+  language: UiLanguage
+}) {
+  if (!summary?.ok) return null
+  const progress = summary.progress
+  const clv = summary.clv
+  const score = summary.probability_score
+  const pnl = summary.paper_pnl
+  const hypothesisA = summary.hypotheses?.['H-A']
+  const hypothesisB = summary.hypotheses?.['H-B']
+  const percent = (value?: number | null) => value === null || value === undefined
+    ? '--'
+    : `${value >= 0 ? '+' : ''}${(value * 100).toFixed(1)}%`
+  const brier = (value?: number | null) => value === null || value === undefined ? '--' : value.toFixed(3)
+  const date = String(progress.expected_evaluation_date || '').replace(/-/g, '/')
+  const title = language === 'zh'
+    ? `预注册队列：ask ${(summary.protocol.ask_min * 100).toFixed(0)}–${(summary.protocol.ask_max * 100).toFixed(0)}¢，优势至少 ${(summary.protocol.edge_min * 100).toFixed(0)}%。CLV 使用决策价与收盘前最后可得 ask；H-A 为优势≥15%，H-B 为 8%–15%。`
+    : `Preregistered cohort: ask ${(summary.protocol.ask_min * 100).toFixed(0)}–${(summary.protocol.ask_max * 100).toFixed(0)}c and edge >= ${(summary.protocol.edge_min * 100).toFixed(0)}%. CLV compares decision ask with the final available pre-close ask; H-A is edge >=15%, H-B is 8%-15%.`
+
+  return (
+    <div className="shrink-0 border-b border-cyan-500/20 bg-cyan-500/[0.045] px-3 py-1.5" title={title}>
+      <div className="flex items-center gap-3 overflow-x-auto whitespace-nowrap text-[10px] text-neutral-400">
+        <span className="font-semibold text-cyan-300">{language === 'zh' ? '前瞻验证' : 'Forward validation'}</span>
+        <span className="tabular-nums text-neutral-200">{progress.samples}/{progress.target_samples}</span>
+        <span className="h-1.5 w-20 overflow-hidden bg-neutral-800">
+          <span className="block h-full bg-cyan-500" style={{ width: `${Math.max(0, Math.min(100, progress.completion_percent))}%` }} />
+        </span>
+        <span>{language === 'zh' ? '预计' : 'ETA'} {date || '--'}</span>
+        <span className="tabular-nums">CLV {percent(clv.mean)} <span className="text-neutral-600">n={clv.n}</span></span>
+        <span className="tabular-nums">Brier {brier(score.model_brier)} / {brier(score.market_brier)}</span>
+        <span className={`tabular-nums ${pnl.realized_usd >= 0 ? 'text-green-300' : 'text-red-300'}`}>
+          P&amp;L {pnl.realized_usd >= 0 ? '+' : ''}${pnl.realized_usd.toFixed(2)}
+        </span>
+        <span className="tabular-nums text-neutral-500">H-A {percent(hypothesisA?.mean)} n={hypothesisA?.n ?? 0}</span>
+        <span className="tabular-nums text-neutral-500">H-B {percent(hypothesisB?.mean)} n={hypothesisB?.n ?? 0}</span>
+      </div>
     </div>
   )
 }
@@ -1877,6 +1921,7 @@ function App() {
         </aside>
 
         <section className="order-1 min-w-0 min-h-[720px] overflow-hidden xl:order-2 xl:flex xl:min-h-0 xl:flex-col">
+          <ForwardValidationStrip summary={data?.forward_validation} language={uiLanguage} />
           <div className={`shrink-0 border-b px-3 py-1.5 ${hasStrategyRecommendations ? 'border-cyan-500/20 bg-cyan-500/10' : 'border-amber-500/20 bg-amber-500/10'}`}>
             <div className="flex flex-wrap items-center gap-3">
               <div

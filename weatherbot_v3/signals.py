@@ -504,14 +504,6 @@ def d0_peak_decision_window(
             "target_date": target_text,
             "peak_hour": peak_text,
         }
-    if target > local_now.date():
-        return {
-            "enforced": False,
-            "ok": True,
-            "reason": "forecast_lead",
-            "target_date": target_text,
-            "peak_hour": peak_text,
-        }
     try:
         peak_clock = time.fromisoformat(peak_text[:5])
     except (TypeError, ValueError):
@@ -525,11 +517,30 @@ def d0_peak_decision_window(
         }
     peak_local = datetime.combine(target, peak_clock, tzinfo=zone)
     hours_before_peak = (peak_local - local_now).total_seconds() / 3600.0
+    if target > local_now.date():
+        crosses_local_midnight = (
+            (target - local_now.date()).days == 1
+            and 0.0 <= hours_before_peak <= 4.0
+        )
+        if not crosses_local_midnight:
+            return {
+                "enforced": False,
+                "ok": True,
+                "reason": "forecast_lead",
+                "target_date": target_text,
+                "peak_hour": peak_text,
+            }
     ok = 2.0 <= hours_before_peak <= 3.0
     return {
         "enforced": True,
         "ok": ok,
-        "reason": "peak_window" if ok else "outside_peak_window",
+        "reason": (
+            "cross_day_peak_window"
+            if ok and target > local_now.date()
+            else "peak_window"
+            if ok
+            else "outside_peak_window"
+        ),
         "target_date": target_text,
         "peak_hour": peak_text,
         "decision_local": local_now.isoformat(),

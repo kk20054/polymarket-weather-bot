@@ -145,6 +145,46 @@ class DynamicModelWeightTests(unittest.TestCase):
         self.assertEqual(quality["family_count"], 3)
         self.assertAlmostEqual(quality["calibration_coverage"], 0.7)
 
+    def test_core_quality_counts_zero_weight_diagnostic_families_but_not_excluded_models(self):
+        strategy = CoreModalStrategy()
+        prediction = {
+            "components": [
+                {
+                    **component("weathercom_v3", prior=0.484, samples=7, mae=None),
+                    "weight": 1.0,
+                    "weight_status": "cold_start_v3_only",
+                    "mae_imputed": True,
+                },
+                {
+                    **component("gfs", prior=0.152, samples=24, mae=0.8),
+                    "weight": 0.0,
+                    "weight_status": "diagnostic_only",
+                },
+                {
+                    **component("ecmwf", prior=0.104, samples=24, mae=0.7),
+                    "weight": 0.0,
+                    "weight_status": "diagnostic_only",
+                },
+                {
+                    **component("icon", prior=0.095, samples=24, mae=0.9),
+                    "weight": 0.0,
+                    "weight_status": "diagnostic_only",
+                },
+                {
+                    **component("jma", prior=0.073, samples=24, mae=1.2),
+                    "weight": 0.0,
+                    "weight_status": "excluded",
+                },
+            ],
+        }
+
+        quality = strategy._prediction_quality(prediction, {})
+
+        self.assertEqual(quality["families"], ["ecmwf", "gfs", "icon", "weathercom_v3"])
+        self.assertEqual(quality["family_count"], 4)
+        self.assertAlmostEqual(quality["weight_total"], 1.0)
+        self.assertIsNotNone(quality["model_spread_c"])
+
 
 if __name__ == "__main__":
     unittest.main()

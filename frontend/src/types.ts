@@ -1842,6 +1842,51 @@ export interface ForecastArchiveManifest {
   reason_counts?: Record<string, number>
 }
 
+export interface ForwardValidationMetric {
+  n: number
+  mean?: number | null
+  std?: number | null
+  ci95_low?: number | null
+  ci95_high?: number | null
+}
+
+export interface ForwardValidationSummary {
+  ok: boolean
+  protocol: {
+    protocol_id: string
+    started_at: string
+    ask_min: number
+    ask_max: number
+    edge_min: number
+    target_n: number
+    power_effect_clv: number
+    expected_evaluation_date: string
+  }
+  progress: {
+    samples: number
+    target_samples: number
+    completion_percent: number
+    expected_evaluation_date: string
+  }
+  clv: ForwardValidationMetric
+  probability_score: {
+    n: number
+    model_brier?: number | null
+    market_brier?: number | null
+  }
+  paper_pnl: {
+    settled_orders: number
+    open_orders: number
+    realized_usd: number
+    unrealized_usd: number
+  }
+  hypotheses: {
+    'H-A': ForwardValidationMetric
+    'H-B': ForwardValidationMetric
+  }
+  generated_at?: string
+}
+
 export interface DashboardData {
   stats: BotStats
   v3?: V3Summary
@@ -1863,6 +1908,7 @@ export interface DashboardData {
   city_statuses?: Record<string, CityStatusConfig>
   city_evidence?: CityEvidence[]
   recommendations?: DashboardRecommendations
+  forward_validation?: ForwardValidationSummary
   scheduler_status?: SchedulerStatus
   events?: DashboardEvent[]
   fetch_log?: FetchLogRow[]
