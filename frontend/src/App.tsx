@@ -397,14 +397,16 @@ function ForwardValidationStrip({
   const pnl = summary.paper_pnl
   const hypothesisA = summary.hypotheses?.['H-A']
   const hypothesisB = summary.hypotheses?.['H-B']
+  const paperAllowed = summary.strata?.paper_allowed?.true?.enrolled ?? 0
+  const enrolled = progress.enrolled_candidates ?? progress.samples
   const percent = (value?: number | null) => value === null || value === undefined
     ? '--'
     : `${value >= 0 ? '+' : ''}${(value * 100).toFixed(1)}%`
   const brier = (value?: number | null) => value === null || value === undefined ? '--' : value.toFixed(3)
   const date = String(progress.expected_evaluation_date || '').replace(/-/g, '/')
   const title = language === 'zh'
-    ? `预注册队列：ask ${(summary.protocol.ask_min * 100).toFixed(0)}–${(summary.protocol.ask_max * 100).toFixed(0)}¢，优势至少 ${(summary.protocol.edge_min * 100).toFixed(0)}%。CLV 使用决策价与收盘前最后可得 ask；H-A 为优势≥15%，H-B 为 8%–15%。`
-    : `Preregistered cohort: ask ${(summary.protocol.ask_min * 100).toFixed(0)}–${(summary.protocol.ask_max * 100).toFixed(0)}c and edge >= ${(summary.protocol.edge_min * 100).toFixed(0)}%. CLV compares decision ask with the final available pre-close ask; H-A is edge >=15%, H-B is 8%-15%.`
+    ? `v2 冻结队列：ask ${(summary.protocol.ask_min * 100).toFixed(0)}–${(summary.protocol.ask_max * 100).toFixed(0)}¢，优势至少 ${(summary.protocol.edge_min * 100).toFixed(0)}%。CLV 使用“决策后 6 小时，且不晚于预测峰值前 1 小时”的最后可得 ask；可执行性仅作分层。`
+    : `Frozen v2 cohort: ask ${(summary.protocol.ask_min * 100).toFixed(0)}–${(summary.protocol.ask_max * 100).toFixed(0)}c and edge >= ${(summary.protocol.edge_min * 100).toFixed(0)}%. CLV uses the last ask before decision+6h, capped at one hour before the predicted peak; executability is a stratum.`
 
   return (
     <div className="shrink-0 border-b border-cyan-500/20 bg-cyan-500/[0.045] px-3 py-1.5" title={title}>
@@ -413,6 +415,9 @@ function ForwardValidationStrip({
         <span className="tabular-nums text-neutral-200">{progress.samples}/{progress.target_samples}</span>
         <span className="h-1.5 w-20 overflow-hidden bg-neutral-800">
           <span className="block h-full bg-cyan-500" style={{ width: `${Math.max(0, Math.min(100, progress.completion_percent))}%` }} />
+        </span>
+        <span className="tabular-nums text-neutral-500">
+          {language === 'zh' ? '入组' : 'Enrolled'} {enrolled} · {language === 'zh' ? '可执行' : 'Executable'} {paperAllowed}
         </span>
         <span>{language === 'zh' ? '预计' : 'ETA'} {date || '--'}</span>
         <span className="tabular-nums">CLV {percent(clv.mean)} <span className="text-neutral-600">n={clv.n}</span></span>

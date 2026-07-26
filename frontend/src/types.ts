@@ -1864,6 +1864,7 @@ export interface ForwardValidationSummary {
   }
   progress: {
     samples: number
+    enrolled_candidates?: number
     target_samples: number
     completion_percent: number
     expected_evaluation_date: string
@@ -1883,6 +1884,18 @@ export interface ForwardValidationSummary {
   hypotheses: {
     'H-A': ForwardValidationMetric
     'H-B': ForwardValidationMetric
+  }
+  strata?: {
+    paper_allowed?: {
+      true?: {
+        enrolled: number
+        clv: ForwardValidationMetric
+      }
+      false?: {
+        enrolled: number
+        clv: ForwardValidationMetric
+      }
+    }
   }
   generated_at?: string
 }

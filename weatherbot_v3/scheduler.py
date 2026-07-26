@@ -12,7 +12,10 @@ from zoneinfo import ZoneInfo
 
 from .bias import DEFAULT_BIAS_TABLE, train_bias_table
 from .cli import run_daily_max_build, run_gamma_structured_sync, run_hourly_consensus_build, run_market_buckets_sync, run_model_timing_reprice, run_openmeteo_fetch, run_pws_fetch, run_signal_decisions_build, run_weathercom_fetch, run_wunderground_daily_rollup, run_wunderground_hourly_fetch
-from .clv import snapshot_candidate_preclose_quotes
+from .forward_validation import (
+    enroll_forward_validation_candidates,
+    snapshot_forward_validation_anchor_quotes,
+)
 from .china_weather import fetch_china_weather_city, supported_china_live_cities
 from .db import connect, log_data_fetch, utc_now
 from .env_utils import env_value
@@ -774,6 +777,9 @@ class WeatherBotScheduler:
         # own builders; `data-readiness` remains available as an explicit CLI.
         result["readiness_refreshed"] = False
         result["readiness_reason"] = "explicit_audit_only"
+        result["forward_validation_enrollment"] = await asyncio.to_thread(
+            enroll_forward_validation_candidates
+        )
         return result
 
     async def _run_china_live_poller(self) -> dict[str, Any]:
@@ -815,8 +821,8 @@ class WeatherBotScheduler:
             limit=10_000,
             dry_run=False,
         )
-        result["candidate_preclose_quotes"] = await asyncio.to_thread(
-            snapshot_candidate_preclose_quotes
+        result["forward_validation_anchor_quotes"] = await asyncio.to_thread(
+            snapshot_forward_validation_anchor_quotes
         )
         result["active_market_cities"] = len(targets_by_city)
         return result

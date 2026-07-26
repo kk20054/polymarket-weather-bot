@@ -657,7 +657,10 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "weatherbot_v3.scheduler.run_signal_decisions_build",
             return_value={"ok": True, "stored": 11, "results": [{"bucket_count": 11}]},
-        ) as decisions:
+        ) as decisions, patch(
+            "weatherbot_v3.scheduler.enroll_forward_validation_candidates",
+            return_value={"ok": True, "enrolled": 0},
+        ):
             result = await WeatherBotScheduler(city_concurrency=2)._run_derive_poller()
 
         self.assertTrue(result["ok"])
@@ -691,7 +694,10 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             "weatherbot_v3.scheduler._active_market_city_keys", return_value={"chicago", "atlanta"}
         ), patch(
             "weatherbot_v3.scheduler.refresh_cached_market_bucket_orderbooks", side_effect=fake_cached_refresh
-        ) as cached_refresh:
+        ) as cached_refresh, patch(
+            "weatherbot_v3.scheduler.snapshot_forward_validation_anchor_quotes",
+            return_value={"ok": True, "stored": 0},
+        ):
             result = await WeatherBotScheduler(city_concurrency=2)._run_gamma_orderbook_poller()
 
         self.assertTrue(result["ok"])

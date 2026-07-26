@@ -1028,6 +1028,52 @@ def _init_v3_db_uncached(path: Path | None = None) -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS forward_validation_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                enrollment_key TEXT UNIQUE,
+                protocol_id TEXT NOT NULL,
+                decision_id TEXT,
+                market_id TEXT,
+                token_id TEXT NOT NULL,
+                bucket_key TEXT,
+                city_key TEXT,
+                target_date TEXT,
+                lead_bucket TEXT,
+                decision_at TEXT NOT NULL,
+                enrolled_at TEXT NOT NULL,
+                entry_ask REAL NOT NULL,
+                model_probability REAL,
+                market_probability REAL,
+                edge REAL NOT NULL,
+                paper_allowed_at_entry INTEGER NOT NULL DEFAULT 0,
+                blocked_reason_primary TEXT,
+                peak_hour TEXT,
+                anchor_kind TEXT NOT NULL,
+                anchor_at TEXT NOT NULL,
+                quote_age_at_entry_seconds REAL,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS forward_validation_anchor_quotes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_key TEXT UNIQUE,
+                protocol_id TEXT NOT NULL,
+                enrollment_key TEXT NOT NULL,
+                decision_id TEXT,
+                token_id TEXT NOT NULL,
+                anchor_kind TEXT NOT NULL,
+                anchor_at TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                quote_timestamp TEXT,
+                best_bid REAL,
+                best_ask REAL,
+                status TEXT NOT NULL,
+                source TEXT,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS model_reprice_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_key TEXT UNIQUE,
@@ -1490,6 +1536,11 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_candidate_preclose_snapshot ON candidate_preclose_quotes(snapshot_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_candidate_preclose_token_time ON candidate_preclose_quotes(token_id, captured_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_candidate_preclose_market_close ON candidate_preclose_quotes(market_id, market_close_at)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_forward_validation_enrollment ON forward_validation_candidates(enrollment_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_forward_validation_protocol_decision ON forward_validation_candidates(protocol_id, decision_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_forward_validation_protocol_anchor ON forward_validation_candidates(protocol_id, anchor_at)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_forward_validation_anchor_snapshot ON forward_validation_anchor_quotes(snapshot_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_forward_validation_anchor_lookup ON forward_validation_anchor_quotes(protocol_id, enrollment_key)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_model_reprice_event_key ON model_reprice_events(event_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_model_reprice_city_date ON model_reprice_events(city_key, target_date)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_orders_idempotency ON paper_orders(idempotency_key)")
