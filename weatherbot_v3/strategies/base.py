@@ -90,12 +90,7 @@ class StrategyBase:
             hard_blocks.append("order_min_size_missing")
         if not bool(bucket.get("enable_order_book")):
             hard_blocks.append("orderbook_disabled")
-        if market_ask is None or not (0 < market_ask < 1):
-            hard_blocks.append("invalid_best_ask")
-        if market_bid is None or not (0 < market_bid < 1):
-            hard_blocks.append("invalid_best_bid")
-        if market_bid is not None and market_ask is not None and market_bid > market_ask:
-            hard_blocks.append("crossed_orderbook")
+        hard_blocks.extend(orderbook_execution_reasons(bucket, market_bid, market_ask))
         if market_probability is None:
             hard_blocks.append("market_probability_missing")
         if model_probability is None:
@@ -247,6 +242,11 @@ class StrategyBase:
                 "depth_basis": bucket.get("depth_basis") or "legacy_total_depth",
                 "quote_timestamp": bucket.get("quote_timestamp"),
                 "source": bucket.get("orderbook_source"),
+                "state": bucket.get("orderbook_state"),
+                "checked_at": bucket.get("orderbook_checked_at"),
+                "last_success_at": bucket.get("orderbook_last_success_at"),
+                "http_status": bucket.get("orderbook_http_status"),
+                "error": bucket.get("orderbook_error"),
                 "snapshot_key": bucket.get("orderbook_snapshot_key"),
             },
             "tick_size": bucket.get("tick_size"),
@@ -377,6 +377,31 @@ def spread_bps_value(spread: float | None, ask: float | None, bid: float | None)
     if spread is None or ask is None or ask <= 0:
         return None
     return max(0.0, float(spread) / float(ask) * 10_000.0)
+
+
+def orderbook_execution_reasons(
+    bucket: dict[str, Any],
+    bid: float | None,
+    ask: float | None,
+) -> list[str]:
+    """Classify missing quotes without conflating an empty side with fetch failure."""
+    state = str(bucket.get("orderbook_state") or "").strip().lower()
+    source = str(bucket.get("orderbook_source") or "").strip().lower()
+    reasons: list[str] = []
+    if state == "fetch_failed":
+        reasons.append("orderbook_fetch_failed")
+    elif state == "book_absent":
+        reasons.append("orderbook_absent")
+    else:
+        if ask is None or not (0 < ask < 1):
+            reasons.append("ask_side_absent" if state == "side_absent" else "invalid_best_ask")
+        if bid is None or not (0 < bid < 1):
+            reasons.append("bid_side_absent" if state == "side_absent" else "invalid_best_bid")
+    if source and source != "clob":
+        reasons.append("orderbook_not_clob")
+    if bid is not None and ask is not None and bid > ask:
+        reasons.append("crossed_orderbook")
+    return unique(reasons)
 
 
 def book_age_seconds_value(value: Any, *, as_of: Any = None) -> float | None:

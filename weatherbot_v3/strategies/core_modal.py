@@ -8,6 +8,7 @@ from .base import (
     StrategyBase,
     book_age_seconds_value,
     bucket_sort_key,
+    orderbook_execution_reasons,
     optional_float,
     spread_bps_value,
     unique,
@@ -234,12 +235,7 @@ class CoreModalStrategy(StrategyBase):
             reasons.append("order_min_size_missing")
         if not bool(bucket.get("enable_order_book")):
             reasons.append("orderbook_disabled")
-        if ask is None or not 0 < ask < 1:
-            reasons.append("invalid_best_ask")
-        if bid is None or not 0 < bid < 1:
-            reasons.append("invalid_best_bid")
-        if ask is not None and bid is not None and bid > ask:
-            reasons.append("crossed_orderbook")
+        reasons.extend(orderbook_execution_reasons(bucket, bid, ask))
         max_spread_bps = float(context.get("max_spread_bps") or 500.0)
         spread_bps = spread_bps_value(spread, ask, bid)
         if spread_bps is None or spread_bps > max_spread_bps + 1e-9:

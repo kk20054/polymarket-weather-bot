@@ -28,14 +28,17 @@
 - Bias training now covers every enabled registry city, including Wellington and Chongqing; their five available model families each have 6 independent settled pairs instead of 0.
 - Visual Crossing Pro is ready as an optional paper/history calibration provider with masked settings and payload validation; it cannot unlock live truth.
 - Focused strategy, settings, dynamic-weight and walk-forward calibration tests passed.
+- Live CLOB audit sampled 15 CoreModal Top-1 buckets across 15 cities: 15/15 requests returned HTTP 200 and genuinely had no YES bids, while DB and live asks both equaled 0.001.
+- Orderbook state now distinguishes `two_sided`, `side_absent`, `book_absent` and `fetch_failed`; failed fetches preserve quote timestamps and cannot masquerade as fresh quotes.
 
 ## Production Blockers
 - Executable paper orders still require valid bid/ask, acceptable spread, sufficient depth/order size, fresh quotes and positive edge. These thresholds were not lowered.
 - The latest runtime verification is blocked by stale `hourly_consensus`, decisions older than 30 minutes and one stale/future-dated orderbook candidate.
 - Current dominant decision reasons are invalid bid/ask, wide spread, stale book, exchange minimum above the risk budget, and genuine edge below the configured minimum.
+- CoreModal can still rank a physically eliminated bucket after the observed maximum has passed it; this is the next strategy defect to fix without lowering risk thresholds.
 - Sparse calibration increases uncertainty; it no longer suppresses paper discovery but still blocks live approval.
 - Several cities and model families do not yet have enough settled truth to support a live-trading claim.
 
 ## Next Task
-- Refresh hourly consensus, decisions and CLOB quotes, then rerun `tools/diagnose_signal_funnel.py` without changing risk thresholds.
+- Exclude physically eliminated buckets before CoreModal ranking, then refresh decisions and rerun the funnel without changing risk thresholds.
 - Next calibration upgrade: segment residuals by D+0/D+1/D+2 lead time and validate with walk-forward replay before changing the live path.

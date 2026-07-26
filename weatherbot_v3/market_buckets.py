@@ -10,7 +10,15 @@ from typing import Any
 
 import requests
 
-from .db import connect, init_v3_db, insert_orderbooks, log_data_fetch, upsert_market_buckets
+from .db import (
+    connect,
+    init_v3_db,
+    insert_orderbooks,
+    log_data_fetch,
+    mark_market_bucket_orderbook_fetch_state,
+    upsert_market_buckets,
+    utc_now,
+)
 from .polymarket import quote_from_market_payload
 from .stations import list_stations
 
@@ -172,6 +180,16 @@ def refresh_cached_market_bucket_orderbooks(
     try:
         books = client.get_orderbooks(token_ids)
     except Exception as exc:
+        state_updates = 0
+        if not dry_run:
+            state_updates = _sqlite_write_with_retry(
+                mark_market_bucket_orderbook_fetch_state,
+                token_ids,
+                path=path,
+                state="fetch_failed",
+                http_status=_http_status_from_exception(exc),
+                error=str(exc)[:1000],
+            )
         return {
             "ok": False,
             "refresh_version": CACHED_ORDERBOOK_REFRESH_VERSION,
@@ -179,6 +197,7 @@ def refresh_cached_market_bucket_orderbooks(
             "tokens_requested": len(token_ids),
             "quotes_refreshed": 0,
             "quotes_missing": len(token_ids),
+            "orderbook_state_updates": state_updates,
             "error": str(exc),
             "elapsed_ms": round((time.perf_counter() - started) * 1000),
         }
@@ -233,6 +252,16 @@ def refresh_cached_market_bucket_orderbooks(
                 orderbook_rows[start:start + write_batch_size],
                 path=path,
             )
+        missing_token_ids = [str(item.get("token_id") or "") for item in missing]
+        if missing_token_ids:
+            _sqlite_write_with_retry(
+                mark_market_bucket_orderbook_fetch_state,
+                missing_token_ids,
+                path=path,
+                state="fetch_failed",
+                http_status=200,
+                error="token_missing_from_clob_batch_response",
+            )
     return {
         "ok": bool(refreshed_rows) and not missing,
         "refresh_version": CACHED_ORDERBOOK_REFRESH_VERSION,
@@ -248,15 +277,24 @@ def refresh_cached_market_bucket_orderbooks(
     }
 
 
-def _sqlite_write_with_retry(write_fn, payload, *, path=None, attempts: int = 4):
+def _sqlite_write_with_retry(write_fn, payload, *, path=None, attempts: int = 4, **kwargs):
     """Retry a short SQLite batch when another collector owns the writer lock."""
     for attempt in range(max(1, attempts)):
         try:
-            return write_fn(payload, path=path)
+            return write_fn(payload, path=path, **kwargs)
         except sqlite3.OperationalError as exc:
             if "locked" not in str(exc).lower() or attempt >= attempts - 1:
                 raise
             time.sleep(0.2 * (2 ** attempt))
+
+
+def _http_status_from_exception(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    try:
+        return int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _cached_market_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -533,6 +571,27 @@ def market_bucket_from_payload(
     no_token_id = str(payload.get("no_token_id") or (tokens[1] if len(tokens) > 1 else ""))
     outcome_name = _outcome_name(outcomes)
     has_clob_book = quote.book_source == "clob"
+    orderbook_error = str(payload.get("orderbook_error") or "")
+    if orderbook_error or quote.book_source == "gamma_fallback":
+        orderbook_state = "fetch_failed"
+        orderbook_checked_at = utc_now()
+        orderbook_last_success_at = ""
+        orderbook_http_status = payload.get("orderbook_http_status")
+    elif has_clob_book:
+        orderbook_checked_at = utc_now()
+        orderbook_last_success_at = orderbook_checked_at
+        orderbook_http_status = int(payload.get("orderbook_http_status") or 200)
+        if quote.bids and quote.asks:
+            orderbook_state = "two_sided"
+        elif quote.bids or quote.asks:
+            orderbook_state = "side_absent"
+        else:
+            orderbook_state = "book_absent"
+    else:
+        orderbook_state = ""
+        orderbook_checked_at = ""
+        orderbook_last_success_at = ""
+        orderbook_http_status = None
     best_bid = quote.best_bid if quote.best_bid > 0 else (None if has_clob_book else _num(payload.get("bestBid")))
     best_ask = quote.best_ask if quote.best_ask > 0 else (None if has_clob_book else _num(payload.get("bestAsk")))
     price = best_ask or (_num(prices[0]) if prices else None)
@@ -574,6 +633,11 @@ def market_bucket_from_payload(
         "quote_timestamp": quote.quote_timestamp or str(payload.get("quote_timestamp") or payload.get("timestamp") or ""),
         "orderbook_snapshot_key": str(payload.get("snapshot_key") or ""),
         "orderbook_source": quote.book_source,
+        "orderbook_state": orderbook_state,
+        "orderbook_checked_at": orderbook_checked_at,
+        "orderbook_last_success_at": orderbook_last_success_at,
+        "orderbook_http_status": orderbook_http_status,
+        "orderbook_error": orderbook_error,
         "bid_depth": round(sum(level["size"] for level in quote.bids), 6) if quote.bids else _num(payload.get("bid_depth")),
         "ask_depth": round(sum(level["size"] for level in quote.asks), 6) if quote.asks else _num(payload.get("ask_depth")),
         "source_url": str(payload.get("source_url") or ""),

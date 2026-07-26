@@ -124,6 +124,7 @@ def _init_v3_db_uncached(path: Path | None = None) -> None:
                 tick_size REAL,
                 enable_order_book INTEGER,
                 snapshot_type TEXT,
+                book_state TEXT,
                 quote_timestamp TEXT,
                 book_hash TEXT,
                 bids_json TEXT,
@@ -724,6 +725,11 @@ def _init_v3_db_uncached(path: Path | None = None) -> None:
                 quote_timestamp TEXT,
                 orderbook_snapshot_key TEXT,
                 orderbook_source TEXT,
+                orderbook_state TEXT,
+                orderbook_checked_at TEXT,
+                orderbook_last_success_at TEXT,
+                orderbook_http_status INTEGER,
+                orderbook_error TEXT,
                 bid_depth REAL,
                 ask_depth REAL,
                 source_url TEXT,
@@ -1206,6 +1212,11 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             "quote_timestamp": "TEXT",
             "orderbook_snapshot_key": "TEXT",
             "orderbook_source": "TEXT",
+            "orderbook_state": "TEXT",
+            "orderbook_checked_at": "TEXT",
+            "orderbook_last_success_at": "TEXT",
+            "orderbook_http_status": "INTEGER",
+            "orderbook_error": "TEXT",
             "bid_depth": "REAL",
             "ask_depth": "REAL",
             "source_url": "TEXT",
@@ -1217,6 +1228,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         "orderbooks": {
             "snapshot_key": "TEXT",
             "snapshot_type": "TEXT",
+            "book_state": "TEXT",
             "quote_timestamp": "TEXT",
             "book_hash": "TEXT",
             "bids_json": "TEXT",
@@ -1618,16 +1630,41 @@ def insert_orderbook(
         init_v3_db(path)
     bids = _levels(payload.get("bids"))
     asks = _levels(payload.get("asks"))
-    has_clob_book = str(payload.get("snapshot_type") or "").lower() == "clob" or "bids" in payload or "asks" in payload
-    best_bid = max(
-        (level["price"] for level in bids),
-        default=0.0 if has_clob_book else _num(payload.get("bestBid"), _num(payload.get("best_bid"), 0.0)),
+    snapshot_type = str(payload.get("snapshot_type") or ("clob" if bids or asks else "gamma"))
+    has_clob_book = snapshot_type.lower() == "clob" or "bids" in payload or "asks" in payload
+    explicit_state = str(payload.get("book_state") or "")
+    fetch_failed = (
+        explicit_state == "fetch_failed"
+        or bool(payload.get("orderbook_error"))
+        or snapshot_type.lower() == "gamma_fallback"
     )
-    best_ask = min(
-        (level["price"] for level in asks),
-        default=0.0 if has_clob_book else _num(payload.get("bestAsk"), _num(payload.get("best_ask"), 0.0)),
-    )
-    spread = _num(payload.get("spread"), best_ask - best_bid if best_ask and best_bid else 0.0)
+    if fetch_failed:
+        book_state = "fetch_failed"
+        best_bid = None
+        best_ask = None
+        spread = None
+    else:
+        if has_clob_book:
+            best_bid = max((level["price"] for level in bids), default=None)
+            best_ask = min((level["price"] for level in asks), default=None)
+        else:
+            best_bid = _nullable_num(payload.get("bestBid", payload.get("best_bid")))
+            best_ask = _nullable_num(payload.get("bestAsk", payload.get("best_ask")))
+        if explicit_state:
+            book_state = explicit_state
+        elif has_clob_book and bids and asks:
+            book_state = "two_sided"
+        elif has_clob_book and (bids or asks):
+            book_state = "side_absent"
+        elif has_clob_book:
+            book_state = "book_absent"
+        else:
+            book_state = "indicative_only"
+        spread = (
+            round(best_ask - best_bid, 6)
+            if best_ask is not None and best_bid is not None
+            else None
+        )
     raw_response_hash = str(payload.get("raw_response_hash") or _json_hash(payload))
     snapshot_key = str(
         payload.get("snapshot_key")
@@ -1640,13 +1677,14 @@ def insert_orderbook(
             INSERT INTO orderbooks (
                 snapshot_key, market_id, yes_token_id, best_bid, best_ask, spread,
                 volume, order_min_size, tick_size, enable_order_book, snapshot_type,
-                quote_timestamp, book_hash, bids_json, asks_json, bid_depth,
+                book_state, quote_timestamp, book_hash, bids_json, asks_json, bid_depth,
                 ask_depth, source_url, raw_response_hash, raw_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(snapshot_key) DO UPDATE SET
                 best_bid=excluded.best_bid,
                 best_ask=excluded.best_ask,
                 spread=excluded.spread,
+                book_state=excluded.book_state,
                 bids_json=excluded.bids_json,
                 asks_json=excluded.asks_json,
                 bid_depth=excluded.bid_depth,
@@ -1665,7 +1703,8 @@ def insert_orderbook(
                 _num(payload.get("orderMinSize"), _num(payload.get("order_min_size"), _num(payload.get("min_order_size"), 0.0))),
                 _num(payload.get("orderPriceMinTickSize"), _num(payload.get("tick_size"), 0.0)),
                 1 if payload.get("enableOrderBook", payload.get("enable_order_book", True)) else 0,
-                str(payload.get("snapshot_type") or ("clob" if bids or asks else "gamma")),
+                snapshot_type,
+                book_state,
                 str(payload.get("quote_timestamp") or payload.get("timestamp") or ""),
                 str(payload.get("hash") or ""),
                 dump_json(bids),
@@ -1751,6 +1790,15 @@ def upsert_market_bucket(
         "quote_timestamp": str(bucket.get("quote_timestamp") or ""),
         "orderbook_snapshot_key": str(bucket.get("orderbook_snapshot_key") or ""),
         "orderbook_source": str(bucket.get("orderbook_source") or ""),
+        "orderbook_state": str(bucket.get("orderbook_state") or ""),
+        "orderbook_checked_at": str(bucket.get("orderbook_checked_at") or ""),
+        "orderbook_last_success_at": str(bucket.get("orderbook_last_success_at") or ""),
+        "orderbook_http_status": (
+            int(bucket["orderbook_http_status"])
+            if bucket.get("orderbook_http_status") is not None
+            else None
+        ),
+        "orderbook_error": str(bucket.get("orderbook_error") or ""),
         "bid_depth": _nullable_num(bucket.get("bid_depth")),
         "ask_depth": _nullable_num(bucket.get("ask_depth")),
         "source_url": str(bucket.get("source_url") or ""),
@@ -1773,7 +1821,9 @@ def upsert_market_bucket(
                 no_token_id, token_id, token_side, outcome_index, price, best_bid,
                 best_ask, spread, volume, liquidity, order_min_size, tick_size,
                 neg_risk, enable_order_book, quote_timestamp, orderbook_snapshot_key,
-                orderbook_source, bid_depth, ask_depth, source_url, raw_response_hash,
+                orderbook_source, orderbook_state, orderbook_checked_at,
+                orderbook_last_success_at, orderbook_http_status, orderbook_error,
+                bid_depth, ask_depth, source_url, raw_response_hash,
                 strict_match_status, strict_match_reasons, parser_version, raw_json,
                 created_at, updated_at
             ) VALUES (
@@ -1783,7 +1833,9 @@ def upsert_market_bucket(
                 :no_token_id, :token_id, :token_side, :outcome_index, :price, :best_bid,
                 :best_ask, :spread, :volume, :liquidity, :order_min_size, :tick_size,
                 :neg_risk, :enable_order_book, :quote_timestamp, :orderbook_snapshot_key,
-                :orderbook_source, :bid_depth, :ask_depth, :source_url, :raw_response_hash,
+                :orderbook_source, :orderbook_state, :orderbook_checked_at,
+                :orderbook_last_success_at, :orderbook_http_status, :orderbook_error,
+                :bid_depth, :ask_depth, :source_url, :raw_response_hash,
                 :strict_match_status, :strict_match_reasons, :parser_version, :raw_json,
                 :created_at, :updated_at
             )
@@ -1820,6 +1872,15 @@ def upsert_market_bucket(
                 quote_timestamp=excluded.quote_timestamp,
                 orderbook_snapshot_key=excluded.orderbook_snapshot_key,
                 orderbook_source=excluded.orderbook_source,
+                orderbook_state=COALESCE(NULLIF(excluded.orderbook_state, ''), market_buckets.orderbook_state),
+                orderbook_checked_at=COALESCE(NULLIF(excluded.orderbook_checked_at, ''), market_buckets.orderbook_checked_at),
+                orderbook_last_success_at=COALESCE(NULLIF(excluded.orderbook_last_success_at, ''), market_buckets.orderbook_last_success_at),
+                orderbook_http_status=COALESCE(excluded.orderbook_http_status, market_buckets.orderbook_http_status),
+                orderbook_error=CASE
+                    WHEN excluded.orderbook_state IN ('two_sided', 'side_absent', 'book_absent') THEN ''
+                    WHEN excluded.orderbook_error <> '' THEN excluded.orderbook_error
+                    ELSE market_buckets.orderbook_error
+                END,
                 bid_depth=excluded.bid_depth,
                 ask_depth=excluded.ask_depth,
                 source_url=excluded.source_url,
@@ -1842,6 +1903,56 @@ def upsert_market_buckets(buckets: list[dict[str, Any]], path: Path | None = Non
     init_v3_db(path)
     with connect(path) as conn:
         return [upsert_market_bucket(bucket, path, _connection=conn) for bucket in buckets]
+
+
+def mark_market_bucket_orderbook_fetch_state(
+    token_ids: list[str],
+    *,
+    state: str,
+    checked_at: str | None = None,
+    last_success_at: str | None = None,
+    http_status: int | None = None,
+    error: str = "",
+    path: Path | None = None,
+) -> int:
+    """Record a CLOB fetch outcome without overwriting the last known quote."""
+    normalized_tokens = list(dict.fromkeys(str(token_id) for token_id in token_ids if str(token_id)))
+    if not normalized_tokens:
+        return 0
+    allowed_states = {"two_sided", "side_absent", "book_absent", "fetch_failed"}
+    if state not in allowed_states:
+        raise ValueError(f"unsupported_orderbook_state:{state}")
+    init_v3_db(path)
+    attempted_at = checked_at or utc_now()
+    updated = 0
+    with connect(path) as conn:
+        for token_id in normalized_tokens:
+            cursor = conn.execute(
+                """
+                UPDATE market_buckets
+                SET orderbook_state = ?,
+                    orderbook_checked_at = ?,
+                    orderbook_last_success_at = CASE
+                        WHEN ? IS NULL OR ? = '' THEN orderbook_last_success_at
+                        ELSE ?
+                    END,
+                    orderbook_http_status = ?,
+                    orderbook_error = ?
+                WHERE yes_token_id = ?
+                """,
+                (
+                    state,
+                    attempted_at,
+                    last_success_at,
+                    last_success_at,
+                    last_success_at,
+                    http_status,
+                    error,
+                    token_id,
+                ),
+            )
+            updated += int(cursor.rowcount or 0)
+    return updated
 
 
 def list_market_buckets(
