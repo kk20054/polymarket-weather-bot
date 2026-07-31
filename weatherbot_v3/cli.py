@@ -17,6 +17,7 @@ from .notifier import FeishuNotifier
 from .qualification import build_data_readiness, persist_data_readiness
 from .source_health import build_source_health_matrix
 from .stations import list_stations, set_station_enabled, sync_station_registry
+from .storage_maintenance import archive_redundant_blobs, restore_blob_archive, storage_audit
 from .validation import build_production_validation_report
 from .verification_agents import build_project_verification_report, project_verification_markdown
 
@@ -1546,6 +1547,9 @@ def main() -> None:
             "migrate",
             "summary",
             "source-health",
+            "storage-audit",
+            "storage-archive",
+            "storage-restore",
             "project-verify",
             "state-print",
             "notify-daily",
@@ -1622,8 +1626,10 @@ def main() -> None:
     parser.add_argument("--amount", type=float, default=None, help="Paper/live order amount where supported")
     parser.add_argument("--reviewer", default="local-operator", help="Manual verifier name")
     parser.add_argument("--note", default="", help="Manual verification note")
-    parser.add_argument("--archive-path", default="", help="Historical forecast archive JSON/JSONL path")
+    parser.add_argument("--archive-path", default="", help="Forecast archive path or storage archive/manifest path")
     parser.add_argument("--output-path", default="", help="Output path for generated JSONL/manifest files")
+    parser.add_argument("--before-days", type=int, default=30, help="Archive duplicate raw payloads older than this many days")
+    parser.add_argument("--batch-size", type=int, default=10000, help="Storage archive batch size, bounded to 100-50000")
     parser.add_argument("--sources", default="ecmwf,gfs_ensemble", help="Comma-separated forecast archive sources")
     parser.add_argument("--unverify", action="store_true", help="Clear manual verification instead of setting it")
     parser.add_argument("--apply", action="store_true", help="Apply a bulk write; without it bulk commands are dry-run")
@@ -1672,6 +1678,23 @@ def main() -> None:
         print(json.dumps(dashboard_summary(), ensure_ascii=False, indent=2))
     elif args.command == "source-health":
         print(json.dumps(build_source_health_matrix(), ensure_ascii=False, indent=2))
+    elif args.command == "storage-audit":
+        print(json.dumps(storage_audit(before_days=args.before_days), ensure_ascii=False, indent=2))
+    elif args.command == "storage-archive":
+        print(json.dumps(archive_redundant_blobs(
+            archive_root=Path(args.archive_path) if args.archive_path else None,
+            before_days=args.before_days,
+            batch_size=args.batch_size,
+            apply=args.apply,
+        ), ensure_ascii=False, indent=2))
+    elif args.command == "storage-restore":
+        if not args.archive_path:
+            raise SystemExit("--archive-path must point to MANIFEST.json")
+        if not args.apply:
+            raise SystemExit("storage-restore requires --apply")
+        print(json.dumps(restore_blob_archive(
+            manifest_path=Path(args.archive_path),
+        ), ensure_ascii=False, indent=2))
     elif args.command == "project-verify":
         report = build_project_verification_report(
             probe_runtime=not args.skip_runtime_probe,
