@@ -265,6 +265,47 @@ Invoke-RestMethod http://127.0.0.1:8765/api/source-health
 Invoke-RestMethod -Method Post http://127.0.0.1:8765/api/scheduler/stop
 ```
 
+## 公网访问（前后端分离）
+
+私有前端地址：<https://weatherbot-polymarket-v1.kl28398052.chatgpt.site>。使用唯一管理员邮箱登录后访问。
+
+- 前端由 Sites 托管；SQLite、采集器、策略和执行工作台仍运行在本机。
+- 本机在线时，Sites Worker 通过受保护的 Cloudflare Tunnel 读取实时 API。
+- 本机离线时，只读请求回退到最近一次不可变快照；写操作明确返回本地端离线，不会伪造成功。
+- 公网写操作仅开放调度器、受控刷新和 paper 操作；密钥配置、legacy、canary 与 live 路径仍只能在本机访问。
+- 当前使用 Quick Tunnel 做联调，电脑或 tunnel 重启后 URL 会变化。长期使用前应换成命名 Tunnel 和固定域名。
+
+浏览器永远不会收到 `WEATHERBOT_ORIGIN_TOKEN`。该令牌只保存在本机 `.env` 与 Sites 的隐藏运行时变量中。
+
+## 存储治理
+
+生产数据库位于 `D:\WeatherBot\data\weatherbot_v3.db`。先做快速只读估算：
+
+```powershell
+.\.venv\Scripts\python.exe -m weatherbot_v3.cli storage-audit --before-days 30
+```
+
+预演归档（默认不改数据库）：
+
+```powershell
+.\.venv\Scripts\python.exe -m weatherbot_v3.cli storage-archive --before-days 30
+```
+
+真正执行前必须停止调度器和后端并另做数据库备份。`--apply` 会先把旧的重复 `raw_json` 写入带逐行校验和的 gzip 归档，归档完成后才把对应数据库字段置空；结构化盘口、逐小时成员、价格历史和预测结果不会删除：
+
+```powershell
+.\.venv\Scripts\python.exe -m weatherbot_v3.cli storage-archive --before-days 30 --apply
+```
+
+恢复归档：
+
+```powershell
+.\.venv\Scripts\python.exe -m weatherbot_v3.cli storage-restore `
+  --archive-path D:\WeatherBot\data\archive\storage-maintenance\<run>\MANIFEST.json --apply
+```
+
+清空字段不会立即缩小 SQLite 文件；验证归档后还要在停机窗口单独运行 SQLite 压缩。不要在调度器运行时执行 VACUUM。
+
 ## 日常操作
 
 ### 左侧城市栏

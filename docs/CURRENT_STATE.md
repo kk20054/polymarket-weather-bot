@@ -1,28 +1,28 @@
 # WeatherBot Current State
 
 ## Current Layer
-- Date: 2026-07-27. Phase 3/6: frozen forward observation.
-- Backend and scheduler are running against `D:\WeatherBot\data\weatherbot_v3.db`.
-- Paper validation was stopped at `2026-07-26T17:58:32Z`; the v2 statistics cohort continues to observe without placing orders.
-- `LIVE_TRADING=false` by default; profitability is not proven.
+- Date: 2026-08-01. Phase 3/6: frozen forward observation and operator-access hardening.
+- Backend, frontend, and the 12-poller scheduler are running against `D:\WeatherBot\data\weatherbot_v3.db`.
+- `LIVE_TRADING=false`; no profitability claim has been established.
+- Frozen v2 validation remains unchanged: model-side `0.20<=ask<0.40`, `edge>=8%`, target `N=338`.
 
 ## Latest Evidence
-- Production fix commit `7c47df4` is deployed.
-- Preregistration v1 is void: 88.5% of pre-close quotes were already at the two probability endpoints, so its "CLV" had degenerated into unit P&L.
-- Frozen v2 uses `decision + 6h`, capped at predicted peak minus 1h. Historical availability is 76.2%, ask-change SD is 0.2216, and the fixed target is N=338.
-- The v2 primary cohort is model-side `0.20<=ask<0.40` and `edge>=8%`; `paper_allowed` is an immutable analysis stratum, not an enrollment gate.
-- Historical first-candidate rate is 28.17/day model-side versus 0.50/day gate-pass. Expected model-side evaluation date is 2026-08-12; a gate-pass-only route would extend to about 2028-12-30.
-- Runtime has enrolled 16 immutable v2 candidates: 0 paper-allowed and 16 blocked.
-- The first valid anchor is São Paulo 2026-07-26: entry ask `0.38`, anchor ask `0.34`, observed CLV `-0.04`. This is one observation, not an evaluation.
-- Current blocker counts are `d0_outside_peak_decision_window=12`, `core_no_qualified_top_bucket=3`, and `spread_too_wide=1`.
-- Targeted forward-validation/scheduler tests passed (5/5), the frontend build passed, and no risk threshold or model weight changed.
+- Sites version 2 is deployed privately at `https://weatherbot-polymarket-v1.kl28398052.chatgpt.site`.
+- Hosted reads use a protected Cloudflare origin tunnel while the laptop is online and fall back to the immutable snapshot when it is offline.
+- Hosted writes are owner-only and allowlisted. API settings, live/canary execution, secrets, and legacy actions remain local-only.
+- The tunnel origin requires `WEATHERBOT_ORIGIN_TOKEN`; localhost remains usable without the token.
+- Local `/api/healthz` is immediate, `/api/dashboard` returned 200 in 8.8s with a 1.09MB payload, and `/api/source-health` exceeded 30s.
+- The production SQLite database is 38.62GB. A fast audit estimates that duplicate raw payloads older than 30 days account for about 0.94GB.
+- `storage-archive` now supports checksum-verified gzip archival before clearing duplicate `raw_json`; `storage-restore` reverses it.
+- No storage archive or VACUUM has been applied to the production database in this turn.
 
 ## Production Blockers
-- CLV N is only 1 versus the frozen target N=338.
-- The current executable stratum remains empty; this is tracked separately and does not suppress the model-quality cohort.
-- The selected anchor is outcome-independent but was earlier than the realized daily peak in only 61.0% of historical auditable cases; this frozen limitation must remain visible in the final interpretation.
+- The current Cloudflare Quick Tunnel URL is temporary and changes after restart; stable remote operation needs a named tunnel/domain.
+- Dashboard/source-health aggregation is still too slow for a consistently responsive public operator experience.
+- Forward validation has not reached the frozen `N=338` stop rule; strategy quality and profitability remain unproven.
 
 ## Next Task
-- Pure observation only until the fixed checkpoint at `2026-07-28T15:30:00Z`.
-- At the checkpoint, report model-side candidates, ask/lead strata, `paper_allowed` count, rate change, and all gate blockers.
-- Stop at N=338 and evaluate once. Do not edit v2, create v3, or reopen historical model-selection/P&L loops.
+- Sign in with the owner account and verify the deployed private Sites dashboard in live and laptop-offline modes.
+- Replace Quick Tunnel with a named Cloudflare Tunnel before treating remote writes as production-stable.
+- Schedule downtime, run `storage-archive --apply`, verify archives, then run an offline SQLite compaction separately.
+- Profile and cache `/api/source-health` and reduce the 1.09MB dashboard payload without changing strategy semantics.
