@@ -6,6 +6,7 @@ import json
 import asyncio
 import math
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -17,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -85,6 +86,7 @@ from weatherbot_v3.strategy_profiles import (
     list_strategy_profile_revisions,
     validate_paper_strategy_selection,
 )
+from weatherbot_v3.env_utils import env_value
 
 
 ROOT = Path(__file__).resolve().parent
@@ -130,6 +132,42 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_LOCAL_REQUEST_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver"}
+
+
+def _normalized_request_host(host: str | None) -> str:
+    value = str(host or "").strip().lower()
+    if value.startswith("[") and "]" in value:
+        return value[1:value.index("]")]
+    return value.split(":", 1)[0]
+
+
+def _origin_request_allowed(host: str | None, supplied_token: str | None) -> tuple[bool, str]:
+    if _normalized_request_host(host) in _LOCAL_REQUEST_HOSTS:
+        return True, "local"
+    expected_token = env_value("WEATHERBOT_ORIGIN_TOKEN")
+    if not expected_token:
+        return False, "remote_origin_disabled"
+    if not supplied_token or not secrets.compare_digest(str(supplied_token), expected_token):
+        return False, "invalid_origin_token"
+    return True, "remote_token"
+
+
+@app.middleware("http")
+async def require_remote_origin_token(request: Request, call_next):
+    allowed, reason = _origin_request_allowed(
+        request.headers.get("host"),
+        request.headers.get("x-weatherbot-origin-token"),
+    )
+    if not allowed:
+        status_code = 503 if reason == "remote_origin_disabled" else 401
+        return JSONResponse(
+            status_code=status_code,
+            content={"ok": False, "reason": reason},
+            headers={"cache-control": "no-store"},
+        )
+    return await call_next(request)
 
 
 class StatusUpdate(BaseModel):
@@ -271,7 +309,11 @@ class ApiSettingTestRequest(BaseModel):
 
 def _require_local_developer_request(request: Request, confirmed: bool) -> None:
     client_host = str(request.client.host if request.client else "")
-    if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+    request_host = _normalized_request_host(request.headers.get("host"))
+    if (
+        client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}
+        or request_host not in _LOCAL_REQUEST_HOSTS
+    ):
         raise HTTPException(status_code=403, detail={"reason": "developer_write_requires_loopback"})
     if not confirmed:
         raise HTTPException(status_code=409, detail={"reason": "developer_write_requires_confirmation"})
@@ -4612,6 +4654,16 @@ async def index():
     return FileResponse(DASHBOARD_DIR / "index.html")
 
 
+@app.get("/api/healthz")
+async def healthz():
+    return {
+        "ok": True,
+        "service": "weatherbot-dashboard",
+        "version": app.version,
+        "live_trading": False,
+    }
+
+
 @app.get("/api/dashboard")
 async def dashboard(city: str = ""):
     # HTTP reads may refresh the local presentation cache even when collector
@@ -5422,6 +5474,13 @@ async def signal_decision(signal_id: int):
 
 @app.websocket("/ws/events")
 async def websocket_events(websocket: WebSocket):
+    allowed, _reason = _origin_request_allowed(
+        websocket.headers.get("host"),
+        websocket.headers.get("x-weatherbot-origin-token"),
+    )
+    if not allowed:
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     last_event_id = 0
     log_pos = BOT_LOG_PATH.stat().st_size if BOT_LOG_PATH.exists() else 0

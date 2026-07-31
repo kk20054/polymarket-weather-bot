@@ -1,7 +1,7 @@
 param(
   [string]$HostAddress = "127.0.0.1",
   [int]$Port = 8765,
-  [int]$ReadyTimeoutSeconds = 120,
+  [int]$ReadyTimeoutSeconds = 300,
   [switch]$NoStart
 )
 
@@ -59,7 +59,7 @@ $Deadline = (Get-Date).AddSeconds($ReadyTimeoutSeconds)
 do {
   Start-Sleep -Milliseconds 500
   try {
-    $Health = Invoke-RestMethod -Uri "http://$HostAddress`:$Port/api/scheduler/status" -TimeoutSec 5
+    $Health = Invoke-RestMethod -Uri "http://$HostAddress`:$Port/api/healthz" -TimeoutSec 5
   } catch {
     $Health = $null
   }
