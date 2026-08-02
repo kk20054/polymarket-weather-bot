@@ -15,8 +15,9 @@
 - Ordinary dashboard reads are now lightweight by default; the full rebuild runs only when `WEATHERBOT_DASHBOARD_AUTO_BUILD=true` is explicitly set.
 - Initial 51-city indexing improved from more than 44s to 2.57s. Selected-city dashboard reads measured 2.64s cold and 1.21s warm with an approximately 186KB response.
 - `/api/source-health` improved from about 74s to 2.45s cold and 0.07s cached while retaining all 49 source-health rows.
-- The production SQLite database is 45.67GB. A fast audit estimates that duplicate raw payloads older than 30 days account for about 0.94GB.
-- `storage-archive` now supports checksum-verified gzip archival before clearing duplicate `raw_json`; `storage-restore` reverses it.
+- The production SQLite database is 45.67GB. An exact read-only scan found 911MB of duplicate `raw_json` older than 30 days; 14-day and 7-day estimates are about 5.7GB and 20.2GB respectively.
+- `storage-archive` now checkpoints a checksum-verified recovery manifest before every database clear, survives interrupted batches, and restores archived `raw_json` without loading whole archives into memory.
+- Six obsolete SQLite backups occupy 24.3GB uncompressed on NTFS. Transparent backup compression is the safest first physical-space reduction; production SQLite uses `auto_vacuum=0`, so raw-blob archival alone will not shrink its 45.67GB file.
 - No storage archive or VACUUM has been applied to the production database in this turn.
 - A prior uninterrupted scheduler run lasted about 41 hours. Core polling continued, but network failures and occasional `database is locked` errors were observed; derive concurrency is now capped at 2 and transient SQLite locks receive two bounded retries.
 - The post-fix smoke cycle completed derive for 49/49 enabled cities with no lock failure, refreshed 1,078/1,078 order books, and completed one paper execution pass with zero fresh executable candidates.
@@ -34,4 +35,4 @@
 ## Next Task
 - Keep collecting the frozen forward cohort without changing model or risk thresholds; use CLV/Brier/P&L rather than raw signal count as the go/no-go evidence.
 - Replace the Quick Tunnel with a named tunnel or cloud backend before stable remote operation; keep the lightweight dashboard path as the default.
-- Schedule downtime before applying verified storage archival and any offline SQLite compaction.
+- During the next approved downtime, transparently compress old backup files first; separately choose a 7/14/30-day raw-payload retention window before archival and offline SQLite compaction.

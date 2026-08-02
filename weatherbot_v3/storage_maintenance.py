@@ -19,6 +19,25 @@ ARCHIVABLE_BLOBS = {
 }
 
 
+def _sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _persist_manifest(path: Path, manifest: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    payload = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    with temp_path.open("wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temp_path.replace(path)
+
+
 def _cutoff_iso(before_days: int) -> str:
     days = max(1, int(before_days))
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -124,7 +143,7 @@ def _write_archive_batch(
             }, ensure_ascii=False, separators=(",", ":")) + "\n")
     with temp_path.open("r+b") as handle:
         os.fsync(handle.fileno())
-    compressed_sha = hashlib.sha256(temp_path.read_bytes()).hexdigest()
+    compressed_sha = _sha256_file(temp_path)
     temp_path.replace(final_path)
     return {
         "path": str(final_path),
@@ -134,6 +153,21 @@ def _write_archive_batch(
         "compressed_bytes": final_path.stat().st_size,
         "compressed_sha256": compressed_sha,
     }
+
+
+def _clear_archived_rows(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    column: str,
+    ids: list[tuple[int]],
+) -> int:
+    before_changes = conn.total_changes
+    conn.executemany(
+        f"UPDATE {table} SET {column} = NULL WHERE id = ? AND {column} IS NOT NULL",
+        ids,
+    )
+    return conn.total_changes - before_changes
 
 
 def archive_redundant_blobs(
@@ -155,56 +189,80 @@ def archive_redundant_blobs(
     root = Path(archive_root or path.parent / "archive" / "storage-maintenance").resolve()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = root / run_id
+    manifest_path = run_dir / "MANIFEST.json"
     manifest: dict[str, Any] = {
         "version": 1,
+        "status": "in_progress",
         "database": str(path),
         "cutoff": cutoff,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "tables": {},
         "batches": [],
     }
+    _persist_manifest(manifest_path, manifest)
 
-    with connect(path) as conn:
-        for table, column in ARCHIVABLE_BLOBS.items():
-            archived_rows = 0
-            archived_bytes = 0
-            cutoff_id = _cutoff_max_id(conn, table, cutoff)
-            while True:
-                rows = conn.execute(
-                    f"SELECT id, created_at, {column} FROM {table} "
-                    f"WHERE id <= ? AND {column} IS NOT NULL AND created_at < ? ORDER BY id LIMIT ?",
-                    (cutoff_id, cutoff, bounded_batch),
-                ).fetchall()
-                if not rows:
-                    break
-                batch = _write_archive_batch(
-                    archive_dir=run_dir / table,
-                    table=table,
-                    column=column,
-                    rows=rows,
-                )
-                ids = [(int(row["id"]),) for row in rows]
-                before_changes = conn.total_changes
-                conn.executemany(
-                    f"UPDATE {table} SET {column} = NULL WHERE id = ? AND {column} IS NOT NULL",
-                    ids,
-                )
-                changed = conn.total_changes - before_changes
-                if changed != len(rows):
-                    conn.rollback()
-                    raise RuntimeError(f"archive_update_count_mismatch:{table}:{changed}:{len(rows)}")
-                conn.commit()
-                archived_rows += len(rows)
-                archived_bytes += sum(len(str(row[column]).encode("utf-8")) for row in rows)
-                manifest["batches"].append(batch)
-            manifest["tables"][table] = {
-                "archived_rows": archived_rows,
-                "archived_uncompressed_bytes": archived_bytes,
-            }
+    try:
+        with connect(path) as conn:
+            for table, column in ARCHIVABLE_BLOBS.items():
+                archived_rows = 0
+                archived_bytes = 0
+                cutoff_id = _cutoff_max_id(conn, table, cutoff)
+                last_seen_id = 0
+                manifest["tables"][table] = {
+                    "archived_rows": 0,
+                    "archived_uncompressed_bytes": 0,
+                }
+                _persist_manifest(manifest_path, manifest)
+                while True:
+                    rows = conn.execute(
+                        f"SELECT id, created_at, {column} FROM {table} "
+                        f"WHERE id > ? AND id <= ? AND {column} IS NOT NULL AND created_at < ? "
+                        f"ORDER BY id LIMIT ?",
+                        (last_seen_id, cutoff_id, cutoff, bounded_batch),
+                    ).fetchall()
+                    if not rows:
+                        break
+                    batch = _write_archive_batch(
+                        archive_dir=run_dir / table,
+                        table=table,
+                        column=column,
+                        rows=rows,
+                    )
+                    batch["database_cleared"] = False
+                    manifest["batches"].append(batch)
+                    _persist_manifest(manifest_path, manifest)
 
-    manifest_path = run_dir / "MANIFEST.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    ids = [(int(row["id"]),) for row in rows]
+                    changed = _clear_archived_rows(
+                        conn,
+                        table=table,
+                        column=column,
+                        ids=ids,
+                    )
+                    if changed != len(rows):
+                        conn.rollback()
+                        raise RuntimeError(f"archive_update_count_mismatch:{table}:{changed}:{len(rows)}")
+                    conn.commit()
+
+                    batch["database_cleared"] = True
+                    last_seen_id = int(rows[-1]["id"])
+                    archived_rows += len(rows)
+                    archived_bytes += sum(len(str(row[column]).encode("utf-8")) for row in rows)
+                    manifest["tables"][table] = {
+                        "archived_rows": archived_rows,
+                        "archived_uncompressed_bytes": archived_bytes,
+                    }
+                    _persist_manifest(manifest_path, manifest)
+    except BaseException as exc:
+        manifest["status"] = "failed"
+        manifest["failed_at"] = datetime.now(timezone.utc).isoformat()
+        manifest["error"] = f"{type(exc).__name__}:{exc}"
+        _persist_manifest(manifest_path, manifest)
+        raise
+
+    manifest["status"] = "complete"
+    manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
+    _persist_manifest(manifest_path, manifest)
     return {
         "dry_run": False,
         "database": str(path),
@@ -223,7 +281,7 @@ def restore_blob_archive(*, db_path: Path | None = None, manifest_path: Path) ->
     with connect(path) as conn:
         for batch in manifest.get("batches", []):
             archive_path = Path(batch["path"])
-            if hashlib.sha256(archive_path.read_bytes()).hexdigest() != batch["compressed_sha256"]:
+            if _sha256_file(archive_path) != batch["compressed_sha256"]:
                 raise RuntimeError(f"archive_checksum_mismatch:{archive_path}")
             with gzip.open(archive_path, "rt", encoding="utf-8") as handle:
                 for line in handle:
