@@ -4,6 +4,7 @@ ensure_test_environment()
 
 import asyncio
 import os
+import sqlite3
 import threading
 import time
 import unittest
@@ -671,6 +672,38 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decisions.call_count, 4)
         for call in decisions.call_args_list:
             self.assertFalse(call.kwargs["refresh_readiness"])
+
+    async def test_derive_poller_retries_transient_sqlite_lock(self):
+        rows = [{"city_key": "chicago", "station_id": "KORD"}]
+        calls = 0
+
+        def hourly(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return {"ok": True, "rows_upserted": 24}
+
+        with patch("weatherbot_v3.scheduler._collection_rows", return_value=rows), patch(
+            "weatherbot_v3.scheduler._active_market_city_keys", return_value={"chicago"}
+        ), patch(
+            "weatherbot_v3.scheduler._target_dates_for_station", return_value=["2026-08-02"]
+        ), patch(
+            "weatherbot_v3.scheduler.run_hourly_consensus_build", side_effect=hourly
+        ), patch(
+            "weatherbot_v3.scheduler.run_daily_max_build", return_value={"ok": True, "stored": 1}
+        ), patch(
+            "weatherbot_v3.scheduler.run_signal_decisions_build",
+            return_value={"ok": True, "stored": 11, "results": [{"bucket_count": 11}]},
+        ), patch(
+            "weatherbot_v3.scheduler.enroll_forward_validation_candidates",
+            return_value={"ok": True, "enrolled": 0},
+        ), patch("weatherbot_v3.scheduler.SQLITE_LOCK_RETRY_BASE_SECONDS", 0.01):
+            result = await WeatherBotScheduler(city_concurrency=4)._run_derive_poller()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, 2)
+        self.assertEqual(result["results"][0]["sqlite_lock_retries"], 1)
 
     async def test_gamma_poller_refreshes_cached_books_in_one_batch(self):
         rows = [

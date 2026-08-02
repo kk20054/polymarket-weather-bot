@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -71,6 +72,9 @@ PAPER_EXECUTION_INTERVAL_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PAPER_EXE
 METAR_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_METAR_CITY_TIMEOUT", "120") or "120")
 FORECAST_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_FORECAST_CITY_TIMEOUT", "240") or "240")
 DERIVE_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_DERIVE_CITY_TIMEOUT", "300") or "300")
+DERIVE_CITY_CONCURRENCY = max(1, int(os.getenv("WEATHERBOT_SCHEDULER_DERIVE_CITY_CONCURRENCY", "2") or "2"))
+SQLITE_LOCK_RETRY_ATTEMPTS = max(0, int(os.getenv("WEATHERBOT_SQLITE_LOCK_RETRY_ATTEMPTS", "2") or "2"))
+SQLITE_LOCK_RETRY_BASE_SECONDS = max(0.05, float(os.getenv("WEATHERBOT_SQLITE_LOCK_RETRY_BASE_SECONDS", "1") or "1"))
 CHINA_LIVE_CITY_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_CHINA_LIVE_CITY_TIMEOUT", "15") or "15")
 PWS_OPTIONAL_TIMEOUT_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PWS_TIMEOUT", "30") or "30")
 PWS_AUTH_COOLDOWN_SECONDS = int(os.getenv("WEATHERBOT_SCHEDULER_PWS_AUTH_COOLDOWN", "3600") or "3600")
@@ -766,10 +770,11 @@ class WeatherBotScheduler:
 
         result = await _run_city_batch(
             rows,
-            self.city_concurrency,
+            min(self.city_concurrency, DERIVE_CITY_CONCURRENCY),
             run_city,
             poller_key="derive_poller",
             timeout_seconds=DERIVE_CITY_TIMEOUT_SECONDS,
+            sqlite_lock_retries=SQLITE_LOCK_RETRY_ATTEMPTS,
         )
         # A full production-readiness audit is intentionally operator-driven.
         # It scans cross-layer history and must not run every 15 minutes on the
@@ -949,6 +954,7 @@ async def _run_city_batch(
     *,
     poller_key: str,
     timeout_seconds: int,
+    sqlite_lock_retries: int = 0,
 ) -> dict[str, Any]:
     semaphore = asyncio.Semaphore(max(1, int(concurrency or 2)))
 
@@ -957,65 +963,85 @@ async def _run_city_batch(
         async with semaphore:
             started = utc_now()
             started_perf = time.perf_counter()
-            try:
-                payload = await asyncio.wait_for(
-                    city_fn(row),
-                    timeout=max(1, int(timeout_seconds)),
-                )
-                ok = _payload_ok(payload)
-                finished = utc_now()
-                compact_payload = _compact_city_payload(payload)
-                details = {**compact_payload, "poller": poller_key}
-                log_error = await asyncio.to_thread(
-                    _safe_log_data_fetch,
-                    source="scheduler",
-                    stage="city_refresh",
-                    status="OK" if ok else "WARN",
-                    duration_ms=round((time.perf_counter() - started_perf) * 1000),
-                    city=city,
-                    message=f"{poller_key} city refresh {'completed' if ok else 'finished with warnings'} for {city}",
-                    details=details,
-                    started_at=started,
-                    finished_at=finished,
-                )
-                return {"city": city, "ok": ok, "payload": compact_payload, "log_error": log_error}
-            except asyncio.TimeoutError:
-                finished = utc_now()
-                error = {
-                    "city": city,
-                    "ok": False,
-                    "poller": poller_key,
-                    "error": f"city_timeout_{int(timeout_seconds)}s",
-                }
-                log_error = await asyncio.to_thread(
-                    _safe_log_data_fetch,
-                    source="scheduler",
-                    stage="city_refresh",
-                    status="ERROR",
-                    duration_ms=round((time.perf_counter() - started_perf) * 1000),
-                    city=city,
-                    message=f"{poller_key} city refresh timed out for {city}",
-                    details=error,
-                    started_at=started,
-                    finished_at=finished,
-                )
-                return {**error, "log_error": log_error}
-            except Exception as exc:
-                finished = utc_now()
-                error = {"city": city, "ok": False, "poller": poller_key, "error": str(exc)}
-                log_error = await asyncio.to_thread(
-                    _safe_log_data_fetch,
-                    source="scheduler",
-                    stage="city_refresh",
-                    status="ERROR",
-                    duration_ms=round((time.perf_counter() - started_perf) * 1000),
-                    city=city,
-                    message=f"{poller_key} city refresh failed for {city}",
-                    details=error,
-                    started_at=started,
-                    finished_at=finished,
-                )
-                return {**error, "log_error": log_error}
+            retry_count = 0
+            while True:
+                try:
+                    payload = await asyncio.wait_for(
+                        city_fn(row),
+                        timeout=max(1, int(timeout_seconds)),
+                    )
+                    ok = _payload_ok(payload)
+                    finished = utc_now()
+                    compact_payload = _compact_city_payload(payload)
+                    details = {**compact_payload, "poller": poller_key, "sqlite_lock_retries": retry_count}
+                    log_error = await asyncio.to_thread(
+                        _safe_log_data_fetch,
+                        source="scheduler",
+                        stage="city_refresh",
+                        status="OK" if ok else "WARN",
+                        duration_ms=round((time.perf_counter() - started_perf) * 1000),
+                        city=city,
+                        message=f"{poller_key} city refresh {'completed' if ok else 'finished with warnings'} for {city}",
+                        details=details,
+                        started_at=started,
+                        finished_at=finished,
+                    )
+                    return {
+                        "city": city,
+                        "ok": ok,
+                        "payload": compact_payload,
+                        "sqlite_lock_retries": retry_count,
+                        "log_error": log_error,
+                    }
+                except asyncio.TimeoutError:
+                    finished = utc_now()
+                    error = {
+                        "city": city,
+                        "ok": False,
+                        "poller": poller_key,
+                        "error": f"city_timeout_{int(timeout_seconds)}s",
+                        "sqlite_lock_retries": retry_count,
+                    }
+                    log_error = await asyncio.to_thread(
+                        _safe_log_data_fetch,
+                        source="scheduler",
+                        stage="city_refresh",
+                        status="ERROR",
+                        duration_ms=round((time.perf_counter() - started_perf) * 1000),
+                        city=city,
+                        message=f"{poller_key} city refresh timed out for {city}",
+                        details=error,
+                        started_at=started,
+                        finished_at=finished,
+                    )
+                    return {**error, "log_error": log_error}
+                except Exception as exc:
+                    retryable_lock = isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+                    if retryable_lock and retry_count < max(0, int(sqlite_lock_retries)):
+                        await asyncio.sleep(SQLITE_LOCK_RETRY_BASE_SECONDS * (2 ** retry_count))
+                        retry_count += 1
+                        continue
+                    finished = utc_now()
+                    error = {
+                        "city": city,
+                        "ok": False,
+                        "poller": poller_key,
+                        "error": str(exc),
+                        "sqlite_lock_retries": retry_count,
+                    }
+                    log_error = await asyncio.to_thread(
+                        _safe_log_data_fetch,
+                        source="scheduler",
+                        stage="city_refresh",
+                        status="ERROR",
+                        duration_ms=round((time.perf_counter() - started_perf) * 1000),
+                        city=city,
+                        message=f"{poller_key} city refresh failed for {city}",
+                        details=error,
+                        started_at=started,
+                        finished_at=finished,
+                    )
+                    return {**error, "log_error": log_error}
 
     results = await asyncio.gather(*(guarded(row) for row in rows), return_exceptions=False)
     failures = [row for row in results if not row.get("ok")]
