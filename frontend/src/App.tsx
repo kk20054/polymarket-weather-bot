@@ -1015,7 +1015,7 @@ function App() {
   const { data, isLoading, error, refetch, dataUpdatedAt } = useQuery({
     queryKey: ['dashboard', selectedCity],
     queryFn: () => fetchDashboard(selectedCity),
-    refetchInterval: 10000,
+    refetchInterval: 30000,
     retry: 1,
   })
 

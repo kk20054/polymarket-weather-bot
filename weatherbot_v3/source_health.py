@@ -74,6 +74,9 @@ def build_source_health_matrix(
                 required=True,
                 stages=("nwp_poller", "refresh_forecast_runs"),
                 now=now,
+                latest_order_by="target_date DESC, retrieved_at DESC",
+                recent_date_column="target_date",
+                recent_date_cutoff=(now - timedelta(days=2)).date().isoformat(),
             ),
             _freshness_source(
                 conn,
@@ -92,6 +95,9 @@ def build_source_health_matrix(
                 },
                 stages=("forecast_poller", "refresh_forecast_runs"),
                 now=now,
+                latest_order_by="target_date DESC, retrieved_at DESC",
+                recent_date_column="target_date",
+                recent_date_cutoff=(now - timedelta(days=2)).date().isoformat(),
             ),
             _freshness_source(
                 conn,
@@ -198,6 +204,9 @@ def build_source_health_matrix(
                 required=True,
                 stages=("derive_poller",),
                 now=now,
+                latest_order_by="target_date DESC, local_hour DESC, updated_at DESC",
+                recent_date_column="target_date",
+                recent_date_cutoff=(now - timedelta(days=2)).date().isoformat(),
             ),
             _freshness_source(
                 conn,
@@ -215,6 +224,9 @@ def build_source_health_matrix(
                 required=True,
                 stages=("derive_poller",),
                 now=now,
+                latest_order_by="target_date DESC, updated_at DESC",
+                recent_date_column="target_date",
+                recent_date_cutoff=(now - timedelta(days=2)).date().isoformat(),
             ),
         ])
 
@@ -319,21 +331,43 @@ def _freshness_source(
     stages: tuple[str, ...],
     now: datetime,
     freshness_column: str | None = None,
+    latest_order_by: str | None = None,
+    recent_date_column: str | None = None,
+    recent_date_cutoff: str | None = None,
 ) -> dict[str, Any]:
     expected = sorted(set(str(city) for city in expected_cities if city))
     health_column = freshness_column or timestamp_column
-    rows = conn.execute(
-        f"""
-        SELECT {city_column} city, COUNT(*) sample_count,
-               MAX({timestamp_column}) latest_data_at,
-               MAX({health_column}) latest_at
-        FROM {table}
-        WHERE {where}
-        GROUP BY {city_column}
-        """
-    ).fetchall()
-    by_city = {str(row["city"]): dict(row) for row in rows if str(row["city"] or "") in set(expected)}
-    covered = sorted(city for city in expected if city in by_city and int(by_city[city]["sample_count"] or 0) > 0)
+    order_by = latest_order_by or f"{timestamp_column} DESC"
+    recent_sql = f" AND {recent_date_column} >= ?" if recent_date_column and recent_date_cutoff else ""
+    by_city: dict[str, dict[str, Any]] = {}
+    if expected:
+        expected_values = ",".join("(?)" for _ in expected)
+        recent_args: tuple[Any, ...] = (recent_date_cutoff,) if recent_sql else ()
+        rows = conn.execute(
+            f"""
+            WITH expected(city) AS (VALUES {expected_values})
+            SELECT source.{city_column} city,
+                   source.{timestamp_column} latest_data_at,
+                   {health_column} latest_at
+            FROM expected
+            JOIN {table} source
+              ON source.id = (
+                  SELECT id
+                  FROM {table}
+                  WHERE {city_column} = expected.city
+                    AND ({where})
+                    {recent_sql}
+                  ORDER BY {order_by}, id DESC
+                  LIMIT 1
+              )
+            """,
+            (*expected, *recent_args),
+        ).fetchall()
+        by_city = {
+            str(row["city"]): {**dict(row), "sample_count": 1}
+            for row in rows
+        }
+    covered = sorted(by_city)
     latest = _latest_time_value(by_city[city]["latest_at"] for city in covered)
     latest_data = _latest_time_value(by_city[city]["latest_data_at"] for city in covered)
     sample_count = sum(int(by_city[city]["sample_count"] or 0) for city in covered)
@@ -366,9 +400,10 @@ def _freshness_source(
         "age_seconds_by_city": age_by_city,
         "data_age_seconds_by_city": data_age_by_city,
         "sample_count_by_city": {
-            city: int(by_city[city]["sample_count"] or 0)
+            city: 1
             for city in covered
         },
+        "sample_count_basis": "latest_state_presence",
         "stale_cities": sorted(
             city for city, age in age_by_city.items()
             if age is None or age > stale_after_seconds

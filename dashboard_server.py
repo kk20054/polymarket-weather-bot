@@ -118,6 +118,15 @@ SCHEDULER_AUTO_START = os.getenv("WEATHERBOT_SCHEDULER", "false").strip().lower(
 dashboard_payload_cache: dict | None = None
 dashboard_payload_cache_at: datetime | None = None
 DASHBOARD_CACHE_TTL_SECONDS = int(os.getenv("WEATHERBOT_DASHBOARD_CACHE_TTL", "20") or "20")
+source_health_cache: dict | None = None
+source_health_cache_at: datetime | None = None
+source_health_refresh_task: asyncio.Task | None = None
+SOURCE_HEALTH_CACHE_TTL_SECONDS = max(15, int(os.getenv("WEATHERBOT_SOURCE_HEALTH_CACHE_TTL", "60") or "60"))
+recommendations_cache: dict | None = None
+recommendations_cache_at: datetime | None = None
+recommendations_cache_scheduler_running: bool | None = None
+recommendations_refresh_task: asyncio.Task | None = None
+RECOMMENDATIONS_CACHE_TTL_SECONDS = max(15, int(os.getenv("WEATHERBOT_RECOMMENDATIONS_CACHE_TTL", "30") or "30"))
 production_validation_cache: dict[tuple[bool], tuple[float, dict]] = {}
 PRODUCTION_VALIDATION_CACHE_TTL_SECONDS = int(os.getenv("WEATHERBOT_PRODUCTION_VALIDATION_CACHE_TTL", "60") or "60")
 DASHBOARD_AUTO_BUILD = os.getenv("WEATHERBOT_DASHBOARD_AUTO_BUILD", "false").strip().lower() not in {"0", "false", "no", "off"}
@@ -363,6 +372,81 @@ def _production_refresh_summary(payload):
         "ok_stage_count": sum(1 for stage in stages if stage.get("ok")),
         "blocked_keys": list(((payload.get("readiness") or {}).get("blocked_keys") or [])),
         "scan_signals": bool(payload.get("scan_signals")),
+    }
+
+
+def _v3_dashboard_overview() -> dict:
+    cfg = load_v3_config()
+    return {
+        "config": {
+            "live_trading": bool(cfg.live_trading),
+            "live_dry_run": bool(cfg.live_dry_run),
+        },
+        "detail_endpoint": "/api/v3/status",
+    }
+
+
+def _data_readiness_overview(payload: dict | None) -> dict | None:
+    if not payload:
+        return None
+    return {
+        "audit_version": payload.get("audit_version"),
+        "generated_at": payload.get("generated_at"),
+        "status": payload.get("status"),
+        "score": payload.get("score"),
+        "live_allowed": bool(payload.get("live_allowed")),
+        "phase": payload.get("phase"),
+        "blocked_keys": list(payload.get("blocked_keys") or []),
+        "blockers": list(payload.get("blockers") or [])[:10],
+        "next_actions": list(payload.get("next_actions") or [])[:5],
+        "detail_endpoint": "/api/data-readiness",
+    }
+
+
+def _compact_production_refresh_state(payload: dict | None) -> dict | None:
+    if not payload:
+        return None
+    summary = _production_refresh_summary(payload)
+    return {
+        **summary,
+        "running": bool(payload.get("running") or payload.get("production_refresh_running")),
+        "production_refresh_running": bool(payload.get("production_refresh_running")),
+        "last_refresh_was_auto": bool(payload.get("last_refresh_was_auto")),
+        "auto_refresh_enabled": bool(payload.get("auto_refresh_enabled")),
+        "history": list(payload.get("history") or [])[:3],
+        "detail_endpoint": "/api/production-refresh/status",
+    }
+
+
+def _compact_scheduler_status(payload: dict | None) -> dict:
+    payload = payload or {}
+    pollers: dict[str, dict] = {}
+    for key, value in (payload.get("pollers") or {}).items():
+        row = value or {}
+        pollers[str(key)] = {
+            field: row.get(field)
+            for field in (
+                "name",
+                "interval_seconds",
+                "running",
+                "last_status",
+                "last_run_at",
+                "age_seconds",
+                "last_duration_ms",
+                "fails_last_hour",
+                "next_run_at",
+                "consecutive_failures",
+                "run_count",
+                "last_message",
+            )
+            if field in row
+        }
+    return {
+        "running": bool(payload.get("running")),
+        "started_at": payload.get("started_at"),
+        "stopped_at": payload.get("stopped_at"),
+        "pollers": pollers,
+        "detail_endpoint": "/api/scheduler/status",
     }
 
 
@@ -861,9 +945,43 @@ def _freshest_focus_observation(city: str, metars: dict[str, dict], china_live: 
     return row, source
 
 
+def _latest_rows_for_cities(
+    conn,
+    *,
+    table: str,
+    cities: list[str],
+    where: str,
+    order_by: str,
+) -> list[dict]:
+    if not cities:
+        return []
+    placeholders = ",".join("(?)" for _ in cities)
+    rows = conn.execute(
+        f"""
+        WITH enabled(city) AS (VALUES {placeholders})
+        SELECT source.*
+        FROM enabled
+        JOIN {table} source
+          ON source.id = (
+              SELECT id
+              FROM {table}
+              WHERE city = enabled.city
+                AND ({where})
+              ORDER BY {order_by}, id DESC
+              LIMIT 1
+          )
+        """,
+        tuple(cities),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = None, path: Path | None = None) -> dict:
     """Return separate weather-focus cards and Layer 6 trade candidates."""
-    init_v3_db(path)
+    # Server startup owns production schema initialization. Tests and explicit
+    # alternate databases still initialize their isolated path here.
+    if path is not None:
+        init_v3_db(path)
     now = datetime.now(timezone.utc)
     items: list[dict] = []
     skipped = Counter()
@@ -872,49 +990,26 @@ def _recommendations_payload(limit: int = 8, *, scheduler_status: dict | None = 
             str(row["city_key"]): dict(row)
             for row in conn.execute("SELECT * FROM stations").fetchall()
         }
+        station_cities = sorted(stations)
         query_cutoff = _recommendation_query_cutoff(stations, now)
         metars = _latest_rows_by_city(
-            [dict(row) for row in conn.execute(
-                """
-                SELECT mr.*
-                FROM metar_reports mr
-                JOIN (
-                    SELECT city, MAX(report_time) AS report_time
-                    FROM metar_reports
-                    WHERE city IS NOT NULL AND TRIM(city) != ''
-                    GROUP BY city
-                ) latest
-                  ON latest.city = mr.city
-                 AND latest.report_time = mr.report_time
-                WHERE mr.id = (
-                    SELECT MAX(m2.id)
-                    FROM metar_reports m2
-                    WHERE m2.city = mr.city AND m2.report_time = mr.report_time
-                )
-                """
-            ).fetchall()],
+            _latest_rows_for_cities(
+                conn,
+                table="metar_reports",
+                cities=station_cities,
+                where="COALESCE(parse_status, '') != 'failed'",
+                order_by="report_time DESC",
+            ),
             "report_time",
         )
         china_live = _latest_rows_by_city(
-            [dict(row) for row in conn.execute(
-                """
-                WITH ranked AS (
-                    SELECT
-                        *,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY city
-                            ORDER BY observed_at DESC, id DESC
-                        ) AS city_rank
-                    FROM mesonet_observations
-                    WHERE network = 'china_live'
-                      AND city IS NOT NULL
-                      AND TRIM(city) != ''
-                )
-                SELECT *
-                FROM ranked
-                WHERE city_rank = 1
-                """
-            ).fetchall()],
+            _latest_rows_for_cities(
+                conn,
+                table="mesonet_observations",
+                cities=station_cities,
+                where="network = 'china_live' AND COALESCE(parse_status, '') != 'failed'",
+                order_by="observed_at DESC",
+            ),
             "observed_at",
         )
         forecast_runs = [
@@ -2857,7 +2952,6 @@ def _merge_hourly_points(forecast_points: list[dict], consensus_points: list[dic
 def _recent_hourly_targets(limit_per_city: int = 10) -> dict[str, set[str]]:
     """Return recent city/date targets that already exist in the v3 database."""
     try:
-        init_v3_db()
         with connect() as conn:
             rows = [
                 dict(row)
@@ -2909,7 +3003,7 @@ def _hourly_cache_for_targets(targets: dict[str, set[str]], *, allow_forecast_fa
         return {}
     consensus_cache: dict[str, list[dict]]
     try:
-        consensus_cache = hourly_consensus_points(targets)
+        consensus_cache = hourly_consensus_points(targets, ensure_schema=False)
     except Exception:
         consensus_cache = {}
 
@@ -3086,10 +3180,36 @@ def _build_weather_city_series(markets):
     return sorted(rows, key=lambda row: row.get("city_name") or "")
 
 
+def _registry_current_targets(now: datetime | None = None) -> dict[str, set[str]]:
+    """Bound the lightweight city index to the dates useful on first paint."""
+    now = now or datetime.now(timezone.utc)
+    targets: dict[str, set[str]] = {}
+    for profile in SETTLEMENT_REGISTRY.values():
+        try:
+            local_day = now.astimezone(ZoneInfo(profile.timezone)).date()
+        except Exception:
+            local_day = now.date()
+        targets[profile.city] = {
+            (local_day + timedelta(days=offset)).isoformat()
+            for offset in (-1, 0, 1)
+        }
+    return targets
+
+
 def _registry_city_series(targets: dict[str, set[str]] | None = None):
     """Lightweight city index used before the first manual data refresh."""
-    hourly_by_city = _hourly_cache_for_targets(targets if targets is not None else _recent_hourly_targets())
-    station_rows = {str(row.get("city_key") or row.get("city") or ""): row for row in list_stations()}
+    hourly_by_city = _hourly_cache_for_targets(
+        targets if targets is not None else _registry_current_targets()
+    )
+    try:
+        with connect() as conn:
+            raw_station_rows = [dict(row) for row in conn.execute("SELECT * FROM stations").fetchall()]
+    except Exception:
+        raw_station_rows = []
+    station_rows = {
+        str(row.get("city_key") or row.get("city") or ""): row
+        for row in raw_station_rows
+    }
     latest_fetch = _latest_fetch_by_city()
     rows = []
     for profile in SETTLEMENT_REGISTRY.values():
@@ -4395,9 +4515,11 @@ def build_dashboard_payload():
     city_evidence = _build_city_evidence_payload(weather_city_series, weather_signals, fetch_log)
     return {
         "stats": stats,
-        "v3": v3_dashboard_summary(),
-        "data_readiness": data_readiness,
-        "production_refresh": _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None)),
+        "v3": _v3_dashboard_overview(),
+        "data_readiness": _data_readiness_overview(data_readiness),
+        "production_refresh": _compact_production_refresh_state(
+            _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None))
+        ),
         "model_dataset_audit": model_dataset_audit,
         "truth_health": truth_health,
         "btc_price": None,
@@ -4420,8 +4542,8 @@ def build_dashboard_payload():
             "message": "recommendation_cache_warming",
         },
         "forward_validation": forward_validation_summary(),
-        "events": events,
-        "fetch_log": fetch_log,
+        "events": events[:50],
+        "fetch_log": fetch_log[:50],
     }
 
 
@@ -4459,14 +4581,16 @@ def _minimal_dashboard_payload(reason: str = "cache_warming"):
         "auto_simulation": _auto_simulation_state(),
     }
     try:
-        v3_summary = v3_dashboard_summary()
+        v3_summary = _v3_dashboard_overview()
     except Exception as exc:
         v3_summary = {"error": str(exc)}
     return {
         "stats": stats,
         "v3": v3_summary,
         "data_readiness": None,
-        "production_refresh": _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None)),
+        "production_refresh": _compact_production_refresh_state(
+            _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None))
+        ),
         "model_dataset_audit": None,
         "truth_health": None,
         "btc_price": None,
@@ -4492,12 +4616,16 @@ def _minimal_dashboard_payload(reason: str = "cache_warming"):
 
 def _dashboard_city_series_for_selection(rows: list[dict], city: str = "") -> list[dict]:
     detail_fields = ("hourly_points", "history_points", "forecast_points", "points")
-    return [
-        row
-        if city and _city_evidence_matches(row, city)
-        else {**row, **{field: [] for field in detail_fields}}
-        for row in rows
-    ]
+    selected_rows: list[dict] = []
+    for row in rows:
+        if city and _city_evidence_matches(row, city):
+            selected = dict(row)
+            if selected.get("forecast_points"):
+                selected["points"] = []
+            selected_rows.append(selected)
+        else:
+            selected_rows.append({**row, **{field: [] for field in detail_fields}})
+    return selected_rows
 
 
 async def _refresh_dashboard_cache_once():
@@ -4523,6 +4651,66 @@ def _ensure_dashboard_refresh(force: bool = False):
         return
     if dashboard_refresh_task is None or dashboard_refresh_task.done():
         dashboard_refresh_task = asyncio.create_task(_refresh_dashboard_cache_once())
+
+
+def _cache_is_fresh(updated_at: datetime | None, ttl_seconds: int) -> bool:
+    return bool(
+        updated_at
+        and (datetime.now(timezone.utc) - updated_at).total_seconds() <= ttl_seconds
+    )
+
+
+async def _refresh_source_health_cache_once() -> dict:
+    global source_health_cache, source_health_cache_at
+    matrix = await asyncio.to_thread(build_source_health_matrix, read_only=True)
+    source_health_cache = matrix
+    source_health_cache_at = datetime.now(timezone.utc)
+    get_scheduler().update_source_health_cache(matrix)
+    return matrix
+
+
+async def _cached_source_health() -> dict:
+    global source_health_refresh_task
+    if source_health_cache is not None and _cache_is_fresh(
+        source_health_cache_at,
+        SOURCE_HEALTH_CACHE_TTL_SECONDS,
+    ):
+        return source_health_cache
+    if source_health_refresh_task is None or source_health_refresh_task.done():
+        source_health_refresh_task = asyncio.create_task(_refresh_source_health_cache_once())
+    if source_health_cache is not None:
+        return source_health_cache
+    return await source_health_refresh_task
+
+
+async def _refresh_recommendations_cache_once(scheduler_payload: dict) -> dict:
+    global recommendations_cache, recommendations_cache_at, recommendations_cache_scheduler_running
+    payload = await asyncio.to_thread(
+        _recommendations_payload,
+        scheduler_status=scheduler_payload,
+    )
+    recommendations_cache = payload
+    recommendations_cache_at = datetime.now(timezone.utc)
+    recommendations_cache_scheduler_running = bool(scheduler_payload.get("running"))
+    return payload
+
+
+async def _cached_recommendations(scheduler_payload: dict) -> dict:
+    global recommendations_refresh_task
+    scheduler_running = bool(scheduler_payload.get("running"))
+    cache_matches = recommendations_cache_scheduler_running == scheduler_running
+    if recommendations_cache is not None and cache_matches and _cache_is_fresh(
+        recommendations_cache_at,
+        RECOMMENDATIONS_CACHE_TTL_SECONDS,
+    ):
+        return recommendations_cache
+    if recommendations_refresh_task is None or recommendations_refresh_task.done():
+        recommendations_refresh_task = asyncio.create_task(
+            _refresh_recommendations_cache_once(scheduler_payload)
+        )
+    if recommendations_cache is not None and cache_matches:
+        return recommendations_cache
+    return await recommendations_refresh_task
 
 
 def _clear_production_validation_cache():
@@ -4624,8 +4812,9 @@ async def startup():
     _ensure_auto_simulation_task()
     if SCHEDULER_AUTO_START:
         await get_scheduler().start()
-    global dashboard_payload_cache
+    global dashboard_payload_cache, dashboard_payload_cache_at
     dashboard_payload_cache = _minimal_dashboard_payload("manual_refresh_required")
+    dashboard_payload_cache_at = datetime.now(timezone.utc)
     if DASHBOARD_AUTO_BUILD:
         _ensure_dashboard_refresh(force=True)
     log_event("info", "Dashboard started", {
@@ -4666,9 +4855,11 @@ async def healthz():
 
 @app.get("/api/dashboard")
 async def dashboard(city: str = ""):
-    # HTTP reads may refresh the local presentation cache even when collector
-    # auto-start is disabled. This never starts a scanner or scheduler.
-    _ensure_dashboard_refresh()
+    # The full legacy dashboard build scans historical evidence and mutates
+    # presentation tables. Keep ordinary HTTP reads lightweight unless the
+    # operator explicitly enables background dashboard builds.
+    if DASHBOARD_AUTO_BUILD:
+        _ensure_dashboard_refresh()
     if dashboard_payload_cache is not None:
         payload = dict(dashboard_payload_cache)
     else:
@@ -4684,7 +4875,7 @@ async def dashboard(city: str = ""):
         ]
         payload["fetch_log"] = await asyncio.to_thread(
             _data_fetch_log_payload,
-            100,
+            50,
             city,
             "",
         )
@@ -4694,14 +4885,11 @@ async def dashboard(city: str = ""):
         lambda: _production_refresh_runtime_state(_read_json(PRODUCTION_REFRESH_PATH, None))
     )
     if latest_refresh is not None:
-        payload["production_refresh"] = latest_refresh
+        payload["production_refresh"] = _compact_production_refresh_state(latest_refresh)
     scheduler_payload = get_scheduler().status()
-    payload["scheduler_status"] = scheduler_payload
+    payload["scheduler_status"] = _compact_scheduler_status(scheduler_payload)
     try:
-        payload["recommendations"] = await asyncio.to_thread(
-            _recommendations_payload,
-            scheduler_status=scheduler_payload,
-        )
+        payload["recommendations"] = await _cached_recommendations(scheduler_payload)
     except Exception as exc:
         payload["recommendations"] = {
             "items": [],
@@ -4888,9 +5076,10 @@ async def paper_validation_tick_api(request: PaperValidationTickRequest | None =
 
 @app.get("/api/source-health")
 async def source_health():
-    matrix = await asyncio.to_thread(build_source_health_matrix)
-    get_scheduler().update_source_health_cache(matrix)
-    return matrix
+    try:
+        return await _cached_source_health()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"source_health_unavailable: {exc}") from exc
 
 
 @app.post("/api/scheduler/start")

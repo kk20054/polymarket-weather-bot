@@ -66,7 +66,9 @@ class DashboardAsyncReadTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "dashboard_server._ensure_dashboard_refresh"
         ), patch(
-            "dashboard_server._recommendations_payload", return_value={"focus_items": []}
+            "dashboard_server._cached_recommendations", return_value={"focus_items": []}
+        ), patch.object(
+            dashboard_server, "DASHBOARD_AUTO_BUILD", False
         ):
             payload = await dashboard_server.dashboard("shanghai")
 
@@ -89,7 +91,9 @@ class DashboardAsyncReadTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "dashboard_server._ensure_dashboard_refresh"
         ), patch(
-            "dashboard_server._recommendations_payload", return_value={"focus_items": []}
+            "dashboard_server._cached_recommendations", return_value={"focus_items": []}
+        ), patch.object(
+            dashboard_server, "DASHBOARD_AUTO_BUILD", False
         ):
             payload = await dashboard_server.dashboard("")
 
@@ -97,7 +101,7 @@ class DashboardAsyncReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row["hourly_points"] == [] for row in payload["weather_city_series"]))
         self.assertEqual(payload["city_evidence"], [])
 
-    async def test_dashboard_refreshes_presentation_cache_and_recomputes_focus_cards(self):
+    async def test_dashboard_only_refreshes_full_cache_when_explicitly_enabled(self):
         cached = {
             "weather_city_series": [],
             "city_evidence": [],
@@ -112,13 +116,30 @@ class DashboardAsyncReadTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "dashboard_server._ensure_dashboard_refresh"
         ) as ensure_refresh, patch(
-            "dashboard_server._recommendations_payload", return_value=current
-        ) as recommendations:
+            "dashboard_server._cached_recommendations", return_value=current
+        ) as recommendations, patch.object(
+            dashboard_server, "DASHBOARD_AUTO_BUILD", True
+        ):
             payload = await dashboard_server.dashboard("")
 
         ensure_refresh.assert_called_once_with()
         recommendations.assert_called_once()
         self.assertEqual(payload["recommendations"], current)
+
+    async def test_dashboard_default_read_does_not_start_full_build(self):
+        cached = {"weather_city_series": [], "city_evidence": []}
+        with patch.object(dashboard_server, "dashboard_payload_cache", cached), patch(
+            "dashboard_server._read_json", return_value=None
+        ), patch(
+            "dashboard_server._ensure_dashboard_refresh"
+        ) as ensure_refresh, patch(
+            "dashboard_server._cached_recommendations", return_value={"focus_items": []}
+        ), patch.object(
+            dashboard_server, "DASHBOARD_AUTO_BUILD", False
+        ):
+            await dashboard_server.dashboard("")
+
+        ensure_refresh.assert_not_called()
 
 
 if __name__ == "__main__":
