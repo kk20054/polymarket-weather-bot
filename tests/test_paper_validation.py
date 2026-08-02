@@ -11,6 +11,7 @@ from weatherbot_v3.db import (
     insert_orderbook,
     list_paper_orders,
     paper_execution_summary,
+    upsert_paper_order_record,
     upsert_daily_max_prediction,
     upsert_signal_decision_record as _db_upsert_signal_decision_record,
 )
@@ -172,6 +173,41 @@ class PaperValidationTests(unittest.TestCase):
         self.assertAlmostEqual(float(summary["equity"]), 40.0 + expected_pnl, places=4)
         self.assertGreaterEqual(len(summary["equity_curve"]), 3)
         self.assertAlmostEqual(float(summary["equity_curve"][-1]["pnl"]), expected_pnl, places=4)
+
+    def test_execution_summary_does_not_count_rejected_orders_as_open_positions(self):
+        path = test_db_path("paper_validation_rejected_summary")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        started = start_paper_validation_run(
+            bankroll_usd=40,
+            max_per_trade_usd=2,
+            cities=["chicago"],
+            strategies=["single_bucket_ev"],
+            path=path,
+        )
+        run = started["run"]
+        upsert_paper_order_record({
+            "decision_id": "rejected-decision",
+            "idempotency_key": "rejected-order",
+            "market_id": "market-rejected",
+            "yes_token_id": "yes-rejected",
+            "bucket_key": "bucket-rejected",
+            "city_key": "chicago",
+            "target_date": "2026-08-02",
+            "status": "rejected",
+            "lifecycle_status": "rejected",
+            "fill_status": "not_filled",
+            "requested_amount": 1.5,
+            "filled_amount": 0.0,
+            "filled_shares": 0.0,
+            "cohort_run_id": run["run_id"],
+        }, path=path)
+
+        summary = paper_execution_summary(cohort_run_id=run["run_id"], path=path)
+
+        self.assertEqual(summary["count"], 1)
+        self.assertEqual(summary["open_orders"], 0)
+        self.assertEqual(summary["unrealized_pnl"], 0.0)
+        self.assertEqual(summary["orders"][0]["pnl_kind"], "not_filled")
 
     def test_start_stop_are_explicit_and_single_active_run(self):
         path = test_db_path("paper_validation_lifecycle")

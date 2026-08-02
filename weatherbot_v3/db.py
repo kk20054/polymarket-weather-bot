@@ -5098,7 +5098,14 @@ def paper_execution_summary(
         latest_quote = eligible_quotes[-1] if eligible_quotes else None
         settlement = settlements_by_order.get(int(order.get("id") or 0))
         resolved = bool(settlement and settlement.get("settlement_status") == "resolved")
-        early_exited = str(order.get("lifecycle_status") or "") == "exited" and not resolved
+        lifecycle_status = str(order.get("lifecycle_status") or "")
+        early_exited = lifecycle_status == "exited" and not resolved
+        is_open_fill = (
+            lifecycle_status == "open"
+            and status in {"paper_filled", "paper_partial"}
+            and _num(order.get("filled_amount"), 0.0) > 0
+            and _num(order.get("filled_shares"), 0.0) > 0
+        )
         entry_price = _num(order.get("average_fill_price"), _num(order.get("limit_price"), 0.0))
         entry_value = _num(order.get("filled_amount"), 0.0)
         shares = _num(order.get("filled_shares"), _num(order.get("shares"), 0.0))
@@ -5125,7 +5132,7 @@ def paper_execution_summary(
             pnl_kind = "realized_exit"
             exit_price = mark_price
             exit_time = mark_timestamp
-        else:
+        elif is_open_fill:
             execution_quote = order.get("execution_quote") or {}
             mark_price = _num(
                 (latest_quote or {}).get("best_bid"),
@@ -5145,6 +5152,16 @@ def paper_execution_summary(
             pnl_kind = "unrealized"
             exit_price = None
             exit_time = ""
+        else:
+            mark_price = 0.0
+            mark_timestamp = str(order.get("closed_at") or order.get("updated_at") or "")
+            mark_source = "not_filled"
+            current_best_ask = None
+            unrealized_pnl = 0.0
+            pnl_value = 0.0
+            pnl_kind = "not_filled"
+            exit_price = None
+            exit_time = mark_timestamp
 
         params = order.get("strategy_params_snapshot") or {}
         exit_policy = (
