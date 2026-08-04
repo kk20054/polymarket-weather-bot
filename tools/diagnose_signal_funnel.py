@@ -80,10 +80,11 @@ def _current_contract_participant(component: dict[str, Any]) -> bool:
 
 
 def _family_contract_participant(component: dict[str, Any]) -> bool:
+    """Mirror CoreModalStrategy evidence membership, not fusion weight membership."""
     return bool(
         isinstance(component, dict)
         and _component_family(component)
-        and float(component.get("weight") or 0.0) > 0.0
+        and str(component.get("weight_status") or "").strip().lower() != "excluded"
         and _component_has_model_evidence(component)
     )
 
