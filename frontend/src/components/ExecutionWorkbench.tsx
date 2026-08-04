@@ -19,6 +19,7 @@ interface Props {
   liveAvailable: boolean
   schedulerRunning: boolean
   onOpenDeveloperSettings: () => void
+  readOnly?: boolean
   language?: 'zh' | 'en'
 }
 
@@ -445,7 +446,7 @@ function OrderRow({ order, language }: { order: PaperOrderRecord; language: 'zh'
   )
 }
 
-export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation, liveAvailable, schedulerRunning, onOpenDeveloperSettings, language = 'zh' }: Props) {
+export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation, liveAvailable, schedulerRunning, onOpenDeveloperSettings, readOnly = false, language = 'zh' }: Props) {
   const queryClient = useQueryClient()
   const [view, setView] = useState<'queue' | 'orders'>('queue')
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -507,17 +508,20 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
     refetchInterval: 30000,
   })
   const executeMutation = useMutation({
-    mutationFn: (payload: { decisionId?: string; dryRun: boolean }) => executePaperOrders({
-      decisionId: payload.decisionId,
-      city: payload.decisionId ? undefined : cityKey,
-      targetDate: payload.decisionId ? undefined : targetDate,
-      limit: 100,
-      dryRun: payload.dryRun,
-      strategies: selectedStrategies,
-      strategyRevisionId: selectedRevisionId,
-      decisionBatchIssuedAt: latestDecisionIssuedAt,
-      cohortRunId: validation?.run_id,
-    }),
+    mutationFn: (payload: { decisionId?: string; dryRun: boolean }) => {
+      if (readOnly) throw new Error('remote_snapshot_is_read_only')
+      return executePaperOrders({
+        decisionId: payload.decisionId,
+        city: payload.decisionId ? undefined : cityKey,
+        targetDate: payload.decisionId ? undefined : targetDate,
+        limit: 100,
+        dryRun: payload.dryRun,
+        strategies: selectedStrategies,
+        strategyRevisionId: selectedRevisionId,
+        decisionBatchIssuedAt: latestDecisionIssuedAt,
+        cohortRunId: validation?.run_id,
+      })
+    },
     onSuccess: result => {
       setLastResult(result)
       queryClient.invalidateQueries({ queryKey: ['paper-orders'] })
@@ -527,6 +531,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
   })
   const validationMutation = useMutation({
     mutationFn: async (action: 'start' | 'stop') => {
+      if (readOnly) throw new Error('remote_snapshot_is_read_only')
       if (action === 'stop') return stopPaperValidation()
       let revisionId = selectedRevisionId
       const enabledProfileStrategies = Object.entries(activePaperProfile?.parameters?.strategies ?? {})
@@ -585,12 +590,17 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
   })
   const summary = ordersQuery.data
   const toggleStrategy = (strategy: string) => {
-    if (validationActive) return
+    if (validationActive || readOnly) return
     setSelectedStrategies([strategy])
   }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {readOnly && (
+        <div className="shrink-0 border-b border-amber-500/25 bg-amber-500/5 px-3 py-2 text-[10px] text-amber-300">
+          {tx(language, '当前为只读数据，恢复实时连接后才可操作。', 'Read-only data. Controls resume when the live connection returns.')}
+        </div>
+      )}
       <div className="shrink-0 border-b border-neutral-800 bg-black/95 px-3 py-2">
         <div className="flex items-start justify-between gap-2">
           <div>
@@ -603,7 +613,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
         </div>
         <div className="mt-1 flex items-center justify-between gap-2 text-[9px] text-neutral-600">
           <span title={selectedRevisionId || tx(language, '未加载', 'Not loaded')}>{tx(language, '策略版本', 'Strategy version')} {selectedRevisionId ? tx(language, '已加载', 'loaded') : '--'}</span>
-          <button type="button" onClick={onOpenDeveloperSettings} className="inline-flex items-center gap-1 text-cyan-500 hover:text-cyan-300">
+          <button type="button" onClick={onOpenDeveloperSettings} disabled={readOnly} className="inline-flex items-center gap-1 text-cyan-500 hover:text-cyan-300 disabled:cursor-not-allowed disabled:opacity-35">
             <Settings2 className="h-3 w-3" /> {tx(language, '设置', 'Settings')}
           </button>
         </div>
@@ -620,10 +630,10 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
         {settingsOpen && (
           <div className="mt-2 space-y-2 border border-neutral-800 bg-neutral-950/60 p-2">
             <div className="grid grid-cols-2 gap-2">
-              <label className="text-[9px] text-neutral-500">{tx(language, '本金（USD）', 'Bankroll (USD)')}<input disabled={validationActive} type="number" min="1" step="1" value={bankroll} onChange={event => setBankroll(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
-              <label className="text-[9px] text-neutral-500">{tx(language, '单笔上限（USD）', 'Max per trade (USD)')}<input disabled={validationActive} type="number" min="0.1" step="0.1" value={maxPerTrade} onChange={event => setMaxPerTrade(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
+              <label className="text-[9px] text-neutral-500">{tx(language, '本金（USD）', 'Bankroll (USD)')}<input disabled={validationActive || readOnly} type="number" min="1" step="1" value={bankroll} onChange={event => setBankroll(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
+              <label className="text-[9px] text-neutral-500">{tx(language, '单笔上限（USD）', 'Max per trade (USD)')}<input disabled={validationActive || readOnly} type="number" min="0.1" step="0.1" value={maxPerTrade} onChange={event => setMaxPerTrade(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
             </div>
-            <fieldset disabled={validationActive} className="space-y-1">
+            <fieldset disabled={validationActive || readOnly} className="space-y-1">
               <legend className="mb-1 text-[9px] text-neutral-500">{tx(language, '入场策略（单选，避免重复敞口）', 'Entry strategy (single choice to avoid duplicate exposure)')}</legend>
               {STRATEGY_OPTIONS.map(option => (
                 <label key={option.key} title={tx(language, option.helpZh, option.helpEn)} className="flex min-h-7 items-center gap-2 border border-neutral-800 px-2 text-[10px] text-neutral-300">
@@ -636,7 +646,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
               <select
                 className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-[10px] text-neutral-200 disabled:opacity-60"
                 value={exitMode}
-                disabled={validationActive}
+                disabled={validationActive || readOnly}
                 onChange={event => setExitMode(event.target.value as ExitMode)}
               >
                 <option value="hold_to_settlement">{tx(language, '持有至结算', 'Hold to settlement')}</option>
@@ -654,7 +664,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
             {!schedulerRunning && <div className="border border-amber-500/20 bg-amber-500/5 px-2 py-1.5 text-[9px] text-amber-300">{tx(language, '请先启动顶部调度器。', 'Start the scheduler first.')}</div>}
             <button
               type="button"
-              disabled={validationMutation.isPending || (!validationActive && (!schedulerRunning || selectedStrategies.length === 0))}
+              disabled={readOnly || validationMutation.isPending || (!validationActive && (!schedulerRunning || selectedStrategies.length === 0))}
               onClick={() => validationMutation.mutate(validationActive ? 'stop' : 'start')}
               className={`inline-flex min-h-9 w-full items-center justify-center gap-1 border text-[10px] disabled:opacity-30 ${validationActive ? 'border-red-500/30 text-red-300 hover:bg-red-500/10' : 'border-green-500/30 bg-green-500/10 text-green-200 hover:bg-green-500/15'}`}
             >
@@ -685,7 +695,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
             <span className="text-[10px] text-neutral-500">{cityKey} · {targetDate}</span>
             <button
               type="button"
-              disabled={!validationActive || eligibleCount === 0 || executeMutation.isPending}
+              disabled={readOnly || !validationActive || eligibleCount === 0 || executeMutation.isPending}
               onClick={() => executeMutation.mutate({ dryRun: false })}
               className="border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-30"
             >
@@ -698,7 +708,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
                 key={item.key}
                 item={item}
                 pending={executeMutation.isPending}
-                accountActive={validationActive}
+                accountActive={validationActive && !readOnly}
                 onExecute={(decisionId, dryRun) => executeMutation.mutate({ decisionId, dryRun })}
                 language={language}
               />

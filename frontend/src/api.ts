@@ -7,6 +7,68 @@ const api = axios.create({
   baseURL: `${API_BASE}/api`,
 })
 
+export type ApiAccessMode = 'local' | 'live' | 'snapshot' | 'unknown'
+
+export type ApiAccessState = {
+  mode: ApiAccessMode
+  snapshotAt: string | null
+  writable: boolean
+  observedAt: string
+}
+
+const isLocalBrowser = () => typeof window !== 'undefined'
+  && ['127.0.0.1', 'localhost'].includes(window.location.hostname)
+
+let apiAccessState: ApiAccessState = {
+  mode: isLocalBrowser() ? 'local' : 'unknown',
+  snapshotAt: null,
+  writable: isLocalBrowser(),
+  observedAt: new Date().toISOString(),
+}
+
+const apiAccessListeners = new Set<(state: ApiAccessState) => void>()
+
+function responseHeader(headers: unknown, name: string) {
+  if (!headers || typeof headers !== 'object') return ''
+  const record = headers as Record<string, unknown> & { get?: (key: string) => unknown }
+  return String(record[name] ?? record.get?.(name) ?? '')
+}
+
+function recordApiAccess(headers: unknown) {
+  const reportedMode = responseHeader(headers, 'x-weatherbot-data-mode')
+  if (reportedMode !== 'live' && reportedMode !== 'snapshot') return
+  const next: ApiAccessState = {
+    mode: reportedMode,
+    snapshotAt: responseHeader(headers, 'x-weatherbot-snapshot-at') || null,
+    writable: reportedMode === 'live' && responseHeader(headers, 'x-weatherbot-write-enabled') === 'true',
+    observedAt: new Date().toISOString(),
+  }
+  apiAccessState = next
+  apiAccessListeners.forEach(listener => listener(next))
+}
+
+api.interceptors.response.use(
+  response => {
+    recordApiAccess(response.headers)
+    return response
+  },
+  error => {
+    recordApiAccess(error?.response?.headers)
+    return Promise.reject(error)
+  },
+)
+
+export function getApiAccessState() {
+  return apiAccessState
+}
+
+export function subscribeApiAccessState(listener: (state: ApiAccessState) => void) {
+  apiAccessListeners.add(listener)
+  return () => {
+    apiAccessListeners.delete(listener)
+  }
+}
+
 export async function fetchDashboard(city = ''): Promise<DashboardData> {
   const { data } = await api.get<DashboardData>('/dashboard', { params: city ? { city } : undefined })
   return data

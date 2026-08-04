@@ -25,6 +25,7 @@ import {
   fetchSchedulerStatus,
   fetchSignalDecisions,
   fetchSettlementContracts,
+  getApiAccessState,
   placeLiveOrder,
   runProductionAction,
   runProductionRefresh,
@@ -32,6 +33,7 @@ import {
   startScheduler,
   stopScheduler,
   stopBot,
+  subscribeApiAccessState,
   updateSignalStatus,
   verifySettlementContract,
   verifySettlementContractsBulk,
@@ -974,6 +976,7 @@ function PaperValidationCard({ status }: { status?: PaperValidationStatus | null
 
 function App() {
   const queryClient = useQueryClient()
+  const [apiAccess, setApiAccess] = useState(getApiAccessState)
   const [tradeMode, setTradeMode] = useState<TradeMode>('paper')
   const [activityView, setActivityView] = useState<'signals' | 'trades'>('signals')
   const [selectedCity, setSelectedCity] = useState(() => {
@@ -1002,6 +1005,8 @@ function App() {
   const copy = UI_COPY[uiLanguage]
   const i18nLanguage: I18nLanguage = uiLanguage === 'zh' ? 'zh-CN' : 'en'
   const t = useT(i18nLanguage)
+
+  useEffect(() => subscribeApiAccessState(setApiAccess), [])
 
   const showRefreshNotice = (notice: RefreshNotice, ttlMs = 7000) => {
     setRefreshNotices(current => [notice, ...current.filter(item => item.id !== notice.id)].slice(0, 3))
@@ -1673,6 +1678,25 @@ function App() {
     )
   }
 
+  const remoteReadOnly = apiAccess.mode === 'snapshot' || apiAccess.mode === 'unknown' || !apiAccess.writable
+  const snapshotAgeMinutes = apiAccess.snapshotAt
+    ? Math.max(0, (Date.now() - new Date(apiAccess.snapshotAt).getTime()) / 60000)
+    : null
+  const accessLabel = apiAccess.mode === 'local'
+    ? (uiLanguage === 'zh' ? '本地实时' : 'Local live')
+    : apiAccess.mode === 'live'
+      ? (apiAccess.writable
+        ? (uiLanguage === 'zh' ? '公网实时' : 'Remote live')
+        : (uiLanguage === 'zh' ? '公网只读' : 'Remote read-only'))
+      : apiAccess.mode === 'snapshot'
+        ? (uiLanguage === 'zh' ? '离线快照' : 'Offline snapshot')
+        : (uiLanguage === 'zh' ? '连接待确认' : 'Connection pending')
+  const accessTone = apiAccess.mode === 'local' || (apiAccess.mode === 'live' && apiAccess.writable)
+    ? 'border-green-500/30 bg-green-500/5 text-green-300'
+    : apiAccess.mode === 'snapshot' && snapshotAgeMinutes !== null && snapshotAgeMinutes > 60
+      ? 'border-red-500/30 bg-red-500/5 text-red-300'
+      : 'border-amber-500/30 bg-amber-500/5 text-amber-300'
+
   return (
     <div className={`${themeMode === 'dark' ? 'polywx-dark bg-[#161A22] text-[#CBD2DC]' : 'polywx-light bg-white text-gray-900'} flex min-h-screen flex-col xl:h-screen xl:overflow-hidden`}>
       <header className="flex shrink-0 items-center gap-2 border-b border-neutral-800 px-3 py-1.5">
@@ -1685,6 +1709,14 @@ function App() {
         </div>
         <span className="hidden shrink-0 text-[10px] text-neutral-500 md:inline">
           {copy.updated} {dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString(uiLanguage === 'zh' ? 'zh-CN' : 'en-GB', { hour12: false }) : '--:--:--'}
+        </span>
+        <span
+          className={`hidden shrink-0 border px-2 py-1 text-[10px] md:inline ${accessTone}`}
+          title={apiAccess.snapshotAt
+            ? `${uiLanguage === 'zh' ? '快照时间' : 'Snapshot time'}: ${new Date(apiAccess.snapshotAt).toLocaleString()}`
+            : accessLabel}
+        >
+          {accessLabel}{apiAccess.mode === 'snapshot' && snapshotAgeMinutes !== null ? ` · ${Math.round(snapshotAgeMinutes)}m` : ''}
         </span>
         <label className="inline-flex items-center gap-1 border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400" aria-label={t('language.label')}>
           <span>{t('language.label')}</span>
@@ -1715,8 +1747,9 @@ function App() {
         </div>
         <button
           type="button"
-          onClick={() => setDeveloperSettingsOpen(true)}
-          className="inline-flex h-[30px] w-[30px] items-center justify-center border border-neutral-700 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-100"
+          onClick={() => apiAccess.mode === 'local' && setDeveloperSettingsOpen(true)}
+          disabled={apiAccess.mode !== 'local'}
+          className="inline-flex h-[30px] w-[30px] items-center justify-center border border-neutral-700 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-35"
           aria-label={copy.settings}
           title={uiLanguage === 'zh' ? '设置与开发者模式' : 'Settings and developer tools'}
         >
@@ -1727,7 +1760,7 @@ function App() {
             if (schedulerRunning) schedulerStopMutation.mutate()
             else schedulerStartMutation.mutate()
           }}
-          disabled={schedulerStartMutation.isPending || schedulerStopMutation.isPending}
+          disabled={remoteReadOnly || schedulerStartMutation.isPending || schedulerStopMutation.isPending}
           className={`inline-flex items-center gap-1 whitespace-nowrap border px-2 py-1.5 text-[11px] disabled:opacity-40 ${
             schedulerRunning
               ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/15'
@@ -2057,7 +2090,8 @@ function App() {
             validation={paperValidationStatusQuery.data}
             liveAvailable={liveAvailable}
             schedulerRunning={schedulerRunning}
-            onOpenDeveloperSettings={() => setDeveloperSettingsOpen(true)}
+            onOpenDeveloperSettings={() => apiAccess.mode === 'local' && setDeveloperSettingsOpen(true)}
+            readOnly={remoteReadOnly}
             language={uiLanguage}
           />
           {false && <>
