@@ -1,38 +1,31 @@
 # WeatherBot Current State
 
 ## Current Layer
-- Date: 2026-08-03. Phase 3/6: frozen forward observation and operator-access hardening.
-- Production data remains at `D:\WeatherBot\data\weatherbot_v3.db`; the scheduler is stopped after a bounded smoke cycle.
+- Date: 2026-08-05. Phase 3/6: frozen forward observation, public dashboard separation, and storage hardening.
+- Production data remains local at `D:\WeatherBot\data\weatherbot_v3.db`; the scheduler is stopped and the database has not changed since 2026-08-03.
 - `LIVE_TRADING=false`; no profitability claim has been established.
 - Frozen v2 validation remains unchanged: model-side `0.20<=ask<0.40`, `edge>=8%`, target `N=338`.
 
 ## Latest Evidence
-- Sites version 2 is deployed privately at `https://weatherbot-polymarket-v1.kl28398052.chatgpt.site`.
-- Hosted reads use a protected Cloudflare origin tunnel while the laptop is online and fall back to the immutable snapshot when it is offline.
-- Hosted writes are owner-only and allowlisted. API settings, live/canary execution, secrets, and legacy actions remain local-only.
-- The tunnel origin requires `WEATHERBOT_ORIGIN_TOKEN`; localhost remains usable without the token.
-- The recurring operator freeze was traced to ordinary `/api/dashboard` reads launching the full legacy dashboard rebuild after its 20-second cache expired.
-- Ordinary dashboard reads are now lightweight by default; the full rebuild runs only when `WEATHERBOT_DASHBOARD_AUTO_BUILD=true` is explicitly set.
-- Initial 51-city indexing improved from more than 44s to 2.57s. Selected-city dashboard reads measured 2.64s cold and 1.21s warm with an approximately 186KB response.
-- `/api/source-health` improved from about 74s to 2.45s cold and 0.07s cached while retaining all 49 source-health rows.
-- The production SQLite database is 45.67GB. An exact read-only scan found 911MB of duplicate `raw_json` older than 30 days; 14-day and 7-day estimates are about 5.7GB and 20.2GB respectively.
-- `storage-archive` now checkpoints a checksum-verified recovery manifest before every database clear, survives interrupted batches, and restores archived `raw_json` without loading whole archives into memory.
-- Six obsolete SQLite backups occupy 24.3GB uncompressed on NTFS. Transparent backup compression is the safest first physical-space reduction; production SQLite uses `auto_vacuum=0`, so raw-blob archival alone will not shrink its 45.67GB file.
-- No storage archive or VACUUM has been applied to the production database in this turn.
-- A prior uninterrupted scheduler run lasted about 41 hours. Core polling continued, but network failures and occasional `database is locked` errors were observed; derive concurrency is now capped at 2 and transient SQLite locks receive two bounded retries.
-- The post-fix smoke cycle completed derive for 49/49 enabled cities with no lock failure, refreshed 1,078/1,078 order books, and completed one paper execution pass with zero fresh executable candidates.
-- The latest three-day funnel has 130 city/date predictions and 1,430 strictly matched buckets, but only 3 decisions were ever paper-allowed and none is currently dashboard-visible. Dominant blocks are absent book sides, D+0 peak-window timing, insufficient effective edge, and spread/price constraints; thresholds were not weakened.
-- Frozen forward evidence currently has 162 enrolled candidates and 137 anchors. Mean CLV is -4.22 percentage points (95% CI -6.77 to -1.68); D+0 and the 8-15% edge subgroup are negative, so no validated trading edge exists yet.
-- The active paper cohort has 4 records: 1 settled loss (-$1.17), 1 open position (-$0.285 mark-to-market), and 2 rejected orders. Rejected orders are now excluded from open-position and unrealized-PnL totals.
+- The current core-modal cohort has 5 records: 2 settled (1 win, 1 loss), 1 open, and 2 rejected; settled win rate is 50% at `N=2`, realized PnL is about `+$3.09`, and the open mark was slightly negative. This is operational evidence, not a profitability result.
+- Forward validation has 168 enrolled and 140 anchored candidates. Mean CLV is about `-4.11pp` with a 95% interval entirely below zero, so the current strategy is not ready for live trading.
+- The latest complete three-day funnel has 99 city/date predictions, all 99 with at least four model families and model spread, 1,089 strict-matched buckets, but zero latest `paper_allowed` decisions. Main blocks are wide spreads, D+0 timing, missing book sides, and insufficient effective edge; risk thresholds were not weakened.
+- A signal-funnel audit bug that counted only positive-weight models was fixed; deterministic diagnostic model families now count independently from ensemble members and fusion weight.
+- Sites version 3 is privately deployed at `https://weatherbot-polymarket-v1.kl28398052.chatgpt.site`.
+- The hosted UI now distinguishes local live, public live, public read-only, and offline snapshot modes. A stale snapshot is visibly marked and mutation controls are disabled.
+- Public mutations are owner-only and narrowly allowlisted to scheduler and paper-validation/order actions. Production refresh, secrets, legacy, canary, and live execution remain local-only.
+- With the laptop offline, `/api/dashboard` returned `snapshot`, `write=false`, and the removed production-refresh route returned HTTP 403. The current fallback snapshot is dated 2026-07-18 and must not be treated as live.
+- Initial 51-city indexing is about 2.57s; selected-city dashboard reads measured about 2.64s cold and 1.21s warm. `/api/source-health` measured about 2.45s cold and 0.07s cached.
+- The production SQLite database is 45.67GB. Backup files totaling 24.32GB logical were losslessly NTFS-compressed to about 2.37GB stored, freeing roughly 20.45GB without deleting data.
+- Raw duplicate JSON remains a later maintenance target. It will be checksum-archived before clearing, and SQLite compaction will only run in an approved offline window.
 
 ## Production Blockers
-- The current Cloudflare Quick Tunnel URL is temporary and changes after restart; stable remote operation needs a named tunnel/domain.
-- SQLite remains large enough that uncached first reads take 2-3s; remote hosting still needs a named tunnel and later database migration/compaction.
-- Forward validation has not reached the frozen `N=338` stop rule; strategy quality and profitability remain unproven.
-- Current forward CLV is materially negative overall. Live trading must remain locked until the frozen evaluation reaches its stop rule and reverses this evidence.
-- SQLite is still a write-contention bottleneck under broad 49-city derive workloads; bounded retries reduce transient failures but do not replace a future database architecture decision.
+- Current forward CLV is materially negative and settled `N=2` is not decision-grade. Live trading stays locked.
+- The Quick Tunnel URL changes after restart; reliable public live operation needs a named Cloudflare Tunnel or cloud backend.
+- The offline public snapshot is stale. Snapshot publishing needs an automatic successful-cycle hook before it can be a useful fallback.
+- SQLite is a 45.67GB single-writer bottleneck; broad derive work can still encounter contention despite bounded concurrency and retries.
 
 ## Next Task
-- Keep collecting the frozen forward cohort without changing model or risk thresholds; use CLV/Brier/P&L rather than raw signal count as the go/no-go evidence.
-- Replace the Quick Tunnel with a named tunnel or cloud backend before stable remote operation; keep the lightweight dashboard path as the default.
-- During the next approved downtime, transparently compress old backup files first; separately choose a 7/14/30-day raw-payload retention window before archival and offline SQLite compaction.
+- Resume the frozen paper cohort only when continuous collection is desired; judge by CLV/Brier/PnL, not signal count.
+- Replace Quick Tunnel with a named tunnel and add automatic snapshot publication after a successful derive cycle.
+- In the next approved downtime, archive old duplicate raw payloads, verify recovery, then compact SQLite; do not delete structured evidence.

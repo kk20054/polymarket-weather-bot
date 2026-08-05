@@ -270,9 +270,9 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8765/api/scheduler/stop
 私有前端地址：<https://weatherbot-polymarket-v1.kl28398052.chatgpt.site>。使用唯一管理员邮箱登录后访问。
 
 - 前端由 Sites 托管；SQLite、采集器、策略和执行工作台仍运行在本机。
-- 本机在线时，Sites Worker 通过受保护的 Cloudflare Tunnel 读取实时 API。
-- 本机离线时，只读请求回退到最近一次不可变快照；写操作明确返回本地端离线，不会伪造成功。
-- 公网写操作仅开放调度器、受控刷新和 paper 操作；密钥配置、legacy、canary 与 live 路径仍只能在本机访问。
+- 本机在线时，Sites Worker 通过受保护的 Cloudflare Tunnel 读取实时 API；顶栏显示“公网实时”。
+- 本机离线时，只读请求回退到最近一次不可变快照；顶栏显示“离线快照”和快照年龄，写操作禁用，不会伪造成功。
+- 公网写操作仅开放调度器启停、paper validation 和 paper order；生产刷新、密钥配置、legacy、canary 与 live 路径只能在本机访问。
 - 当前使用 Quick Tunnel 做联调，电脑或 tunnel 重启后 URL 会变化。长期使用前应换成命名 Tunnel 和固定域名。
 
 浏览器永远不会收到 `WEATHERBOT_ORIGIN_TOKEN`。该令牌只保存在本机 `.env` 与 Sites 的隐藏运行时变量中。
@@ -280,6 +280,8 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8765/api/scheduler/stop
 ## 存储治理
 
 生产数据库位于 `D:\WeatherBot\data\weatherbot_v3.db`。先做快速只读估算：
+
+旧 SQLite 备份已使用 NTFS 透明 LZX 压缩：逻辑大小约 `24.32GB`，实际占用约 `2.37GB`，不影响恢复和校验。生产数据库本体未压缩、未删除、未 VACUUM。
 
 ```powershell
 .\.venv\Scripts\python.exe -m weatherbot_v3.cli storage-audit --before-days 30
