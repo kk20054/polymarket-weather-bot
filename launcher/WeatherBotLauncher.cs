@@ -405,8 +405,7 @@ namespace WeatherBotLauncher
         private static bool IsBackendReady(string url)
         {
             string body;
-            return TryGet(url, 3000, out body)
-                && body.IndexOf("\"running\"", StringComparison.OrdinalIgnoreCase) >= 0;
+            return TryGet(url, 3000, out body);
         }
 
         private static bool IsFrontendReady(string url)
