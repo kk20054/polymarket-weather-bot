@@ -101,6 +101,41 @@ class DashboardAsyncReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row["hourly_points"] == [] for row in payload["weather_city_series"]))
         self.assertEqual(payload["city_evidence"], [])
 
+    async def test_dashboard_overlays_fresh_observation_on_cached_city_summary(self):
+        cached = {
+            "weather_city_series": [{
+                "city_key": "shanghai",
+                "current_temp": None,
+                "current_temp_timestamp": None,
+                "last_refreshed_at": "2026-08-06T17:22:00+00:00",
+                "hourly_points": [],
+            }],
+            "city_evidence": [],
+        }
+        fresh = {
+            "shanghai": {
+                "current_temp": 30.9,
+                "current_temp_source": "china_live",
+                "current_temp_timestamp": "2026-08-07T00:20:00+00:00",
+                "last_refreshed_at": "2026-08-07T00:20:00+00:00",
+            }
+        }
+        with patch.object(dashboard_server, "dashboard_payload_cache", cached), patch(
+            "dashboard_server._latest_city_observation_summaries", return_value=fresh
+        ), patch(
+            "dashboard_server._read_json", return_value=None
+        ), patch(
+            "dashboard_server._cached_recommendations", return_value={"focus_items": []}
+        ), patch.object(
+            dashboard_server, "DASHBOARD_AUTO_BUILD", False
+        ):
+            payload = await dashboard_server.dashboard("")
+
+        shanghai = payload["weather_city_series"][0]
+        self.assertEqual(shanghai["current_temp"], 30.9)
+        self.assertEqual(shanghai["current_temp_source"], "china_live")
+        self.assertEqual(shanghai["last_refreshed_at"], "2026-08-07T00:20:00+00:00")
+
     async def test_dashboard_only_refreshes_full_cache_when_explicitly_enabled(self):
         cached = {
             "weather_city_series": [],

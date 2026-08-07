@@ -3278,6 +3278,73 @@ def _latest_fetch_by_city() -> dict[str, str]:
         return {}
 
 
+def _latest_city_observation_summaries(now: datetime | None = None) -> dict[str, dict]:
+    """Read the latest real observation per city without rebuilding the dashboard cache."""
+    current_time = now or datetime.now(timezone.utc)
+    summaries: dict[str, dict] = {}
+    source_priority = {"metar": 1, "wunderground_pws": 2, "china_live": 3}
+    try:
+        with connect() as conn:
+            for profile in SETTLEMENT_REGISTRY.values():
+                candidates: list[tuple[datetime, int, str, float]] = []
+                metar = conn.execute(
+                    """
+                    SELECT temperature, report_time
+                    FROM metar_reports
+                    WHERE city = ? AND temperature IS NOT NULL
+                    ORDER BY report_time DESC
+                    LIMIT 1
+                    """,
+                    (profile.city,),
+                ).fetchone()
+                if metar:
+                    observed_at = _parse_iso(metar["report_time"])
+                    temperature = _temperature_in_unit(metar["temperature"], profile.unit)
+                    if observed_at and temperature is not None and observed_at <= current_time + timedelta(minutes=10):
+                        candidates.append((observed_at, source_priority["metar"], "metar", temperature))
+
+                mesonet = conn.execute(
+                    """
+                    SELECT network, temperature, observed_at
+                    FROM mesonet_observations
+                    WHERE city = ?
+                      AND network IN ('china_live', 'wunderground_pws')
+                      AND temperature IS NOT NULL
+                      AND COALESCE(parse_status, '') != 'failed'
+                    ORDER BY observed_at DESC
+                    LIMIT 1
+                    """,
+                    (profile.city,),
+                ).fetchone()
+                if mesonet:
+                    observed_at = _parse_iso(mesonet["observed_at"])
+                    temperature = _temperature_in_unit(mesonet["temperature"], profile.unit)
+                    source = str(mesonet["network"] or "").strip().lower()
+                    if observed_at and temperature is not None and observed_at <= current_time + timedelta(minutes=10):
+                        candidates.append((observed_at, source_priority.get(source, 0), source, temperature))
+
+                if not candidates:
+                    continue
+                observed_at, _, source, temperature = max(candidates, key=lambda item: (item[0], item[1]))
+                timestamp = observed_at.isoformat()
+                summaries[profile.city] = {
+                    "current_temp": temperature,
+                    "current_temp_source": source,
+                    "current_temp_timestamp": timestamp,
+                    "last_refreshed_at": timestamp,
+                }
+    except Exception:
+        return {}
+    return summaries
+
+
+def _overlay_city_observation_summaries(rows: list[dict], summaries: dict[str, dict]) -> list[dict]:
+    return [
+        {**row, **summaries.get(str(row.get("city_key") or ""), {})}
+        for row in rows
+    ]
+
+
 def _distribution_item_count(distribution) -> int:
     if not isinstance(distribution, dict):
         return 0
@@ -4864,8 +4931,13 @@ async def dashboard(city: str = ""):
         payload = dict(dashboard_payload_cache)
     else:
         payload = _minimal_dashboard_payload()
-    payload["weather_city_series"] = _dashboard_city_series_for_selection(
+    latest_observations = await asyncio.to_thread(_latest_city_observation_summaries)
+    city_series = _overlay_city_observation_summaries(
         payload.get("weather_city_series") or [],
+        latest_observations,
+    )
+    payload["weather_city_series"] = _dashboard_city_series_for_selection(
+        city_series,
         city,
     )
     if city:

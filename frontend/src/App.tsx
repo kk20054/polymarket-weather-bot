@@ -1415,7 +1415,7 @@ function App() {
           ? 'market_candidate'
           : row.city_scope || 'market_candidate',
         tier: row.tier ?? 9,
-        lastRefreshedAt: row.last_refreshed_at ?? row.latest_timestamp ?? null,
+        lastRefreshedAt: row.current_temp_timestamp ?? row.last_refreshed_at ?? row.latest_timestamp ?? null,
       })
     }
 
