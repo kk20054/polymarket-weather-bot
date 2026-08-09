@@ -143,18 +143,27 @@ def refresh_cached_market_bucket_orderbooks(
         if city and target_date
     }
     bounded_limit = max(1, min(int(limit or 5000), 10_000))
+    where = ["COALESCE(yes_token_id, '') != ''"]
+    params: list[Any] = []
+    if target_pairs:
+        pair_clauses = []
+        for target_city, target_date in sorted(target_pairs):
+            pair_clauses.append("(city = ? AND target_date = ?)")
+            params.extend((target_city, target_date))
+        where.append(f"({' OR '.join(pair_clauses)})")
+    params.append(bounded_limit)
     with connect(path) as conn:
         db_rows = [
             dict(row)
             for row in conn.execute(
-                """
+                f"""
                 SELECT *
                 FROM market_buckets
-                WHERE COALESCE(yes_token_id, '') != ''
+                WHERE {' AND '.join(where)}
                 ORDER BY target_date ASC, city ASC, id ASC
                 LIMIT ?
                 """,
-                (bounded_limit,),
+                params,
             ).fetchall()
         ]
     if target_pairs:

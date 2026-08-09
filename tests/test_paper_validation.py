@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from weatherbot_v3.db import (
+    connect,
     init_v3_db,
     insert_orderbook,
     list_paper_orders,
@@ -17,6 +18,7 @@ from weatherbot_v3.db import (
 )
 from weatherbot_v3.forecast_time import FORECAST_COMPONENT_COHORT_VERSION
 from weatherbot_v3.paper_validation import (
+    _fresh_candidates,
     paper_validation_status,
     run_paper_validation_tick,
     start_paper_validation_run,
@@ -75,6 +77,76 @@ def upsert_signal_decision_record(decision: dict, path: Path | None = None) -> i
 
 
 class PaperValidationTests(unittest.TestCase):
+    def test_fresh_candidate_query_is_not_displaced_by_unrelated_recent_rows(self):
+        path = test_db_path("paper_validation_candidate_query")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        init_v3_db(path)
+        started = start_paper_validation_run(
+            duration_days=14,
+            cities=["chicago"],
+            strategies=["single_bucket_ev"],
+            path=path,
+        )
+        self.assertTrue(started["ok"])
+        run = started["run"]
+        revision_id = str(run["strategy_revision_id"])
+        now = datetime.now(timezone.utc)
+        valid_issued_at = (now - timedelta(seconds=2)).isoformat()
+        noise_issued_at = (now - timedelta(seconds=1)).isoformat()
+        rows = [(
+            "valid-candidate",
+            "chicago",
+            now.date().isoformat(),
+            valid_issued_at,
+            "single_bucket_ev",
+            revision_id,
+            1,
+            "buy",
+            0.12,
+            "yes-valid",
+            valid_issued_at,
+        )]
+        rows.extend(
+            (
+                f"noise-{index}",
+                "chicago",
+                now.date().isoformat(),
+                noise_issued_at,
+                "single_bucket_ev",
+                revision_id,
+                0,
+                "skip",
+                0.0,
+                f"yes-noise-{index}",
+                noise_issued_at,
+            )
+            for index in range(1005)
+        )
+        with connect(path) as conn:
+            conn.executemany(
+                """
+                INSERT INTO signal_decisions (
+                    decision_id, city_key, target_date, issued_at, strategy_name,
+                    strategy_revision_id, paper_allowed, paper_decision, edge,
+                    yes_token_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        candidates = _fresh_candidates(
+            run,
+            decision_id="",
+            city_key="",
+            target_date="",
+            strategies=None,
+            strategy_revision_id="",
+            decision_batch_issued_at="",
+            path=path,
+        )
+
+        self.assertEqual([row["decision_id"] for row in candidates], ["valid-candidate"])
+
     def test_seoul_is_available_to_paper_validation_but_not_live(self):
         self.assertEqual(ASIAN_CITY_PRIORITY["seoul"]["mode"], "paper_only")
 

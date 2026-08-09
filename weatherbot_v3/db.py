@@ -4027,6 +4027,13 @@ def list_signal_decisions(
     decision_id: str | None = None,
     limit: int = 100,
     path: Path | None = None,
+    *,
+    issued_at_min: str | None = None,
+    paper_allowed: bool | None = None,
+    paper_decision: str | None = None,
+    strategy_revision_id: str | None = None,
+    city_keys: list[str] | None = None,
+    strategy_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     init_v3_db(path)
     where: list[str] = []
@@ -4040,6 +4047,26 @@ def list_signal_decisions(
     if target_date:
         where.append("target_date = ?")
         params.append(target_date)
+    if issued_at_min:
+        where.append("COALESCE(issued_at, updated_at) >= ?")
+        params.append(issued_at_min)
+    if paper_allowed is not None:
+        where.append("paper_allowed = ?")
+        params.append(1 if paper_allowed else 0)
+    if paper_decision:
+        where.append("paper_decision = ?")
+        params.append(paper_decision)
+    if strategy_revision_id:
+        where.append("strategy_revision_id = ?")
+        params.append(strategy_revision_id)
+    normalized_cities = sorted({str(value) for value in (city_keys or []) if value})
+    if normalized_cities:
+        where.append(f"city_key IN ({','.join('?' for _ in normalized_cities)})")
+        params.extend(normalized_cities)
+    normalized_strategies = sorted({str(value) for value in (strategy_names or []) if value})
+    if normalized_strategies:
+        where.append(f"strategy_name IN ({','.join('?' for _ in normalized_strategies)})")
+        params.extend(normalized_strategies)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     bounded_limit = max(1, min(int(limit or 100), 1000))
     with connect(path) as conn:

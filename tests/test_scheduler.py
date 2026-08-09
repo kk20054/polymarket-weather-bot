@@ -20,6 +20,7 @@ from weatherbot_v3.scheduler import (
     WeatherBotScheduler,
     _bias_refresh_due,
     _compact_city_payload,
+    _compact_result,
     _ensemble_due_by_city,
     _remaining_cycle_delay,
     _tiered_refresh_rows,
@@ -46,6 +47,28 @@ def configure_enabled_cities(cities: list[str]) -> None:
 
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compact_result_preserves_paper_skip_evidence_and_timing(self):
+        compact = _compact_result({
+            "ok": False,
+            "status": "no_executable_candidates",
+            "candidate_count": 2,
+            "executed": 0,
+            "skipped_reason_counts": {"stale_book": 2},
+            "timing_ms": {"candidate_query": 12, "quote_refresh": 8, "total": 25},
+            "skipped_candidates": [
+                {
+                    "decision_id": "decision-1",
+                    "reason": "stale_book",
+                    "reasons": ["stale_book", "spread_too_wide"],
+                }
+            ],
+        })
+
+        self.assertEqual(compact["candidate_count"], 2)
+        self.assertEqual(compact["skipped_reason_counts"], {"stale_book": 2})
+        self.assertEqual(compact["timing_ms"]["total"], 25)
+        self.assertEqual(compact["skipped_candidates"][0]["reason"], "stale_book")
+
     async def test_forecast_and_historical_default_to_ten_minute_cadence(self):
         self.assertEqual(FORECAST_INTERVAL_SECONDS, 600)
         self.assertEqual(HISTORICAL_INTERVAL_SECONDS, 600)

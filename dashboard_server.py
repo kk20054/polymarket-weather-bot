@@ -4972,6 +4972,15 @@ async def dashboard(city: str = ""):
             "empty_reason": "recommendation_read_failed",
             "message": str(exc)[:160],
         }
+    try:
+        payload["forward_validation"] = await asyncio.to_thread(forward_validation_summary)
+    except Exception as exc:
+        current_forward = payload.get("forward_validation") or {}
+        payload["forward_validation"] = {
+            **current_forward,
+            "ok": False,
+            "read_error": str(exc)[:160],
+        }
     return await asyncio.to_thread(_json_safe, payload)
 
 

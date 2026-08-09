@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -191,6 +192,7 @@ def _run_paper_validation_tick_locked(
     decision_batch_issued_at: str,
     path: Path | None,
 ) -> dict[str, Any]:
+    tick_started = time.perf_counter()
     active = get_active_paper_validation_run(path=path)
     if run_id:
         requested = _load_run(run_id, path=path)
@@ -213,7 +215,9 @@ def _run_paper_validation_tick_locked(
             "reason": "strategy_revision_mismatch",
             "run_id": run["run_id"],
         }
+    metrics_started = time.perf_counter()
     metrics = _run_metrics(run, path=path)
+    metrics_ms = round((time.perf_counter() - metrics_started) * 1000)
     remaining_open = max(0, int(run["max_open_positions"]) - int(metrics["open_positions"]))
     remaining_orders = max(0, int(run["max_orders_per_day"]) - int(metrics["orders_today"]))
     remaining_daily = max(0.0, float(run["daily_max_usd"]) - float(metrics["spent_today_usd"]))
@@ -228,6 +232,7 @@ def _run_paper_validation_tick_locked(
             "metrics": metrics,
         }
 
+    candidates_started = time.perf_counter()
     candidates = _fresh_candidates(
         run,
         decision_id=decision_id,
@@ -238,8 +243,11 @@ def _run_paper_validation_tick_locked(
         decision_batch_issued_at=decision_batch_issued_at,
         path=path,
     )
+    candidate_query_ms = round((time.perf_counter() - candidates_started) * 1000)
     results: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    quote_refresh_ms = 0
+    preflight_ms = 0
     profile_parameters = (run.get("strategy_profile_snapshot") or {}).get("parameters", {})
     decision_policy = profile_parameters.get("decision_policy", {})
     strategy_parameters = profile_parameters.get("strategies", {})
@@ -249,10 +257,18 @@ def _run_paper_validation_tick_locked(
         group_rows = _candidate_group_rows(decision, path=path)
         leg_count = len(group_rows) if decision.get("ladder_group_id") else 1
         if leg_count <= 0 or leg_count > remaining_open or leg_count > remaining_orders:
+            skipped.append({
+                "decision_id": decision.get("decision_id"),
+                "ladder_group_id": decision.get("ladder_group_id") or "",
+                "reason": "paper_capacity_insufficient_for_group",
+                "reasons": ["paper_capacity_insufficient_for_group"],
+            })
             continue
         if remaining_daily < 0.01 or cash_available < 0.01:
             break
+        quote_started = time.perf_counter()
         fresh_group_rows = [refresh_paper_decision_quote(row, path=path) for row in (group_rows or [decision])]
+        quote_refresh_ms += round((time.perf_counter() - quote_started) * 1000)
         fresh_reasons = _fresh_quote_gate_reasons(
             fresh_group_rows,
             decision_policy=decision_policy,
@@ -297,6 +313,12 @@ def _run_paper_validation_tick_locked(
         )
         amount = sizing.capped_position_size_usd
         if amount < 0.01:
+            skipped.append({
+                "decision_id": decision.get("decision_id"),
+                "ladder_group_id": decision.get("ladder_group_id") or "",
+                "reason": "non_positive_position_size",
+                "reasons": ["non_positive_position_size"],
+            })
             continue
         sizing_snapshot = {
             **sizing.snapshot(),
@@ -306,6 +328,7 @@ def _run_paper_validation_tick_locked(
             "ladder_leg_count": leg_count,
             "position_size_multiplier": position_size_multiplier,
         }
+        preflight_started = time.perf_counter()
         preflight = execute_paper_decision_record(
             decision,
             amount=amount,
@@ -317,6 +340,7 @@ def _run_paper_validation_tick_locked(
             max_book_age_seconds=max_book_age_seconds,
             max_spread_bps=max_spread_bps,
         )
+        preflight_ms += round((time.perf_counter() - preflight_started) * 1000)
         if not preflight.get("ok"):
             skipped.append({
                 "decision_id": decision.get("decision_id"),
@@ -345,6 +369,10 @@ def _run_paper_validation_tick_locked(
             cash_available = max(0.0, cash_available - filled)
             remaining_open = max(0, remaining_open - leg_count)
             remaining_orders = max(0, remaining_orders - leg_count)
+    skipped_reason_counts: dict[str, int] = {}
+    for row in skipped:
+        reason = str(row.get("reason") or "paper_skip_unclassified")
+        skipped_reason_counts[reason] = skipped_reason_counts.get(reason, 0) + 1
     return {
         "ok": all(row.get("ok") or row.get("status") == "duplicate" for row in results),
         "status": ("executed" if apply else "dry_run") if results else ("no_executable_candidates" if skipped else "no_fresh_candidates"),
@@ -356,6 +384,16 @@ def _run_paper_validation_tick_locked(
         "duplicates": sum(1 for row in results if row.get("status") == "duplicate"),
         "results": results,
         "skipped_candidates": skipped,
+        "skipped_reason_counts": dict(
+            sorted(skipped_reason_counts.items(), key=lambda item: (-item[1], item[0]))
+        ),
+        "timing_ms": {
+            "metrics": metrics_ms,
+            "candidate_query": candidate_query_ms,
+            "quote_refresh": quote_refresh_ms,
+            "preflight": preflight_ms,
+            "total": round((time.perf_counter() - tick_started) * 1000),
+        },
         "metrics": _run_metrics(run, path=path) if apply else metrics,
     }
 
@@ -376,7 +414,24 @@ def _fresh_candidates(
     allowed_strategies = set(run.get("strategies") or [])
     if strategies:
         allowed_strategies &= set(strategies)
-    rows = list_signal_decisions(limit=2000, path=path)
+    if city_key and city_key not in allowed_cities:
+        return []
+    if not allowed_cities or not allowed_strategies:
+        return []
+    expected_revision = strategy_revision_id or str(run.get("strategy_revision_id") or "")
+    rows = list_signal_decisions(
+        city_key=city_key or None,
+        target_date=target_date or None,
+        decision_id=decision_id or None,
+        limit=1000,
+        path=path,
+        issued_at_min=cutoff.isoformat(),
+        paper_allowed=True,
+        paper_decision="buy",
+        strategy_revision_id=expected_revision,
+        city_keys=sorted(allowed_cities),
+        strategy_names=sorted(allowed_strategies),
+    )
     with connect(path) as conn:
         existing_rows = conn.execute(
             "SELECT decision_id, yes_token_id FROM paper_orders WHERE cohort_run_id=?",
@@ -403,7 +458,6 @@ def _fresh_candidates(
         strategy = str(row.get("strategy_name") or "single_bucket_ev")
         if city not in allowed_cities or strategy not in allowed_strategies:
             continue
-        expected_revision = strategy_revision_id or str(run.get("strategy_revision_id") or "")
         if str(row.get("strategy_revision_id") or "") != expected_revision:
             continue
         if not bool(row.get("paper_allowed")) or str(row.get("paper_decision") or "") != "buy":

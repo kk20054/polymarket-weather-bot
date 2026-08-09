@@ -1317,6 +1317,13 @@ def _compact_result(payload: dict[str, Any]) -> dict[str, Any]:
         "city_results": city_results,
     }
     for key in (
+        "status",
+        "reason",
+        "candidate_count",
+        "executed",
+        "duplicates",
+        "skipped_reason_counts",
+        "timing_ms",
         "refresh_scope",
         "enabled_cities",
         "active_market_cities",
@@ -1340,6 +1347,18 @@ def _compact_result(payload: dict[str, Any]) -> dict[str, Any]:
     ):
         if key in payload:
             compact[key] = payload[key]
+    skipped_candidates = payload.get("skipped_candidates")
+    if isinstance(skipped_candidates, list):
+        compact["skipped_candidates"] = [
+            {
+                "decision_id": row.get("decision_id"),
+                "ladder_group_id": row.get("ladder_group_id") or "",
+                "reason": row.get("reason") or "paper_skip_unclassified",
+                "reasons": list(row.get("reasons") or [])[:8],
+            }
+            for row in skipped_candidates[:20]
+            if isinstance(row, dict)
+        ]
     return compact
 
 
@@ -1352,11 +1371,19 @@ def _poller_message(poller_key: str, result: dict[str, Any]) -> str:
             f"{int(result.get('exited_now') or 0)} model exits"
         )
     if poller_key == "paper_execution_poller":
-        return (
+        message = (
             f"{poller_key} {result.get('status') or 'completed'}: "
             f"{int(result.get('executed') or 0)} executed from "
             f"{int(result.get('candidate_count') or 0)} candidates"
         )
+        reason_counts = result.get("skipped_reason_counts") or {}
+        if isinstance(reason_counts, dict) and reason_counts:
+            top_reasons = ", ".join(
+                f"{reason}={count}"
+                for reason, count in list(reason_counts.items())[:3]
+            )
+            message += f"; skipped {top_reasons}"
+        return message
     if poller_key == "gamma_orderbook_poller":
         return (
             f"{poller_key} completed: {int(result.get('quotes_refreshed') or 0)} fresh books, "

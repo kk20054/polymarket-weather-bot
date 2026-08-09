@@ -134,6 +134,46 @@ class CachedOrderbookRefreshTests(unittest.TestCase):
         self.assertTrue(bucket["orderbook_last_success_at"])
         self.assertEqual(orderbooks, 1)
 
+    def test_current_target_is_not_displaced_by_older_rows_before_limit(self):
+        TEST_DB_DIR.mkdir(exist_ok=True)
+        db_path = TEST_DB_DIR / "cached_orderbook_target_filter.db"
+        db_path.unlink(missing_ok=True)
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        self._seed_bucket(db_path)
+        for index in range(6):
+            self._seed_bucket(
+                db_path,
+                bucket_key=f"old-bucket-{index}",
+                market_id=f"old-market-{index}",
+                city="chicago",
+                city_name="Chicago",
+                target_date=f"2020-01-{index + 1:02d}",
+                station_id="KORD",
+                yes_token_id=f"old-yes-{index}",
+                no_token_id=f"old-no-{index}",
+            )
+        session = _Session([{
+            "asset_id": "yes-1",
+            "timestamp": "1784428800000",
+            "hash": "fresh-hash",
+            "tick_size": "0.001",
+            "min_order_size": "5",
+            "bids": [{"price": "0.19", "size": "100"}],
+            "asks": [{"price": "0.21", "size": "80"}],
+        }])
+
+        result = refresh_cached_market_bucket_orderbooks(
+            targets_by_city={"shanghai": ["2026-07-19"]},
+            limit=5,
+            path=db_path,
+            session=session,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["cached_buckets"], 1)
+        self.assertEqual(result["quotes_refreshed"], 1)
+        self.assertEqual(session.posts[0]["json"], [{"token_id": "yes-1"}])
+
     def test_one_sided_clob_keeps_missing_bid_null_and_classifies_side_absent(self):
         TEST_DB_DIR.mkdir(exist_ok=True)
         db_path = TEST_DB_DIR / "cached_orderbook_one_sided.db"
