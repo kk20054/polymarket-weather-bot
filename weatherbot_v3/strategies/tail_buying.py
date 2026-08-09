@@ -39,14 +39,11 @@ class TailBuyingStrategy(StrategyBase):
             return None
         if ask > self.max_ask:
             return None
-        required_min_edge = max(self.min_edge, float(context.get("min_trade_edge") or 0.08))
+        required_min_edge = max(self.min_edge, float(context.get("paper_min_trade_edge") or 0.05))
         if model_probability - ask < required_min_edge:
             return None
-        extra_reasons = []
         independent_days = int(context.get("independent_settlement_days") or 0)
         live_mature = independent_days >= self.min_live_independent_settlement_days
-        if not live_mature:
-            extra_reasons.append("tail_live_maturity_below_min")
         decision = self.build_decision(
             bucket,
             probability,
@@ -54,8 +51,12 @@ class TailBuyingStrategy(StrategyBase):
             context,
             min_edge=required_min_edge,
             allow_low_price_tail=True,
-            extra_gate_reasons=extra_reasons,
         )
+        if not live_mature:
+            decision["live_gate_reasons"] = list(dict.fromkeys([
+                *(decision.get("live_gate_reasons") or []),
+                "tail_live_maturity_below_min",
+            ]))
         if decision.get("position_size_usd") is not None:
             decision["position_size_usd"] = min(float(decision["position_size_usd"] or 0.0), self.max_order_usd)
         decision["tail_buying"] = {

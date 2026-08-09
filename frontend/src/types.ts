@@ -1504,15 +1504,21 @@ export interface StrategyProfileSnapshot {
 export interface StrategyProfileParameters {
   schema_version: number
   decision_policy: {
-    min_trade_edge: number
+    min_paper_trade_edge: number
+    min_live_trade_edge: number
+    min_trade_edge?: number
     max_spread_bps: number
     stale_book_seconds: number
     min_bias_sample_days: number
     low_price_tail_ask: number
   }
   sizing: {
-    kelly_multiplier: number
-    max_bankroll_fraction_per_trade: number
+    paper_kelly_multiplier: number
+    live_kelly_multiplier: number
+    max_paper_bankroll_fraction_per_trade: number
+    max_live_bankroll_fraction_per_trade: number
+    kelly_multiplier?: number
+    max_bankroll_fraction_per_trade?: number
   }
   strategies: Record<string, Record<string, boolean | number>>
   exit_policy: {

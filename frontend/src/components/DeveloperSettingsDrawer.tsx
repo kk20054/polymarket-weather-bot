@@ -520,8 +520,8 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
               <div className="px-4 py-4 sm:px-5">
                 <div className="mb-2 text-[11px] font-semibold text-neutral-300">仓位控制</div>
                 <div className="border-y border-neutral-800">
-                  <SettingNumber label="仓位折扣系数" description="按凯莉公式算出仓位后再打折，降低模型误差和连续亏损风险。" value={draft.sizing.kelly_multiplier} min={0} max={1} step={0.01} onChange={value => update(['sizing', 'kelly_multiplier'], value)} />
-                  <SettingNumber label="单笔本金比例" description={`当前为 ${percent(draft.sizing.max_bankroll_fraction_per_trade)}，与模拟单笔上限共同取较小值。`} value={draft.sizing.max_bankroll_fraction_per_trade} min={0.001} max={0.25} step={0.005} onChange={value => update(['sizing', 'max_bankroll_fraction_per_trade'], value)} />
+                  <SettingNumber label="仓位折扣系数" description="按凯莉公式算出仓位后再打折；模拟运行使用这里的系数。" value={draft.sizing.paper_kelly_multiplier} min={0} max={1} step={0.01} onChange={value => update(['sizing', 'paper_kelly_multiplier'], value)} />
+                  <SettingNumber label="单笔本金比例" description={`当前为 ${percent(draft.sizing.max_paper_bankroll_fraction_per_trade)}，与账户的单笔金额上限共同取较小值。`} value={draft.sizing.max_paper_bankroll_fraction_per_trade} min={0.001} max={0.25} step={0.005} onChange={value => update(['sizing', 'max_paper_bankroll_fraction_per_trade'], value)} />
                 </div>
 
                 <div className="mb-2 mt-6 text-[11px] font-semibold text-neutral-300">盘口与证据闸门</div>
@@ -529,12 +529,12 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                   <SettingNumber
                     label="最低交易优势"
                     description="校正后模型概率减去当前买入价的共同下限；核心策略还会扣除 tick 与半档价差作为执行缓冲。"
-                    value={Number(((draft.decision_policy.min_trade_edge ?? 0.08) * 100).toFixed(2))}
+                    value={Number(((draft.decision_policy.min_paper_trade_edge ?? 0.05) * 100).toFixed(2))}
                     min={0}
                     max={50}
                     step={1}
                     suffix="%"
-                    onChange={value => update(['decision_policy', 'min_trade_edge'], value / 100)}
+                    onChange={value => update(['decision_policy', 'min_paper_trade_edge'], value / 100)}
                   />
                   <SettingNumber label="最大价差" description="超过该 spread 的候选只观察，不进入交易队列。" value={draft.decision_policy.max_spread_bps} min={0} max={5000} step={10} suffix="bps" onChange={value => update(['decision_policy', 'max_spread_bps'], value)} />
                   <SettingNumber label="盘口有效期" description="成交前会读取最新本地盘口；超过该时间则拒绝。" value={draft.decision_policy.stale_book_seconds} min={30} max={3600} step={30} suffix="秒" onChange={value => update(['decision_policy', 'stale_book_seconds'], value)} />

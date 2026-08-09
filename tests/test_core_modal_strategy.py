@@ -148,6 +148,31 @@ class CoreModalStrategyTests(unittest.TestCase):
         self.assertEqual(decision["core_modal"]["model_rank"], 2)
         self.assertNotIn("core_modal_not_executable", decision["gate_reasons"])
 
+    def test_simulation_can_buy_without_unlocking_live_execution(self):
+        buckets = [_bucket("modal", 29, 30, 0.20, 0.19)]
+        probabilities = {"modal": {"bucket_key": "modal", "probability": 0.26}}
+
+        decision = CoreModalStrategy().evaluate_many(
+            buckets,
+            probabilities,
+            _prediction(),
+            _context(
+                paper_min_trade_edge=0.05,
+                live_min_trade_edge=0.08,
+                paper_bankroll=100.0,
+                paper_max_per_trade_usd=2.0,
+                live_bankroll=40.0,
+                live_max_per_trade_usd=2.0,
+            ),
+        )[0]
+
+        self.assertTrue(decision["paper_allowed"])
+        self.assertEqual(decision["paper_decision"], "buy")
+        self.assertFalse(decision["live_allowed"])
+        self.assertNotIn("edge_below_min", decision["paper_gate_reasons"])
+        self.assertIn("edge_below_live_min", decision["live_gate_reasons"])
+        self.assertIn("live_execution_not_ready", decision["live_gate_reasons"])
+
     def test_low_calibration_coverage_remains_paper_eligible_and_live_provisional(self):
         prediction = _prediction()
         for component in prediction["components"][:2]:
@@ -160,7 +185,8 @@ class CoreModalStrategyTests(unittest.TestCase):
 
         self.assertTrue(decision["paper_allowed"])
         self.assertNotIn("core_calibration_coverage_below_min", decision["gate_reasons"])
-        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["gate_reasons"])
+        self.assertNotIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["gate_reasons"])
+        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["live_gate_reasons"])
         self.assertNotIn("core_modal_not_executable", decision["gate_reasons"])
         self.assertAlmostEqual(decision["core_modal"]["quality"]["calibration_coverage"], 0.6)
 
@@ -175,7 +201,7 @@ class CoreModalStrategyTests(unittest.TestCase):
         self.assertTrue(decision["paper_allowed"])
         self.assertNotIn("core_model_spread_too_wide", decision["gate_reasons"])
         self.assertIn(CORE_MODAL_WIDE_SPREAD_CAUTION, decision["cautions"])
-        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["gate_reasons"])
+        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["live_gate_reasons"])
 
     def test_paper_explores_model_spread_that_remains_live_blocked(self):
         prediction = _prediction()
@@ -194,7 +220,7 @@ class CoreModalStrategyTests(unittest.TestCase):
         self.assertEqual(decision["core_modal"]["maturity_status"], "provisional")
         self.assertEqual(decision["position_size_multiplier"], 1.0)
         self.assertNotIn("core_model_spread_too_wide", decision["gate_reasons"])
-        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["gate_reasons"])
+        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["live_gate_reasons"])
 
     def test_sparse_settlement_history_remains_paper_eligible(self):
         bucket = _bucket("modal", 29, 30, 0.20, 0.19)
@@ -210,7 +236,7 @@ class CoreModalStrategyTests(unittest.TestCase):
         self.assertTrue(decision["paper_allowed"])
         self.assertNotIn("core_independent_settlement_days_below_min", decision["gate_reasons"])
         self.assertEqual(decision["core_modal"]["maturity_status"], "provisional")
-        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["gate_reasons"])
+        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, decision["live_gate_reasons"])
 
     def test_10_to_19_independent_samples_are_provisional_at_normal_paper_size(self):
         bucket = _bucket("modal", 29, 30, 0.20, 0.19)
@@ -237,7 +263,7 @@ class CoreModalStrategyTests(unittest.TestCase):
         self.assertEqual(provisional["position_size_multiplier"], 1.0)
         self.assertAlmostEqual(provisional["position_size_usd"], mature["position_size_usd"])
         self.assertIn(CORE_MODAL_PROVISIONAL_CAUTION, provisional["cautions"])
-        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, provisional["gate_reasons"])
+        self.assertIn(CORE_MODAL_LIVE_MATURITY_REASON, provisional["live_gate_reasons"])
         self.assertEqual(mature["core_modal"]["maturity_status"], "mature")
         self.assertEqual(mature["position_size_multiplier"], 1.0)
         self.assertNotIn(CORE_MODAL_PROVISIONAL_CAUTION, mature["cautions"])

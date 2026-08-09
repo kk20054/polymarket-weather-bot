@@ -17,10 +17,16 @@ def _context(**overrides):
         "max_spread_bps": 500.0,
         "stale_book_seconds": 300.0,
         "min_bias_sample_days": 7,
-        "min_trade_edge": 0.08,
-        "bankroll": 1000.0,
-        "kelly_multiplier": 0.15,
-        "max_per_trade_usd": 100.0,
+        "paper_min_trade_edge": 0.05,
+        "live_min_trade_edge": 0.08,
+        "paper_bankroll": 1000.0,
+        "live_bankroll": 1000.0,
+        "paper_kelly_multiplier": 0.25,
+        "live_kelly_multiplier": 0.15,
+        "paper_bankroll_fraction_cap": 0.125,
+        "live_bankroll_fraction_cap": 0.05,
+        "paper_max_per_trade_usd": 100.0,
+        "live_max_per_trade_usd": 100.0,
         "independent_settlement_days": 20,
     }
     base.update(overrides)
@@ -70,7 +76,7 @@ def _bucket(key, low, high, ask, bid=0.09, direction="range"):
 
 
 class StrategyTests(unittest.TestCase):
-    def test_single_bucket_ev_uses_global_eight_point_edge_threshold(self):
+    def test_single_bucket_ev_uses_configured_paper_edge_threshold(self):
         strategy = SingleBucketEVStrategy()
         decision = strategy.evaluate(
             _bucket("mid", 89.0, 91.0, 0.20, 0.195),
@@ -95,14 +101,14 @@ class StrategyTests(unittest.TestCase):
             _bucket("stricter", 89.0, 91.0, 0.20, 0.195),
             {"bucket_key": "stricter", "probability": 0.30},
             _prediction(),
-            _context(min_trade_edge=0.12),
+            _context(paper_min_trade_edge=0.12),
         )
         self.assertEqual(stricter["paper_decision"], "skip")
         self.assertIn("edge_below_min", stricter["gate_reasons"])
 
     def test_single_bucket_ev_blocks_orders_below_market_minimum(self):
         bucket = _bucket("large-minimum", 89.0, 91.0, 0.20, 0.195)
-        bucket["order_min_size"] = 500.0
+        bucket["order_min_size"] = 600.0
         decision = SingleBucketEVStrategy().evaluate(
             bucket,
             {"bucket_key": "large-minimum", "probability": 0.28},
@@ -113,8 +119,8 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(decision["paper_decision"], "skip")
         self.assertFalse(decision["paper_allowed"])
         self.assertIn("order_minimum_exceeds_trade_cap", decision["gate_reasons"])
-        self.assertEqual(decision["minimum_executable_amount_usd"], 100.0)
-        self.assertEqual(decision["trade_cap_usd"], 50.0)
+        self.assertEqual(decision["minimum_executable_amount_usd"], 120.0)
+        self.assertEqual(decision["trade_cap_usd"], 100.0)
 
     def test_ladder_grid_builds_three_bucket_atomic_group(self):
         buckets = [
@@ -132,7 +138,7 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(len(decisions), 3)
         self.assertEqual({row["strategy_name"] for row in decisions}, {"ladder_grid"})
         self.assertEqual(len({row["ladder_group_id"] for row in decisions}), 1)
-        self.assertAlmostEqual(sum(row["position_size_usd"] for row in decisions), 30.0, places=3)
+        self.assertAlmostEqual(sum(row["position_size_usd"] for row in decisions), 56.25, places=3)
         self.assertGreater(decisions[1]["position_size_usd"], decisions[0]["position_size_usd"])
 
     def test_ladder_grid_requires_all_three_edges(self):
@@ -168,7 +174,8 @@ class StrategyTests(unittest.TestCase):
         )
         self.assertEqual(thin_history["paper_decision"], "buy")
         self.assertTrue(thin_history["paper_allowed"])
-        self.assertIn("tail_live_maturity_below_min", thin_history["gate_reasons"])
+        self.assertNotIn("tail_live_maturity_below_min", thin_history["gate_reasons"])
+        self.assertIn("tail_live_maturity_below_min", thin_history["live_gate_reasons"])
         self.assertEqual(thin_history["tail_buying"]["live_maturity_status"], "provisional")
 
     def test_tail_buying_daily_candidate_cap(self):

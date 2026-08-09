@@ -23,23 +23,28 @@ PAPER_STRATEGY_NAMES = (
 DEFAULT_PARAMETERS: dict[str, Any] = {
     "schema_version": STRATEGY_PROFILE_SCHEMA_VERSION,
     "decision_policy": {
-        "min_trade_edge": 0.08,
+        "min_paper_trade_edge": 0.05,
+        "min_live_trade_edge": 0.08,
         "max_spread_bps": 500.0,
         "stale_book_seconds": 300.0,
         "min_bias_sample_days": 7,
         "low_price_tail_ask": 0.05,
     },
     "sizing": {
-        "kelly_multiplier": 0.15,
-        "max_bankroll_fraction_per_trade": 0.05,
+        "paper_kelly_multiplier": 0.25,
+        "live_kelly_multiplier": 0.15,
+        "max_paper_bankroll_fraction_per_trade": 0.125,
+        "max_live_bankroll_fraction_per_trade": 0.05,
     },
     "strategies": {
         "core_modal_v1": {
             "enabled": False,
-            "min_effective_edge": 0.08,
+            "min_paper_effective_edge": 0.05,
+            "min_live_effective_edge": 0.08,
             "min_model_probability": 0.25,
             "max_model_rank": 2,
-            "min_market_ask": 0.10,
+            "min_paper_market_ask": 0.05,
+            "min_live_market_ask": 0.10,
             "min_paper_settlement_days": 0,
             "min_live_settlement_days": 20,
             "require_authoritative_truth": True,
@@ -99,22 +104,33 @@ def validate_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     decision = merged["decision_policy"]
     sizing = merged["sizing"]
     strategies = merged["strategies"]
-    _bounded(decision, "min_trade_edge", 0.0, 0.5)
+    _bounded(decision, "min_paper_trade_edge", 0.0, 0.5)
+    _bounded(decision, "min_live_trade_edge", 0.0, 0.5)
+    if decision["min_live_trade_edge"] < decision["min_paper_trade_edge"]:
+        raise ValueError("live_trade_edge_below_paper")
     _bounded(decision, "max_spread_bps", 0.0, 5000.0)
     _bounded(decision, "stale_book_seconds", 30.0, 3600.0)
     _bounded(decision, "min_bias_sample_days", 0, 365, integer=True)
     _bounded(decision, "low_price_tail_ask", 0.0, 0.5)
-    _bounded(sizing, "kelly_multiplier", 0.0, 1.0)
-    _bounded(sizing, "max_bankroll_fraction_per_trade", 0.001, 0.25)
+    _bounded(sizing, "paper_kelly_multiplier", 0.0, 1.0)
+    _bounded(sizing, "live_kelly_multiplier", 0.0, 1.0)
+    _bounded(sizing, "max_paper_bankroll_fraction_per_trade", 0.001, 0.25)
+    _bounded(sizing, "max_live_bankroll_fraction_per_trade", 0.001, 0.25)
 
     core_modal = strategies["core_modal_v1"]
     single = strategies["single_bucket_ev"]
     ladder = strategies["ladder_grid"]
     tail = strategies["tail_buying"]
-    _bounded(core_modal, "min_effective_edge", 0.0, 0.5)
+    _bounded(core_modal, "min_paper_effective_edge", 0.0, 0.5)
+    _bounded(core_modal, "min_live_effective_edge", 0.0, 0.5)
+    if core_modal["min_live_effective_edge"] < core_modal["min_paper_effective_edge"]:
+        raise ValueError("core_modal_live_edge_below_paper")
     _bounded(core_modal, "min_model_probability", 0.0, 1.0)
     _bounded(core_modal, "max_model_rank", 1, 2, integer=True)
-    _bounded(core_modal, "min_market_ask", 0.01, 0.5)
+    _bounded(core_modal, "min_paper_market_ask", 0.01, 0.5)
+    _bounded(core_modal, "min_live_market_ask", 0.01, 0.5)
+    if core_modal["min_live_market_ask"] < core_modal["min_paper_market_ask"]:
+        raise ValueError("core_modal_live_market_ask_below_paper")
     _bounded(core_modal, "min_paper_settlement_days", 0, 365, integer=True)
     _bounded(core_modal, "min_live_settlement_days", 20, 365, integer=True)
     if core_modal["min_live_settlement_days"] < core_modal["min_paper_settlement_days"]:
@@ -411,11 +427,40 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 def _migrate_legacy_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
     migrated = deepcopy(parameters)
+    decision = migrated.get("decision_policy")
+    if isinstance(decision, dict) and "min_trade_edge" in decision:
+        legacy_edge = float(decision.pop("min_trade_edge"))
+        decision.setdefault("min_paper_trade_edge", legacy_edge)
+        decision.setdefault("min_live_trade_edge", max(0.08, legacy_edge))
+    sizing = migrated.get("sizing")
+    if isinstance(sizing, dict):
+        if "kelly_multiplier" in sizing:
+            legacy_kelly = float(sizing.pop("kelly_multiplier"))
+            sizing.setdefault("paper_kelly_multiplier", legacy_kelly)
+            sizing.setdefault("live_kelly_multiplier", min(0.15, legacy_kelly))
+        if "max_bankroll_fraction_per_trade" in sizing:
+            legacy_cap = float(sizing.pop("max_bankroll_fraction_per_trade"))
+            sizing.setdefault("max_paper_bankroll_fraction_per_trade", legacy_cap)
+            sizing.setdefault("max_live_bankroll_fraction_per_trade", min(0.05, legacy_cap))
     strategies = migrated.get("strategies")
     if not isinstance(strategies, dict):
         return migrated
     core_modal = strategies.get("core_modal_v1")
     if isinstance(core_modal, dict):
+        _split_mode_value(
+            core_modal,
+            legacy_key="min_effective_edge",
+            paper_key="min_paper_effective_edge",
+            live_key="min_live_effective_edge",
+            live_floor=0.08,
+        )
+        _split_mode_value(
+            core_modal,
+            legacy_key="min_market_ask",
+            paper_key="min_paper_market_ask",
+            live_key="min_live_market_ask",
+            live_floor=0.10,
+        )
         _split_legacy_threshold(
             core_modal,
             legacy_key="min_settlement_days",
@@ -433,6 +478,21 @@ def _migrate_legacy_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
         tail_buying.setdefault("min_live_settlement_days", tail_buying["min_settlement_days"])
         tail_buying.pop("min_settlement_days", None)
     return migrated
+
+
+def _split_mode_value(
+    parameters: dict[str, Any],
+    *,
+    legacy_key: str,
+    paper_key: str,
+    live_key: str,
+    live_floor: float,
+) -> None:
+    if legacy_key not in parameters:
+        return
+    legacy_value = float(parameters.pop(legacy_key))
+    parameters.setdefault(paper_key, legacy_value)
+    parameters.setdefault(live_key, max(live_floor, legacy_value))
 
 
 def _split_legacy_threshold(

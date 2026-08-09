@@ -83,8 +83,8 @@ def start_paper_validation_run(
         "strategies": clean_strategies,
         "strategy_revision_id": profile["revision_id"],
         "strategy_profile_snapshot": profile_snapshot(profile),
-        "kelly_multiplier": float(sizing_policy["kelly_multiplier"]),
-        "bankroll_fraction_cap": float(sizing_policy["max_bankroll_fraction_per_trade"]),
+        "kelly_multiplier": float(sizing_policy["paper_kelly_multiplier"]),
+        "bankroll_fraction_cap": float(sizing_policy["max_paper_bankroll_fraction_per_trade"]),
         "execution_version": PAPER_EXECUTION_VERSION,
         "notes": str(notes or ""),
         "version": PAPER_VALIDATION_VERSION,
@@ -482,7 +482,7 @@ def _fresh_quote_gate_reasons(
     strategy_parameters: dict[str, Any],
 ) -> list[str]:
     reasons: list[str] = []
-    global_min_trade_edge = _number_or_default(decision_policy.get("min_trade_edge"), 0.08)
+    global_min_trade_edge = _number_or_default(decision_policy.get("min_paper_trade_edge"), 0.05)
     max_spread_bps = _number_or_default(decision_policy.get("max_spread_bps"), 500.0)
     stale_book_seconds = _number_or_default(decision_policy.get("stale_book_seconds"), 300.0)
     for row in rows:

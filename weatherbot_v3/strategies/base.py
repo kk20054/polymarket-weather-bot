@@ -8,6 +8,7 @@ from typing import Any
 
 from ..config import load_config
 from ..deb import bucket_excluded_by_observed_floor
+from ..executor import LIVE_EXECUTION_PRODUCTION_READY
 from ..sizing import size_position
 
 
@@ -97,13 +98,17 @@ class StrategyBase:
         if model_probability is None:
             hard_blocks.append("model_probability_missing")
         low_price_tail_ask = context_number(context, "low_price_tail_ask", 0.05)
-        global_min_trade_edge = context_number(context, "min_trade_edge", 0.08)
-        required_min_edge = max(float(min_edge), global_min_trade_edge)
+        paper_min_trade_edge = context_number(context, "paper_min_trade_edge", 0.05)
+        live_min_trade_edge = context_number(context, "live_min_trade_edge", 0.08)
+        required_min_edge = max(float(min_edge), paper_min_trade_edge)
+        live_required_min_edge = max(float(min_edge), live_min_trade_edge)
         max_spread_bps = context_number(context, "max_spread_bps", 500.0)
         stale_book_seconds = context_number(context, "stale_book_seconds", 300.0)
         min_bias_sample_days = int(context_number(context, "min_bias_sample_days", 7.0))
-        kelly_multiplier = context_number(context, "kelly_multiplier", 0.15)
-        bankroll_fraction_cap = context_number(context, "bankroll_fraction_cap", 0.05)
+        kelly_multiplier = context_number(context, "paper_kelly_multiplier", 0.25)
+        bankroll_fraction_cap = context_number(context, "paper_bankroll_fraction_cap", 0.125)
+        live_kelly_multiplier = context_number(context, "live_kelly_multiplier", 0.15)
+        live_bankroll_fraction_cap = context_number(context, "live_bankroll_fraction_cap", 0.05)
         if not allow_low_price_tail and is_low_price_tail(bucket, market_ask, threshold=low_price_tail_ask):
             hard_blocks.append("low_price_tail_bucket")
         if bucket_excluded_by_observed_floor(
@@ -127,17 +132,29 @@ class StrategyBase:
             gate_reasons.append("insufficient_bias_samples")
         if edge is None or edge < required_min_edge:
             skip_reasons.append("edge_below_min")
+        live_skip_reasons: list[str] = []
+        if edge is None or edge < live_required_min_edge:
+            live_skip_reasons.append("edge_below_live_min")
         skip_reasons.extend(force_skip_reasons or [])
+        live_skip_reasons.extend(force_skip_reasons or [])
         hard_blocks.extend(extra_hard_blocks or [])
         gate_reasons.extend(extra_gate_reasons or [])
 
         sizing = size_position(
             model_probability,
             market_ask,
-            bankroll=float(context.get("bankroll") or 0.0),
-            max_per_trade_usd=float(context.get("max_per_trade_usd") or 0.0),
+            bankroll=float(context.get("paper_bankroll") or context.get("bankroll") or 0.0),
+            max_per_trade_usd=float(context.get("paper_max_per_trade_usd") or context.get("max_per_trade_usd") or 0.0),
             kelly_multiplier=kelly_multiplier,
             bankroll_fraction_cap=bankroll_fraction_cap,
+        )
+        live_sizing = size_position(
+            model_probability,
+            market_ask,
+            bankroll=float(context.get("live_bankroll") or 0.0),
+            max_per_trade_usd=float(context.get("live_max_per_trade_usd") or 0.0),
+            kelly_multiplier=live_kelly_multiplier,
+            bankroll_fraction_cap=live_bankroll_fraction_cap,
         )
         clean_position_size_multiplier = min(1.0, max(0.0, float(position_size_multiplier)))
         kelly_fraction = sizing.kelly_fraction if kelly_fraction_override is None else round(max(0.0, float(kelly_fraction_override)), 8)
@@ -170,6 +187,14 @@ class StrategyBase:
             else:
                 skip_reasons.append("risk_budget_below_exchange_minimum")
         if (
+            minimum_executable_amount_usd is not None
+            and live_sizing.capped_position_size_usd + 1e-9 < minimum_executable_amount_usd
+        ):
+            if minimum_executable_amount_usd > live_sizing.hard_cap_usd + 1e-9:
+                live_skip_reasons.append("order_minimum_exceeds_live_trade_cap")
+            else:
+                live_skip_reasons.append("live_risk_budget_below_exchange_minimum")
+        if (
             position_size <= 0
             and edge is not None
             and edge + 1e-12 >= required_min_edge
@@ -178,27 +203,36 @@ class StrategyBase:
             and model_probability is not None
         ):
             skip_reasons.append("non_positive_kelly_size")
+        if (
+            live_sizing.capped_position_size_usd <= 0
+            and edge is not None
+            and edge + 1e-12 >= live_required_min_edge
+            and market_ask is not None
+            and 0 < market_ask < 1
+            and model_probability is not None
+        ):
+            live_skip_reasons.append("non_positive_live_kelly_size")
 
-        gate_reasons.extend(hard_blocks)
-        gate_reasons.extend(skip_reasons)
-        gate_reasons = unique(gate_reasons)
         hard_blocks = unique(hard_blocks)
         skip_reasons = unique(skip_reasons)
+        live_skip_reasons = unique(live_skip_reasons)
+        paper_gate_reasons = unique([*gate_reasons, *hard_blocks, *skip_reasons])
         paper_allowed = not hard_blocks and not skip_reasons
         paper_decision = "buy" if paper_allowed else ("blocked" if hard_blocks else "skip")
-        live_allowed = False
-        live_decision = "blocked"
-        live_reasons = []
+        live_reasons = [*hard_blocks, *live_skip_reasons]
         if int(prediction.get("bias_sample_count") or 0) < min_bias_sample_days:
             live_reasons.append("insufficient_bias_samples")
         live_reasons.extend(context.get("station_live_reasons") or [])
-        if not paper_allowed:
-            live_reasons.append("paper_gate_not_passed")
         if not getattr(cfg, "live_trading", False):
             live_reasons.append("live_trading_disabled")
-        gate_reasons = unique(gate_reasons + live_reasons)
+        if not LIVE_EXECUTION_PRODUCTION_READY:
+            live_reasons.append("live_execution_not_ready")
+        live_reasons = unique(live_reasons)
+        live_allowed = not live_reasons
+        live_decision = "buy" if live_allowed else "blocked"
+        gate_reasons = paper_gate_reasons
         gate_status = "paper_allowed" if paper_allowed else ("paper_blocked" if hard_blocks else "skip")
-        primary_reason = (hard_blocks or skip_reasons or live_reasons or gate_reasons or [""])[0]
+        primary_reason = (hard_blocks or skip_reasons or gate_reasons or [""])[0]
         distribution = context.get("distribution") or {}
         evidence = context.get("evidence") or {}
         decision = {
@@ -237,11 +271,12 @@ class StrategyBase:
             "strategy_revision_id": str(context.get("strategy_revision_id") or ""),
             "strategy_params_hash": str(context.get("strategy_params_hash") or ""),
             "strategy_params_snapshot": context.get("strategy_params_snapshot") or {},
-            "sizing_bankroll_usd": float(context.get("bankroll") or 0.0),
-            "sizing_max_per_trade_usd": float(context.get("max_per_trade_usd") or 0.0),
+            "sizing_bankroll_usd": float(context.get("paper_bankroll") or context.get("bankroll") or 0.0),
+            "sizing_max_per_trade_usd": float(context.get("paper_max_per_trade_usd") or context.get("max_per_trade_usd") or 0.0),
             "kelly_multiplier": kelly_multiplier,
             "bankroll_fraction_cap": bankroll_fraction_cap,
             "sizing_snapshot": sizing_snapshot,
+            "live_sizing_snapshot": live_sizing.snapshot(),
             "orderbook_snapshot": {
                 "best_bid": market_bid,
                 "best_ask": market_ask,
@@ -271,6 +306,8 @@ class StrategyBase:
             "spread_bps": spread_bps,
             "gate_status": gate_status,
             "gate_reasons": gate_reasons,
+            "paper_gate_reasons": paper_gate_reasons,
+            "live_gate_reasons": live_reasons,
             "paper_allowed": paper_allowed,
             "live_allowed": live_allowed,
             "paper_decision": paper_decision,

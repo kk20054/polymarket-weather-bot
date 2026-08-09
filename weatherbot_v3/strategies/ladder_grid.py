@@ -35,7 +35,7 @@ class LadderGridStrategy(StrategyBase):
         selected = self._select_ladder_buckets(buckets, prediction)
         if len(selected) != 3:
             return []
-        required_min_edge = max(self.min_edge, float(context.get("min_trade_edge") or 0.08))
+        required_min_edge = max(self.min_edge, float(context.get("paper_min_trade_edge") or 0.05))
         enriched: list[tuple[dict[str, Any], dict[str, Any], float, float]] = []
         for bucket in selected:
             probability = probabilities.get(str(bucket.get("bucket_key") or ""), {})
@@ -52,10 +52,10 @@ class LadderGridStrategy(StrategyBase):
         center_size = size_position(
             center_prob,
             center_ask,
-            bankroll=float(context.get("bankroll") or 0.0),
-            max_per_trade_usd=float(context.get("max_per_trade_usd") or 0.0),
-            kelly_multiplier=float(context.get("kelly_multiplier") or 0.15),
-            bankroll_fraction_cap=float(context.get("bankroll_fraction_cap") or 0.05),
+            bankroll=float(context.get("paper_bankroll") or context.get("bankroll") or 0.0),
+            max_per_trade_usd=float(context.get("paper_max_per_trade_usd") or context.get("max_per_trade_usd") or 0.0),
+            kelly_multiplier=float(context.get("paper_kelly_multiplier") or context.get("kelly_multiplier") or 0.25),
+            bankroll_fraction_cap=float(context.get("paper_bankroll_fraction_cap") or context.get("bankroll_fraction_cap") or 0.125),
         )
         total_size = round(center_size.capped_position_size_usd * self.group_exposure_multiplier, 4)
         if total_size <= 0:

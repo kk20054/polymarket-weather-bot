@@ -452,6 +452,8 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [bankroll, setBankroll] = useState('40')
   const [maxPerTrade, setMaxPerTrade] = useState('2')
+  const [dailyMax, setDailyMax] = useState('10')
+  const [minEdgePercent, setMinEdgePercent] = useState('5')
   const [selectedStrategies, setSelectedStrategies] = useState<string[]>(['core_modal_v1'])
   const [exitMode, setExitMode] = useState<ExitMode>('hold_to_settlement')
   const [lastResult, setLastResult] = useState<PaperExecutionResult | null>(null)
@@ -480,17 +482,22 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
     if (validationActive) {
       setBankroll(String(validation?.bankroll_usd ?? 40))
       setMaxPerTrade(String(validation?.max_per_trade_usd ?? 2))
+      setDailyMax(String(validation?.daily_max_usd ?? 10))
+      setMinEdgePercent(String(Number(
+        validation?.strategy_profile_snapshot?.parameters?.decision_policy?.min_paper_trade_edge ?? 0.05,
+      ) * 100))
       if (validation?.strategies?.length) setSelectedStrategies(validation.strategies)
       setExitMode(normalizeExitMode(validation?.strategy_profile_snapshot?.parameters?.exit_policy?.mode))
       return
     }
     setExitMode(normalizeExitMode(activePaperProfile?.parameters?.exit_policy?.mode))
+    setMinEdgePercent(String(Number(activePaperProfile?.parameters?.decision_policy?.min_paper_trade_edge ?? 0.05) * 100))
     const configuredStrategies = Object.entries(activePaperProfile?.parameters?.strategies ?? {})
       .filter(([, settings]) => settings.enabled === true)
       .map(([name]) => name)
       .filter(name => STRATEGY_OPTIONS.some(option => option.key === name))
     if (configuredStrategies.length) setSelectedStrategies(configuredStrategies)
-  }, [activePaperProfile?.revision_id, activePaperProfile?.parameters?.exit_policy?.mode, validationActive, validation?.bankroll_usd, validation?.max_per_trade_usd, validation?.strategies, validation?.strategy_profile_snapshot?.parameters?.exit_policy?.mode])
+  }, [activePaperProfile?.revision_id, activePaperProfile?.parameters?.exit_policy?.mode, activePaperProfile?.parameters?.decision_policy?.min_paper_trade_edge, validationActive, validation?.bankroll_usd, validation?.max_per_trade_usd, validation?.daily_max_usd, validation?.strategies, validation?.strategy_profile_snapshot?.parameters?.exit_policy?.mode, validation?.strategy_profile_snapshot?.parameters?.decision_policy?.min_paper_trade_edge])
   const queue = useMemo(() => {
     const latestRows = latestDecisionIssuedAt
       ? selectedRevisionRows.filter(row => row.issued_at === latestDecisionIssuedAt)
@@ -539,27 +546,40 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
         .map(([name]) => name)
         .sort()
       const strategySelectionChanged = enabledProfileStrategies.join('|') !== [...selectedStrategies].sort().join('|')
+      const paperEdge = Math.min(0.5, Math.max(0, (Number(minEdgePercent) || 0) / 100))
+      const paperEdgeChanged = Math.abs(
+        Number(activePaperProfile?.parameters?.decision_policy?.min_paper_trade_edge ?? 0.05) - paperEdge,
+      ) > 1e-9
       if (activePaperProfile && (
         activePaperProfile.parameters.exit_policy.mode !== exitMode
         || strategySelectionChanged
+        || paperEdgeChanged
       )) {
         const strategySettings = Object.fromEntries(
           Object.entries(activePaperProfile.parameters.strategies).map(([name, settings]) => [
             name,
-            { ...settings, enabled: selectedStrategies.includes(name) },
+            {
+              ...settings,
+              enabled: selectedStrategies.includes(name),
+              ...(name === 'core_modal_v1' ? { min_paper_effective_edge: paperEdge } : {}),
+            },
           ]),
         )
         const revision = await createStrategyProfile({
           profile_key: activePaperProfile.profile_key,
           parameters: {
             ...activePaperProfile.parameters,
+            decision_policy: {
+              ...activePaperProfile.parameters.decision_policy,
+              min_paper_trade_edge: paperEdge,
+            },
             strategies: strategySettings,
             exit_policy: {
               ...activePaperProfile.parameters.exit_policy,
               mode: exitMode,
             },
           },
-          change_note: `Paper strategy ${selectedStrategies[0]} with exit mode ${exitMode}`,
+          change_note: `Strategy ${selectedStrategies[0]}, paper edge ${paperEdge.toFixed(3)}, exit ${exitMode}`,
           activate_scopes: ['signal_generation', 'paper_default'],
           confirm: true,
         })
@@ -569,7 +589,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
         bankroll_usd: Math.max(1, Number(bankroll) || 40),
         max_per_trade_usd: Math.max(0.1, Number(maxPerTrade) || 2),
         duration_days: 14,
-        daily_max_usd: Math.max(1, Math.min(Number(bankroll) || 40, 10)),
+        daily_max_usd: Math.max(1, Math.min(Number(bankroll) || 40, Number(dailyMax) || 10)),
         max_open_positions: 5,
         max_orders_per_day: 5,
         decision_max_age_minutes: 30,
@@ -632,6 +652,8 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
             <div className="grid grid-cols-2 gap-2">
               <label className="text-[9px] text-neutral-500">{tx(language, '本金（USD）', 'Bankroll (USD)')}<input disabled={validationActive || readOnly} type="number" min="1" step="1" value={bankroll} onChange={event => setBankroll(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
               <label className="text-[9px] text-neutral-500">{tx(language, '单笔上限（USD）', 'Max per trade (USD)')}<input disabled={validationActive || readOnly} type="number" min="0.1" step="0.1" value={maxPerTrade} onChange={event => setMaxPerTrade(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
+              <label className="text-[9px] text-neutral-500">{tx(language, '每日上限（USD）', 'Daily cap (USD)')}<input disabled={validationActive || readOnly} type="number" min="1" step="1" value={dailyMax} onChange={event => setDailyMax(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
+              <label className="text-[9px] text-neutral-500">{tx(language, '最低优势（%）', 'Minimum edge (%)')}<input disabled={validationActive || readOnly} type="number" min="0" max="50" step="1" value={minEdgePercent} onChange={event => setMinEdgePercent(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
             </div>
             <fieldset disabled={validationActive || readOnly} className="space-y-1">
               <legend className="mb-1 text-[9px] text-neutral-500">{tx(language, '入场策略（单选，避免重复敞口）', 'Entry strategy (single choice to avoid duplicate exposure)')}</legend>

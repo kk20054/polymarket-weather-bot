@@ -19,6 +19,7 @@ from .db import (
 )
 from .deb import bucket_probabilities, probability_mu_for_prediction
 from .orderbook_replay import best_level_size, parse_levels
+from .paper_validation import get_active_paper_validation_run
 from .stations import get_station
 from .strategies import CoreModalStrategy, LadderGridStrategy, SingleBucketEVStrategy, TailBuyingStrategy
 from .strategy_profiles import ensure_default_strategy_profile, get_strategy_profile_revision, profile_snapshot
@@ -132,6 +133,21 @@ def build_signal_decisions(
     decision_policy = profile_parameters["decision_policy"]
     sizing_policy = profile_parameters["sizing"]
     strategy_parameters = profile_parameters["strategies"]
+    paper_run = get_active_paper_validation_run(path=path)
+    paper_run_matches_profile = bool(
+        paper_run
+        and str(paper_run.get("strategy_revision_id") or "") == str(profile.get("revision_id") or "")
+    )
+    paper_bankroll = (
+        float(paper_run.get("bankroll_usd") or 0.0)
+        if paper_run_matches_profile
+        else float(getattr(cfg, "bankroll_usd", getattr(cfg, "max_bet", 0.0)) or 0.0)
+    )
+    paper_max_per_trade = (
+        float(paper_run.get("max_per_trade_usd") or 0.0)
+        if paper_run_matches_profile
+        else float(getattr(cfg, "max_per_trade_usd", getattr(cfg, "max_bet", 0.0)) or 0.0)
+    )
     settlement_evidence = _independent_settlement_evidence(city, path, prediction)
     context = {
         "decision_time": decision_time,
@@ -141,15 +157,27 @@ def build_signal_decisions(
         "evidence": evidence,
         "station_live_reasons": station_live_reasons,
         "forecast_algo": forecast_algo,
-        "min_trade_edge": decision_policy.get("min_trade_edge", 0.08),
+        "paper_min_trade_edge": decision_policy.get("min_paper_trade_edge", 0.05),
+        "live_min_trade_edge": decision_policy.get("min_live_trade_edge", 0.08),
+        # Compatibility aliases are paper-mode values. Strategy selection and paper execution
+        # must use the bankroll the operator entered for the active simulation run.
+        "min_trade_edge": decision_policy.get("min_paper_trade_edge", 0.05),
         "max_spread_bps": decision_policy.get("max_spread_bps", MAX_SPREAD_BPS),
         "stale_book_seconds": decision_policy.get("stale_book_seconds", STALE_BOOK_SECONDS),
         "min_bias_sample_days": decision_policy.get("min_bias_sample_days", MIN_BIAS_SAMPLE_DAYS),
         "low_price_tail_ask": decision_policy.get("low_price_tail_ask", 0.05),
-        "bankroll": getattr(cfg, "bankroll_usd", getattr(cfg, "max_bet", 0.0)),
-        "kelly_multiplier": sizing_policy.get("kelly_multiplier", getattr(cfg, "kelly_multiplier", 0.15)),
-        "bankroll_fraction_cap": sizing_policy.get("max_bankroll_fraction_per_trade", 0.05),
-        "max_per_trade_usd": getattr(cfg, "max_per_trade_usd", getattr(cfg, "max_bet", 0.0)),
+        "paper_bankroll": paper_bankroll,
+        "live_bankroll": float(getattr(cfg, "bankroll_usd", getattr(cfg, "max_bet", 0.0)) or 0.0),
+        "bankroll": paper_bankroll,
+        "paper_kelly_multiplier": sizing_policy.get("paper_kelly_multiplier", 0.25),
+        "live_kelly_multiplier": sizing_policy.get("live_kelly_multiplier", 0.15),
+        "kelly_multiplier": sizing_policy.get("paper_kelly_multiplier", 0.25),
+        "paper_bankroll_fraction_cap": sizing_policy.get("max_paper_bankroll_fraction_per_trade", 0.125),
+        "live_bankroll_fraction_cap": sizing_policy.get("max_live_bankroll_fraction_per_trade", 0.05),
+        "bankroll_fraction_cap": sizing_policy.get("max_paper_bankroll_fraction_per_trade", 0.125),
+        "paper_max_per_trade_usd": paper_max_per_trade,
+        "live_max_per_trade_usd": float(getattr(cfg, "max_per_trade_usd", getattr(cfg, "max_bet", 0.0)) or 0.0),
+        "max_per_trade_usd": paper_max_per_trade,
         "independent_settlement_days": settlement_evidence["days"],
         "independent_settlement_basis": settlement_evidence["basis"],
         "independent_settlement_authoritative": settlement_evidence["authoritative"],

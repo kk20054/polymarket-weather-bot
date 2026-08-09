@@ -193,7 +193,7 @@ class PaperValidationTests(unittest.TestCase):
         self.assertEqual(cohort_summary["cohort_run_id"], run_id)
         self.assertEqual(applied["metrics"]["open_positions"], 1)
         self.assertLessEqual(applied["metrics"]["spent_today_usd"], 2.0)
-        self.assertAlmostEqual(orders[0]["filled_amount"], 1.5, places=2)
+        self.assertAlmostEqual(orders[0]["filled_amount"], 2.0, places=2)
         self.assertEqual(orders[0]["strategy_revision_id"], revision_id)
         self.assertEqual(orders[0]["sizing_snapshot"]["bankroll_usd"], 40.0)
 
@@ -346,9 +346,9 @@ class PaperValidationTests(unittest.TestCase):
         order = list_paper_orders(path=path)[0]
 
         self.assertEqual(result["executed"], 1)
-        self.assertAlmostEqual(order["filled_amount"], 5.0, places=2)
+        self.assertAlmostEqual(order["filled_amount"], 8.0, places=2)
         self.assertEqual(order["sizing_snapshot"]["caps"]["cohort_max_per_trade_usd"], 8.0)
-        self.assertEqual(order["sizing_snapshot"]["caps"]["bankroll_fraction_cap_usd"], 5.0)
+        self.assertEqual(order["sizing_snapshot"]["caps"]["bankroll_fraction_cap_usd"], 12.5)
 
     def test_ladder_reserves_three_order_and_position_slots(self):
         path = test_db_path("paper_validation_ladder_capacity")
@@ -503,7 +503,10 @@ class PaperValidationTests(unittest.TestCase):
     def test_zero_kelly_multiplier_really_disables_cohort_sizing(self):
         path = test_db_path("paper_validation_zero_kelly")
         self.addCleanup(lambda: path.unlink(missing_ok=True))
-        parameters = {**DEFAULT_PARAMETERS, "sizing": {**DEFAULT_PARAMETERS["sizing"], "kelly_multiplier": 0.0}}
+        parameters = {
+            **DEFAULT_PARAMETERS,
+            "sizing": {**DEFAULT_PARAMETERS["sizing"], "paper_kelly_multiplier": 0.0},
+        }
         profile = create_strategy_profile_revision(parameters, profile_key="zero-kelly", path=path)
         started = start_paper_validation_run(
             cities=["chicago"],
@@ -523,7 +526,7 @@ class PaperValidationTests(unittest.TestCase):
         self.assertEqual(result["executed"], 0)
         self.assertEqual(list_paper_orders(path=path), [])
 
-    def test_provisional_core_modal_cohort_executes_at_half_exposure(self):
+    def test_provisional_core_modal_cohort_uses_configured_paper_exposure(self):
         path = test_db_path("paper_validation_core_modal_provisional")
         self.addCleanup(lambda: path.unlink(missing_ok=True))
         profile = create_strategy_profile_revision(
@@ -557,8 +560,8 @@ class PaperValidationTests(unittest.TestCase):
         order = list_paper_orders(cohort_run_id=run["run_id"], path=path)[0]
 
         self.assertEqual(result["executed"], 1)
-        self.assertAlmostEqual(order["filled_amount"], 1.88, places=2)
-        self.assertEqual(order["sizing_snapshot"]["position_size_multiplier"], 0.5)
+        self.assertAlmostEqual(order["filled_amount"], 6.25, places=2)
+        self.assertEqual(order["sizing_snapshot"]["position_size_multiplier"], 1.0)
 
 
 def _decision(

@@ -24,10 +24,14 @@ class CoreModalStrategy(StrategyBase):
     """Trade at most one liquid bucket from the event's two model modes."""
 
     strategy_name = "core_modal_v1"
-    min_effective_edge = 0.08
+    min_paper_effective_edge = 0.05
+    min_live_effective_edge = 0.08
+    min_effective_edge = min_paper_effective_edge
     min_model_probability = 0.25
     max_model_rank = 2
-    min_market_ask = 0.10
+    min_paper_market_ask = 0.05
+    min_live_market_ask = 0.10
+    min_market_ask = min_paper_market_ask
     min_paper_independent_settlement_days = 0
     min_live_independent_settlement_days = 20
     require_authoritative_truth = True
@@ -42,10 +46,28 @@ class CoreModalStrategy(StrategyBase):
 
     def __init__(self, parameters: dict[str, Any] | None = None):
         self.parameters = dict(parameters or {})
-        self.min_effective_edge = float(self.parameters.get("min_effective_edge", self.min_effective_edge))
+        legacy_effective_edge = self.parameters.get("min_effective_edge")
+        self.min_paper_effective_edge = float(self.parameters.get(
+            "min_paper_effective_edge",
+            legacy_effective_edge if legacy_effective_edge is not None else self.min_paper_effective_edge,
+        ))
+        self.min_live_effective_edge = float(self.parameters.get(
+            "min_live_effective_edge",
+            max(0.08, float(legacy_effective_edge)) if legacy_effective_edge is not None else self.min_live_effective_edge,
+        ))
+        self.min_effective_edge = self.min_paper_effective_edge
         self.min_model_probability = float(self.parameters.get("min_model_probability", self.min_model_probability))
         self.max_model_rank = int(self.parameters.get("max_model_rank", self.max_model_rank))
-        self.min_market_ask = float(self.parameters.get("min_market_ask", self.min_market_ask))
+        legacy_market_ask = self.parameters.get("min_market_ask")
+        self.min_paper_market_ask = float(self.parameters.get(
+            "min_paper_market_ask",
+            legacy_market_ask if legacy_market_ask is not None else self.min_paper_market_ask,
+        ))
+        self.min_live_market_ask = float(self.parameters.get(
+            "min_live_market_ask",
+            max(0.10, float(legacy_market_ask)) if legacy_market_ask is not None else self.min_live_market_ask,
+        ))
+        self.min_market_ask = self.min_paper_market_ask
         (
             self.min_paper_independent_settlement_days,
             self.min_live_independent_settlement_days,
@@ -121,7 +143,7 @@ class CoreModalStrategy(StrategyBase):
                 force_skip_reasons=event_reasons,
                 position_size_multiplier=self._position_multiplier(quality),
             )
-            self._attach_metadata(decision, modal, modal, ranked, quality)
+            self._attach_metadata(decision, modal, modal, ranked, quality, context)
             return [decision]
 
         candidates: list[dict[str, Any]] = []
@@ -141,7 +163,7 @@ class CoreModalStrategy(StrategyBase):
                 force_skip_reasons=unique(["core_no_qualified_top_bucket", *rejection_reasons]),
                 position_size_multiplier=self._position_multiplier(quality),
             )
-            self._attach_metadata(decision, modal, modal, ranked, quality)
+            self._attach_metadata(decision, modal, modal, ranked, quality, context)
             return [decision]
 
         chosen = max(
@@ -156,7 +178,7 @@ class CoreModalStrategy(StrategyBase):
             min_edge=0.0,
             position_size_multiplier=self._position_multiplier(quality),
         )
-        self._attach_metadata(decision, chosen, modal, ranked, quality)
+        self._attach_metadata(decision, chosen, modal, ranked, quality, context)
         return [decision]
 
     def _ranked_buckets(
@@ -208,12 +230,12 @@ class CoreModalStrategy(StrategyBase):
         if float(item["probability"]) + 1e-12 < self.min_model_probability:
             reasons.append("core_probability_below_min")
         ask = optional_float(item.get("market_ask"))
-        if ask is None or ask + 1e-12 < self.min_market_ask:
+        if ask is None or ask + 1e-12 < self.min_paper_market_ask:
             reasons.append("core_price_below_min")
         effective_edge = optional_float(item.get("effective_edge"))
         required_min_edge = max(
-            self.min_effective_edge,
-            float(context.get("min_trade_edge") or 0.08),
+            self.min_paper_effective_edge,
+            float(context.get("paper_min_trade_edge") or 0.05),
         )
         if effective_edge is None or effective_edge + 1e-12 < required_min_edge:
             reasons.append("core_effective_edge_below_min")
@@ -386,6 +408,7 @@ class CoreModalStrategy(StrategyBase):
         modal: dict[str, Any],
         ranked: list[dict[str, Any]],
         quality: dict[str, Any],
+        context: dict[str, Any],
     ) -> None:
         maturity_status = str(quality.get("maturity_status") or "insufficient")
         position_size_multiplier = self._position_multiplier(quality)
@@ -403,8 +426,12 @@ class CoreModalStrategy(StrategyBase):
             "thresholds": {
                 "max_model_rank": self.max_model_rank,
                 "min_model_probability": self.min_model_probability,
-                "min_effective_edge": self.min_effective_edge,
-                "min_market_ask": self.min_market_ask,
+                "min_effective_edge": self.min_paper_effective_edge,
+                "min_paper_effective_edge": self.min_paper_effective_edge,
+                "min_live_effective_edge": self.min_live_effective_edge,
+                "min_market_ask": self.min_paper_market_ask,
+                "min_paper_market_ask": self.min_paper_market_ask,
+                "min_live_market_ask": self.min_live_market_ask,
                 "min_independent_settlement_days": self.min_paper_independent_settlement_days,
                 "min_paper_independent_settlement_days": self.min_paper_independent_settlement_days,
                 "min_live_independent_settlement_days": self.min_live_independent_settlement_days,
@@ -422,12 +449,28 @@ class CoreModalStrategy(StrategyBase):
         }
         if maturity_status == "provisional":
             decision["cautions"] = unique([*(decision.get("cautions") or []), CORE_MODAL_PROVISIONAL_CAUTION])
-            decision["gate_reasons"] = unique([
-                *(decision.get("gate_reasons") or []),
+            decision["live_gate_reasons"] = unique([
+                *(decision.get("live_gate_reasons") or []),
                 CORE_MODAL_LIVE_MATURITY_REASON,
             ])
-            decision["reasons"] = list(decision["gate_reasons"])
+        live_reasons = list(decision.get("live_gate_reasons") or [])
+        ask = optional_float(chosen.get("market_ask"))
+        if ask is None or ask + 1e-12 < self.min_live_market_ask:
+            live_reasons.append("core_price_below_live_min")
+        effective_edge = optional_float(chosen.get("effective_edge"))
+        live_required_edge = max(
+            self.min_live_effective_edge,
+            float(context.get("live_min_trade_edge") or 0.08),
+        )
+        if effective_edge is None or effective_edge + 1e-12 < live_required_edge:
+            live_reasons.append("core_effective_edge_below_live_min")
         spread = optional_float(quality.get("model_spread_c"))
+        if spread is not None and spread > self.max_live_model_spread_c + 1e-12:
+            live_reasons.append("core_live_model_spread_above_max")
+        decision["live_gate_reasons"] = unique(live_reasons)
+        if decision["live_gate_reasons"]:
+            decision["live_allowed"] = False
+            decision["live_decision"] = "blocked"
         if spread is not None and spread > self.max_paper_model_spread_c + 1e-12:
             decision["cautions"] = unique([
                 *(decision.get("cautions") or []),
