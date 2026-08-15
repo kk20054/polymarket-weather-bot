@@ -1,9 +1,9 @@
 # WeatherBot Current State
 
 ## Current Layer
-- Date: 2026-08-09. Phase 3/6: forward simulation and production hardening.
-- Production DB: `D:\WeatherBot\data\weatherbot_v3.db` (about 50GB).
-- Backend, frontend, and scheduler are running on ports `8765` and `5173`.
+- Date: 2026-08-15. Phase 3/6: forward simulation and production hardening.
+- Production DB: `D:\WeatherBot\data\weatherbot_v3.db` (about 60GB).
+- Backend, frontend, and scheduler were stopped cleanly before GitHub publication; ports `8765` and `5173` are offline.
 - One strategy engine serves two execution modes; there is no separate exploration queue.
 - `LIVE_TRADING=false` and the live executor is not production-ready, so live remains unavailable.
 
@@ -23,6 +23,7 @@
 - Truth maturity, source entitlement, SQLite size, and single-writer contention remain operational risks.
 
 ## Next Task
+- Use the GitHub `main` branch as the source of truth for the Vercel frontend deployment; runtime data and secrets remain local and ignored.
 - Let the active simulation run collect new decisions and settlements under the explicit bankroll settings; do not create another queue.
 - Review simulation fills, CLV, and settled PnL by strategy revision before changing strategy parameters again.
 - Implement and independently verify the real CLOB execution path before making the live option selectable.
