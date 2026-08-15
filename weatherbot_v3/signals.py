@@ -532,6 +532,14 @@ def d0_peak_decision_window(
             "target_date": target_text,
             "peak_hour": peak_text,
         }
+    if target > local_now.date() and not peak_text:
+        return {
+            "enforced": False,
+            "ok": True,
+            "reason": "forecast_lead",
+            "target_date": target_text,
+            "peak_hour": peak_text,
+        }
     try:
         peak_clock = time.fromisoformat(peak_text[:5])
     except (TypeError, ValueError):

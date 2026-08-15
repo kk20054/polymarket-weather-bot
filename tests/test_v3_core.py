@@ -2769,6 +2769,7 @@ class V3CoreTests(unittest.TestCase):
             "cohort_contract_version": "forecast-component-cohort-v1",
             "cohort_as_of": "2026-07-02T12:00:00+00:00",
             "sigma_floor": 0.5,
+            "peak_hour": (datetime.now(ZoneInfo("America/Chicago")) + timedelta(hours=2, minutes=30)).strftime("%H:%M"),
             "bias_sample_count": bias_sample_count,
             "source_run_ids": [101, 102],
             "components": [{
@@ -2950,7 +2951,8 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(mid["paper_decision"], "buy")
         self.assertEqual(mid["gate_status"], "paper_allowed")
         self.assertEqual(mid["live_decision"], "blocked")
-        self.assertIn("settlement_mismatch", mid["gate_reasons"])
+        self.assertIn("settlement_mismatch", mid["live_gate_reasons"])
+        self.assertNotIn("settlement_mismatch", mid["paper_gate_reasons"])
 
     def test_signal_decisions_api_and_readiness_expose_layer6_without_refreshing(self):
         db_path = test_db_path("signal_decision_api_readiness")
@@ -6018,10 +6020,10 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("truth_basis", v3_component)
         self.assertTrue(v3_component["mae_imputed"])
         self.assertEqual(v3_component["effective_mae_c"], 1.2)
-        self.assertEqual(v3_component["weight_status"], "prior_only")
+        self.assertEqual(v3_component["weight_status"], "cold_start_v3_only")
         self.assertEqual(v3_component["weight_exclusion_reason"], "")
-        self.assertGreater(v3_component["weight"], 0.0)
-        self.assertIn("dynamic_weight_uses_prior_only_components", prediction["build_warnings"])
+        self.assertEqual(v3_component["weight"], 1.0)
+        self.assertNotIn("dynamic_weight_uses_prior_only_components", prediction["build_warnings"])
         self.assertNotIn("missing_weathercom_v3", prediction["build_warnings"])
 
     def test_weathercom_v3_deb_rebuilds_elapsed_hours_from_forecast_snapshots(self):

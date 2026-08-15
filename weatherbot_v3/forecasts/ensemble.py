@@ -1375,7 +1375,7 @@ def _mae_for(
         # Paper weighting learns from the first leakage-free forecast/truth
         # pair. Sample thresholds describe maturity and live eligibility; they
         # must not make a real sparse error metric disappear.
-        if int(calibration.get("sample_count") or 0) < DYNAMIC_WEIGHT_MIN_SAMPLES:
+        if int(calibration.get("sample_count") or 0) < BIAS_PAPER_MIN_SAMPLE_COUNT:
             return None
         for key in (
             "walk_forward_mae_7d_c",
