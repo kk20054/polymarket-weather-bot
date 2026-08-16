@@ -80,33 +80,34 @@ def select_orderbook_as_of(
     market = str(market_id or "").strip()
     if not cutoff or (not token and not market):
         return None
-    row = conn.execute(
-        """
-        SELECT *
-        FROM orderbooks
-        WHERE ((yes_token_id = ? AND ? != '') OR (market_id = ? AND ? != ''))
-          AND julianday(
-                CASE
-                  WHEN length(trim(COALESCE(quote_timestamp, ''))) >= 13
-                       AND trim(quote_timestamp) NOT GLOB '*[^0-9]*'
-                    THEN datetime(CAST(quote_timestamp AS REAL) / 1000.0, 'unixepoch')
-                  ELSE COALESCE(NULLIF(quote_timestamp, ''), created_at)
-                END
-              ) <= julianday(?)
-        ORDER BY
-          julianday(
-            CASE
-              WHEN length(trim(COALESCE(quote_timestamp, ''))) >= 13
-                   AND trim(quote_timestamp) NOT GLOB '*[^0-9]*'
-                THEN datetime(CAST(quote_timestamp AS REAL) / 1000.0, 'unixepoch')
-              ELSE COALESCE(NULLIF(quote_timestamp, ''), created_at)
-            END
-          ) DESC,
-          id DESC
-        LIMIT 1
-        """,
-        (token, token, market, market, cutoff),
-    ).fetchone()
+    timestamp_expression = """
+        CASE
+          WHEN length(trim(COALESCE(quote_timestamp, ''))) >= 13
+               AND trim(quote_timestamp) NOT GLOB '*[^0-9]*'
+            THEN datetime(CAST(quote_timestamp AS REAL) / 1000.0, 'unixepoch')
+          ELSE COALESCE(NULLIF(quote_timestamp, ''), created_at)
+        END
+    """
+
+    def select_by(column: str, value: str) -> Any:
+        return conn.execute(
+            f"""
+            SELECT *
+            FROM orderbooks
+            WHERE {column} = ?
+              AND julianday({timestamp_expression}) <= julianday(?)
+            ORDER BY julianday({timestamp_expression}) DESC, id DESC
+            LIMIT 1
+            """,
+            (value, cutoff),
+        ).fetchone()
+
+    # Keep the token lookup isolated so SQLite can use
+    # idx_orderbooks_token_id. Combining token and market with OR forces a
+    # multi-million-row scan on production databases.
+    row = select_by("yes_token_id", token) if token else None
+    if row is None and market:
+        row = select_by("market_id", market)
     return dict(row) if row is not None else None
 
 

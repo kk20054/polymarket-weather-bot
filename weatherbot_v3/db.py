@@ -1485,14 +1485,6 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_members_run_member "
         "ON forecast_members(run_id, member_id)"
     )
-    conn.execute(
-        """
-        UPDATE forecast_runs
-        SET training_eligible = 0,
-            ineligibility_reason = COALESCE(ineligibility_reason, 'legacy_run_before_training_gate')
-        WHERE training_eligible IS NULL
-        """
-    )
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_orderbooks_snapshot_key ON orderbooks(snapshot_key)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_settlements_key ON settlements(settlement_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_settlements_order ON settlements(paper_order_id, settlement_status)")
@@ -5581,7 +5573,7 @@ def list_data_fetch_logs(
             SELECT *
             FROM data_fetch_logs
             {where_sql}
-            ORDER BY datetime(COALESCE(finished_at, created_at)) DESC, id DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,
             (*params, bounded),

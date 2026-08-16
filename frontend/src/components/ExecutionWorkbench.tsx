@@ -57,6 +57,7 @@ const REASON_LABELS: Record<string, string> = {
   spread_too_wide_after_reprice: '最新盘口价差过大',
   tail_ask_above_max_after_reprice: '尾部桶最新买价超过策略上限',
   orderbook_timestamp_missing_or_invalid: '最新盘口时间无效',
+  decision_expired: '策略已过期，等待下一轮更新',
 }
 
 const REASON_LABELS_EN: Record<string, string> = {
@@ -78,6 +79,7 @@ const REASON_LABELS_EN: Record<string, string> = {
   spread_too_wide_after_reprice: 'Latest spread is too wide',
   tail_ask_above_max_after_reprice: 'Latest tail ask exceeds the strategy cap',
   orderbook_timestamp_missing_or_invalid: 'Order-book timestamp is invalid',
+  decision_expired: 'Strategy expired; waiting for the next update',
 }
 
 function tx(language: 'zh' | 'en', zh: string, en: string) {
@@ -199,10 +201,40 @@ function decisionMeetsOrderMinimum(row: SignalDecisionRecord) {
   return ask > 0 && minimumShares > 0 && suggestedAmount / ask + 1e-9 >= minimumShares
 }
 
-function queueItemEligible(item: QueueItem) {
+function decisionIsExpired(row: SignalDecisionRecord, maxAgeMinutes = 30) {
+  const issuedAt = Date.parse(String(row.issued_at ?? ''))
+  if (!Number.isFinite(issuedAt)) return true
+  return Date.now() - issuedAt > Math.max(1, maxAgeMinutes) * 60_000
+}
+
+function queueItemEligible(item: QueueItem, maxAgeMinutes = 30) {
   return !item.decisions.some(decisionBookIsStale)
+    && !item.decisions.some(row => decisionIsExpired(row, maxAgeMinutes))
     && item.decisions.length === (item.ladderGroupId ? 3 : 1)
     && item.decisions.every(row => row.paper_allowed && row.paper_decision === 'buy' && decisionMeetsOrderMinimum(row))
+}
+
+function orderHasFill(order: PaperOrderRecord) {
+  return Number(order.filled_amount ?? 0) > 0
+    || Number(order.filled_shares ?? 0) > 0
+    || ['filled', 'partially_filled'].includes(String(order.fill_status ?? '').toLowerCase())
+    || ['open', 'settled', 'exited'].includes(String(order.lifecycle_status ?? '').toLowerCase())
+}
+
+function decisionHasOrder(decision: SignalDecisionRecord, orders: PaperOrderRecord[]) {
+  return orders.some(order => orderHasFill(order) && (
+    order.decision_id === decision.decision_id
+    || (
+      Boolean(order.yes_token_id)
+      && order.yes_token_id === decision.yes_token_id
+      && order.city_key === decision.city_key
+      && order.target_date === decision.target_date
+    )
+  ))
+}
+
+function queueItemBought(item: QueueItem, orders: PaperOrderRecord[]) {
+  return item.decisions.length > 0 && item.decisions.every(decision => decisionHasOrder(decision, orders))
 }
 
 function resultMessage(result?: PaperExecutionResult | null, language: 'zh' | 'en' = 'zh') {
@@ -221,19 +253,24 @@ function DecisionRow({
   item,
   pending,
   accountActive,
+  maxDecisionAgeMinutes,
+  bought,
   onExecute,
   language,
 }: {
   item: QueueItem
   pending: boolean
   accountActive: boolean
+  maxDecisionAgeMinutes: number
+  bought: boolean
   onExecute: (decisionId: string, dryRun: boolean) => void
   language: 'zh' | 'en'
 }) {
   const [expanded, setExpanded] = useState(false)
   const first = item.decisions[0]
   const staleBook = item.decisions.some(decisionBookIsStale)
-  const eligible = queueItemEligible(item)
+  const expired = item.decisions.some(row => decisionIsExpired(row, maxDecisionAgeMinutes))
+  const eligible = !bought && queueItemEligible(item, maxDecisionAgeMinutes)
   const suggested = item.decisions.reduce((sum, row) => sum + Number(row.position_size_usd ?? 0), 0)
   const reasons = [...new Set(item.decisions.flatMap(row => row.gate_reasons ?? row.reasons ?? []))]
     .filter(reason => reason !== 'live_trading_disabled')
@@ -253,8 +290,8 @@ function DecisionRow({
         <span className="min-w-0">
           <span className="flex flex-wrap items-center gap-1">
             <span className="text-[11px] font-medium text-neutral-100">{strategyLabel(item.strategy, language)}</span>
-            <span className={`border px-1 py-0.5 text-[9px] ${eligible ? 'border-green-500/30 text-green-300' : 'border-amber-500/30 text-amber-300'}`}>
-              {eligible ? tx(language, '可执行', 'Eligible') : tx(language, '观察', 'Watch')}
+            <span className={`border px-1 py-0.5 text-[9px] ${eligible ? 'border-green-500/30 text-green-300' : bought ? 'border-cyan-500/30 text-cyan-300' : 'border-amber-500/30 text-amber-300'}`}>
+              {bought ? tx(language, '已买入', 'Bought') : eligible ? tx(language, '可执行', 'Eligible') : expired ? tx(language, '待更新', 'Refreshing') : tx(language, '观察', 'Watch')}
             </span>
           </span>
           <span className="mt-1 block truncate text-[10px] text-neutral-500">
@@ -285,9 +322,9 @@ function DecisionRow({
           <div className="grid grid-cols-3 gap-1 border-y border-neutral-800 py-2 text-[9px] text-neutral-500">
             <span>{tx(language, '模型概率', 'Model probability')}</span><span className="text-center">Ask</span><span className="text-right">{tx(language, 'Kelly 建议', 'Kelly size')} {money(suggested)}</span>
           </div>
-          {!eligible && (
+          {!eligible && !bought && (
             <div className="text-[10px] leading-relaxed text-amber-300">
-              {reasonText(primaryReason, language)}
+              {reasonText(expired ? 'decision_expired' : primaryReason, language)}
               {reasons.length > 1 && (
                 <details className="mt-1 text-neutral-500">
                   <summary className="cursor-pointer">{tx(language, '全部阻塞原因', 'All gate reasons')}</summary>
@@ -304,7 +341,7 @@ function DecisionRow({
           <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
-              disabled={!eligible || !accountActive || pending}
+              disabled={!eligible || !accountActive || pending || bought}
               onClick={() => onExecute(first.decision_id, true)}
               className="min-h-9 border border-neutral-700 text-[10px] text-neutral-300 hover:bg-neutral-900 disabled:opacity-30"
             >
@@ -312,11 +349,11 @@ function DecisionRow({
             </button>
             <button
               type="button"
-              disabled={!eligible || !accountActive || pending}
+              disabled={!eligible || !accountActive || pending || bought}
               onClick={() => onExecute(first.decision_id, false)}
               className="min-h-9 border border-cyan-500/40 bg-cyan-500/10 text-[10px] text-cyan-200 hover:bg-cyan-500/15 disabled:opacity-30"
             >
-              {tx(language, '执行买入', 'Execute buy')}
+              {bought ? tx(language, '已买入', 'Bought') : expired ? tx(language, '等待更新', 'Waiting for update') : tx(language, '执行买入', 'Execute buy')}
             </button>
           </div>
           {eventUrl && (
@@ -504,7 +541,6 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
       : selectedRevisionRows
     return groupDecisions(latestRows.filter(row => selectedStrategies.includes(row.strategy_name ?? 'single_bucket_ev')))
   }, [latestDecisionIssuedAt, selectedRevisionRows, selectedStrategies])
-  const eligibleCount = queue.filter(queueItemEligible).length
   const activeCohortRunId = validation?.run_id ?? ''
   const ordersQuery = useQuery({
     queryKey: ['paper-orders', activeCohortRunId || cityKey, activeCohortRunId ? 'all-cities' : targetDate],
@@ -609,6 +645,9 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
     onError: error => setLastResult({ ok: false, reason: error instanceof Error ? error.message : 'paper_validation_request_failed' }),
   })
   const summary = ordersQuery.data
+  const maxDecisionAgeMinutes = Number(validation?.decision_max_age_minutes ?? 30)
+  const currentOrders = summary?.orders ?? []
+  const eligibleCount = queue.filter(item => queueItemEligible(item, maxDecisionAgeMinutes) && !queueItemBought(item, currentOrders)).length
   const toggleStrategy = (strategy: string) => {
     if (validationActive || readOnly) return
     setSelectedStrategies([strategy])
@@ -725,6 +764,8 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
                 item={item}
                 pending={executeMutation.isPending}
                 accountActive={validationActive && !readOnly}
+                maxDecisionAgeMinutes={maxDecisionAgeMinutes}
+                bought={queueItemBought(item, currentOrders)}
                 onExecute={(decisionId, dryRun) => executeMutation.mutate({ decisionId, dryRun })}
                 language={language}
               />

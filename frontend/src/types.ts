@@ -1470,6 +1470,7 @@ export interface PaperValidationStatus {
   daily_max_usd?: number
   max_open_positions?: number
   max_orders_per_day?: number
+  decision_max_age_minutes?: number
   strategies?: string[]
   cities?: string[]
   strategy_revision_id?: string

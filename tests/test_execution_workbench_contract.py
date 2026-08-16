@@ -36,6 +36,8 @@ class ExecutionWorkbenchContractTests(unittest.TestCase):
         self.assertNotIn("模拟卖出价", self.component)
         self.assertNotIn("策略版本", self.component)
         self.assertIn("执行买入", self.component)
+        self.assertIn("已买入", self.component)
+        self.assertIn("decisionIsExpired", self.component)
         self.assertIn("退出价（买一）", self.component)
         self.assertIn("暂无订单", self.component)
 

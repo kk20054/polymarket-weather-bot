@@ -48,6 +48,36 @@ class OrderbookReplayTests(unittest.TestCase):
             )
         )
 
+    def test_as_of_prefers_exact_token_and_uses_market_only_as_fallback(self):
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO orderbooks (
+                    snapshot_key, market_id, yes_token_id, best_bid, best_ask,
+                    quote_timestamp, bids_json, asks_json, created_at
+                ) VALUES
+                    ('other-token', 'market', 'other', 0.79, 0.80,
+                     '2026-07-20T11:59:30Z', '[]', '[]', '2026-07-20T11:59:30Z'),
+                    ('exact-token', 'market', 'token', 0.39, 0.40,
+                     '2026-07-20T11:59:00Z', '[]', '[]', '2026-07-20T11:59:00Z')
+                """
+            )
+            exact = select_orderbook_as_of(
+                conn,
+                decision_time="2026-07-20T12:00:00Z",
+                yes_token_id="token",
+                market_id="market",
+            )
+            fallback = select_orderbook_as_of(
+                conn,
+                decision_time="2026-07-20T12:00:00Z",
+                yes_token_id="missing-token",
+                market_id="market",
+            )
+
+        self.assertEqual(exact["snapshot_key"], "exact-token")
+        self.assertEqual(fallback["snapshot_key"], "other-token")
+
     def test_limit_fill_uses_price_levels_not_total_book_depth(self):
         asks = [
             {"price": 0.20, "size": 5},

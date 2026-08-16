@@ -174,14 +174,14 @@ class WeatherBotScheduler:
             "metar_poller": PollerState("metar_poller", "METAR", METAR_INTERVAL_SECONDS, 0, "critical"),
             "china_live_poller": PollerState("china_live_poller", "China Live", CHINA_LIVE_INTERVAL_SECONDS, 5, "critical"),
             "forecast_poller": PollerState("forecast_poller", "Forecast", FORECAST_INTERVAL_SECONDS, 15),
-            "nwp_poller": PollerState("nwp_poller", "NWP", NWP_INTERVAL_SECONDS, 30, "background"),
+            "nwp_poller": PollerState("nwp_poller", "NWP", NWP_INTERVAL_SECONDS, 600, "background"),
             "historical_poller": PollerState("historical_poller", "Historical", HISTORICAL_INTERVAL_SECONDS, 90),
             "pws_poller": PollerState("pws_poller", "PWS", PWS_INTERVAL_SECONDS, 120),
             "gamma_orderbook_poller": PollerState("gamma_orderbook_poller", "Orderbook", GAMMA_ORDERBOOK_INTERVAL_SECONDS, 45, "critical"),
-            "gamma_discovery_poller": PollerState("gamma_discovery_poller", "Market Discovery", GAMMA_DISCOVERY_INTERVAL_SECONDS, 180, "background"),
-            "derive_poller": PollerState("derive_poller", "Derived", DERIVE_INTERVAL_SECONDS, 420, "background"),
+            "gamma_discovery_poller": PollerState("gamma_discovery_poller", "Market Discovery", GAMMA_DISCOVERY_INTERVAL_SECONDS, 720, "background"),
+            "derive_poller": PollerState("derive_poller", "Derived", DERIVE_INTERVAL_SECONDS, 240, "background"),
             "paper_settlement_poller": PollerState("paper_settlement_poller", "Paper Settlement", PAPER_SETTLEMENT_INTERVAL_SECONDS, 600),
-            "paper_execution_poller": PollerState("paper_execution_poller", "Paper Validation", PAPER_EXECUTION_INTERVAL_SECONDS, 720),
+            "paper_execution_poller": PollerState("paper_execution_poller", "Paper Validation", PAPER_EXECUTION_INTERVAL_SECONDS, 420),
             "model_timing_poller": PollerState("model_timing_poller", "Model Timing", MODEL_TIMING_INTERVAL_SECONDS, 0),
         }
 

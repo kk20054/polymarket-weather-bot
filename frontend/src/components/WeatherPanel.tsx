@@ -11,7 +11,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { ExternalLink, HelpCircle, History, SlidersHorizontal, X } from 'lucide-react'
+import { ExternalLink, HelpCircle, History, Save, SlidersHorizontal, X } from 'lucide-react'
 import { HourlyTemperatureChart, type HourlyChartRow } from './HourlyTemperatureChart'
 import { ForecastRevisionDialog } from './ForecastRevisionDialog'
 import {
@@ -760,6 +760,15 @@ function sourceShortLabel(source: unknown, family?: unknown) {
   return String(source || family || 'source').replace(/^openmeteo_/, '').replace(/_forecast$/, '')
 }
 
+function modelWeightFamilyForLabel(label: string): ModelWeightFamily | null {
+  const normalized = sourceShortLabel(label).toLowerCase()
+  if (normalized === 'v3') return 'weathercom_v3'
+  if (normalized === 'gfs' || normalized === 'ecmwf' || normalized === 'icon' || normalized === 'gem' || normalized === 'jma') {
+    return normalized
+  }
+  return null
+}
+
 function buildDebSourceRows(deb: DailyMaxPredictionSummary['latest'], unit: string): DebSourceRow[] {
   const components = (deb?.components ?? []) as Array<Record<string, unknown>>
   const weights = deb?.model_weights ?? {}
@@ -849,7 +858,7 @@ function buildDebDisagreementAnalysis(
     center,
     centerPct: center === null ? null : toPct(center),
     spread,
-    activeCount: predictions.filter(row => row.status === 'active' && Number(row.weight ?? 0) > 0).length,
+    activeCount: weightedRows.length,
   }
 }
 
@@ -3102,6 +3111,20 @@ function TemperatureDistributionPanel({
       setModelWeightSaving(false)
     }
   }
+  const editModelWeight = (family: ModelWeightFamily, nextWeight: number) => {
+    const effectiveWeights = sourceRows.reduce<Partial<Record<ModelWeightFamily, number>>>((result, row) => {
+      const rowFamily = modelWeightFamilyForLabel(row.label)
+      if (rowFamily && row.weight !== null && Number.isFinite(row.weight)) result[rowFamily] = Math.max(0, row.weight)
+      return result
+    }, {})
+    setModelWeights(current => ({
+      ...current,
+      ...(modelWeightMode === 'dynamic' ? effectiveWeights : {}),
+      [family]: nextWeight,
+    }))
+    setModelWeightMode('manual')
+    setModelWeightMessage('')
+  }
   const peakLock = deb?.peak_lock_candidate as Record<string, unknown> | undefined
   const peakLockCandidate = Boolean(peakLock?.candidate)
   const debState = queryState?.deb ?? IDLE_LAYER7_RESOURCE
@@ -3356,7 +3379,7 @@ function TemperatureDistributionPanel({
                           ? edge === null ? '--' : fmtSignedPp(edge)
                           : fmtProb(item.probability)}
                     </div>
-                    <div className="mt-1 flex justify-between gap-2 text-[10px] tabular-nums text-[#7D8694]">
+                    <div className="mt-1 flex justify-between gap-2 whitespace-nowrap text-[10px] tabular-nums text-[#7D8694]">
                       {quoteFresh ? (
                         <>
                           <span>{tr(language, '模型', 'Model')} {fmtProb(item.probability)}</span>
@@ -3365,7 +3388,7 @@ function TemperatureDistributionPanel({
                       ) : (
                         <>
                           <span>{tr(language, '旧卖一', 'Old ask')} {fallbackMode || !askAvailable ? '--' : fmtPrice(item.ask)}</span>
-                          <span>{tr(language, '不计算差值', 'No edge')}</span>
+                          <span className="shrink-0">{tr(language, '差值 --', 'Edge --')}</span>
                         </>
                       )}
                     </div>
@@ -3440,55 +3463,31 @@ function TemperatureDistributionPanel({
                   </div>
                 </div>
                 <div className="ml-auto flex items-center gap-1.5">
-                  <div className="inline-flex border border-[#2C3445]" role="group" aria-label={tr(language, '模型权重模式', 'Model weight mode')}>
-                    {(['dynamic', 'manual'] as ModelWeightMode[]).map(mode => (
-                      <button
-                        key={mode}
-                        type="button"
-                        disabled={modelWeightLoading || modelWeightSaving}
-                        onClick={() => setModelWeightMode(mode)}
-                        className={`h-8 px-3 text-[10px] font-medium ${modelWeightMode === mode ? 'bg-[#2563EB] text-white' : 'text-[#9AA4B2] hover:bg-[#222A37] hover:text-[#F8FAFC]'} disabled:opacity-40`}
-                      >
-                        {mode === 'dynamic' ? tr(language, '动态', 'Dynamic') : tr(language, '手动', 'Manual')}
-                      </button>
-                    ))}
-                  </div>
+                  <label className="inline-flex h-8 cursor-pointer items-center gap-2 border border-[#2C3445] px-2.5 text-[10px] text-[#CBD5E1] hover:bg-[#222A37]">
+                    <input
+                      type="checkbox"
+                      checked={modelWeightMode === 'dynamic'}
+                      disabled={modelWeightLoading || modelWeightSaving}
+                      onChange={event => setModelWeightMode(event.target.checked ? 'dynamic' : 'manual')}
+                      className="h-3.5 w-3.5 accent-[#2563EB]"
+                    />
+                    <span>{tr(language, '自动权重', 'Auto weights')}</span>
+                  </label>
                   <button
                     type="button"
                     disabled={modelWeightLoading || modelWeightSaving}
                     onClick={saveModelWeights}
-                    className="h-8 border border-[#2C3445] px-3 text-[10px] font-medium text-[#CBD5E1] hover:bg-[#222A37] hover:text-white disabled:opacity-40"
+                    className="inline-flex h-8 w-8 items-center justify-center border border-[#2C3445] text-[#9AA4B2] hover:bg-[#222A37] hover:text-white disabled:opacity-40"
+                    aria-label={modelWeightSaving ? tr(language, '保存中', 'Saving') : tr(language, '保存权重', 'Save weights')}
+                    title={modelWeightSaving ? tr(language, '保存中', 'Saving') : tr(language, '保存权重', 'Save weights')}
                   >
-                    {modelWeightSaving ? tr(language, '保存中', 'Saving') : tr(language, '保存', 'Save')}
+                    <Save className="h-4 w-4" />
                   </button>
                   <button type="button" onClick={() => setSourceDialogOpen(false)} className="inline-flex h-8 w-8 shrink-0 items-center justify-center border border-[#2C3445] text-[#9AA4B2] hover:bg-[#222A37] hover:text-[#F8FAFC]" aria-label={tr(language, '关闭', 'Close')}>
                     <X className="h-4 w-4" />
                   </button>
                 </div>
               </div>
-              {modelWeightMode === 'manual' && (
-                <div className="mt-3 grid grid-cols-3 gap-1.5 sm:grid-cols-6">
-                  {MODEL_WEIGHT_FAMILIES.map(family => (
-                    <label key={family.key} className="flex h-9 items-center border border-[#2C3445] bg-[#12161D] px-2">
-                      <span className="min-w-0 flex-1 text-[9px] font-semibold text-[#9AA4B2]">{family.label}</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        step={0.1}
-                        value={Number((modelWeights[family.key] * 100).toFixed(1))}
-                        onChange={event => {
-                          const value = Math.max(0, Math.min(100, Number(event.target.value) || 0)) / 100
-                          setModelWeights(current => ({ ...current, [family.key]: value }))
-                        }}
-                        className="w-12 bg-transparent text-right text-[10px] tabular-nums text-[#F8FAFC] outline-none"
-                        aria-label={`${family.label} ${tr(language, '权重百分比', 'weight percent')}`}
-                      />
-                      <span className="text-[9px] text-[#7D8694]">%</span>
-                    </label>
-                  ))}
-                </div>
-              )}
               {modelWeightMessage && <div className={`mt-2 text-right text-[9px] ${modelWeightMessage.includes('失败') || modelWeightMessage.includes('fail') ? 'text-red-300' : 'text-emerald-300'}`}>{modelWeightMessage}</div>}
               <div className="mt-3 inline-flex border border-[#2C3445]" role="tablist" aria-label={tr(language, '模型分析视图', 'Model analysis view')}>
                 <button
@@ -3643,6 +3642,10 @@ function TemperatureDistributionPanel({
                     {sourceRows.map((row, index) => {
                       const modelColor = debModelColor(row.label, index)
                       const weightPct = row.weight === null ? null : Math.max(0, Math.min(100, row.weight * 100))
+                      const weightFamily = modelWeightFamilyForLabel(row.label)
+                      const editableWeightPct = weightFamily
+                        ? Math.max(0, Math.min(100, (modelWeightMode === 'dynamic' ? Number(row.weight ?? modelWeights[weightFamily]) : modelWeights[weightFamily]) * 100))
+                        : null
                       const maeDisplay = row.mae === null ? null : convertDeltaUnit(row.mae, 'C', unit)
                       return (
                         <article
@@ -3667,10 +3670,25 @@ function TemperatureDistributionPanel({
                           <div>
                             <div className="flex items-center justify-between gap-2 text-[9px] text-[#7D8694]">
                               <span>{tr(language, '融合权重', 'Blend weight')}</span>
-                              <span className="tabular-nums text-[#CBD2DC]">{weightPct === null ? '--' : `${weightPct.toFixed(1)}%`}</span>
+                              {weightFamily && editableWeightPct !== null ? (
+                                <label className="inline-flex h-7 w-[84px] items-center border border-[#303A4C] bg-[#12161D] px-2 focus-within:border-[#3B82F6]" title={modelWeightMode === 'dynamic' ? tr(language, '修改后自动切换为自定义权重', 'Editing switches to custom weights') : undefined}>
+                                  <input
+                                    type="text"
+                                    inputMode="decimal"
+                                    value={editableWeightPct.toFixed(1)}
+                                    disabled={modelWeightLoading || modelWeightSaving}
+                                    onChange={event => editModelWeight(weightFamily, Math.max(0, Math.min(100, Number(event.target.value) || 0)) / 100)}
+                                    className="min-w-0 flex-1 bg-transparent text-right text-[10px] font-semibold tabular-nums text-[#F8FAFC] outline-none disabled:opacity-50"
+                                    aria-label={`${row.label} ${tr(language, '权重百分比', 'weight percent')}`}
+                                  />
+                                  <span className="ml-1 text-[9px] text-[#7D8694]">%</span>
+                                </label>
+                              ) : (
+                                <span className="tabular-nums text-[#CBD2DC]">{weightPct === null ? '--' : `${weightPct.toFixed(1)}%`}</span>
+                              )}
                             </div>
                             <div className="mt-2 h-1.5 bg-[#263044]">
-                              <span className="block h-full" style={{ width: `${weightPct ?? 0}%`, backgroundColor: modelColor }} />
+                              <span className="block h-full" style={{ width: `${editableWeightPct ?? weightPct ?? 0}%`, backgroundColor: modelColor }} />
                             </div>
                           </div>
                           <div>
