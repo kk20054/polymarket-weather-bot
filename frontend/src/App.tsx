@@ -47,7 +47,7 @@ import { TradesTable } from './components/TradesTable'
 import { TruthHealthPanel } from './components/TruthHealthPanel'
 import { WeatherPanel } from './components/WeatherPanel'
 import { useT, type I18nLanguage } from './i18n/useT'
-import type { BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommendationItem, DataReadiness, ForwardValidationSummary, Layer7QueryState, Layer7ResourceState, PaperValidationStatus, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerStatus } from './types'
+import type { BotStats, CityStatusConfig, CityTradingStatus, DashboardRecommendationItem, DataReadiness, Layer7QueryState, Layer7ResourceState, PaperValidationStatus, ProductionActionRunResult, ProductionRefreshResult, ProductionValidationAction, ProductionValidationReport, SchedulerStatus } from './types'
 
 type TradeMode = 'paper' | 'live'
 type UiLanguage = 'zh' | 'en'
@@ -79,8 +79,6 @@ const UI_COPY = {
     legacyRunning: '旧扫描运行中',
     autoOn: '一键模拟运行中',
     autoOff: '一键模拟关闭',
-    liveReady: '实盘可用',
-    liveLocked: '实盘锁定',
     schedulerStart: '启动调度器',
     schedulerStop: '停止调度器',
     fetching: '抓取中',
@@ -128,8 +126,6 @@ const UI_COPY = {
     legacyRunning: 'Legacy scan running',
     autoOn: 'Auto paper running',
     autoOff: 'Auto paper off',
-    liveReady: 'Live ready',
-    liveLocked: 'Live locked',
     schedulerStart: 'Start scheduler',
     schedulerStop: 'Stop scheduler',
     fetching: 'Fetching',
@@ -385,55 +381,6 @@ function RecommendationCard({
   )
 }
 
-function ForwardValidationStrip({
-  summary,
-  language,
-}: {
-  summary?: ForwardValidationSummary
-  language: UiLanguage
-}) {
-  if (!summary?.ok) return null
-  const progress = summary.progress
-  const clv = summary.clv
-  const score = summary.probability_score
-  const pnl = summary.paper_pnl
-  const hypothesisA = summary.hypotheses?.['H-A']
-  const hypothesisB = summary.hypotheses?.['H-B']
-  const paperAllowed = summary.strata?.paper_allowed?.true?.enrolled ?? 0
-  const enrolled = progress.enrolled_candidates ?? progress.samples
-  const percent = (value?: number | null) => value === null || value === undefined
-    ? '--'
-    : `${value >= 0 ? '+' : ''}${(value * 100).toFixed(1)}%`
-  const brier = (value?: number | null) => value === null || value === undefined ? '--' : value.toFixed(3)
-  const date = String(progress.expected_evaluation_date || '').replace(/-/g, '/')
-  const title = language === 'zh'
-    ? `v2 冻结队列：ask ${(summary.protocol.ask_min * 100).toFixed(0)}–${(summary.protocol.ask_max * 100).toFixed(0)}¢，优势至少 ${(summary.protocol.edge_min * 100).toFixed(0)}%。CLV 使用“决策后 6 小时，且不晚于预测峰值前 1 小时”的最后可得 ask；可执行性仅作分层。`
-    : `Frozen v2 cohort: ask ${(summary.protocol.ask_min * 100).toFixed(0)}–${(summary.protocol.ask_max * 100).toFixed(0)}c and edge >= ${(summary.protocol.edge_min * 100).toFixed(0)}%. CLV uses the last ask before decision+6h, capped at one hour before the predicted peak; executability is a stratum.`
-
-  return (
-    <div className="shrink-0 border-b border-cyan-500/20 bg-cyan-500/[0.045] px-3 py-1.5" title={title}>
-      <div className="flex items-center gap-3 overflow-x-auto whitespace-nowrap text-[10px] text-neutral-400">
-        <span className="font-semibold text-cyan-300">{language === 'zh' ? '前瞻验证' : 'Forward validation'}</span>
-        <span className="tabular-nums text-neutral-200">{progress.samples}/{progress.target_samples}</span>
-        <span className="h-1.5 w-20 overflow-hidden bg-neutral-800">
-          <span className="block h-full bg-cyan-500" style={{ width: `${Math.max(0, Math.min(100, progress.completion_percent))}%` }} />
-        </span>
-        <span className="tabular-nums text-neutral-500">
-          {language === 'zh' ? '入组' : 'Enrolled'} {enrolled} · {language === 'zh' ? '可执行' : 'Executable'} {paperAllowed}
-        </span>
-        <span>{language === 'zh' ? '预计' : 'ETA'} {date || '--'}</span>
-        <span className="tabular-nums">CLV {percent(clv.mean)} <span className="text-neutral-600">n={clv.n}</span></span>
-        <span className="tabular-nums">Brier {brier(score.model_brier)} / {brier(score.market_brier)}</span>
-        <span className={`tabular-nums ${pnl.realized_usd >= 0 ? 'text-green-300' : 'text-red-300'}`}>
-          P&amp;L {pnl.realized_usd >= 0 ? '+' : ''}${pnl.realized_usd.toFixed(2)}
-        </span>
-        <span className="tabular-nums text-neutral-500">H-A {percent(hypothesisA?.mean)} n={hypothesisA?.n ?? 0}</span>
-        <span className="tabular-nums text-neutral-500">H-B {percent(hypothesisB?.mean)} n={hypothesisB?.n ?? 0}</span>
-      </div>
-    </div>
-  )
-}
-
 type Layer7ResourceInput = {
   enabled: boolean
   hasPayload: boolean
@@ -516,11 +463,18 @@ function cityKeyFromParam(value: string | null) {
   return value.split('-').slice(0, -1).join('-') || value
 }
 
-function cityContinent(cityKey?: string, cityName?: string) {
+function cityRegion(timeZone?: string, cityKey?: string, cityName?: string) {
+  const zone = String(timeZone || '')
+  if (zone.startsWith('Asia/')) return 'Asia'
+  if (zone.startsWith('Europe/')) return 'Europe'
+  if (zone.startsWith('America/')) return 'Americas'
+  if (zone.startsWith('Africa/')) return 'Africa'
+  if (zone.startsWith('Australia/') || zone.startsWith('Pacific/') || zone.startsWith('Antarctica/')) return 'Oceania'
+
   const value = `${cityKey || ''} ${cityName || ''}`.toLowerCase()
   if (/london|paris|munich|madrid|milan|amsterdam|warsaw|helsinki|moscow|istanbul|ankara/.test(value)) return 'Europe'
   if (/tokyo|seoul|shanghai|shenzhen|beijing|wuhan|singapore|taipei|hong|busan|chengdu|chongqing|guangzhou|jakarta|jeddah|karachi|kuala|lucknow|manila|qingdao|tel-aviv/.test(value)) return 'Asia'
-  if (/sydney|wellington/.test(value)) return 'Pacific'
+  if (/sydney|wellington/.test(value)) return 'Oceania'
   if (/cape|lagos/.test(value)) return 'Africa'
   if (/new-york|nyc|chicago|miami|dallas|seattle|atlanta|toronto|sao|paulo|austin|denver|houston|los-angeles|san-francisco|mexico|panama|buenos/.test(value)) return 'Americas'
   return 'Other'
@@ -550,7 +504,7 @@ function continentLabel(value: string, language: UiLanguage) {
     Americas: ['美洲', 'Americas'],
     Europe: ['欧洲', 'Europe'],
     Asia: ['亚洲', 'Asia'],
-    Pacific: ['大洋洲', 'Pacific'],
+    Oceania: ['大洋洲', 'Oceania'],
     Africa: ['非洲', 'Africa'],
     Other: ['其他', 'Other'],
   }
@@ -574,7 +528,7 @@ function cityBrowseGroupLabel(value: string, mode: CityBrowseMode, language: UiL
 
 function cityBrowseGroupRank(value: string, mode: CityBrowseMode) {
   if (mode === 'continent') {
-    const order = ['Asia', 'Europe', 'Africa', 'Americas', 'Pacific', 'Other']
+    const order = ['Asia', 'Europe', 'Americas', 'Africa', 'Oceania', 'Other']
     const index = order.indexOf(value)
     return index >= 0 ? index : order.length
   }
@@ -1397,7 +1351,7 @@ function App() {
         settlementTimeBasis: row.settlement_time_basis,
         primarySettlementSource: row.primary_settlement_source,
         verificationStatus: row.verification_status,
-        continent: cityContinent(row.city_key, row.city_name),
+        continent: cityRegion(row.settlement_timezone, row.city_key, row.city_name),
         unit: row.unit || 'F',
         current: row.current_temp ?? null,
         currentSource: row.current_temp_source ?? null,
@@ -1434,7 +1388,7 @@ function App() {
           settlementTimeBasis: undefined,
           primarySettlementSource: undefined,
           verificationStatus: 'unverified',
-          continent: cityContinent(row.city_key, row.city_name),
+          continent: cityRegion(undefined, row.city_key, row.city_name),
           unit: 'F',
           current: null,
           currentSource: null,
@@ -1469,7 +1423,7 @@ function App() {
         settlementTimeBasis: undefined,
         primarySettlementSource: undefined,
         verificationStatus: 'unverified',
-        continent: cityContinent(signal.city_key, signal.city_name),
+        continent: cityRegion(undefined, signal.city_key, signal.city_name),
         unit: 'F',
         current: null,
         currentSource: null,
@@ -1679,23 +1633,6 @@ function App() {
   }
 
   const remoteReadOnly = apiAccess.mode === 'snapshot' || apiAccess.mode === 'unknown' || !apiAccess.writable
-  const snapshotAgeMinutes = apiAccess.snapshotAt
-    ? Math.max(0, (Date.now() - new Date(apiAccess.snapshotAt).getTime()) / 60000)
-    : null
-  const accessLabel = apiAccess.mode === 'local'
-    ? (uiLanguage === 'zh' ? '本地实时' : 'Local live')
-    : apiAccess.mode === 'live'
-      ? (apiAccess.writable
-        ? (uiLanguage === 'zh' ? '公网实时' : 'Remote live')
-        : (uiLanguage === 'zh' ? '公网只读' : 'Remote read-only'))
-      : apiAccess.mode === 'snapshot'
-        ? (uiLanguage === 'zh' ? '离线快照' : 'Offline snapshot')
-        : (uiLanguage === 'zh' ? '连接待确认' : 'Connection pending')
-  const accessTone = apiAccess.mode === 'local' || (apiAccess.mode === 'live' && apiAccess.writable)
-    ? 'border-green-500/30 bg-green-500/5 text-green-300'
-    : apiAccess.mode === 'snapshot' && snapshotAgeMinutes !== null && snapshotAgeMinutes > 60
-      ? 'border-red-500/30 bg-red-500/5 text-red-300'
-      : 'border-amber-500/30 bg-amber-500/5 text-amber-300'
 
   return (
     <div className={`${themeMode === 'dark' ? 'polywx-dark bg-[#161A22] text-[#CBD2DC]' : 'polywx-light bg-white text-gray-900'} flex min-h-screen flex-col xl:h-screen xl:overflow-hidden`}>
@@ -1709,14 +1646,6 @@ function App() {
         </div>
         <span className="hidden shrink-0 text-[10px] text-neutral-500 md:inline">
           {copy.updated} {dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString(uiLanguage === 'zh' ? 'zh-CN' : 'en-GB', { hour12: false }) : '--:--:--'}
-        </span>
-        <span
-          className={`hidden shrink-0 border px-2 py-1 text-[10px] md:inline ${accessTone}`}
-          title={apiAccess.snapshotAt
-            ? `${uiLanguage === 'zh' ? '快照时间' : 'Snapshot time'}: ${new Date(apiAccess.snapshotAt).toLocaleString()}`
-            : accessLabel}
-        >
-          {accessLabel}{apiAccess.mode === 'snapshot' && snapshotAgeMinutes !== null ? ` · ${Math.round(snapshotAgeMinutes)}m` : ''}
         </span>
         <label className="inline-flex items-center gap-1 border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400" aria-label={t('language.label')}>
           <span>{t('language.label')}</span>
@@ -1959,13 +1888,12 @@ function App() {
         </aside>
 
         <section className="order-1 min-w-0 min-h-[720px] overflow-hidden xl:order-2 xl:flex xl:min-h-0 xl:flex-col">
-          <ForwardValidationStrip summary={data?.forward_validation} language={uiLanguage} />
           <div className={`shrink-0 border-b px-3 py-1.5 ${hasStrategyRecommendations ? 'border-cyan-500/20 bg-cyan-500/10' : 'border-amber-500/20 bg-amber-500/10'}`}>
             <div className="flex flex-wrap items-center gap-3">
               <div
                 className="flex shrink-0 items-center gap-2"
                 title={hasStrategyRecommendations
-                  ? (uiLanguage === 'zh' ? '已通过后端策略与 paper 交易闸门的最新候选。' : 'Latest candidates that passed strategy and paper execution gates.')
+                  ? (uiLanguage === 'zh' ? '符合当前策略条件的最新候选。' : 'Latest candidates matching the active strategy.')
                   : (uiLanguage === 'zh' ? '天气临界关注；交易判断请以右侧策略队列为准。' : 'Weather threshold watch; use the strategy queue for trade decisions.')}
               >
                 <span className={`text-[11px] font-semibold ${hasStrategyRecommendations ? 'text-cyan-300' : 'text-amber-300'}`}>
@@ -2026,19 +1954,13 @@ function App() {
             </div>
           </div>
 
-          {selectedCityMeta && selectedTradingStatus !== 'fully_active' && (
+          {selectedCityMeta && selectedCityMeta.verificationStatus === 'settlement_mismatch' && (
             <div className={`border-b px-3 py-2 text-[11px] ${statusTone(selectedTradingStatus)}`}>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-semibold">
                   {STATUS_ICON[selectedTradingStatus]} {t(`city.status.${selectedTradingStatus}`)}
                 </span>
-                {selectedTradingStatus === 'paper_only' && selectedCityMeta.key === 'hong-kong' ? (
-                  <span>{t('banner.hk')}</span>
-                ) : selectedTradingStatus === 'paper_only' && selectedCityMeta.key === 'seoul' ? (
-                  <span>{uiLanguage === 'zh' ? '该城市仅进入模拟验证，实盘保持锁定。' : 'This city is available for paper validation only; live remains locked.'}</span>
-                ) : (
-                  <span>{selectedStatusConfig?.reason || selectedCityMeta.verificationStatus || 'no active market'}</span>
-                )}
+                <span>{selectedCityMeta.key === 'hong-kong' ? t('banner.hk') : (selectedStatusConfig?.reason || selectedCityMeta.verificationStatus)}</span>
               </div>
             </div>
           )}
@@ -2088,7 +2010,6 @@ function App() {
             targetDate={selectedDate}
             decisions={signalDecisionsQuery.data}
             validation={paperValidationStatusQuery.data}
-            liveAvailable={liveAvailable}
             schedulerRunning={schedulerRunning}
             onOpenDeveloperSettings={() => apiAccess.mode === 'local' && setDeveloperSettingsOpen(true)}
             readOnly={remoteReadOnly}

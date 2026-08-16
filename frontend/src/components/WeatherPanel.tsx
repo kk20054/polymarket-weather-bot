@@ -14,6 +14,11 @@ import {
 import { ExternalLink, HelpCircle, History, SlidersHorizontal, X } from 'lucide-react'
 import { HourlyTemperatureChart, type HourlyChartRow } from './HourlyTemperatureChart'
 import { ForecastRevisionDialog } from './ForecastRevisionDialog'
+import {
+  fetchModelWeightSettings,
+  updateModelWeightSettings,
+  type ModelWeightMode,
+} from '../api'
 import type { BucketProbabilitySummary, CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlyBiasSourceStats, HourlyBiasStats, HourlyConsensusSummary, HourlySourcePoint, HourlySourceSeries, Layer7QueryState, Layer7ResourceState, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
@@ -50,6 +55,26 @@ interface Props {
 }
 
 type EvidenceStatus = 'fresh' | 'stale' | 'missing'
+
+type ModelWeightFamily = 'weathercom_v3' | 'gfs' | 'ecmwf' | 'icon' | 'gem' | 'jma'
+
+const MODEL_WEIGHT_FAMILIES: Array<{ key: ModelWeightFamily; label: string }> = [
+  { key: 'weathercom_v3', label: 'V3' },
+  { key: 'gfs', label: 'GFS' },
+  { key: 'ecmwf', label: 'ECMWF' },
+  { key: 'icon', label: 'ICON' },
+  { key: 'gem', label: 'GEM' },
+  { key: 'jma', label: 'JMA' },
+]
+
+const DEFAULT_MODEL_WEIGHTS: Record<ModelWeightFamily, number> = {
+  weathercom_v3: 0.484,
+  gfs: 0.152,
+  ecmwf: 0.104,
+  icon: 0.095,
+  gem: 0,
+  jma: 0,
+}
 
 const CHINA_LIVE_CITY_KEYS = new Set([
   'beijing',
@@ -1494,9 +1519,9 @@ export function WeatherPanel({
   const chinaLivePulseDetail = fetchPulseDetail(fetchLog, ['china_live', 'china weather', 'weather.com.cn'], chinaLiveSourceTime)
   const supportsChinaLive = CHINA_LIVE_CITY_KEYS.has(cityKey)
   const truthTier = latestHistory?.calibration_tier === 'live_truth'
-    ? '实盘 truth'
+    ? '结算数据'
     : latestHistory?.calibration_tier === 'research_truth'
-      ? '研究 truth'
+      ? '校准数据'
       : 'truth 待补'
 
   useEffect(() => {
@@ -2701,7 +2726,7 @@ function BiasPanel({
                 <DetailLine label="provider" value={providerSummary} wide />
                 <DetailLine label="METAR" value={fmtTemp(focusPair?.metar, unit)} />
                 <DetailLine label="数据状态" value={`预报 ${forecastStatus} · METAR ${metarStatus} · 历史 ${historyStatus}`} wide />
-                <DetailLine label="用途" value="这是研究/校准视图，实盘仍需独立 truth 样本和回放闸门通过。" wide />
+                <DetailLine label="用途" value="用于复核观测、预报与结算数据来源。" wide />
               </div>
             </details>
           </div>
@@ -2948,6 +2973,11 @@ function TemperatureDistributionPanel({
 }) {
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false)
   const [sourceAnalysisView, setSourceAnalysisView] = useState<'history' | 'disagreement'>('disagreement')
+  const [modelWeightMode, setModelWeightMode] = useState<ModelWeightMode>('dynamic')
+  const [modelWeights, setModelWeights] = useState<Record<ModelWeightFamily, number>>(DEFAULT_MODEL_WEIGHTS)
+  const [modelWeightLoading, setModelWeightLoading] = useState(false)
+  const [modelWeightSaving, setModelWeightSaving] = useState(false)
+  const [modelWeightMessage, setModelWeightMessage] = useState('')
   const distribution = signal?.distribution
   const deb = dailyMaxPrediction?.latest
   const debUnit = deb?.unit || unit
@@ -3023,6 +3053,55 @@ function TemperatureDistributionPanel({
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [sourceDialogOpen])
+  useEffect(() => {
+    if (!sourceDialogOpen) return undefined
+    let active = true
+    setModelWeightLoading(true)
+    setModelWeightMessage('')
+    fetchModelWeightSettings()
+      .then(settings => {
+        if (!active) return
+        const nextWeights = { ...DEFAULT_MODEL_WEIGHTS }
+        for (const family of MODEL_WEIGHT_FAMILIES) {
+          const value = Number(settings.weights?.[family.key])
+          if (Number.isFinite(value) && value >= 0) nextWeights[family.key] = value
+        }
+        setModelWeightMode(settings.mode === 'manual' ? 'manual' : 'dynamic')
+        setModelWeights(nextWeights)
+      })
+      .catch(error => {
+        if (!active) return
+        setModelWeightMessage(tr(language, '权重读取失败', 'Weights unavailable'))
+        console.error('model weight settings fetch failed', error)
+      })
+      .finally(() => {
+        if (active) setModelWeightLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [language, sourceDialogOpen])
+
+  const saveModelWeights = async () => {
+    setModelWeightSaving(true)
+    setModelWeightMessage('')
+    try {
+      const saved = await updateModelWeightSettings(modelWeightMode, modelWeights)
+      const nextWeights = { ...DEFAULT_MODEL_WEIGHTS }
+      for (const family of MODEL_WEIGHT_FAMILIES) {
+        const value = Number(saved.weights?.[family.key])
+        if (Number.isFinite(value) && value >= 0) nextWeights[family.key] = value
+      }
+      setModelWeightMode(saved.mode === 'manual' ? 'manual' : 'dynamic')
+      setModelWeights(nextWeights)
+      setModelWeightMessage(tr(language, '已保存', 'Saved'))
+    } catch (error) {
+      setModelWeightMessage(tr(language, '保存失败', 'Save failed'))
+      console.error('model weight settings update failed', error)
+    } finally {
+      setModelWeightSaving(false)
+    }
+  }
   const peakLock = deb?.peak_lock_candidate as Record<string, unknown> | undefined
   const peakLockCandidate = Boolean(peakLock?.candidate)
   const debState = queryState?.deb ?? IDLE_LAYER7_RESOURCE
@@ -3251,7 +3330,7 @@ function TemperatureDistributionPanel({
                     ? ''
                     : tr(language, `模型概率 - YES 卖一 = ${fmtSignedPp(edge)}`, `Model probability - YES best ask = ${fmtSignedPp(edge)}`),
                   tradeCandidate
-                    ? tr(language, `买入候选 · ${item.strategy_name || '策略通过'}；实际模拟前仍会复核盘口、深度、最小订单与 Kelly 金额。`, `Buy candidate · ${item.strategy_name || 'strategy passed'}; paper execution still rechecks quote, depth, minimum size, and Kelly sizing.`)
+                    ? tr(language, `买入候选 · ${item.strategy_name || '策略通过'}；执行前仍会复核盘口、深度、最小订单与 Kelly 金额。`, `Buy candidate · ${item.strategy_name || 'strategy passed'}; execution still rechecks quote, depth, minimum size, and Kelly sizing.`)
                     : tr(
                       language,
                       `观察 · ${!meetsOrderMinimum && item.paper_allowed ? 'Kelly 金额不足最小份额' : gateReason ? gateReasonLabel(gateReason, language) : quoteState}`,
@@ -3264,7 +3343,7 @@ function TemperatureDistributionPanel({
                       <span className="min-w-0 truncate font-semibold text-[#F8FAFC]">{fmtBucketAxisLabel(item, unit)}</span>
                       <span className="flex shrink-0 items-center gap-1">
                         {tradeCandidate
-                          ? <span className="text-[9px] text-cyan-300" title={tr(language, '模型优势和策略闸门已通过，等待模拟执行时复核盘口。', 'Model edge and strategy gates passed; quote is rechecked at paper execution.')}>{tr(language, '买入候选', 'Buy candidate')}</span>
+                          ? <span className="text-[9px] text-cyan-300" title={tr(language, '模型优势和策略条件已通过，执行时会再次复核盘口。', 'Model edge and strategy conditions passed; the quote is rechecked at execution.')}>{tr(language, '买入候选', 'Buy candidate')}</span>
                           : <span className="text-[9px] text-[#7D8694]">{quoteState}</span>}
                         {alpha ? <span title={alphaEventTitle(alpha)} className="text-amber-300">⚡</span> : null}
                         {item.event_url ? <ExternalLink className="h-3 w-3 text-[#7D8694]" aria-hidden="true" /> : null}
@@ -3331,7 +3410,7 @@ function TemperatureDistributionPanel({
         >
           <section className="deb-source-dialog max-h-[88vh] w-full max-w-4xl overflow-hidden border border-[#2C3445] bg-[#161A22] shadow-2xl">
             <header className="border-b border-[#2C3445] px-4 py-3">
-              <div className="flex items-start justify-between gap-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-2">
                   <div className="text-base font-semibold text-[#F8FAFC]">{tr(language, '模型分析', 'Model analysis')}</div>
                   <div className="group relative">
@@ -3360,10 +3439,57 @@ function TemperatureDistributionPanel({
                     </div>
                   </div>
                 </div>
-                <button type="button" onClick={() => setSourceDialogOpen(false)} className="inline-flex h-9 w-9 shrink-0 items-center justify-center border border-[#2C3445] text-[#9AA4B2] hover:bg-[#222A37] hover:text-[#F8FAFC]" aria-label={tr(language, '关闭', 'Close')}>
-                  <X className="h-4 w-4" />
-                </button>
+                <div className="ml-auto flex items-center gap-1.5">
+                  <div className="inline-flex border border-[#2C3445]" role="group" aria-label={tr(language, '模型权重模式', 'Model weight mode')}>
+                    {(['dynamic', 'manual'] as ModelWeightMode[]).map(mode => (
+                      <button
+                        key={mode}
+                        type="button"
+                        disabled={modelWeightLoading || modelWeightSaving}
+                        onClick={() => setModelWeightMode(mode)}
+                        className={`h-8 px-3 text-[10px] font-medium ${modelWeightMode === mode ? 'bg-[#2563EB] text-white' : 'text-[#9AA4B2] hover:bg-[#222A37] hover:text-[#F8FAFC]'} disabled:opacity-40`}
+                      >
+                        {mode === 'dynamic' ? tr(language, '动态', 'Dynamic') : tr(language, '手动', 'Manual')}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={modelWeightLoading || modelWeightSaving}
+                    onClick={saveModelWeights}
+                    className="h-8 border border-[#2C3445] px-3 text-[10px] font-medium text-[#CBD5E1] hover:bg-[#222A37] hover:text-white disabled:opacity-40"
+                  >
+                    {modelWeightSaving ? tr(language, '保存中', 'Saving') : tr(language, '保存', 'Save')}
+                  </button>
+                  <button type="button" onClick={() => setSourceDialogOpen(false)} className="inline-flex h-8 w-8 shrink-0 items-center justify-center border border-[#2C3445] text-[#9AA4B2] hover:bg-[#222A37] hover:text-[#F8FAFC]" aria-label={tr(language, '关闭', 'Close')}>
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
+              {modelWeightMode === 'manual' && (
+                <div className="mt-3 grid grid-cols-3 gap-1.5 sm:grid-cols-6">
+                  {MODEL_WEIGHT_FAMILIES.map(family => (
+                    <label key={family.key} className="flex h-9 items-center border border-[#2C3445] bg-[#12161D] px-2">
+                      <span className="min-w-0 flex-1 text-[9px] font-semibold text-[#9AA4B2]">{family.label}</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={0.1}
+                        value={Number((modelWeights[family.key] * 100).toFixed(1))}
+                        onChange={event => {
+                          const value = Math.max(0, Math.min(100, Number(event.target.value) || 0)) / 100
+                          setModelWeights(current => ({ ...current, [family.key]: value }))
+                        }}
+                        className="w-12 bg-transparent text-right text-[10px] tabular-nums text-[#F8FAFC] outline-none"
+                        aria-label={`${family.label} ${tr(language, '权重百分比', 'weight percent')}`}
+                      />
+                      <span className="text-[9px] text-[#7D8694]">%</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {modelWeightMessage && <div className={`mt-2 text-right text-[9px] ${modelWeightMessage.includes('失败') || modelWeightMessage.includes('fail') ? 'text-red-300' : 'text-emerald-300'}`}>{modelWeightMessage}</div>}
               <div className="mt-3 inline-flex border border-[#2C3445]" role="tablist" aria-label={tr(language, '模型分析视图', 'Model analysis view')}>
                 <button
                   type="button"
@@ -3508,7 +3634,7 @@ function TemperatureDistributionPanel({
                         role="tooltip"
                         className="weatherbot-tooltip pointer-events-none invisible absolute left-0 top-full z-[70] mt-2 w-72 border p-3 text-[10px] leading-relaxed opacity-0 shadow-2xl transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
                       >
-                        {tr(language, '权重决定模型对 DEB 的影响，不等同于单独准确率排名。误差只使用无泄漏预测与真实结算的配对样本；样本可以先参与模拟校准，完成结算配对后才显示误差。', 'Weight controls influence on DEB, not standalone accuracy. Error uses leakage-safe forecast/truth pairs; samples may enter paper calibration before settled MAE is available.')}
+                        {tr(language, '权重决定模型对 DEB 的影响，不等同于单独准确率排名。误差只使用无泄漏预测与真实结算的配对样本；完成结算配对后才显示误差。', 'Weight controls influence on DEB, not standalone accuracy. Error uses leakage-safe forecast/truth pairs and appears only after settlement pairing.')}
                       </div>
                     </div>
                   </div>

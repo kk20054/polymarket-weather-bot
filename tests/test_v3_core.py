@@ -6020,10 +6020,10 @@ class V3CoreTests(unittest.TestCase):
         self.assertIn("truth_basis", v3_component)
         self.assertTrue(v3_component["mae_imputed"])
         self.assertEqual(v3_component["effective_mae_c"], 1.2)
-        self.assertEqual(v3_component["weight_status"], "cold_start_v3_only")
+        self.assertEqual(v3_component["weight_status"], "prior_only")
         self.assertEqual(v3_component["weight_exclusion_reason"], "")
-        self.assertEqual(v3_component["weight"], 1.0)
-        self.assertNotIn("dynamic_weight_uses_prior_only_components", prediction["build_warnings"])
+        self.assertGreater(v3_component["weight"], 0.0)
+        self.assertIn("dynamic_weight_uses_prior_only_components", prediction["build_warnings"])
         self.assertNotIn("missing_weathercom_v3", prediction["build_warnings"])
 
     def test_weathercom_v3_deb_rebuilds_elapsed_hours_from_forecast_snapshots(self):

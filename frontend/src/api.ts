@@ -16,6 +16,16 @@ export type ApiAccessState = {
   observedAt: string
 }
 
+export type ModelWeightMode = 'dynamic' | 'manual'
+
+export type ModelWeightSettings = {
+  ok: boolean
+  mode: ModelWeightMode
+  weights: Record<string, number>
+  available_families: string[]
+  method: string
+}
+
 const isLocalBrowser = () => typeof window !== 'undefined'
   && ['127.0.0.1', 'localhost'].includes(window.location.hostname)
 
@@ -197,6 +207,23 @@ export async function fetchSourceHealth(): Promise<SourceHealthMatrix> {
 
 export async function fetchApiSettings(): Promise<ApiSettingsResponse> {
   const { data } = await api.get<ApiSettingsResponse>('/developer/api-settings')
+  return data
+}
+
+export async function fetchModelWeightSettings(): Promise<ModelWeightSettings> {
+  const { data } = await api.get<ModelWeightSettings>('/developer/model-weights')
+  return data
+}
+
+export async function updateModelWeightSettings(
+  mode: ModelWeightMode,
+  weights: Record<string, number>,
+): Promise<ModelWeightSettings> {
+  const { data } = await api.put<ModelWeightSettings>('/developer/model-weights', {
+    mode,
+    weights,
+    confirm: true,
+  })
   return data
 }
 

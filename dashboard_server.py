@@ -87,6 +87,7 @@ from weatherbot_v3.strategy_profiles import (
     validate_paper_strategy_selection,
 )
 from weatherbot_v3.env_utils import env_value
+from weatherbot_v3.model_weight_settings import model_weight_settings, update_model_weight_settings
 
 
 ROOT = Path(__file__).resolve().parent
@@ -314,6 +315,12 @@ class ApiSettingTestRequest(BaseModel):
     value: str = Field(default="", max_length=4096)
     confirm: bool = False
     allow_side_effect: bool = False
+
+
+class ModelWeightSettingsRequest(BaseModel):
+    mode: str = "dynamic"
+    weights: dict[str, float] = Field(default_factory=dict)
+    confirm: bool = False
 
 
 def _require_local_developer_request(request: Request, confirmed: bool) -> None:
@@ -5129,6 +5136,27 @@ async def developer_api_setting_test_api(
             provider_key,
             payload.value,
             allow_side_effect=payload.allow_side_effect,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"reason": str(exc)}) from exc
+
+
+@app.get("/api/developer/model-weights")
+async def developer_model_weights_api():
+    return await asyncio.to_thread(model_weight_settings)
+
+
+@app.put("/api/developer/model-weights")
+async def developer_model_weights_update_api(
+    payload: ModelWeightSettingsRequest,
+    request: Request,
+):
+    _require_local_developer_request(request, payload.confirm)
+    try:
+        return await asyncio.to_thread(
+            update_model_weight_settings,
+            payload.mode,
+            payload.weights,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"reason": str(exc)}) from exc

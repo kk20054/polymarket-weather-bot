@@ -12,6 +12,7 @@ from ..config import DATA_DIR
 from ..db import connect, init_v3_db, upsert_model_reprice_event, utc_now
 from ..deb import bucket_bounds_in_prediction_unit, sigma_with_floor
 from ..env_utils import env_value
+from ..model_weight_settings import manual_model_weights, model_weight_policy
 from ..forecast_time import (
     DEFAULT_COMPONENT_MAX_SKEW_HOURS,
     FORECAST_COMPONENT_COHORT_VERSION,
@@ -33,7 +34,6 @@ MIN_MEMBER_COUNT_FOR_SINGLE_FAMILY = 5
 SIGMA_FLOOR_C = 0.5
 UNCALIBRATED_SIGMA_C = 1.2
 BIAS_MIN_SAMPLE_COUNT = 20
-BIAS_PAPER_MIN_SAMPLE_COUNT = 10
 BIAS_SHRINKAGE_PRIOR_SAMPLES = 10
 BIAS_MAX_ABS_C = 2.5
 BIAS_RUNTIME_METHOD = "zero_prior_shrinkage_v1"
@@ -41,7 +41,7 @@ FORECAST_SNAPSHOT_SELECTION_VERSION = "forecast-snapshot-selection-v2"
 # Dynamic weighting starts as soon as a leakage-free forecast/truth pair is
 # available. Sparse models keep their prior share instead of disappearing;
 # live maturity remains on the stricter 20-sample contract.
-DYNAMIC_WEIGHT_MIN_SAMPLES = 20
+DYNAMIC_WEIGHT_MIN_SAMPLES = 10
 DYNAMIC_WEIGHT_FULL_SAMPLES = 40
 DYNAMIC_WEIGHT_PERFORMANCE_BLEND_MAX = 0.75
 DYNAMIC_WEIGHT_MAX_SHARE = 0.45
@@ -364,7 +364,11 @@ def build_ensemble_prediction(
         "deb_version": algo,
         "forecast_algo": algo,
         "algo": algo,
-        "weight_method": DYNAMIC_WEIGHT_METHOD if algo == POLYWX_ALIGNED_ALGO else "fixed_region_prior_v1",
+        "weight_method": (
+            "manual_override_v1"
+            if algo == POLYWX_ALIGNED_ALGO and model_weight_policy() == "manual"
+            else (DYNAMIC_WEIGHT_METHOD if algo == POLYWX_ALIGNED_ALGO else "fixed_region_prior_v1")
+        ),
         "model_weights": {component["source"]: component["weight"] for component in usable},
         "member_count": len(samples_unit),
         "available_model_families": sorted(available_families),
@@ -785,6 +789,8 @@ def load_bias_table(path: Path | None = None) -> list[dict[str, Any]]:
 
 def region_model_weights(profile: CitySettlementProfile) -> dict[str, float]:
     if _deb_algo() == POLYWX_ALIGNED_ALGO:
+        if model_weight_policy() == "manual":
+            return manual_model_weights()
         return POLYWX_ALIGNED_MODEL_WEIGHTS
     if profile.region == "us":
         return REGION_MODEL_WEIGHTS["us"]
@@ -1028,15 +1034,11 @@ def _components_from_rows(
             "bias_sample_count": int(sample_count),
             "bias_lead_bucket": lead_bucket,
             "bias_method": BIAS_RUNTIME_METHOD,
-            "bias_status": (
-                "shrinkage_active"
-                if sample_count >= BIAS_PAPER_MIN_SAMPLE_COUNT
-                else ("collecting" if sample_count > 0 else "missing")
-            ),
+            "bias_status": "shrinkage_active" if sample_count > 0 else "missing",
             "bias_shrinkage_factor": round(
                 sample_count / (sample_count + BIAS_SHRINKAGE_PRIOR_SAMPLES),
                 4,
-            ) if sample_count >= BIAS_PAPER_MIN_SAMPLE_COUNT else 0.0,
+            ) if sample_count > 0 else 0.0,
             "bias_applied_before_probability": True,
             "mae_7d": _mae_for(
                 bias_table,
@@ -1080,7 +1082,10 @@ def _components_from_rows(
             ),
         })
     if _deb_algo() == POLYWX_ALIGNED_ALGO:
-        _apply_mae_adjusted_weights(components)
+        if model_weight_policy() == "manual":
+            _apply_manual_weights(components)
+        else:
+            _apply_mae_adjusted_weights(components)
         return components
     raw_sum = sum(component["weight_raw"] for component in components) or 1.0
     for component in components:
@@ -1329,7 +1334,7 @@ def _bias_for(
                 continue
             calibration = _lead_calibration(row, lead_bucket)
             sample_count = int(calibration.get("sample_count") or 0)
-            if sample_count < BIAS_PAPER_MIN_SAMPLE_COUNT:
+            if sample_count <= 0:
                 return 0.0, sample_count
             raw_bias = float(calibration.get("additive_bias_c") or 0.0)
             shrinkage = sample_count / (sample_count + BIAS_SHRINKAGE_PRIOR_SAMPLES)
@@ -1372,10 +1377,9 @@ def _mae_for(
         if profile is not None and int(row.get("location_version") or 1) != int(profile.location_version):
             continue
         calibration = _lead_calibration(row, lead_bucket)
-        # Paper weighting learns from the first leakage-free forecast/truth
-        # pair. Sample thresholds describe maturity and live eligibility; they
-        # must not make a real sparse error metric disappear.
-        if int(calibration.get("sample_count") or 0) < BIAS_PAPER_MIN_SAMPLE_COUNT:
+        # Weighting learns from the first leakage-free forecast/truth pair.
+        # Sparse evidence is handled by shrinkage rather than hidden.
+        if int(calibration.get("sample_count") or 0) <= 0:
             return None
         for key in (
             "walk_forward_mae_7d_c",
@@ -1483,22 +1487,6 @@ def _apply_mae_adjusted_weights(components: list[dict[str, Any]]) -> None:
     if not participants:
         return
 
-    v3 = next(
-        (component for component in participants if component.get("family") == "weathercom_v3"),
-        None,
-    )
-    if v3 is not None and int(v3.get("bias_sample_count") or 0) < BIAS_MIN_SAMPLE_COUNT:
-        for component in participants:
-            selected = component is v3
-            component["weight_raw"] = 1.0 if selected else 0.0
-            component["weight"] = 1.0 if selected else 0.0
-            component["weight_after_mae"] = component["weight"]
-            component["weight_status"] = "cold_start_v3_only" if selected else "diagnostic_only"
-            component["weight_caution"] = (
-                "station_lead_calibration_collecting" if selected else "excluded_during_v3_cold_start"
-            )
-        return
-
     prior_total = sum(float(component.get("weight_prior") or 0.0) for component in participants) or 1.0
     calibrated_prior_mass = sum(
         float(component.get("weight_prior") or 0.0) / prior_total
@@ -1572,9 +1560,33 @@ def _normalize_capped_weights(scores: list[float], max_share: float) -> list[flo
     return [weight / total for weight in weights]
 
 
+def _apply_manual_weights(components: list[dict[str, Any]]) -> None:
+    total = sum(
+        max(0.0, float(component.get("weight_prior") or component.get("weight_raw") or 0.0))
+        for component in components
+    ) or 1.0
+    for component in components:
+        prior = max(0.0, float(component.get("weight_prior") or component.get("weight_raw") or 0.0))
+        weight = prior / total
+        component["weight_method"] = "manual_override_v1"
+        component["weight_eligible"] = weight > 0
+        component["performance_eligible"] = False
+        component["weight_status"] = "manual" if weight > 0 else "excluded"
+        component["weight_exclusion_reason"] = "" if weight > 0 else "manual_weight_zero"
+        component["weight_caution"] = ""
+        component["weight_raw"] = prior
+        component["weight"] = weight
+        component["weight_after_mae"] = weight
+        component["mae_imputed"] = _first_number(component.get("mae_7d")) is None
+        component["effective_mae_c"] = _first_number(component.get("mae_7d")) or UNCALIBRATED_SIGMA_C
+
+
 def _normalize_component_weights(components: list[dict[str, Any]], algo: str) -> None:
     if algo == POLYWX_ALIGNED_ALGO:
-        _apply_mae_adjusted_weights(components)
+        if model_weight_policy() == "manual":
+            _apply_manual_weights(components)
+        else:
+            _apply_mae_adjusted_weights(components)
         return
     total = sum(max(0.0, float(component.get("weight_prior") or component.get("weight_raw") or 0.0)) for component in components) or 1.0
     for component in components:

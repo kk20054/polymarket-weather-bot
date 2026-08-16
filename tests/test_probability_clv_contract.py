@@ -150,7 +150,7 @@ class ProbabilityClvContractTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertAlmostEqual(float(row["best_ask"]), 0.22)
 
-    def test_cold_start_uses_v3_and_keeps_gem_jma_diagnostic_only(self):
+    def test_dynamic_cold_start_uses_configured_priors_and_keeps_gem_jma_excluded(self):
         self.assertEqual(POLYWX_ALIGNED_MODEL_WEIGHTS["gem"], 0.0)
         self.assertEqual(POLYWX_ALIGNED_MODEL_WEIGHTS["jma"], 0.0)
         components = [
@@ -165,8 +165,13 @@ class ProbabilityClvContractTests(unittest.TestCase):
         _apply_mae_adjusted_weights(components)
 
         weights = {row["family"]: float(row.get("weight") or 0.0) for row in components}
-        self.assertEqual(weights["weathercom_v3"], 1.0)
-        self.assertTrue(all(weight == 0.0 for family, weight in weights.items() if family != "weathercom_v3"))
+        self.assertGreater(weights["weathercom_v3"], weights["gfs"])
+        self.assertGreater(weights["gfs"], 0.0)
+        self.assertGreater(weights["ecmwf"], 0.0)
+        self.assertGreater(weights["icon"], 0.0)
+        self.assertEqual(weights["gem"], 0.0)
+        self.assertEqual(weights["jma"], 0.0)
+        self.assertAlmostEqual(sum(weights.values()), 1.0, places=9)
 
     def test_bias_prefers_station_lead_calibration(self):
         table = [{

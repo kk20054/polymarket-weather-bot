@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, ExternalLink, FlaskConical, Info, ListChecks, Play, Settings2, Square } from 'lucide-react'
+import { ChevronDown, ExternalLink, Info, ListChecks, Play, Receipt, Settings2, Square } from 'lucide-react'
 import { createStrategyProfile, executePaperOrders, fetchPaperOrders, fetchStrategyProfiles, runPaperValidationTick, startPaperValidation, stopPaperValidation } from '../api'
 import { EquityChart } from './EquityChart'
 import type {
@@ -16,7 +16,6 @@ interface Props {
   targetDate: string
   decisions?: SignalDecisionSummary | null
   validation?: PaperValidationStatus | null
-  liveAvailable: boolean
   schedulerRunning: boolean
   onOpenDeveloperSettings: () => void
   readOnly?: boolean
@@ -33,14 +32,14 @@ type QueueItem = {
 type ExitMode = 'hold_to_settlement' | 'model_guarded' | 'model_guarded_take_profit'
 
 const STRATEGY_OPTIONS = [
-  { key: 'core_modal_v1', zh: '动态核心温度桶', en: 'Dynamic modal bucket', helpZh: '仅选择模型概率最高的前两个温度桶；所有可用模型从模拟开始即参与融合，配对样本越多，近期误差对权重的影响越大；20 个样本仍是实盘成熟门槛。', helpEn: 'Only consider the top two model buckets. Every available model participates in paper trading from the start; recent error influences its weight more as paired evidence grows. Twenty pairs remain the live-maturity threshold.' },
-  { key: 'single_bucket_ev', zh: '单桶最高温', en: 'Single bucket', helpZh: '仅当盘口与风控闸门全部通过时，模拟买入概率优势最大的单个温度桶并持有至结算。', helpEn: 'Only after all book and risk gates pass, paper-buy the single bucket with the strongest probability advantage and hold to settlement.' },
+  { key: 'core_modal_v1', zh: '动态核心温度桶', en: 'Dynamic modal bucket', helpZh: '仅选择模型概率最高的前两个温度桶；可用模型按当前权重融合，配对样本越多，近期误差对动态权重的影响越大。', helpEn: 'Only consider the top two model buckets. Available models use the active blend, with recent error gaining influence as paired evidence grows.' },
+  { key: 'single_bucket_ev', zh: '单桶最高温', en: 'Single bucket', helpZh: '盘口与风控条件通过后，买入概率优势最大的单个温度桶并持有至结算。', helpEn: 'After book and risk conditions pass, buy the single bucket with the strongest probability advantage and hold to settlement.' },
   { key: 'ladder_grid', zh: '相邻三桶阶梯', en: 'Three-bucket ladder', helpZh: '中心桶与左右相邻桶作为原子组合，整组买入或整组跳过。', helpEn: 'Treat the center bucket and its two neighbors as an atomic group.' },
   { key: 'tail_buying', zh: '低价尾部', en: 'Low-price tail', helpZh: '仅观察/买入价格较低且概率差足够大的尾部桶。', helpEn: 'Watch or buy low-price tail buckets only when the probability gap is large enough.' },
 ] as const
 
 const REASON_LABELS: Record<string, string> = {
-  paper_gate_not_passed: '模拟闸门未通过',
+  paper_gate_not_passed: '交易条件未通过',
   insufficient_bias_samples: '历史校准样本不足',
   spread_too_wide: '买卖价差过大',
   settlement_unverified: '结算规则未核验',
@@ -51,9 +50,9 @@ const REASON_LABELS: Record<string, string> = {
   order_min_size_missing: '最小下单份额缺失',
   tick_size_missing: '价格步长缺失',
   low_price_tail_bucket: '低价尾部桶风险',
-  live_trading_disabled: '实盘已锁定',
-  paper_validation_run_not_active: '模拟账户未启动或已停止',
-  strategy_revision_mismatch: '模拟账户与策略版本不一致',
+  live_trading_disabled: '执行接口未启用',
+  paper_validation_run_not_active: '账户未启动或已停止',
+  strategy_revision_mismatch: '账户与当前策略配置不一致',
   edge_below_min_after_reprice: '最新盘口下的概率优势已不足',
   spread_too_wide_after_reprice: '最新盘口价差过大',
   tail_ask_above_max_after_reprice: '尾部桶最新买价超过策略上限',
@@ -61,7 +60,7 @@ const REASON_LABELS: Record<string, string> = {
 }
 
 const REASON_LABELS_EN: Record<string, string> = {
-  paper_gate_not_passed: 'Paper gate not passed',
+  paper_gate_not_passed: 'Trade conditions not met',
   insufficient_bias_samples: 'Insufficient calibration samples',
   spread_too_wide: 'Bid/ask spread is too wide',
   settlement_unverified: 'Settlement rule is unverified',
@@ -72,9 +71,9 @@ const REASON_LABELS_EN: Record<string, string> = {
   order_min_size_missing: 'Minimum order size is missing',
   tick_size_missing: 'Tick size is missing',
   low_price_tail_bucket: 'Low-price tail bucket risk',
-  live_trading_disabled: 'Live trading is locked',
-  paper_validation_run_not_active: 'Paper account is not active',
-  strategy_revision_mismatch: 'Paper account and strategy version differ',
+  live_trading_disabled: 'Execution adapter is disabled',
+  paper_validation_run_not_active: 'Account is not active',
+  strategy_revision_mismatch: 'Account and active strategy differ',
   edge_below_min_after_reprice: 'Model edge is too small at the latest price',
   spread_too_wide_after_reprice: 'Latest spread is too wide',
   tail_ask_above_max_after_reprice: 'Latest tail ask exceeds the strategy cap',
@@ -208,13 +207,13 @@ function queueItemEligible(item: QueueItem) {
 
 function resultMessage(result?: PaperExecutionResult | null, language: 'zh' | 'en' = 'zh') {
   if (!result) return null
-  if (result.status === 'duplicate') return tx(language, '该策略已存在模拟订单，没有重复买入。', 'A paper order already exists for this strategy; no duplicate was placed.')
-  if (result.status === 'capacity_reached') return tx(language, '模拟账户已达到今日额度或持仓上限。', 'The paper account reached its daily or position limit.')
+  if (result.status === 'duplicate') return tx(language, '该策略已存在订单，没有重复买入。', 'An order already exists for this strategy; no duplicate was placed.')
+  if (result.status === 'capacity_reached') return tx(language, '账户已达到今日额度或持仓上限。', 'The account reached its daily or position limit.')
   if (result.status === 'no_executable_candidates') return tx(language, `当前盘口不再满足策略：${reasonText(result.reason, language)}`, `The latest book no longer meets the strategy: ${reasonText(result.reason, language)}`)
   if (result.status === 'no_fresh_candidates') return tx(language, '当前批次没有可执行的新策略。', 'No fresh executable strategies in this batch.')
-  if (result.ok && result.dry_run) return tx(language, `检查通过：${result.requested ?? result.results?.length ?? 1} 组策略可模拟成交。`, `Check passed: ${result.requested ?? result.results?.length ?? 1} strategy groups can be filled in paper mode.`)
+  if (result.ok && result.dry_run) return tx(language, `检查通过：${result.requested ?? result.results?.length ?? 1} 组策略满足成交条件。`, `Check passed: ${result.requested ?? result.results?.length ?? 1} strategy groups meet fill conditions.`)
   if (result.ok && result.status === 'dry_run') return tx(language, `检查通过：${result.executed ?? 0} 组策略符合当前账户与盘口约束。`, `Check passed: ${result.executed ?? 0} strategy groups meet account and book constraints.`)
-  if (result.ok) return tx(language, `模拟完成：成交 ${result.executed ?? result.results?.length ?? 1} 组。`, `Paper execution complete: ${result.executed ?? result.results?.length ?? 1} groups filled.`)
+  if (result.ok) return tx(language, `执行完成：成交 ${result.executed ?? result.results?.length ?? 1} 组。`, `Execution complete: ${result.executed ?? result.results?.length ?? 1} groups filled.`)
   return tx(language, `未执行：${reasonText(result.reason, language)}`, `Not executed: ${reasonText(result.reason, language)}`)
 }
 
@@ -255,7 +254,7 @@ function DecisionRow({
           <span className="flex flex-wrap items-center gap-1">
             <span className="text-[11px] font-medium text-neutral-100">{strategyLabel(item.strategy, language)}</span>
             <span className={`border px-1 py-0.5 text-[9px] ${eligible ? 'border-green-500/30 text-green-300' : 'border-amber-500/30 text-amber-300'}`}>
-              {eligible ? tx(language, '可模拟', 'Eligible') : tx(language, '观察', 'Watch')}
+              {eligible ? tx(language, '可执行', 'Eligible') : tx(language, '观察', 'Watch')}
             </span>
           </span>
           <span className="mt-1 block truncate text-[10px] text-neutral-500">
@@ -301,7 +300,7 @@ function DecisionRow({
             <span>{tx(language, '账户将按 Kelly 与风控自动分配', 'The account allocates using Kelly and risk limits')}</span>
             <span className="tabular-nums text-neutral-300">{tx(language, '建议', 'Suggested')} {money(suggested)}</span>
           </div>
-          {!accountActive && <div className="text-[10px] text-amber-300">{tx(language, '请先启动上方模拟账户，再检查或执行该策略。', 'Start the paper account before checking or executing this strategy.')}</div>}
+          {!accountActive && <div className="text-[10px] text-amber-300">{tx(language, '请先启动账户，再检查或执行该策略。', 'Start the account before checking or executing this strategy.')}</div>}
           <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
@@ -317,7 +316,7 @@ function DecisionRow({
               onClick={() => onExecute(first.decision_id, false)}
               className="min-h-9 border border-cyan-500/40 bg-cyan-500/10 text-[10px] text-cyan-200 hover:bg-cyan-500/15 disabled:opacity-30"
             >
-              {tx(language, '模拟买入', 'Paper buy')}
+              {tx(language, '执行买入', 'Execute buy')}
             </button>
           </div>
           {eventUrl && (
@@ -398,7 +397,7 @@ function OrderRow({ order, language }: { order: PaperOrderRecord; language: 'zh'
               <span>{settled
                 ? tx(language, '结算价', 'Settlement price')
                 : exited
-                  ? tx(language, '模拟卖出价（买一）', 'Paper sell price (bid)')
+                  ? tx(language, '退出价（买一）', 'Exit price (bid)')
                   : tx(language, '参考卖出价（买一）', 'Reference sell price (bid)')}</span>
               <span className="text-right tabular-nums text-neutral-300">{cents(closed ? order.exit_price : order.mark_price)}</span>
               <span>{exited ? tx(language, '卖出回款', 'Sale proceeds') : tx(language, '持仓市值', 'Position value')}</span>
@@ -427,7 +426,7 @@ function OrderRow({ order, language }: { order: PaperOrderRecord; language: 'zh'
             {settled
               ? tx(language, '该订单已按 Polymarket 官方结果结算。', 'This order was settled from the official Polymarket outcome.')
               : exited
-                ? tx(language, '该订单已按模拟盘保护规则，以当时可成交的 YES 买一价卖出；盈亏已经实现。', 'This paper order exited under the guard rule at the executable YES best bid; PnL is realized.')
+                ? tx(language, '该订单已按保护规则，以当时可成交的 YES 买一价卖出；盈亏已经实现。', 'This order exited under the guard rule at the executable YES best bid; PnL is realized.')
                 : order.exit_policy === 'model_guarded_take_profit'
                   ? tx(language, '退出规则：达到可成交止盈门槛时按最新买一价卖出；否则继续使用实况穿桶与模型失效保护。页面中间价浮盈不会触发退出。', 'Exit rule: sell at the executable best bid after the take-profit threshold is met; otherwise retain observed-breach and model-invalidation protection. Mid-price gains never trigger an exit.')
                 : order.exit_policy === 'model_guarded'
@@ -446,7 +445,7 @@ function OrderRow({ order, language }: { order: PaperOrderRecord; language: 'zh'
   )
 }
 
-export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation, liveAvailable, schedulerRunning, onOpenDeveloperSettings, readOnly = false, language = 'zh' }: Props) {
+export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation, schedulerRunning, onOpenDeveloperSettings, readOnly = false, language = 'zh' }: Props) {
   const queryClient = useQueryClient()
   const [view, setView] = useState<'queue' | 'orders'>('queue')
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -463,7 +462,8 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
     queryFn: fetchStrategyProfiles,
     staleTime: 30000,
   })
-  const activePaperProfile = profilesQuery.data?.profiles.find(profile => profile.active_scopes.includes('paper_default'))
+  const activePaperProfile = profilesQuery.data?.profiles.find(profile => profile.active_scopes.includes('signal_generation'))
+    ?? profilesQuery.data?.profiles.find(profile => profile.active_scopes.includes('paper_default'))
   const selectedRevisionId = validation?.strategy_revision_id ?? activePaperProfile?.revision_id ?? ''
   const selectedRevisionRows = useMemo(
     () => selectedRevisionId
@@ -579,8 +579,8 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
               mode: exitMode,
             },
           },
-          change_note: `Strategy ${selectedStrategies[0]}, paper edge ${paperEdge.toFixed(3)}, exit ${exitMode}`,
-          activate_scopes: ['signal_generation', 'paper_default'],
+          change_note: `Strategy ${selectedStrategies[0]}, edge ${paperEdge.toFixed(3)}, exit ${exitMode}`,
+          activate_scopes: ['signal_generation', 'paper_default', 'live_default'],
           confirm: true,
         })
         revisionId = revision.revision_id
@@ -627,13 +627,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
             <div className="text-sm font-medium text-neutral-100">{tx(language, '交易台', 'Trading desk')}</div>
             <div className="mt-0.5 text-[10px] text-neutral-600">{tx(language, 'Kelly 分配 → 盘口成交 → Polymarket 结算', 'Kelly sizing → order-book fill → Polymarket settlement')}</div>
           </div>
-          <span className={`border px-1.5 py-0.5 text-[9px] ${liveAvailable ? 'border-green-500/30 text-green-300' : 'border-amber-500/30 text-amber-300'}`}>
-            {liveAvailable ? tx(language, '实盘待验收', 'Live review') : tx(language, '实盘锁定', 'Live locked')}
-          </span>
-        </div>
-        <div className="mt-1 flex items-center justify-between gap-2 text-[9px] text-neutral-600">
-          <span title={selectedRevisionId || tx(language, '未加载', 'Not loaded')}>{tx(language, '策略版本', 'Strategy version')} {selectedRevisionId ? tx(language, '已加载', 'loaded') : '--'}</span>
-          <button type="button" onClick={onOpenDeveloperSettings} disabled={readOnly} className="inline-flex items-center gap-1 text-cyan-500 hover:text-cyan-300 disabled:cursor-not-allowed disabled:opacity-35">
+          <button type="button" onClick={onOpenDeveloperSettings} disabled={readOnly} className="inline-flex min-h-7 items-center gap-1 border border-neutral-800 px-2 text-[10px] text-cyan-500 hover:bg-neutral-950 hover:text-cyan-300 disabled:cursor-not-allowed disabled:opacity-35">
             <Settings2 className="h-3 w-3" /> {tx(language, '设置', 'Settings')}
           </button>
         </div>
@@ -701,7 +695,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
           <span className="inline-flex items-center gap-1"><ListChecks className="h-3.5 w-3.5" /> {tx(language, '策略队列', 'Strategy queue')}</span>
         </button>
         <button type="button" role="tab" aria-selected={view === 'orders'} onClick={() => setView('orders')} className={`min-h-10 px-3 text-left text-[11px] ${view === 'orders' ? 'bg-amber-500/10 text-amber-200' : 'text-neutral-500'}`}>
-          <span className="inline-flex items-center gap-1"><FlaskConical className="h-3.5 w-3.5" /> {tx(language, '订单', 'Orders')}</span>
+          <span className="inline-flex items-center gap-1"><Receipt className="h-3.5 w-3.5" /> {tx(language, '订单', 'Orders')}</span>
         </button>
       </div>
 
