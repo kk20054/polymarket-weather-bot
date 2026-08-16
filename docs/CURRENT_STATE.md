@@ -3,7 +3,7 @@
 ## Current Layer
 - Date: 2026-08-16. Phase 3/6: forward simulation and production hardening.
 - Production DB: `D:\WeatherBot\data\weatherbot_v3.db` (about 60GB).
-- Backend, frontend, and scheduler were stopped cleanly before GitHub publication; ports `8765` and `5173` are offline.
+- Local backend, frontend, and scheduler are running on ports `8765/5173`; the scheduler reports 12 pollers and a 49-city source matrix.
 - One strategy engine serves two execution modes; there is no separate exploration queue.
 - `LIVE_TRADING=false` and the live executor is not production-ready, so live remains unavailable.
 
@@ -17,8 +17,9 @@
 - Frozen forward validation remains negative: mean CLV `-3.28pp` (95% CI `[-5.47pp, -1.10pp]`), so there is no evidence supporting live deployment.
 - WU truth covers 48/49 cities but is immature; PWS remains unavailable without entitlement.
 - The Vite frontend is deployed to Vercel project `weatherbot-frontend`; GitHub auto-deploy is connected to `kk20054/polymarket-weather-bot`.
-- Vercel serves the frontend at `https://www.polywxx.org` and `https://weatherbot-frontend.vercel.app`; Cloudflare DNS and Vercel HTTPS verification are complete for both `polywxx.org` and `www.polywxx.org`.
-- The deployment is intentionally frontend-only: Vercel `/api/*` routes return `404` until the FastAPI backend is published or securely tunneled, while runtime data and secrets remain local.
+- Vercel serves the frontend at `https://www.polywxx.org`; its same-origin `/api/*` gateway proxies read-only requests to the local FastAPI backend through `api.polywxx.org`.
+- `api.polywxx.org` is carried by a named Cloudflare Tunnel installed as an automatic Windows service. The origin requires a server-side token, and the public gateway rejects write methods with HTTP `405`.
+- The public dashboard is operational but intentionally read-only. Local `http://127.0.0.1:5173` remains the writable operator interface; the public API depends on this laptop and FastAPI being online.
 
 ## Production Blockers
 - Real Polymarket submission is incomplete: the legacy executor lacks production idempotency, aggregate risk reservation, and revision-bound routing.
@@ -26,8 +27,8 @@
 - Truth maturity, source entitlement, SQLite size, and single-writer contention remain operational risks.
 
 ## Next Task
-- Keep GitHub `main` as the Vercel frontend source of truth; runtime data and secrets remain local and ignored.
-- Publish or securely tunnel the FastAPI backend, then configure the frontend API origin and CORS before treating the public dashboard as operational rather than a static shell.
+- Keep GitHub `main` as the Vercel frontend source of truth; runtime data, tunnel credentials, and API secrets remain local and ignored.
+- Keep the laptop and FastAPI backend online when the public dashboard must show live data; Cloudflare Tunnel now starts automatically with Windows.
 - Let the active simulation run collect new decisions and settlements under the explicit bankroll settings; do not create another queue.
 - Review simulation fills, CLV, and settled PnL by strategy revision before changing strategy parameters again.
 - Implement and independently verify the real CLOB execution path before making the live option selectable.
