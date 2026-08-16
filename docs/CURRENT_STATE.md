@@ -17,7 +17,8 @@
 - Frozen forward validation remains negative: mean CLV `-3.28pp` (95% CI `[-5.47pp, -1.10pp]`), so there is no evidence supporting live deployment.
 - WU truth covers 48/49 cities but is immature; PWS remains unavailable without entitlement.
 - The Vite frontend is deployed to Vercel project `weatherbot-frontend`; GitHub auto-deploy is connected to `kk20054/polymarket-weather-bot`.
-- Vercel serves the frontend at `https://weatherbot-frontend-8c43w4lvj-max-janel.vercel.app`; `polywxx.org` is assigned but awaits Cloudflare A records.
+- Vercel serves the frontend at `https://www.polywxx.org` and `https://weatherbot-frontend.vercel.app`; Cloudflare DNS and Vercel HTTPS verification are complete for both `polywxx.org` and `www.polywxx.org`.
+- The deployment is intentionally frontend-only: Vercel `/api/*` routes return `404` until the FastAPI backend is published or securely tunneled, while runtime data and secrets remain local.
 
 ## Production Blockers
 - Real Polymarket submission is incomplete: the legacy executor lacks production idempotency, aggregate risk reservation, and revision-bound routing.
@@ -26,7 +27,7 @@
 
 ## Next Task
 - Keep GitHub `main` as the Vercel frontend source of truth; runtime data and secrets remain local and ignored.
-- Complete Cloudflare DNS for `polywxx.org` and `www.polywxx.org`, then verify HTTPS and the honest backend-offline state.
+- Publish or securely tunnel the FastAPI backend, then configure the frontend API origin and CORS before treating the public dashboard as operational rather than a static shell.
 - Let the active simulation run collect new decisions and settlements under the explicit bankroll settings; do not create another queue.
 - Review simulation fills, CLV, and settled PnL by strategy revision before changing strategy parameters again.
 - Implement and independently verify the real CLOB execution path before making the live option selectable.
