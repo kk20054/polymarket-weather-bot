@@ -8393,13 +8393,14 @@ class V3CoreTests(unittest.TestCase):
         init_v3_db(path)
         now = "2026-07-11T00:00:00+00:00"
         with connect(path) as conn:
-            for target_date, truth, forecast in (
-                ("2026-06-30", 30.0, 31.0),
-                ("2026-07-01", 30.0, 40.0),
+            for target_date, truth, forecast, truth_available_at in (
+                ("2026-06-29", 30.0, 31.0, "2026-06-30T06:00:00+00:00"),
+                ("2026-06-30", 30.0, 31.0, now),
+                ("2026-07-01", 30.0, 40.0, now),
             ):
                 conn.execute(
                     "INSERT INTO truth_wunderground_daily (truth_key, icao, date_local, high_c, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (f"wu:KORD:{target_date}", "KORD", target_date, truth, now, now),
+                    (f"wu:KORD:{target_date}", "KORD", target_date, truth, truth_available_at, truth_available_at),
                 )
                 conn.execute(
                     """
@@ -8448,8 +8449,10 @@ class V3CoreTests(unittest.TestCase):
         )
         row = next(item for item in payload["rows"] if item["model"] == "ecmwf")
 
-        self.assertEqual(row["sample_dates"], ["2026-06-30"])
+        self.assertEqual(row["sample_dates"], ["2026-06-29"])
         self.assertAlmostEqual(row["additive_bias_c"], 1.0)
+        self.assertAlmostEqual(row["walk_forward_mae_7d_c"], 1.0)
+        self.assertEqual(row["predictive_error_sample_count"], 1)
         self.assertEqual(row["location_version"], 1)
         self.assertEqual(row["location_mismatch_excluded_rows"], 0)
         self.assertEqual(payload["training_policy"]["as_of_date_exclusive"], "2026-07-01")

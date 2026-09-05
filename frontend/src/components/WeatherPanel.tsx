@@ -684,6 +684,8 @@ type DebSourceRow = {
   truthBasis: string
   status: string
   calibrationSamples: number
+  predictiveErrorSamples: number | null
+  predictiveErrorBasis: string
   calibrationProgress: number | null
   exclusionReason: string
   warning?: string
@@ -779,7 +781,12 @@ function buildDebSourceRows(deb: DailyMaxPredictionSummary['latest'], unit: stri
       const sourceUnit = component.model_daily_high_c !== undefined || component.peak_temp_c !== undefined ? 'C' : (deb?.unit || unit)
       const rawMu = asNumber(component.model_daily_high_c) ?? asNumber(component.model_daily_high) ?? asNumber(component.peak_temp_c)
       const weight = asNumber(component.weight_after_mae) ?? asNumber(component.weight) ?? asNumber(weights[source])
-      const mae = asNumber(component.mae_7d) ?? asNumber(component.rmse_7d)
+      const predictiveErrorBasis = String(component.predictive_error_basis ?? 'historical_snapshot')
+      const mae = predictiveErrorBasis === 'prior_only_runtime_bias'
+        ? asNumber(component.predictive_error_c)
+        : predictiveErrorBasis === 'historical_snapshot'
+          ? asNumber(component.mae_7d) ?? asNumber(component.rmse_7d)
+          : null
       return {
         key: `${source}-${index}`,
         label: sourceShortLabel(source, family),
@@ -790,6 +797,8 @@ function buildDebSourceRows(deb: DailyMaxPredictionSummary['latest'], unit: stri
         truthBasis: String(component.truth_basis ?? 'unknown'),
         status: String(component.weight_status ?? (Number(weight ?? 0) > 0 ? 'active' : 'unknown')),
         calibrationSamples: Number(component.bias_sample_count ?? 0),
+        predictiveErrorSamples: asNumber(component.predictive_error_sample_count),
+        predictiveErrorBasis,
         calibrationProgress: asNumber(component.calibration_progress),
         exclusionReason: String(component.weight_exclusion_reason ?? ''),
         warning: String(component.warning ?? ''),
@@ -3638,7 +3647,7 @@ function TemperatureDistributionPanel({
                         role="tooltip"
                         className="weatherbot-tooltip pointer-events-none invisible absolute left-0 top-full z-[70] mt-2 w-72 border p-3 text-[10px] leading-relaxed opacity-0 shadow-2xl transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
                       >
-                        {tr(language, '权重决定模型对 DEB 的影响，不等同于单独准确率排名。误差只使用无泄漏预测与真实结算的配对样本；完成结算配对后才显示误差。', 'Weight controls influence on DEB, not standalone accuracy. Error uses leakage-safe forecast/truth pairs and appears only after settlement pairing.')}
+                        {tr(language, '权重代表对 DEB 的影响，不是胜率。前向 MAE 使用最近最多 7 个独立评分样本，按发布前可用的偏差修正评分；配对数与可评分数不同。历史快照保留旧误差口径，不作为新策略的学习依据。', 'Weight is influence on DEB, not win rate. Forward MAE uses up to 7 recent independently scored samples and the correction available before issue. Paired and scored counts differ. Historical snapshot errors retain their old definition and are not used to train new decisions.')}
                       </div>
                     </div>
                   </div>
@@ -3663,7 +3672,7 @@ function TemperatureDistributionPanel({
                             <span className="h-2.5 w-2.5 shrink-0" style={{ backgroundColor: modelColor }} />
                             <div className="min-w-0">
                               <div className="truncate text-sm font-semibold uppercase text-[#F8FAFC]">{row.label}</div>
-                              <div className="mt-0.5 text-[9px] text-[#7D8694]">
+                              <div className="mt-0.5 text-[9px] text-[#7D8694]" title={tr(language, `独立配对 ${row.calibrationSamples}；前向评分 ${row.predictiveErrorSamples ?? '未记录'}。重复抓取不是新增独立样本。`, `Independent pairs: ${row.calibrationSamples}; predictive scores: ${row.predictiveErrorSamples ?? 'not recorded'}. Repeated fetches are not independent samples.`)}>
                                 {tr(language, '样本', 'samples')} n={row.calibrationSamples}
                               </div>
                             </div>
@@ -3703,18 +3712,14 @@ function TemperatureDistributionPanel({
                               <span className="block h-full" style={{ width: `${editableWeightPct ?? weightPct ?? 0}%`, backgroundColor: modelColor }} />
                             </div>
                           </div>
-                          <div>
-                            <div className="text-[9px] text-[#7D8694]">{tr(language, '近 7 日误差', '7-day MAE')}</div>
+                          <div title={row.predictiveErrorBasis === 'historical_snapshot'
+                            ? tr(language, '此数值来自历史快照的旧评分口径，可能包含样本内拟合误差；不代表经前向验证的准确度，也不用于新的动态权重。', 'This historical snapshot may include in-sample fitted error. It is not validated predictive accuracy and does not drive new dynamic weights.')
+                            : tr(language, `按真实运行偏差公式前向评分，共 ${row.predictiveErrorSamples ?? 0} 笔；显示最近最多 7 笔的平均绝对误差，不是置信区间。`, `Scored with the actual runtime correction: ${row.predictiveErrorSamples ?? 0} samples; MAE over up to the latest 7 scores, not a confidence interval.`)}>
+                            <div className="text-[9px] text-[#7D8694]">{row.predictiveErrorBasis === 'historical_snapshot' ? tr(language, '历史 MAE', 'Historical MAE') : tr(language, '前向 MAE', 'Forward MAE')}</div>
                             {maeDisplay === null ? (
-                              <>
-                                <div className="mt-1 text-xs font-medium text-[#9AA4B2]">{tr(language, '待真实结算', 'Pending truth')}</div>
-                                <div className="mt-0.5 text-[9px] text-[#7D8694]">{tr(language, '暂无可审计误差', 'No auditable MAE yet')}</div>
-                              </>
+                              <div className="mt-1 text-xs font-medium text-[#9AA4B2]">--</div>
                             ) : (
-                              <>
-                                <div className="mt-1 text-xs font-semibold tabular-nums text-[#F8FAFC]">±{Number(maeDisplay).toFixed(2)}°{unit}</div>
-                                <div className="mt-0.5 text-[9px] text-[#7D8694]">{tr(language, '越低越稳定', 'Lower is better')}</div>
-                              </>
+                              <div className="mt-1 text-xs font-semibold tabular-nums text-[#F8FAFC]">{Number(maeDisplay).toFixed(2)}°{unit}</div>
                             )}
                           </div>
                         </article>

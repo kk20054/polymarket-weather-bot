@@ -8,6 +8,7 @@ from weatherbot_v3.forecasts.ensemble import (
     _best_source_group,
     _mae_for,
 )
+from weatherbot_v3.bias import _calibration_summary
 from weatherbot_v3.strategies.core_modal import CoreModalStrategy
 
 
@@ -94,8 +95,12 @@ class DynamicModelWeightTests(unittest.TestCase):
         bias_rows = [{
             "icao": "ZSPD",
             "model": "jma",
-            "sample_count": 1,
-            "walk_forward_mae_7d_c": 0.5,
+            **_calibration_summary([{
+                "target_date": "2026-07-21",
+                "forecast_as_of": "2026-07-20T18:00:00Z",
+                "truth_available_at": "2026-07-22T06:00:00Z",
+                "residual_c": 0.5,
+            }]),
             "location_version": 1,
         }]
         mae = _mae_for(bias_rows, "ZSPD", "jma")

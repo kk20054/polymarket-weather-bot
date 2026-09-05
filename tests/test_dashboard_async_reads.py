@@ -12,6 +12,25 @@ import dashboard_server
 
 
 class DashboardAsyncReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compact_orders_preserve_ledger_and_do_not_mutate_full_evidence(self):
+        source = {
+            "count": 1, "total_pnl": -1.25, "equity_curve": [{"pnl": -1.25}],
+            "orders": [{"id": 7, "raw_json": "large", "raw": {"book": "large"},
+                        "sizing_snapshot_json": "duplicate", "sizing_snapshot": {"kelly_fraction": 0.1},
+                        "settlement": {"pnl": -1.25, "raw": {"event": "large"}}}],
+        }
+        with patch("dashboard_server.paper_execution_summary", return_value=source) as summary:
+            compact = await dashboard_server.paper_orders(cohort_run_id="run-1", compact=True)
+            full = await dashboard_server.paper_orders(cohort_run_id="run-1")
+        self.assertEqual(summary.call_count, 2)
+        self.assertEqual(compact["orders"][0], {
+            "id": 7, "sizing_snapshot": {"kelly_fraction": 0.1}, "settlement": {"pnl": -1.25},
+        })
+        self.assertEqual(compact["equity_curve"], source["equity_curve"])
+        self.assertEqual(compact["total_pnl"], source["total_pnl"])
+        self.assertIs(full, source)
+        self.assertIn("raw", source["orders"][0])
+
     async def test_hourly_consensus_does_not_block_event_loop(self):
         def slow_summary(_city, _target_date, **_kwargs):
             time.sleep(0.12)
@@ -38,6 +57,7 @@ class DashboardAsyncReadTests(unittest.IsolatedAsyncioTestCase):
             dashboard_server.dashboard,
             dashboard_server.production_refresh_status,
             dashboard_server.paper_validation_status_api,
+            dashboard_server.paper_orders,
             dashboard_server.forecast_archive_manifest,
             dashboard_server.forecasts,
             dashboard_server.hourly_consensus,

@@ -594,11 +594,11 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
   const activeCohortRunId = validation?.run_id ?? ''
   const ordersQuery = useQuery({
     queryKey: ['paper-orders', activeCohortRunId || cityKey, activeCohortRunId ? 'all-cities' : targetDate],
-    queryFn: () => activeCohortRunId
-      ? fetchPaperOrders('', '', 100, activeCohortRunId)
-      : fetchPaperOrders(cityKey, targetDate, 100),
+    queryFn: ({ signal }) => activeCohortRunId
+      ? fetchPaperOrders('', '', 100, activeCohortRunId, signal)
+      : fetchPaperOrders(cityKey, targetDate, 100, '', signal),
     enabled: Boolean(activeCohortRunId || (cityKey && targetDate)),
-    refetchInterval: 30000,
+    refetchInterval: schedulerRunning || validation?.status === 'active' ? 30000 : 60000,
   })
   const executeMutation = useMutation({
     mutationFn: (payload: { decisionId?: string; dryRun: boolean }) => {
@@ -860,6 +860,16 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
               </div>
               <div className="h-36">
                 <EquityChart data={summary.equity_curve ?? []} initialBankroll={Number(summary.starting_bankroll ?? validation?.bankroll_usd ?? 0)} language={language} />
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-3 border-t border-neutral-800 pt-2 text-[10px]">
+                <div title={tx(language, '当前账户的权威结算结果；持仓、拒单和提前退出不计入结算胜率。', 'Authoritatively settled orders in this account; excludes open, rejected and early-exited orders.')}>
+                  <div className="text-neutral-500">{tx(language, '结算胜率', 'Settlement win rate')}</div>
+                  <div className="mt-1 font-mono text-neutral-200">{percent(summary.win_rate)} <span className="text-neutral-500">{summary.wins ?? 0}/{summary.resolved_orders ?? 0}</span></div>
+                </div>
+                <div title={tx(language, '仅已结算或已经卖出的盈亏，不含持仓浮动估值。', 'Settled and early-exit P&L only, excluding unrealized marks.')}>
+                  <div className="text-neutral-500">{tx(language, '已实现盈亏', 'Realized P&L')}</div>
+                  <div className={`mt-1 font-mono ${Number(summary.realized_pnl ?? 0) < 0 ? 'text-red-400' : 'text-neutral-200'}`}>{money(summary.realized_pnl)}</div>
+                </div>
               </div>
             </section>
             <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-2 text-[10px]">

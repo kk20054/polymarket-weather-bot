@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   CheckCircle2,
@@ -39,7 +39,7 @@ import {
   verifySettlementContractsBulk,
 } from './api'
 import { DataReadinessPanel } from './components/DataReadinessPanel'
-import { DeveloperSettingsDrawer } from './components/DeveloperSettingsDrawer'
+const DeveloperSettingsDrawer = lazy(() => import('./components/DeveloperSettingsDrawer').then(module => ({ default: module.DeveloperSettingsDrawer })))
 import { ExecutionWorkbench } from './components/ExecutionWorkbench'
 import { ModelDatasetPanel } from './components/ModelDatasetPanel'
 import { SignalsTable } from './components/SignalsTable'
@@ -971,9 +971,10 @@ function App() {
     }
   }
 
-  const { data, isLoading, error, refetch, dataUpdatedAt } = useQuery({
+  const { data, isLoading, isPlaceholderData, error, refetch, dataUpdatedAt } = useQuery({
     queryKey: ['dashboard', selectedCity],
-    queryFn: () => fetchDashboard(selectedCity),
+    queryFn: ({ signal }) => fetchDashboard(selectedCity, signal),
+    placeholderData: keepPreviousData,
     refetchInterval: 30000,
     retry: 1,
   })
@@ -1003,7 +1004,7 @@ function App() {
   const productionRefreshStatusQuery = useQuery({
     queryKey: ['production-refresh-status'],
     queryFn: fetchProductionRefreshStatus,
-    refetchInterval: 3000,
+    refetchInterval: query => query.state.data?.running ? 3000 : 30000,
     retry: 1,
   })
 
@@ -1025,7 +1026,7 @@ function App() {
 
   const hourlyConsensusQuery = useQuery({
     queryKey: ['hourly-consensus', selectedCity, selectedDate],
-    queryFn: () => fetchHourlyConsensus(selectedCity, selectedDate),
+    queryFn: ({ signal }) => fetchHourlyConsensus(selectedCity, selectedDate, signal),
     enabled: selectedEvidenceReadyForLayer7,
     refetchInterval: 30000,
     retry: 1,
@@ -1033,7 +1034,7 @@ function App() {
 
   const marketBucketsQuery = useQuery({
     queryKey: ['market-buckets', selectedCity, selectedDate],
-    queryFn: () => fetchMarketBuckets(selectedCity, selectedDate, 120),
+    queryFn: ({ signal }) => fetchMarketBuckets(selectedCity, selectedDate, 120, signal),
     enabled: selectedEvidenceReadyForLayer7,
     refetchInterval: 30000,
     retry: 1,
@@ -1041,7 +1042,7 @@ function App() {
 
   const signalDecisionsQuery = useQuery({
     queryKey: ['signal-decisions', selectedCity, selectedDate],
-    queryFn: () => fetchSignalDecisions(selectedCity, selectedDate, 120),
+    queryFn: ({ signal }) => fetchSignalDecisions(selectedCity, selectedDate, 120, signal),
     enabled: selectedEvidenceReadyForLayer7,
     refetchInterval: 30000,
     retry: 1,
@@ -1049,7 +1050,7 @@ function App() {
 
   const dailyMaxPredictionQuery = useQuery({
     queryKey: ['daily-max-predictions', selectedCity, selectedDate],
-    queryFn: () => fetchDailyMaxPredictions(selectedCity, selectedDate),
+    queryFn: ({ signal }) => fetchDailyMaxPredictions(selectedCity, selectedDate, signal),
     enabled: selectedEvidenceReadyForLayer7,
     refetchInterval: 60000,
     retry: 1,
@@ -1057,7 +1058,7 @@ function App() {
 
   const bucketProbabilitiesQuery = useQuery({
     queryKey: ['bucket-probabilities', selectedCity, selectedDate],
-    queryFn: () => fetchBucketProbabilities(selectedCity, selectedDate),
+    queryFn: ({ signal }) => fetchBucketProbabilities(selectedCity, selectedDate, signal),
     enabled: selectedEvidenceReadyForLayer7,
     refetchInterval: 30000,
     retry: 1,
@@ -1109,7 +1110,7 @@ function App() {
 
   const modelRepriceEventsQuery = useQuery({
     queryKey: ['model-reprice-events', selectedCity, selectedDate],
-    queryFn: () => fetchModelRepriceEvents(selectedCity || '', selectedDate || '', true, 200),
+    queryFn: ({ signal }) => fetchModelRepriceEvents(selectedCity || '', selectedDate || '', true, 200, signal),
     enabled: selectedEvidenceReadyForLayer7,
     refetchInterval: 30000,
     retry: 1,
@@ -1616,7 +1617,7 @@ function App() {
     )
   }
 
-  if (error || !data) {
+  if (!data) {
     return (
       <div className="flex h-screen items-center justify-center bg-black text-neutral-300">
         <div className="max-w-md border border-red-500/30 bg-red-500/5 p-5 text-center">
@@ -1636,19 +1637,19 @@ function App() {
 
   return (
     <div className={`${themeMode === 'dark' ? 'polywx-dark bg-[#161A22] text-[#CBD2DC]' : 'polywx-light bg-white text-gray-900'} flex min-h-screen flex-col xl:h-screen xl:overflow-hidden`}>
-      <header className="flex shrink-0 items-center gap-2 border-b border-neutral-800 px-3 py-1.5">
-        <div className="min-w-0 flex-1 basis-[130px]">
+      <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-neutral-800 px-3 py-1.5 md:flex-nowrap">
+        <div className="min-w-[150px] basis-full md:min-w-0 md:flex-1 md:basis-[130px]">
           <div className="flex items-baseline gap-2">
             <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot</h1>
             <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] tabular-nums text-neutral-500">{APP_VERSION}</span>
           </div>
-          <div className="text-[11px] text-neutral-600">{t('app.subtitle')}</div>
+          <div className="hidden whitespace-nowrap text-[11px] text-neutral-600 sm:block">{t('app.subtitle')}</div>
         </div>
-        <span className="hidden shrink-0 text-[10px] text-neutral-500 md:inline">
-          {copy.updated} {dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString(uiLanguage === 'zh' ? 'zh-CN' : 'en-GB', { hour12: false }) : '--:--:--'}
+        <span className={`hidden shrink-0 text-[10px] md:inline ${error ? 'text-amber-400' : 'text-neutral-500'}`} title={error ? String(error) : undefined}>
+          {error ? (uiLanguage === 'zh' ? '刷新失败' : 'Refresh failed') : isPlaceholderData ? (uiLanguage === 'zh' ? '加载中' : 'Loading') : copy.updated} {dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString(uiLanguage === 'zh' ? 'zh-CN' : 'en-GB', { hour12: false }) : ''}
         </span>
-        <label className="inline-flex items-center gap-1 border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400" aria-label={t('language.label')}>
-          <span>{t('language.label')}</span>
+        <label className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap border border-neutral-800 px-2 py-1.5 text-[11px] text-neutral-400" aria-label={t('language.label')}>
+          <span className="hidden sm:inline">{t('language.label')}</span>
           <select
             value={uiLanguage}
             onChange={event => setUiLanguage(event.target.value === 'en' ? 'en' : 'zh')}
@@ -1658,7 +1659,7 @@ function App() {
             <option value="en">{t('language.en')}</option>
           </select>
         </label>
-        <div className="inline-flex items-center border border-neutral-800 text-[11px]" aria-label={copy.theme}>
+        <div className="inline-flex shrink-0 items-center whitespace-nowrap border border-neutral-800 text-[11px]" aria-label={copy.theme}>
           <button
             type="button"
             onClick={() => setThemeMode('light')}
@@ -1678,7 +1679,7 @@ function App() {
           type="button"
           onClick={() => apiAccess.mode === 'local' && setDeveloperSettingsOpen(true)}
           disabled={apiAccess.mode !== 'local'}
-          className="inline-flex h-[30px] w-[30px] items-center justify-center border border-neutral-700 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-35"
+          className="inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center border border-neutral-700 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-35"
           aria-label={copy.settings}
           title={uiLanguage === 'zh' ? '设置与开发者模式' : 'Settings and developer tools'}
         >
@@ -1792,7 +1793,7 @@ function App() {
       )}
 
       <main className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto xl:grid-cols-[232px_minmax(0,1fr)_336px] xl:overflow-hidden">
-        <aside className="order-2 border-b border-neutral-800 bg-neutral-950/40 xl:order-1 xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
+        <aside className="hidden border-b border-neutral-800 bg-neutral-950/40 xl:order-1 xl:block xl:min-h-0 xl:overflow-y-auto xl:border-b-0 xl:border-r">
           <div className="p-2">
             <div className="mb-2 flex items-center justify-between">
               <div>
@@ -1922,7 +1923,15 @@ function App() {
           </div>
           <div className="z-20 shrink-0 flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 bg-black/95 px-3 py-1.5">
             <div className="min-w-0">
-              <div className="truncate text-sm font-medium text-neutral-100">
+              <select
+                aria-label={copy.cities}
+                value={selectedCity}
+                onChange={event => setSelectedCity(event.target.value)}
+                className="min-h-9 max-w-full border border-neutral-700 bg-neutral-950 px-2 text-sm text-neutral-100 xl:hidden"
+              >
+                {cityOptions.map(city => <option key={city.key} value={city.key}>{city.name} · {city.station || '--'}</option>)}
+              </select>
+              <div className="hidden truncate text-sm font-medium text-neutral-100 xl:block">
                 {selectedCityMeta?.name ?? (uiLanguage === 'zh' ? '城市天气证据' : 'City weather evidence')} · {selectedCityMeta?.station || copy.stationPending}
               </div>
               <details className="mt-1 text-[9px] text-neutral-500">
@@ -1966,7 +1975,11 @@ function App() {
           )}
 
           <div className="min-h-[720px] min-w-0 overflow-x-hidden overflow-y-auto xl:min-h-0 xl:flex-1">
-            <WeatherPanel
+            {isPlaceholderData ? (
+              <div role="status" className="flex min-h-72 items-center justify-center text-neutral-500">
+                <RefreshCw className="h-5 w-5 animate-spin" aria-label={uiLanguage === 'zh' ? '加载城市数据' : 'Loading city data'} />
+              </div>
+            ) : <WeatherPanel
               forecasts={forecasts}
               signals={signals}
               citySeries={citySeries}
@@ -2000,7 +2013,7 @@ function App() {
               backfillResult={historyBackfillMutation.data}
               alphaEvents={modelRepriceEventsQuery.data?.rows ?? []}
               language={uiLanguage}
-            />
+            />}
           </div>
         </section>
 
@@ -2179,11 +2192,11 @@ function App() {
           </details>
         </aside>
       </main>
-      <DeveloperSettingsDrawer
+      {developerSettingsOpen && <Suspense fallback={<div role="status" className="fixed right-4 top-16 z-50 border border-neutral-700 bg-neutral-950 p-3 text-neutral-300">{uiLanguage === 'zh' ? '加载设置...' : 'Loading settings...'}</div>}><DeveloperSettingsDrawer
         open={developerSettingsOpen}
         onClose={() => setDeveloperSettingsOpen(false)}
         themeMode={themeMode}
-      />
+      /></Suspense>}
     </div>
   )
 }

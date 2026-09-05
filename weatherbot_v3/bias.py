@@ -4,12 +4,13 @@ import json
 import math
 import statistics
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from .config import DATA_DIR
+from .calibration import PREDICTIVE_ERROR_BASIS, PREDICTIVE_ERROR_VERSION, runtime_bias_c
 from .db import connect, init_v3_db
 from .forecasts.ensemble import BIAS_MIN_SAMPLE_COUNT, model_family
 from .forecast_time import assess_forecast_run, parse_utc
@@ -135,6 +136,7 @@ def train_bias_table(
                 "walk_forward_rmse_c": _round_metric(_rmse(walk_forward_values)),
                 "walk_forward_mae_7d_c": _round_metric(_mae(recent_walk_forward)),
                 "walk_forward_dates": [record["target_date"] for record in walk_forward],
+                **_predictive_score_contract(records, walk_forward),
                 "sample_count": len(records),
                 "independent_dates": len(records),
                 "sample_dates": [record["target_date"] for record in records],
@@ -164,7 +166,10 @@ def train_bias_table(
             "truth_priority": ["hong_kong_observatory_daily_extract", "wunderground_daily", "iem_asos_approximation"],
             "forecast_cutoff": "latest real forecast snapshot as_of strictly before target local-day start",
             "independent_sample": "one forecast snapshot per city/model/target_date",
-            "weight_error": "expanding-window bias correction; each target date is scored using prior dates only",
+            "weight_error": "runtime shrinkage and cap; prior truth must be available strictly before forecast_as_of",
+            "predictive_error_version": PREDICTIVE_ERROR_VERSION,
+            "truth_availability_basis": "max(local_day_end, stored_value_updated_at); not source publication time",
+            "unknown_or_future_truth_availability": "excluded_from_training",
             "excluded_archive_semantics": (
                 "Open-Meteo Previous Runs fields are fixed-lead slices across multiple "
                 "initializations and are diagnostic-only, not a single archived run"
@@ -207,7 +212,7 @@ def _truth_by_date(
     with connect(path) as conn:
         for row in conn.execute(
             """
-            SELECT date_local, high_c
+            SELECT date_local, high_c, updated_at
             FROM truth_iem_daily
             WHERE UPPER(icao) = ? AND high_c IS NOT NULL
             ORDER BY date_local
@@ -221,10 +226,11 @@ def _truth_by_date(
                 "high_c": float(row["high_c"]),
                 "basis": "iem_asos_approximation",
                 "exact": False,
+                "truth_available_at": row["updated_at"],
             }
         for row in conn.execute(
             """
-            SELECT date_local, high_c
+            SELECT date_local, high_c, updated_at
             FROM truth_wunderground_daily
             WHERE UPPER(icao) = ? AND high_c IS NOT NULL
             ORDER BY date_local
@@ -238,11 +244,12 @@ def _truth_by_date(
                 "high_c": float(row["high_c"]),
                 "basis": "wunderground_daily",
                 "exact": True,
+                "truth_available_at": row["updated_at"],
             }
         if city == "hong-kong":
             for row in conn.execute(
                 """
-                SELECT date_local, high_c
+                SELECT date_local, high_c, updated_at
                 FROM truth_hko_daily
                 WHERE high_c IS NOT NULL
                 ORDER BY date_local
@@ -255,8 +262,31 @@ def _truth_by_date(
                     "high_c": float(row["high_c"]),
                     "basis": "hong_kong_observatory_daily_extract",
                     "exact": True,
+                    "truth_available_at": row["updated_at"],
                 }
-    return truth
+    profile = SETTLEMENT_REGISTRY[city]
+    cutoff = datetime.now(timezone.utc)
+    if before_date:
+        requested_cutoff = _target_local_start_utc(before_date, profile.timezone)
+        if requested_cutoff is None:
+            raise ValueError("bias_as_of_date_invalid")
+        cutoff = min(cutoff, requested_cutoff)
+    available_truth = {}
+    for date_local, value in truth.items():
+        updated = parse_utc(value.get("truth_available_at"))
+        next_date = (datetime.fromisoformat(date_local).date() + timedelta(days=1)).isoformat()
+        day_end = _target_local_start_utc(next_date, profile.timezone)
+        if updated is None or day_end is None:
+            continue
+        available_at = max(updated, day_end)
+        if available_at >= cutoff:
+            continue
+        available_truth[date_local] = {
+            **value,
+            "truth_available_at": available_at.isoformat(),
+            "truth_availability_basis": "local_day_end_and_stored_value_updated_at",
+        }
+    return available_truth
 
 
 def _residual_records_for_family(
@@ -338,6 +368,8 @@ def _residual_records_for_family(
             "truth_c": float(truth["high_c"]),
             "truth_basis": truth["basis"],
             "truth_exact": bool(truth["exact"]),
+            "truth_available_at": truth.get("truth_available_at"),
+            "truth_availability_basis": truth.get("truth_availability_basis") or "unavailable",
             "residual_c": forecast_c - float(truth["high_c"]),
             "source": str(selected.get("source") or ""),
             "forecast_snapshot_type": "latest_pre_local_day",
@@ -357,24 +389,46 @@ def _residual_records_for_family(
 
 
 def _walk_forward_errors(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Score each residual using a bias fitted only on earlier target dates."""
+    """Score the runtime correction using only truth known at forecast issuance."""
 
     ordered = sorted(records, key=lambda row: str(row.get("target_date") or ""))
-    prior_residuals: list[float] = []
     scored: list[dict[str, Any]] = []
     for record in ordered:
+        forecast_as_of = parse_utc(record.get("forecast_as_of"))
+        if forecast_as_of is None:
+            continue
         residual = float(record["residual_c"])
-        if prior_residuals:
-            prior_bias = float(statistics.median(prior_residuals))
-            scored.append({
-                "target_date": str(record.get("target_date") or ""),
-                "forecast_run_id": int(record.get("forecast_run_id") or 0),
-                "prior_sample_count": len(prior_residuals),
-                "prior_bias_c": round(prior_bias, 4),
-                "corrected_error_c": residual - prior_bias,
-            })
-        prior_residuals.append(residual)
+        prior_residuals = [
+            float(prior["residual_c"])
+            for prior in ordered
+            if str(prior.get("target_date") or "") < str(record.get("target_date") or "")
+            and (prior_forecast := parse_utc(prior.get("forecast_as_of"))) is not None
+            and prior_forecast < forecast_as_of
+            and (truth_available := parse_utc(prior.get("truth_available_at"))) is not None
+            and truth_available < forecast_as_of
+        ]
+        raw_bias = round(float(statistics.median(prior_residuals)), 4) if prior_residuals else 0.0
+        prior_bias = runtime_bias_c(raw_bias, len(prior_residuals))
+        scored.append({
+            "target_date": str(record.get("target_date") or ""),
+            "forecast_run_id": int(record.get("forecast_run_id") or 0),
+            "forecast_as_of": forecast_as_of.isoformat(),
+            "prior_sample_count": len(prior_residuals),
+            "prior_bias_c": prior_bias,
+            "corrected_error_c": residual - prior_bias,
+        })
     return scored
+
+
+def _predictive_score_contract(records: list[dict[str, Any]], scored: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "predictive_error_version": PREDICTIVE_ERROR_VERSION,
+        "predictive_error_basis": PREDICTIVE_ERROR_BASIS,
+        "predictive_error_sample_count": len(scored[-7:]),
+        "predictive_error_excluded_count": len(records) - len(scored),
+        "predictive_error_exclusion_reason": "forecast_as_of_missing_or_invalid" if len(records) != len(scored) else "",
+        "prior_truth_availability_missing_count": sum(parse_utc(row.get("truth_available_at")) is None for row in records),
+    }
 
 
 def _calibration_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -390,6 +444,8 @@ def _calibration_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         "mae_7d_c": _round_metric(_mae(corrected[-7:])),
         "walk_forward_mae_c": _round_metric(_mae(walk_forward_values)),
         "walk_forward_mae_7d_c": _round_metric(_mae(walk_forward_values[-7:])),
+        "walk_forward_sample_count": len(walk_forward_values),
+        **_predictive_score_contract(records, walk_forward),
         "sample_dates": [str(record.get("target_date") or "") for record in records],
     }
 

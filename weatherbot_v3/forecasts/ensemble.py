@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from ..calibration import (
+    BIAS_MAX_ABS_C,
+    BIAS_RUNTIME_METHOD,
+    BIAS_SHRINKAGE_PRIOR_SAMPLES,
+    predictive_error_metadata,
+    runtime_bias_c,
+)
 from ..config import DATA_DIR
 from ..db import connect, init_v3_db, upsert_model_reprice_event, utc_now
 from ..deb import bucket_bounds_in_prediction_unit, sigma_with_floor
@@ -34,9 +41,6 @@ MIN_MEMBER_COUNT_FOR_SINGLE_FAMILY = 5
 SIGMA_FLOOR_C = 0.5
 UNCALIBRATED_SIGMA_C = 1.2
 BIAS_MIN_SAMPLE_COUNT = 20
-BIAS_SHRINKAGE_PRIOR_SAMPLES = 10
-BIAS_MAX_ABS_C = 2.5
-BIAS_RUNTIME_METHOD = "zero_prior_shrinkage_v1"
 FORECAST_SNAPSHOT_SELECTION_VERSION = "forecast-snapshot-selection-v2"
 # Dynamic weighting starts as soon as a leakage-free forecast/truth pair is
 # available. Sparse models keep their prior share instead of disappearing;
@@ -1016,6 +1020,9 @@ def _components_from_rows(
             or first.get("retrieved_at")
             or ""
         )
+        predictive_error = _predictive_error_for(
+            bias_table, profile.station_id, family, profile=profile, lead_bucket=lead_bucket,
+        )
         components.append({
             "source": str(first.get("source") or ""),
             "family": family,
@@ -1040,13 +1047,8 @@ def _components_from_rows(
                 4,
             ) if sample_count > 0 else 0.0,
             "bias_applied_before_probability": True,
-            "mae_7d": _mae_for(
-                bias_table,
-                profile.station_id,
-                family,
-                profile=profile,
-                lead_bucket=lead_bucket,
-            ),
+            "mae_7d": predictive_error["predictive_error_c"],
+            **predictive_error,
             "truth_basis": _truth_basis(profile, target_date, path),
             "retrieved_at": str(first.get("retrieved_at") or ""),
             "available_at": str(first.get("available_at") or ""),
@@ -1337,12 +1339,7 @@ def _bias_for(
             if sample_count <= 0:
                 return 0.0, sample_count
             raw_bias = float(calibration.get("additive_bias_c") or 0.0)
-            shrinkage = sample_count / (sample_count + BIAS_SHRINKAGE_PRIOR_SAMPLES)
-            effective_bias = max(
-                -BIAS_MAX_ABS_C,
-                min(BIAS_MAX_ABS_C, raw_bias * shrinkage),
-            )
-            return round(effective_bias, 4), sample_count
+            return runtime_bias_c(raw_bias, sample_count), sample_count
     return 0.0, 0
 
 
@@ -1367,6 +1364,19 @@ def _mae_for(
     profile: CitySettlementProfile | None = None,
     lead_bucket: str | None = None,
 ) -> float | None:
+    return _predictive_error_for(
+        bias_table, station_id, family, profile=profile, lead_bucket=lead_bucket,
+    )["predictive_error_c"]
+
+
+def _predictive_error_for(
+    bias_table: list[dict[str, Any]],
+    station_id: str,
+    family: str,
+    *,
+    profile: CitySettlementProfile | None = None,
+    lead_bucket: str | None = None,
+) -> dict[str, Any]:
     station = str(station_id or "").upper()
     fam = str(family or "").lower()
     for row in bias_table:
@@ -1377,26 +1387,8 @@ def _mae_for(
         if profile is not None and int(row.get("location_version") or 1) != int(profile.location_version):
             continue
         calibration = _lead_calibration(row, lead_bucket)
-        # Weighting learns from the first leakage-free forecast/truth pair.
-        # Sparse evidence is handled by shrinkage rather than hidden.
-        if int(calibration.get("sample_count") or 0) <= 0:
-            return None
-        for key in (
-            "walk_forward_mae_7d_c",
-            "walk_forward_mae_c",
-            "mae_7d_c",
-            "mae_c",
-            "mae",
-            "rmse_c",
-            "rmse",
-        ):
-            value = _first_number(calibration.get(key))
-            if value is not None:
-                return round(float(value), 4)
-        bias = _first_number(calibration.get("additive_bias_c"))
-        if bias is not None:
-            return round(abs(float(bias)), 4)
-    return None
+        return predictive_error_metadata(calibration)
+    return {**predictive_error_metadata({}), "predictive_error_basis": "unavailable"}
 
 
 def _lead_calibration(row: dict[str, Any], lead_bucket: str | None) -> dict[str, Any]:

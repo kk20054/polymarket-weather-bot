@@ -79,8 +79,8 @@ export function subscribeApiAccessState(listener: (state: ApiAccessState) => voi
   }
 }
 
-export async function fetchDashboard(city = ''): Promise<DashboardData> {
-  const { data } = await api.get<DashboardData>('/dashboard', { params: city ? { city } : undefined })
+export async function fetchDashboard(city = '', signal?: AbortSignal): Promise<DashboardData> {
+  const { data } = await api.get<DashboardData>('/dashboard', { params: city ? { city } : undefined, signal })
   return data
 }
 
@@ -326,23 +326,26 @@ export async function setStationEnabled(cityKey: string, enabled: boolean, tier?
   return data
 }
 
-export async function fetchMarketBuckets(city: string, targetDate: string, limit = 80): Promise<MarketBucketSummary> {
+export async function fetchMarketBuckets(city: string, targetDate: string, limit = 80, signal?: AbortSignal): Promise<MarketBucketSummary> {
   const { data } = await api.get<MarketBucketSummary>('/market-buckets', {
     params: { city, target_date: targetDate, limit },
+    signal,
   })
   return data
 }
 
-export async function fetchSignalDecisions(city: string, targetDate: string, limit = 120): Promise<SignalDecisionSummary> {
+export async function fetchSignalDecisions(city: string, targetDate: string, limit = 120, signal?: AbortSignal): Promise<SignalDecisionSummary> {
   const { data } = await api.get<SignalDecisionSummary>('/signal-decisions', {
     params: { city, target_date: targetDate, limit },
+    signal,
   })
   return data
 }
 
-export async function fetchPaperOrders(city: string, targetDate: string, limit = 100, cohortRunId = ''): Promise<PaperExecutionSummary> {
+export async function fetchPaperOrders(city: string, targetDate: string, limit = 100, cohortRunId = '', signal?: AbortSignal): Promise<PaperExecutionSummary> {
   const { data } = await api.get<PaperExecutionSummary>('/paper-orders', {
-    params: { city, target_date: targetDate, cohort_run_id: cohortRunId, limit },
+    params: { city, target_date: targetDate, cohort_run_id: cohortRunId, limit, compact: true },
+    signal,
   })
   return data
 }
@@ -374,23 +377,26 @@ export async function executePaperOrders(options: {
   return data
 }
 
-export async function fetchDailyMaxPredictions(city: string, targetDate: string): Promise<DailyMaxPredictionSummary> {
+export async function fetchDailyMaxPredictions(city: string, targetDate: string, signal?: AbortSignal): Promise<DailyMaxPredictionSummary> {
   const { data } = await api.get<DailyMaxPredictionSummary>('/daily-max-predictions', {
     params: { city, target_date: targetDate },
+    signal,
   })
   return data
 }
 
-export async function fetchBucketProbabilities(city: string, targetDate: string): Promise<BucketProbabilitySummary> {
+export async function fetchBucketProbabilities(city: string, targetDate: string, signal?: AbortSignal): Promise<BucketProbabilitySummary> {
   const { data } = await api.get<BucketProbabilitySummary>('/bucket-probabilities', {
     params: { city, target_date: targetDate },
+    signal,
   })
   return data
 }
 
-export async function fetchHourlyConsensus(city: string, targetDate: string): Promise<HourlyConsensusSummary> {
+export async function fetchHourlyConsensus(city: string, targetDate: string, signal?: AbortSignal): Promise<HourlyConsensusSummary> {
   const { data } = await api.get<HourlyConsensusSummary>('/hourly-consensus', {
     params: { city, target_date: targetDate },
+    signal,
   })
   return data
 }
@@ -409,9 +415,10 @@ export async function fetchTruthDeltaAudit(city = '', limit = 500): Promise<Trut
   return data
 }
 
-export async function fetchModelRepriceEvents(city = '', targetDate = '', alphaOnly = false, limit = 200): Promise<ModelRepriceEventSummary> {
+export async function fetchModelRepriceEvents(city = '', targetDate = '', alphaOnly = false, limit = 200, signal?: AbortSignal): Promise<ModelRepriceEventSummary> {
   const { data } = await api.get<ModelRepriceEventSummary>('/model-reprice-events', {
     params: { city, target_date: targetDate, alpha_only: alphaOnly, limit },
+    signal,
   })
   return data
 }

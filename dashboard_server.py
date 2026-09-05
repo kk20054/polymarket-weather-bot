@@ -5379,13 +5379,29 @@ async def paper_orders(
     target_date: str = "",
     cohort_run_id: str = "",
     limit: int = 100,
+    compact: bool = False,
 ):
-    return paper_execution_summary(
+    payload = await asyncio.to_thread(
+        paper_execution_summary,
         city or None,
         target_date or None,
         cohort_run_id=cohort_run_id or None,
         limit=limit,
     )
+    return _compact_dashboard_evidence(payload) if compact else payload
+
+
+def _compact_dashboard_evidence(value):
+    """Keep computed ledger fields; raw evidence remains available in the full response."""
+    if isinstance(value, dict):
+        return {
+            key: _compact_dashboard_evidence(item)
+            for key, item in value.items()
+            if key != "raw" and not key.endswith("_json")
+        }
+    if isinstance(value, list):
+        return [_compact_dashboard_evidence(item) for item in value]
+    return value
 
 
 @app.post("/api/paper-orders/execute")
