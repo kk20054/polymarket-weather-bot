@@ -1,7 +1,7 @@
 # WeatherBot Current State
 
 ## Current Layer
-- Date: 2026-09-05. Scope: dashboard controls/navigation and accurate public-access documentation; release pending.
+- Date: 2026-09-05. Scope: dashboard controls/navigation and public-access documentation; released to GitHub and Vercel production.
 - Production DB: `D:\WeatherBot\data\weatherbot_v3.db` (about 60GB), exposed through the repository `data` Junction.
 - Local backend/frontend use `8765/5173`. The browser currently shows the scheduler RUNNING: the user started it between work rounds. This round does not start/stop it; the account remains ended.
 - Last audit's latest persisted decision was `2026-08-16T23:34:58.935698+00:00`; fresh scheduler output has not been re-audited. Scheduler activity does not reopen an ended account.
@@ -25,14 +25,15 @@
 - Refresh rereads the active weather/orderbook/strategy/orders views; it does not collect data, buy or start a strategy. Date arrows, narrow-screen tabs and readable chart ticks remain available; empty dates do not hide navigation.
 - Dashboard order JSON is 153,874 bytes instead of 2,407,770 (93.6% less), retaining 13 orders, PnL and 120 equity points. Full evidence remains available without `compact=true`; SQLite reads leave the API event loop. Settings load on demand; idle polling slows; leaving a city cancels its read requests.
 - UI preserves navigation/account during city loading, provides a mobile city selector, and shows settlement win rate separately from realized PnL. Model Analysis distinguishes historical versus forward MAE with count/method tooltips.
-- Prior backend verification: 8 API tests and 16 calibration/weight/integration tests passed. This round: frontend build passed; in-app browser at 1600x1000 and 390x844 checked settings/help, date arrows and all five mobile tabs. Background-success toasts no longer obscure the chart. Publication remains pending final update.
-- Existing public frontend: Vercel `https://www.polywxx.org`; proxy to local FastAPI via `api.polywxx.org` allows only GET/HEAD/OPTIONS. Public writes, scheduler controls and strategy startup are unavailable; the origin token stays server-side, with no offline snapshot fallback. Existing public health check returned 200/read-only; direct origin without token returned 401. This round's UI is not yet published.
+- Prior backend verification: 8 API tests and 16 calibration/weight/integration tests passed, not rerun this round. Frontend build passed; in-app browser at 1600x1000 and 390x844 checked settings/help, date arrows and all five mobile tabs. Background-success toasts no longer obscure the chart. Public model tabs and 13-order history were verified without writes.
+- UI source `b812d9b` is pushed to `main` and `codex/weatherbot-v6-data-foundation`. Vercel deployment `dpl_69mi5SxaiXzCB2BEAJXrVoaN8vCi`, created 2026-09-05 22:15:54 +08:00, is READY; public JS/CSS match the local build. Both `polywxx.org` and `www.polywxx.org` are assigned.
+- Public frontend `https://www.polywxx.org` proxies GET/HEAD/OPTIONS to local FastAPI via `api.polywxx.org`; health returned 200/read-only. Public model weights are view-only, without inputs/save controls. Writes, scheduler controls and strategy startup remain unavailable; origin token stays server-side and unauthenticated origin returns 401.
 
 ## Remaining Blockers
 - Profitability is not established: this cohort's settled result is negative. Recorded frozen forward CLV was also negative; no historical PnL/model-selection experiment was rerun.
 - More pairs may improve bias estimation; they do not prove improved resolution, win rate, or profit. Inverse-MAE blending remains a heuristic, not direct optimization against the market.
 - Running scheduler is not evidence of fresh calibration, a new account or a new fill; those outputs remain unverified. Earlier UI checks used isolated execution responses, not production writes.
-- Truth entitlement/maturity, the 60GB SQLite store, the laptop-dependent public API and incomplete live execution remain operational limitations. No data was deleted.
+- Truth entitlement/maturity, the 60GB SQLite store, laptop-dependent public API and incomplete live execution remain limitations. No data was deleted. Build warnings include a large JS chunk and 16 npm dependency advisories (2 low, 3 moderate, 11 high); exploitability was not assessed and no forced dependency upgrades were attempted.
 
 ## Next Task
-- Finish scoped UI verification, then record the unified commit/push, production deployment and domain verification. Keep the user-started scheduler running; any new account requires explicit operator action. Verify versioned calibration output separately; do not reopen ended cohorts or historical model-selection experiments.
+- Release is complete. Keep the user-started scheduler running; any new account requires explicit operator action. Next maintenance: assess dependency advisories and verify scheduled versioned calibration output separately, without reopening ended cohorts or historical model-selection experiments.
