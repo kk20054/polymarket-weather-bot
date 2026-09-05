@@ -148,6 +148,13 @@ def get_active_paper_validation_run(*, path: Path | None = None) -> dict[str, An
 def paper_validation_status(*, run_id: str = "", path: Path | None = None) -> dict[str, Any]:
     init_v3_db(path)
     run = _load_run(run_id, path=path) if run_id else get_active_paper_validation_run(path=path)
+    if not run and not run_id:
+        # Keep the last account visible after expiry/stop; only status=active can trade.
+        with connect(path) as conn:
+            row = conn.execute(
+                "SELECT * FROM paper_validation_runs ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+        run = _decode_run(dict(row)) if row else None
     if not run:
         return {"ok": True, "status": "inactive", "version": PAPER_VALIDATION_VERSION}
     metrics = _run_metrics(run, path=path)

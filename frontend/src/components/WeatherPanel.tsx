@@ -2984,6 +2984,7 @@ function TemperatureDistributionPanel({
   const [sourceAnalysisView, setSourceAnalysisView] = useState<'history' | 'disagreement'>('disagreement')
   const [modelWeightMode, setModelWeightMode] = useState<ModelWeightMode>('dynamic')
   const [modelWeights, setModelWeights] = useState<Record<ModelWeightFamily, number>>(DEFAULT_MODEL_WEIGHTS)
+  const [weightDrafts, setWeightDrafts] = useState<Partial<Record<ModelWeightFamily, string>>>({})
   const [modelWeightLoading, setModelWeightLoading] = useState(false)
   const [modelWeightSaving, setModelWeightSaving] = useState(false)
   const [modelWeightMessage, setModelWeightMessage] = useState('')
@@ -3104,6 +3105,7 @@ function TemperatureDistributionPanel({
       setModelWeightMode(saved.mode === 'manual' ? 'manual' : 'dynamic')
       setModelWeights(nextWeights)
       setModelWeightMessage(tr(language, '已保存', 'Saved'))
+      setWeightDrafts({})
     } catch (error) {
       setModelWeightMessage(tr(language, '保存失败', 'Save failed'))
       console.error('model weight settings update failed', error)
@@ -3468,7 +3470,10 @@ function TemperatureDistributionPanel({
                       type="checkbox"
                       checked={modelWeightMode === 'dynamic'}
                       disabled={modelWeightLoading || modelWeightSaving}
-                      onChange={event => setModelWeightMode(event.target.checked ? 'dynamic' : 'manual')}
+                      onChange={event => {
+                        setModelWeightMode(event.target.checked ? 'dynamic' : 'manual')
+                        setWeightDrafts({})
+                      }}
                       className="h-3.5 w-3.5 accent-[#2563EB]"
                     />
                     <span>{tr(language, '自动权重', 'Auto weights')}</span>
@@ -3675,9 +3680,16 @@ function TemperatureDistributionPanel({
                                   <input
                                     type="text"
                                     inputMode="decimal"
-                                    value={editableWeightPct.toFixed(1)}
+                                    value={weightDrafts[weightFamily] ?? editableWeightPct.toFixed(1)}
                                     disabled={modelWeightLoading || modelWeightSaving}
-                                    onChange={event => editModelWeight(weightFamily, Math.max(0, Math.min(100, Number(event.target.value) || 0)) / 100)}
+                                    onChange={event => {
+                                      const draft = event.target.value
+                                      if (!/^\d{0,3}(\.\d*)?$/.test(draft) || Number(draft) > 100) return
+                                      setWeightDrafts(current => ({ ...current, [weightFamily]: draft }))
+                                      if (draft !== '' && draft !== '.') editModelWeight(weightFamily, Number(draft) / 100)
+                                    }}
+                                    onBlur={() => setWeightDrafts(current => ({ ...current, [weightFamily]: undefined }))}
+                                    onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
                                     className="min-w-0 flex-1 bg-transparent text-right text-[10px] font-semibold tabular-nums text-[#F8FAFC] outline-none disabled:opacity-50"
                                     aria-label={`${row.label} ${tr(language, '权重百分比', 'weight percent')}`}
                                   />

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { isAxiosError } from 'axios'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ExternalLink, Info, ListChecks, Play, Receipt, Settings2, Square } from 'lucide-react'
 import { createStrategyProfile, executePaperOrders, fetchPaperOrders, fetchStrategyProfiles, runPaperValidationTick, startPaperValidation, stopPaperValidation } from '../api'
@@ -58,6 +59,14 @@ const REASON_LABELS: Record<string, string> = {
   tail_ask_above_max_after_reprice: '尾部桶最新买价超过策略上限',
   orderbook_timestamp_missing_or_invalid: '最新盘口时间无效',
   decision_expired: '策略已过期，等待下一轮更新',
+  below_order_min_size: '分配金额不足最小下单份额',
+  paper_amount_below_order_min_size: '账户分配金额不足最小下单份额',
+  paper_duplicate_open_position: '该温度桶已有持仓',
+  insufficient_ask_depth: '限价内可成交深度不足',
+  invalid_best_bid: '当前没有有效买盘',
+  invalid_best_ask: '当前没有有效卖盘',
+  risk_budget_below_exchange_minimum: '风险预算不足交易所最小订单',
+  order_minimum_exceeds_trade_cap: '最小订单超过单笔金额上限',
 }
 
 const REASON_LABELS_EN: Record<string, string> = {
@@ -80,6 +89,14 @@ const REASON_LABELS_EN: Record<string, string> = {
   tail_ask_above_max_after_reprice: 'Latest tail ask exceeds the strategy cap',
   orderbook_timestamp_missing_or_invalid: 'Order-book timestamp is invalid',
   decision_expired: 'Strategy expired; waiting for the next update',
+  below_order_min_size: 'Allocated amount is below the minimum order size',
+  paper_amount_below_order_min_size: 'Account allocation is below the minimum order size',
+  paper_duplicate_open_position: 'This bucket already has an open position',
+  insufficient_ask_depth: 'Insufficient depth at the limit price',
+  invalid_best_bid: 'No valid bid available',
+  invalid_best_ask: 'No valid ask available',
+  risk_budget_below_exchange_minimum: 'Risk budget is below the exchange minimum',
+  order_minimum_exceeds_trade_cap: 'Minimum order exceeds the per-trade cap',
 }
 
 function tx(language: 'zh' | 'en', zh: string, en: string) {
@@ -91,9 +108,20 @@ function normalizeExitMode(value?: string): ExitMode {
   return 'hold_to_settlement'
 }
 
-function reasonText(reason?: string | null, language: 'zh' | 'en' = 'zh') {
+function reasonText(reason?: string | null, language: 'zh' | 'en' = 'zh'): string {
   if (!reason) return tx(language, '暂无', 'None')
+  if (reason.includes(',')) return reason.split(',').map(code => reasonText(code.trim(), language)).join('; ')
   return (language === 'zh' ? REASON_LABELS[reason] : REASON_LABELS_EN[reason]) ?? reason.split('_').join(' ')
+}
+
+function requestError(error: unknown): string {
+  if (isAxiosError(error)) {
+    const detail = error.response?.data?.detail ?? error.response?.data
+    if (typeof detail === 'string') return detail
+    if (detail?.reason) return String(detail.reason)
+    if (Array.isArray(detail)) return detail.map(item => item.msg).filter(Boolean).join('; ')
+  }
+  return error instanceof Error ? error.message : 'request_failed'
 }
 
 function money(value?: number | null) {
@@ -164,7 +192,7 @@ function strategyLabel(strategy: string, language: 'zh' | 'en' = 'zh') {
   return tx(language, '单桶 EV', 'Single-bucket EV')
 }
 
-function groupDecisions(rows: SignalDecisionRecord[]): QueueItem[] {
+function groupDecisions(rows: SignalDecisionRecord[], maxAgeMinutes: number, maxBookAgeSeconds: number, now: number): QueueItem[] {
   const result: QueueItem[] = []
   const ladderGroups = new Map<string, SignalDecisionRecord[]>()
   for (const decision of rows) {
@@ -183,15 +211,19 @@ function groupDecisions(rows: SignalDecisionRecord[]): QueueItem[] {
     result.push({ key: ladderGroupId, ladderGroupId, strategy: 'ladder_grid', decisions })
   }
   return result.sort((a, b) => {
-    const aAllowed = queueItemEligible(a)
-    const bAllowed = queueItemEligible(b)
+    const aAllowed = queueItemEligible(a, maxAgeMinutes, maxBookAgeSeconds, now)
+    const bAllowed = queueItemEligible(b, maxAgeMinutes, maxBookAgeSeconds, now)
     if (aAllowed !== bAllowed) return aAllowed ? -1 : 1
     return Number(b.decisions[0]?.edge ?? -1) - Number(a.decisions[0]?.edge ?? -1)
   })
 }
 
-function decisionBookIsStale(row: SignalDecisionRecord) {
-  return (row.cautions ?? []).includes('stale_book') || Number(row.book_age_seconds ?? 0) > 300
+function decisionBookIsStale(row: SignalDecisionRecord, maxBookAgeSeconds: number, now: number) {
+  const issuedAt = Date.parse(String(row.issued_at ?? ''))
+  const age = row.book_age_seconds
+  return (row.cautions ?? []).includes('stale_book')
+    || age == null || !Number.isFinite(age) || age < 0 || !Number.isFinite(issuedAt) || issuedAt > now
+    || age + (now - issuedAt) / 1000 > maxBookAgeSeconds
 }
 
 function decisionMeetsOrderMinimum(row: SignalDecisionRecord) {
@@ -201,15 +233,15 @@ function decisionMeetsOrderMinimum(row: SignalDecisionRecord) {
   return ask > 0 && minimumShares > 0 && suggestedAmount / ask + 1e-9 >= minimumShares
 }
 
-function decisionIsExpired(row: SignalDecisionRecord, maxAgeMinutes = 30) {
+function decisionIsExpired(row: SignalDecisionRecord, maxAgeMinutes: number, now: number) {
   const issuedAt = Date.parse(String(row.issued_at ?? ''))
   if (!Number.isFinite(issuedAt)) return true
-  return Date.now() - issuedAt > Math.max(1, maxAgeMinutes) * 60_000
+  return issuedAt > now || now - issuedAt > Math.max(1, maxAgeMinutes) * 60_000
 }
 
-function queueItemEligible(item: QueueItem, maxAgeMinutes = 30) {
-  return !item.decisions.some(decisionBookIsStale)
-    && !item.decisions.some(row => decisionIsExpired(row, maxAgeMinutes))
+function queueItemEligible(item: QueueItem, maxAgeMinutes: number, maxBookAgeSeconds: number, now: number) {
+  return !item.decisions.some(row => decisionBookIsStale(row, maxBookAgeSeconds, now))
+    && !item.decisions.some(row => decisionIsExpired(row, maxAgeMinutes, now))
     && item.decisions.length === (item.ladderGroupId ? 3 : 1)
     && item.decisions.every(row => row.paper_allowed && row.paper_decision === 'buy' && decisionMeetsOrderMinimum(row))
 }
@@ -226,6 +258,7 @@ function decisionHasOrder(decision: SignalDecisionRecord, orders: PaperOrderReco
     order.decision_id === decision.decision_id
     || (
       Boolean(order.yes_token_id)
+      && order.lifecycle_status === 'open'
       && order.yes_token_id === decision.yes_token_id
       && order.city_key === decision.city_key
       && order.target_date === decision.target_date
@@ -246,7 +279,8 @@ function resultMessage(result?: PaperExecutionResult | null, language: 'zh' | 'e
   if (result.ok && result.dry_run) return tx(language, `检查通过：${result.requested ?? result.results?.length ?? 1} 组策略满足成交条件。`, `Check passed: ${result.requested ?? result.results?.length ?? 1} strategy groups meet fill conditions.`)
   if (result.ok && result.status === 'dry_run') return tx(language, `检查通过：${result.executed ?? 0} 组策略符合当前账户与盘口约束。`, `Check passed: ${result.executed ?? 0} strategy groups meet account and book constraints.`)
   if (result.ok) return tx(language, `执行完成：成交 ${result.executed ?? result.results?.length ?? 1} 组。`, `Execution complete: ${result.executed ?? result.results?.length ?? 1} groups filled.`)
-  return tx(language, `未执行：${reasonText(result.reason, language)}`, `Not executed: ${reasonText(result.reason, language)}`)
+  const failure = result.reason || result.results?.find(row => !row.ok)?.reason
+  return tx(language, `未执行：${reasonText(failure, language)}`, `Not executed: ${reasonText(failure, language)}`)
 }
 
 function DecisionRow({
@@ -254,6 +288,8 @@ function DecisionRow({
   pending,
   accountActive,
   maxDecisionAgeMinutes,
+  maxBookAgeSeconds,
+  now,
   bought,
   onExecute,
   language,
@@ -262,15 +298,17 @@ function DecisionRow({
   pending: boolean
   accountActive: boolean
   maxDecisionAgeMinutes: number
+  maxBookAgeSeconds: number
+  now: number
   bought: boolean
   onExecute: (decisionId: string, dryRun: boolean) => void
   language: 'zh' | 'en'
 }) {
   const [expanded, setExpanded] = useState(false)
   const first = item.decisions[0]
-  const staleBook = item.decisions.some(decisionBookIsStale)
-  const expired = item.decisions.some(row => decisionIsExpired(row, maxDecisionAgeMinutes))
-  const eligible = !bought && queueItemEligible(item, maxDecisionAgeMinutes)
+  const staleBook = item.decisions.some(row => decisionBookIsStale(row, maxBookAgeSeconds, now))
+  const expired = item.decisions.some(row => decisionIsExpired(row, maxDecisionAgeMinutes, now))
+  const eligible = !bought && queueItemEligible(item, maxDecisionAgeMinutes, maxBookAgeSeconds, now)
   const suggested = item.decisions.reduce((sum, row) => sum + Number(row.position_size_usd ?? 0), 0)
   const reasons = [...new Set(item.decisions.flatMap(row => row.gate_reasons ?? row.reasons ?? []))]
     .filter(reason => reason !== 'live_trading_disabled')
@@ -303,7 +341,7 @@ function DecisionRow({
             className={`block tabular-nums text-[11px] ${eligible && Number(first.edge ?? 0) > 0 ? 'text-green-400' : 'text-neutral-500'}`}
             title={tx(language, '模型概率减去当前 YES 卖一价；正数还必须通过盘口、深度、最小订单和风控复核。', 'Model probability minus current YES best ask; a positive value must still pass quote, depth, minimum-size, and risk checks.')}
           >
-            {staleBook ? '--' : probabilityPoints(first.edge)}
+            {staleBook || expired ? '--' : probabilityPoints(first.edge)}
           </span>
           {staleBook && <span className="block text-[9px] text-neutral-600">{tx(language, '盘口过期', 'Stale book')}</span>}
         </span>
@@ -324,7 +362,7 @@ function DecisionRow({
           </div>
           {!eligible && !bought && (
             <div className="text-[10px] leading-relaxed text-amber-300">
-              {reasonText(expired ? 'decision_expired' : primaryReason, language)}
+              {reasonText(expired ? 'decision_expired' : staleBook ? 'orderbook_stale' : primaryReason || 'below_order_min_size', language)}
               {reasons.length > 1 && (
                 <details className="mt-1 text-neutral-500">
                   <summary className="cursor-pointer">{tx(language, '全部阻塞原因', 'All gate reasons')}</summary>
@@ -353,7 +391,7 @@ function DecisionRow({
               onClick={() => onExecute(first.decision_id, false)}
               className="min-h-9 border border-cyan-500/40 bg-cyan-500/10 text-[10px] text-cyan-200 hover:bg-cyan-500/15 disabled:opacity-30"
             >
-              {bought ? tx(language, '已买入', 'Bought') : expired ? tx(language, '等待更新', 'Waiting for update') : tx(language, '执行买入', 'Execute buy')}
+              {bought ? tx(language, '已买入', 'Bought') : pending ? tx(language, '执行中…', 'Executing…') : expired ? tx(language, '等待更新', 'Waiting for update') : tx(language, '执行买入', 'Execute buy')}
             </button>
           </div>
           {eventUrl && (
@@ -372,15 +410,17 @@ function OrderRow({ order, language }: { order: PaperOrderRecord; language: 'zh'
   const settled = order.pnl_kind === 'realized' || order.lifecycle_status === 'settled'
   const exited = order.pnl_kind === 'realized_exit' || order.lifecycle_status === 'exited'
   const closed = settled || exited
-  const pnl = Number(order.pnl_value ?? (closed ? order.realized_pnl : order.unrealized_pnl) ?? 0)
-  const pnlPositive = pnl >= 0
+  const filled = orderHasFill(order)
+  const pnl = filled ? order.pnl_value ?? (closed ? order.realized_pnl : order.unrealized_pnl) : null
+  const pnlPositive = pnl != null && pnl >= 0
+  const pnlColor = pnl == null ? 'text-neutral-500' : pnlPositive ? 'text-green-400' : 'text-red-400'
   const bucket = order.bucket_label || order.bucket_key || tx(language, '温度桶', 'Temperature bucket')
   const statusLabel = closed
     ? (exited ? tx(language, '已保护退出', 'Guarded exit') : tx(language, '已结算', 'Settled'))
     : order.lifecycle_status === 'open'
       ? tx(language, '持仓中', 'Open')
       : tx(language, '未成交', 'Not filled')
-  const pnlLabel = closed
+  const pnlLabel = !filled ? tx(language, '未成交', 'Not filled') : closed
     ? (pnlPositive ? tx(language, '盈利', 'Profit') : tx(language, '亏损', 'Loss'))
     : (pnlPositive ? tx(language, '浮盈', 'Unrealized gain') : tx(language, '浮亏', 'Unrealized loss'))
   const sizing = order.sizing_snapshot ?? {}
@@ -398,13 +438,13 @@ function OrderRow({ order, language }: { order: PaperOrderRecord; language: 'zh'
           <span className="block truncate text-[9px] text-cyan-500">{cityLabel(order.city_key)} · {order.target_date || '--'}</span>
           <span className="block truncate text-[11px] font-medium text-neutral-200">{bucket} · {strategyLabel(order.strategy_name ?? 'single_bucket_ev', language)}</span>
           <span className="mt-0.5 block truncate text-[9px] text-neutral-500">
-            {statusLabel} · {tx(language, '买入', 'Bought')} {formatTimestamp(order.opened_at, language)} · {money(order.entry_value ?? order.filled_amount)}
+            {statusLabel} · {filled ? formatTimestamp(order.opened_at, language) : reasonText(order.failure_reason, language)}{filled && ` · ${money(order.entry_value ?? order.filled_amount)}`}
           </span>
         </span>
         <span className="text-right">
-          <span className={`block text-[9px] ${pnlPositive ? 'text-green-500' : 'text-red-500'}`}>{pnlLabel}</span>
-          <span className={`block text-[12px] font-medium tabular-nums ${pnlPositive ? 'text-green-400' : 'text-red-400'}`}>{money(pnl)}</span>
-          <span className="block text-[9px] tabular-nums text-neutral-600">{percent(order.pnl_pct, true)}</span>
+          <span className={`block text-[9px] ${pnlColor}`}>{pnlLabel}</span>
+          <span className={`block text-[12px] font-medium tabular-nums ${pnlColor}`}>{money(pnl)}</span>
+          <span className="block text-[9px] tabular-nums text-neutral-600">{percent(filled ? order.pnl_pct : null, true)}</span>
         </span>
       </button>
       {expanded && (
@@ -485,6 +525,7 @@ function OrderRow({ order, language }: { order: PaperOrderRecord; language: 'zh'
 export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation, schedulerRunning, onOpenDeveloperSettings, readOnly = false, language = 'zh' }: Props) {
   const queryClient = useQueryClient()
   const [view, setView] = useState<'queue' | 'orders'>('queue')
+  const [orderFilter, setOrderFilter] = useState<'all' | 'open' | 'closed' | 'unfilled'>('all')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [bankroll, setBankroll] = useState('40')
   const [maxPerTrade, setMaxPerTrade] = useState('2')
@@ -493,6 +534,11 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
   const [selectedStrategies, setSelectedStrategies] = useState<string[]>(['core_modal_v1'])
   const [exitMode, setExitMode] = useState<ExitMode>('hold_to_settlement')
   const [lastResult, setLastResult] = useState<PaperExecutionResult | null>(null)
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 15000)
+    return () => window.clearInterval(timer)
+  }, [])
   const validationActive = validation?.status === 'active'
   const profilesQuery = useQuery({
     queryKey: ['strategy-profiles'],
@@ -501,7 +547,11 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
   })
   const activePaperProfile = profilesQuery.data?.profiles.find(profile => profile.active_scopes.includes('signal_generation'))
     ?? profilesQuery.data?.profiles.find(profile => profile.active_scopes.includes('paper_default'))
-  const selectedRevisionId = validation?.strategy_revision_id ?? activePaperProfile?.revision_id ?? ''
+  const selectedRevisionId = (validationActive ? validation?.strategy_revision_id : activePaperProfile?.revision_id) ?? ''
+  const maxDecisionAgeMinutes = Number(validation?.decision_max_age_minutes ?? 30)
+  const maxBookAgeSeconds = Number((validationActive
+    ? validation?.strategy_profile_snapshot?.parameters
+    : activePaperProfile?.parameters)?.decision_policy?.stale_book_seconds ?? 300)
   const selectedRevisionRows = useMemo(
     () => selectedRevisionId
       ? (decisions?.decisions ?? []).filter(row => row.strategy_revision_id === selectedRevisionId)
@@ -539,8 +589,8 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
     const latestRows = latestDecisionIssuedAt
       ? selectedRevisionRows.filter(row => row.issued_at === latestDecisionIssuedAt)
       : selectedRevisionRows
-    return groupDecisions(latestRows.filter(row => selectedStrategies.includes(row.strategy_name ?? 'single_bucket_ev')))
-  }, [latestDecisionIssuedAt, selectedRevisionRows, selectedStrategies])
+    return groupDecisions(latestRows.filter(row => selectedStrategies.includes(row.strategy_name ?? 'single_bucket_ev')), maxDecisionAgeMinutes, maxBookAgeSeconds, now)
+  }, [latestDecisionIssuedAt, selectedRevisionRows, selectedStrategies, maxDecisionAgeMinutes, maxBookAgeSeconds, now])
   const activeCohortRunId = validation?.run_id ?? ''
   const ordersQuery = useQuery({
     queryKey: ['paper-orders', activeCohortRunId || cityKey, activeCohortRunId ? 'all-cities' : targetDate],
@@ -570,7 +620,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
       queryClient.invalidateQueries({ queryKey: ['paper-orders'] })
       queryClient.invalidateQueries({ queryKey: ['paper-validation-status'] })
     },
-    onError: error => setLastResult({ ok: false, reason: error instanceof Error ? error.message : 'request_failed' }),
+    onError: error => setLastResult({ ok: false, reason: requestError(error) }),
   })
   const validationMutation = useMutation({
     mutationFn: async (action: 'start' | 'stop') => {
@@ -636,18 +686,21 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
       await runPaperValidationTick({ runId: started.run_id })
       return started
     },
-    onSuccess: () => {
-      setLastResult(null)
+    onSuccess: result => {
+      setLastResult(result.ok ? null : { ok: false, reason: result.reason })
       queryClient.invalidateQueries({ queryKey: ['paper-validation-status'] })
       queryClient.invalidateQueries({ queryKey: ['paper-orders'] })
       queryClient.invalidateQueries({ queryKey: ['strategy-profiles'] })
     },
-    onError: error => setLastResult({ ok: false, reason: error instanceof Error ? error.message : 'paper_validation_request_failed' }),
+    onError: error => setLastResult({ ok: false, reason: requestError(error) }),
   })
   const summary = ordersQuery.data
-  const maxDecisionAgeMinutes = Number(validation?.decision_max_age_minutes ?? 30)
   const currentOrders = summary?.orders ?? []
-  const eligibleCount = queue.filter(item => queueItemEligible(item, maxDecisionAgeMinutes) && !queueItemBought(item, currentOrders)).length
+  const visibleOrders = currentOrders.filter(order => orderFilter === 'all'
+    || (orderFilter === 'open' && order.lifecycle_status === 'open')
+    || (orderFilter === 'closed' && ['settled', 'exited'].includes(order.lifecycle_status ?? ''))
+    || (orderFilter === 'unfilled' && !orderHasFill(order)))
+  const eligibleCount = queue.filter(item => queueItemEligible(item, maxDecisionAgeMinutes, maxBookAgeSeconds, now) && !queueItemBought(item, currentOrders)).length
   const toggleStrategy = (strategy: string) => {
     if (validationActive || readOnly) return
     setSelectedStrategies([strategy])
@@ -663,17 +716,25 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
       <div className="shrink-0 border-b border-neutral-800 bg-black/95 px-3 py-2">
         <div className="flex items-start justify-between gap-2">
           <div>
-            <div className="text-sm font-medium text-neutral-100">{tx(language, '交易台', 'Trading desk')}</div>
-            <div className="mt-0.5 text-[10px] text-neutral-600">{tx(language, 'Kelly 分配 → 盘口成交 → Polymarket 结算', 'Kelly sizing → order-book fill → Polymarket settlement')}</div>
+            <div className="flex items-center gap-2 text-sm font-medium text-neutral-100">
+              {tx(language, '交易台', 'Trading desk')}
+              <span className={`text-[10px] font-normal ${validationActive ? 'text-green-400' : 'text-neutral-500'}`} title={validation?.ends_at ? `${tx(language, '账户截止', 'Account ends')} ${formatTimestamp(validation.ends_at, language)}` : undefined}>
+                {validationActive ? tx(language, '运行中', 'Running') : validation?.status === 'completed' ? tx(language, '已结束', 'Ended') : validation?.status === 'stopped' ? tx(language, '已停止', 'Stopped') : tx(language, '未启动', 'Not started')}
+              </span>
+            </div>
           </div>
           <button type="button" onClick={onOpenDeveloperSettings} disabled={readOnly} className="inline-flex min-h-7 items-center gap-1 border border-neutral-800 px-2 text-[10px] text-cyan-500 hover:bg-neutral-950 hover:text-cyan-300 disabled:cursor-not-allowed disabled:opacity-35">
             <Settings2 className="h-3 w-3" /> {tx(language, '设置', 'Settings')}
           </button>
         </div>
+        {ordersQuery.isError && <div role="alert" className="mt-2 flex items-center justify-between text-[10px] text-amber-400">
+          <span>{tx(language, '订单读取失败', 'Orders unavailable')}</span>
+          <button type="button" onClick={() => ordersQuery.refetch()} className="underline">{tx(language, '重试', 'Retry')}</button>
+        </div>}
         <div className="mt-2 grid grid-cols-2 gap-1 text-[10px]">
-          <div className="border border-neutral-800 p-2"><div className="text-neutral-600">{tx(language, '账户权益', 'Account equity')}</div><div className="mt-1 text-sm tabular-nums text-neutral-100">{money(summary?.equity ?? validation?.bankroll_usd ?? Number(bankroll))}</div></div>
-          <div className="border border-neutral-800 p-2"><div className="text-neutral-600">{tx(language, '累计盈亏', 'Total PnL')}</div><div className={`mt-1 text-sm tabular-nums ${Number(summary?.total_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>{money(summary?.total_pnl ?? 0)}</div></div>
-          <div className="border border-neutral-800 p-2"><div className="text-neutral-600">{tx(language, '现金 / 持仓市值', 'Cash / positions')}</div><div className="mt-1 tabular-nums text-neutral-200">{money(summary?.cash_available ?? validation?.cash_available_usd ?? Number(bankroll))} / {money(summary?.position_value ?? 0)}</div></div>
+          <div className="border border-neutral-800 p-2"><div className="text-neutral-600">{tx(language, '账户权益', 'Account equity')}</div><div className="mt-1 text-sm tabular-nums text-neutral-100">{money(summary?.equity)}</div></div>
+          <div className="border border-neutral-800 p-2"><div className="text-neutral-600">{tx(language, '累计盈亏', 'Total PnL')}</div><div className={`mt-1 text-sm tabular-nums ${Number(summary?.total_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>{money(summary?.total_pnl)}</div></div>
+          <div className="border border-neutral-800 p-2"><div className="text-neutral-600">{tx(language, '现金 / 持仓市值', 'Cash / positions')}</div><div className="mt-1 tabular-nums text-neutral-200">{money(summary?.cash_available)} / {money(summary?.position_value)}</div></div>
           <div className="border border-neutral-800 p-2"><div className="text-neutral-600">{tx(language, '持仓 / 已结算 / 已保护退出', 'Open / settled / guarded')}</div><div className="mt-1 tabular-nums text-neutral-200">{summary?.open_orders ?? 0} / {summary?.resolved_orders ?? 0} / {summary?.exited_orders ?? 0}</div></div>
         </div>
         <button type="button" onClick={() => setSettingsOpen(value => !value)} className="mt-2 inline-flex min-h-8 w-full items-center justify-between border border-neutral-800 px-2 text-[10px] text-neutral-400 hover:bg-neutral-950">
@@ -739,7 +800,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
       </div>
 
       {lastResult && (
-        <div className={`shrink-0 border-b px-3 py-2 text-[10px] ${lastResult.ok ? 'border-green-500/20 bg-green-500/5 text-green-300' : 'border-amber-500/20 bg-amber-500/5 text-amber-300'}`}>
+        <div role="status" aria-live="polite" className={`shrink-0 border-b px-3 py-2 text-[10px] ${lastResult.ok ? 'border-green-500/20 bg-green-500/5 text-green-300' : 'border-amber-500/20 bg-amber-500/5 text-amber-300'}`}>
           {resultMessage(lastResult, language)}
         </div>
       )}
@@ -754,7 +815,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
               onClick={() => executeMutation.mutate({ dryRun: false })}
               className="border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-30"
             >
-              {tx(language, '执行当前策略', 'Execute strategy')}
+              {executeMutation.isPending ? tx(language, '执行中…', 'Executing…') : tx(language, '执行当前策略', 'Execute strategy')}
             </button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
@@ -765,6 +826,8 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
                 pending={executeMutation.isPending}
                 accountActive={validationActive && !readOnly}
                 maxDecisionAgeMinutes={maxDecisionAgeMinutes}
+                maxBookAgeSeconds={maxBookAgeSeconds}
+                now={now}
                 bought={queueItemBought(item, currentOrders)}
                 onExecute={(decisionId, dryRun) => executeMutation.mutate({ decisionId, dryRun })}
                 language={language}
@@ -778,12 +841,18 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
         <div data-testid="paper-order-list" className="min-h-0 flex-1 overflow-y-auto">
           {ordersQuery.isLoading ? (
             <div className="px-3 py-8 text-center text-[11px] text-neutral-600">{tx(language, '读取订单…', 'Loading orders…')}</div>
+          ) : ordersQuery.isError ? (
+            <div className="px-3 py-8 text-center text-[11px] text-amber-400">{tx(language, '暂时无法读取订单，请重试。', 'Orders could not be loaded. Please retry.')}</div>
           ) : summary?.orders?.length ? <>
             <section className="border-b border-neutral-800 px-3 py-3">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <div>
                   <div className="text-[10px] font-medium text-neutral-300">{tx(language, '资金曲线', 'Equity curve')}</div>
-                  <div className="text-[9px] text-neutral-600">{tx(language, '持仓按最新 YES 买一价估值', 'Open positions marked at latest YES best bid')}</div>
+                  <div className="text-[9px] text-neutral-600" title={tx(language, '持仓使用最近保存的 YES 买一价，不代表此刻一定可卖出。', 'Marks use the last stored YES bid, not a guaranteed executable sale.')}>
+                    {currentOrders.some(order => order.lifecycle_status === 'open' && order.quote_is_stale)
+                      ? tx(language, '含过期估值', 'Includes stale marks')
+                      : tx(language, '按买一价估值', 'Marked at bid')}
+                  </div>
                 </div>
                 <div className={`text-right text-[11px] tabular-nums ${Number(summary.total_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                   {money(summary.total_pnl ?? 0)}
@@ -793,7 +862,17 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
                 <EquityChart data={summary.equity_curve ?? []} initialBankroll={Number(summary.starting_bankroll ?? validation?.bankroll_usd ?? 0)} language={language} />
               </div>
             </section>
-            {summary.orders.map(order => <OrderRow key={order.id} order={order} language={language} />)}
+            <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-2 text-[10px]">
+              <span className="tabular-nums text-neutral-500">{visibleOrders.length} / {currentOrders.length}</span>
+              <select aria-label={tx(language, '订单状态', 'Order status')} value={orderFilter} onChange={event => setOrderFilter(event.target.value as typeof orderFilter)} className="h-7 border border-neutral-800 bg-black px-2 text-neutral-300">
+                <option value="all">{tx(language, '全部订单', 'All orders')}</option>
+                <option value="open">{tx(language, '持仓中', 'Open')}</option>
+                <option value="closed">{tx(language, '已结束', 'Closed')}</option>
+                <option value="unfilled">{tx(language, '未成交', 'Not filled')}</option>
+              </select>
+            </div>
+            {visibleOrders.map(order => <OrderRow key={order.id} order={order} language={language} />)}
+            {visibleOrders.length === 0 && <div className="p-6 text-center text-[11px] text-neutral-500">{tx(language, '此状态下暂无订单', 'No orders with this status')}</div>}
           </> : (
             <div className="px-3 py-8 text-center text-[11px] text-neutral-600">{tx(language, '暂无订单', 'No orders')}</div>
           )}

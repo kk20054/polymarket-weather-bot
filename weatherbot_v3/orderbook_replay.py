@@ -106,7 +106,8 @@ def select_orderbook_as_of(
     # idx_orderbooks_token_id. Combining token and market with OR forces a
     # multi-million-row scan on production databases.
     row = select_by("yes_token_id", token) if token else None
-    if row is None and market:
+    # A market identifies both outcomes; never borrow another token's liquidity.
+    if not token and market:
         row = select_by("market_id", market)
     return dict(row) if row is not None else None
 

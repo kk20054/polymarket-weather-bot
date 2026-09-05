@@ -17,7 +17,7 @@ from .deb import bucket_excluded_by_observed_floor
 from .strategy_profiles import DEFAULT_PARAMETERS
 
 
-PAPER_EXIT_VERSION = "paper-exit-v2"
+PAPER_EXIT_VERSION = "paper-exit-v3"
 MANAGED_EXIT_MODES = {"model_guarded", "model_guarded_take_profit"}
 
 
@@ -89,7 +89,7 @@ def _evaluate_order(
         model_probability is not None
         and model_probability <= float(policy["model_probability_threshold"]) + 1e-12
     )
-    source_prediction_id = int(prediction.get("id") or 0) or None
+    source_prediction_id = int((context.get("decision_prediction") or {}).get("id") or 0) or None
     confirmation_count = _confirmation_count(
         previous,
         model_invalid=model_invalid,
@@ -142,10 +142,14 @@ def _evaluate_order(
 
     if not hard_breach and not model_invalid and not take_profit_target:
         reasons.append("exit_condition_not_met")
-    if best_bid is None or best_bid <= 0:
+    if best_bid is None:
         reasons.append("sell_bid_missing")
+    elif not 0 < best_bid < 1:
+        reasons.append("sell_bid_invalid")
     if quote_age is None:
         reasons.append("sell_quote_timestamp_missing")
+    elif quote_age < 0:
+        reasons.append("sell_quote_future")
     elif quote_age > float(policy["max_quote_age_seconds"]):
         reasons.append("sell_quote_stale")
     if shares <= 0:
@@ -156,6 +160,8 @@ def _evaluate_order(
         reasons.append("insufficient_best_bid_depth")
 
     if trigger == "model_probability_invalidated":
+        if source_prediction_id is None:
+            reasons.append("model_exit_prediction_missing_or_invalid")
         if confirmation_count < int(policy["confirmations_required"]):
             reasons.append("model_exit_waiting_for_confirmation")
         if held_minutes is None or held_minutes < float(policy["min_hold_minutes"]):
@@ -183,6 +189,7 @@ def _evaluate_order(
         "model_probability": model_probability,
         "best_bid": best_bid,
         "best_bid_size": best_bid_size,
+        "observed_prediction_id": prediction.get("id"),
         "observed_high": observed_high,
         "quote_timestamp": str(quote.get("quote_timestamp") or quote.get("created_at") or ""),
         "quote_age_seconds": quote_age,
@@ -267,10 +274,22 @@ def _load_exit_context(order: dict[str, Any], *, path: Path | None) -> dict[str,
                 """,
                 (str(order.get("bucket_key") or ""), str(order.get("strategy_name") or "single_bucket_ev")),
             ).fetchone()
+        decision = dict(decision_row) if decision_row else {}
+        evidence = json.loads(decision.get("evidence_links_json") or "{}")
+        prediction_id = int(evidence.get("daily_max_prediction_id") or 0)
+        # Observed breaches use the latest floor; model confirmations use the decision's own source.
+        decision_prediction_row = conn.execute(
+            """
+            SELECT id FROM daily_max_predictions
+            WHERE id = ? AND city_key = ? AND target_date = ?
+              AND COALESCE(validity_status, 'valid') = 'valid'
+            """,
+            (prediction_id, str(order.get("city_key") or ""), str(order.get("target_date") or "")),
+        ).fetchone()
         quote_row = conn.execute(
             """
             SELECT * FROM orderbooks
-            WHERE yes_token_id = ? AND best_bid IS NOT NULL
+            WHERE yes_token_id = ?
             ORDER BY id DESC LIMIT 1
             """,
             (str(order.get("yes_token_id") or ""),),
@@ -279,16 +298,14 @@ def _load_exit_context(order: dict[str, Any], *, path: Path | None) -> dict[str,
         "bucket_key": order.get("bucket_key"),
         "unit": "C",
     }
-    if decision_row:
-        decision = dict(decision_row)
+    if decision:
         bucket.setdefault("bucket_direction", decision.get("bucket_direction"))
         bucket.setdefault("bucket_low", decision.get("bucket_lower"))
         bucket.setdefault("bucket_high", decision.get("bucket_upper"))
-    else:
-        decision = {}
     return {
         "bucket": bucket,
         "prediction": dict(prediction_row) if prediction_row else {},
+        "decision_prediction": dict(decision_prediction_row) if decision_prediction_row else {},
         "decision": decision,
         "quote": dict(quote_row) if quote_row else {},
     }
@@ -308,12 +325,14 @@ def _confirmation_count(
     model_invalid: bool,
     source_prediction_id: int | None,
 ) -> int:
-    if not model_invalid:
+    if not model_invalid or source_prediction_id is None:
         return 0
-    if not previous:
+    if not previous or (previous.get("raw") or {}).get("version") != PAPER_EXIT_VERSION:
         return 1
     previous_source = int(previous.get("source_prediction_id") or 0) or None
     previous_count = int(previous.get("confirmation_count") or 0)
+    if previous_source is None or previous_count <= 0:
+        return 1
     if previous_source == source_prediction_id:
         return max(1, previous_count)
     if str(previous.get("trigger") or "") == "model_probability_invalidated":

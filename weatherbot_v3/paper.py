@@ -10,7 +10,6 @@ from .config import load_config
 from .db import (
     connect,
     get_paper_order_by_idempotency_key,
-    insert_fill_record,
     list_paper_orders,
     list_signal_decisions,
     log_risk,
@@ -203,11 +202,9 @@ def _execute_single_paper_decision_record(
             "fill": filled.get("fill"),
         }
 
-    order_id = upsert_paper_order_record(order, path=path)
     fill = dict(filled["fill"])
     fill.update({
         "idempotency_key": f"{order['idempotency_key']}:fill:0",
-        "order_id": order_id,
         "order_type": "paper",
         "decision_id": order["decision_id"],
         "market_id": order["market_id"],
@@ -215,7 +212,9 @@ def _execute_single_paper_decision_record(
         "fill_status": order["fill_status"],
         "source": PAPER_EXECUTION_VERSION,
     })
-    fill_id = insert_fill_record(fill, path=path)
+    stored_ids = persist_paper_order_fill_group([(order, fill)], path=path)[0]
+    order_id, fill_id = stored_ids["order_id"], stored_ids["fill_id"]
+    fill["order_id"] = order_id
     stored = list_paper_orders(decision_id=order["decision_id"], limit=1, path=path)
     return {
         "ok": True,

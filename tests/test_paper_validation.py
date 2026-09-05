@@ -294,7 +294,24 @@ class PaperValidationTests(unittest.TestCase):
         self.assertFalse(second["ok"])
         self.assertEqual(second["reason"], "paper_validation_run_already_active")
         self.assertEqual(stopped["status"], "stopped")
-        self.assertEqual(inactive["status"], "inactive")
+        self.assertEqual(inactive["status"], "stopped")
+        self.assertEqual(inactive["run_id"], first["run"]["run_id"])
+        blocked = run_paper_validation_tick(run_id=inactive["run_id"], path=path)
+        self.assertEqual(blocked["reason"], "paper_validation_run_not_active")
+
+    def test_expired_account_remains_visible_without_resuming_execution(self):
+        path = test_db_path("paper_validation_expired_display")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        first = start_paper_validation_run(cities=["chicago"], path=path)
+        run_id = first["run"]["run_id"]
+        with connect(path) as conn:
+            conn.execute("UPDATE paper_validation_runs SET ends_at=? WHERE run_id=?",
+                         ((datetime.now(timezone.utc) - timedelta(days=1)).isoformat(), run_id))
+        status = paper_validation_status(path=path)
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["run_id"], run_id)
+        self.assertEqual(status["bankroll_usd"], 40)
+        self.assertEqual(run_paper_validation_tick(path=path)["status"], "inactive")
 
     def test_validation_run_rejects_overlapping_strategy_combination(self):
         path = test_db_path("paper_validation_strategy_combination")

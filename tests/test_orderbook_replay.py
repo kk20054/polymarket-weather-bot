@@ -48,7 +48,7 @@ class OrderbookReplayTests(unittest.TestCase):
             )
         )
 
-    def test_as_of_prefers_exact_token_and_uses_market_only_as_fallback(self):
+    def test_as_of_never_borrows_another_outcome_when_token_is_missing(self):
         with connect(self.db_path) as conn:
             conn.execute(
                 """
@@ -76,7 +76,7 @@ class OrderbookReplayTests(unittest.TestCase):
             )
 
         self.assertEqual(exact["snapshot_key"], "exact-token")
-        self.assertEqual(fallback["snapshot_key"], "other-token")
+        self.assertIsNone(fallback)
 
     def test_limit_fill_uses_price_levels_not_total_book_depth(self):
         asks = [

@@ -3440,6 +3440,26 @@ class V3CoreTests(unittest.TestCase):
         self.assertEqual(second["status"], "duplicate")
         self.assertEqual(len(orders), 1)
 
+    def test_layer8_order_and_fill_roll_back_together_then_retry_once(self):
+        db_path = test_db_path("paper_execution_atomic_retry")
+        self.addCleanup(lambda: db_path.unlink(missing_ok=True))
+        with patch.dict(os.environ, {"V3_DB_PATH": str(db_path), "LIVE_TRADING": "false", "MAX_BET": "2.0"}, clear=False):
+            init_v3_db(db_path)
+            self._seed_signal_decision_fixture(db_path)
+            build_signal_decisions("chicago", "2026-07-02", path=db_path)
+            decision = next(row for row in list_signal_decisions(city_key="chicago", target_date="2026-07-02", path=db_path)
+                            if row["bucket_key"] == "chicago-20260702-mid")
+            with patch("weatherbot_v3.db._insert_fill_conn", side_effect=RuntimeError("injected fill failure")):
+                with self.assertRaisesRegex(RuntimeError, "injected fill failure"):
+                    execute_paper_decision(decision["decision_id"], amount=2.0, path=db_path, cohort_run_id="test-cohort")
+            self.assertEqual(list_paper_orders(decision_id=decision["decision_id"], path=db_path), [])
+            result = execute_paper_decision(decision["decision_id"], amount=2.0, path=db_path, cohort_run_id="test-cohort")
+            repeated = execute_paper_decision(decision["decision_id"], amount=2.0, path=db_path, cohort_run_id="test-cohort")
+            self.assertTrue(result["ok"])
+            self.assertEqual(repeated["status"], "duplicate")
+            with connect(db_path) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM fills WHERE decision_id=?", (decision["decision_id"],)).fetchone()[0], 1)
+
     def test_layer8_paper_execution_rejects_missing_or_future_quote_time(self):
         db_path = test_db_path("paper_execution_quote_time")
         self.addCleanup(lambda: db_path.unlink(missing_ok=True))

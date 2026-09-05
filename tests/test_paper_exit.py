@@ -15,6 +15,7 @@ from weatherbot_v3.db import (
     insert_orderbook,
     list_paper_orders,
     paper_execution_summary,
+    record_paper_exit_evaluation,
     upsert_daily_max_prediction,
     upsert_market_bucket,
     upsert_paper_order_record,
@@ -96,8 +97,11 @@ class PaperExitTests(unittest.TestCase):
         )
 
         later = now + timedelta(minutes=15)
-        _upsert_prediction(path, later, observed_high=31.0)
-        _upsert_decision(path, later, revision, model_probability=0.04, decision_id="exit-second")
+        prediction_id = _upsert_prediction(path, later, observed_high=31.0)
+        _upsert_decision(
+            path, later, revision, model_probability=0.04, decision_id="exit-second",
+            prediction_id=prediction_id,
+        )
         insert_orderbook(
             "market-exit",
             {
@@ -114,7 +118,105 @@ class PaperExitTests(unittest.TestCase):
 
         self.assertEqual(second["exited_now"], 1)
         self.assertEqual(second["results"][0]["evaluation"]["confirmation_count"], 2)
+        self.assertEqual(second["results"][0]["evaluation"]["source_prediction_id"], prediction_id)
         self.assertEqual(order["lifecycle_status"], "exited")
+
+    def test_unrelated_prediction_and_repeated_source_do_not_confirm_model_exit(self):
+        path = test_db_path("paper_exit_unrelated_prediction")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        now = datetime.now(timezone.utc)
+        _order_id, revision = _guarded_order(
+            path, now=now, observed_high=31.0, model_probability=0.05,
+            opened_at=now - timedelta(hours=1),
+        )
+        first = evaluate_open_paper_exits(apply=True, path=path, now=now)
+        source_id = first["results"][0]["evaluation"]["source_prediction_id"]
+        self.assertIsNotNone(source_id)
+        self.assertEqual(first["results"][0]["evaluation"]["confirmation_count"], 1)
+
+        later = now + timedelta(seconds=30)
+        unrelated_id = _upsert_prediction(path, later, observed_high=31.0)
+        self.assertNotEqual(unrelated_id, source_id)
+        for new_decision in (False, True):
+            with self.subTest(new_decision=new_decision):
+                if new_decision:
+                    _upsert_decision(
+                        path, later, revision, model_probability=0.04,
+                        decision_id="exit-repeat-source", prediction_id=source_id,
+                    )
+                result = evaluate_open_paper_exits(apply=True, path=path, now=later)
+                evaluation = result["results"][0]["evaluation"]
+                self.assertEqual(result["exited_now"], 0)
+                self.assertEqual(evaluation["source_prediction_id"], source_id)
+                self.assertEqual(evaluation["confirmation_count"], 1)
+                self.assertIn("model_exit_waiting_for_confirmation", evaluation["reasons"])
+        self.assertEqual(list_paper_orders(path=path)[0]["lifecycle_status"], "open")
+        with connect(path) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM fills WHERE order_type='paper_exit'").fetchone()[0], 0)
+
+    def test_missing_or_invalid_prediction_link_cannot_confirm_model_exit(self):
+        for link in (None, 999999):
+            with self.subTest(prediction_id=link):
+                path = test_db_path(f"paper_exit_invalid_prediction_link_{link}")
+                self.addCleanup(lambda path=path: path.unlink(missing_ok=True))
+                now = datetime.now(timezone.utc)
+                _order_id, revision = _guarded_order(
+                    path, now=now, observed_high=31.0, model_probability=0.05,
+                    opened_at=now - timedelta(hours=1),
+                )
+                _upsert_decision(
+                    path, now, revision, model_probability=0.05,
+                    decision_id="exit-first", prediction_id=link,
+                )
+                for offset in (0, 30):
+                    later = now + timedelta(seconds=offset)
+                    _upsert_prediction(path, later, observed_high=31.0)
+                    result = evaluate_open_paper_exits(apply=True, path=path, now=later)
+                    evaluation = result["results"][0]["evaluation"]
+                    self.assertEqual(result["exited_now"], 0)
+                    self.assertIsNone(evaluation["source_prediction_id"])
+                    self.assertEqual(evaluation["confirmation_count"], 0)
+                    self.assertIn("model_exit_prediction_missing_or_invalid", evaluation["reasons"])
+                self.assertEqual(list_paper_orders(path=path)[0]["lifecycle_status"], "open")
+
+    def test_latest_observed_breach_still_exits_without_a_new_decision(self):
+        path = test_db_path("paper_exit_latest_observed_breach")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        now = datetime.now(timezone.utc)
+        _guarded_order(path, now=now, observed_high=31.0, model_probability=0.35)
+        later = now + timedelta(seconds=30)
+        _upsert_prediction(path, later, observed_high=33.0)
+
+        result = evaluate_open_paper_exits(apply=True, path=path, now=later)
+
+        self.assertEqual(result["exited_now"], 1)
+        self.assertEqual(result["results"][0]["evaluation"]["trigger"], "observed_bucket_breach")
+
+    def test_model_confirmation_does_not_reuse_legacy_unbound_count(self):
+        path = test_db_path("paper_exit_legacy_confirmation")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        now = datetime.now(timezone.utc)
+        order_id, _revision = _guarded_order(
+            path, now=now, observed_high=31.0, model_probability=0.05,
+            opened_at=now - timedelta(hours=1),
+        )
+        record_paper_exit_evaluation(
+            {
+                "paper_order_id": order_id,
+                "source_decision_id": "exit-first",
+                "source_prediction_id": 999999,
+                "trigger": "model_probability_invalidated",
+                "confirmation_count": 1,
+                "version": "paper-exit-v2",
+            },
+            path=path,
+        )
+
+        result = evaluate_open_paper_exits(apply=True, path=path, now=now)
+
+        self.assertEqual(result["exited_now"], 0)
+        self.assertEqual(result["results"][0]["evaluation"]["confirmation_count"], 1)
+        self.assertEqual(list_paper_orders(path=path)[0]["lifecycle_status"], "open")
 
     def test_price_drop_alone_never_triggers_guarded_exit(self):
         path = test_db_path("paper_exit_no_price_stop")
@@ -179,6 +281,80 @@ class PaperExitTests(unittest.TestCase):
         self.assertAlmostEqual(evaluation["executable_roi"], 0.1)
         self.assertEqual(order["lifecycle_status"], "exited")
         self.assertAlmostEqual(float(order["realized_pnl"]), 0.2)
+
+    def test_latest_bidless_or_failed_snapshot_does_not_reuse_previous_bid(self):
+        for book_state in ("side_absent", "fetch_failed"):
+            with self.subTest(book_state=book_state):
+                path = test_db_path(f"paper_exit_withdrawn_bid_{book_state}")
+                self.addCleanup(lambda path=path: path.unlink(missing_ok=True))
+                now = datetime.now(timezone.utc)
+                _guarded_order(path, now=now, observed_high=33.0, model_probability=0.30)
+                later = now + timedelta(seconds=30)
+                insert_orderbook(
+                    "market-exit",
+                    {
+                        "snapshot_key": "exit-book-bid-withdrawn",
+                        "yes_token_id": "yes-exit",
+                        "book_state": book_state,
+                        "bids": [],
+                        "asks": [{"price": 0.11, "size": 100}],
+                        "quote_timestamp": later.isoformat(),
+                    },
+                    path=path,
+                )
+
+                result = evaluate_open_paper_exits(apply=True, path=path, now=later)
+                evaluation = result["results"][0]["evaluation"]
+
+                self.assertEqual(result["exited_now"], 0)
+                self.assertEqual(evaluation["quote_timestamp"], later.isoformat())
+                self.assertIsNone(evaluation["best_bid"])
+                self.assertIn("sell_bid_missing", evaluation["reasons"])
+                self.assertEqual(list_paper_orders(path=path)[0]["lifecycle_status"], "open")
+                with connect(path) as conn:
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM fills WHERE order_type='paper_exit'").fetchone()[0], 0)
+
+    def test_exit_quote_requires_open_interval_bid_and_nonfuture_timestamp(self):
+        cases = (
+            ("zero_bid", 0.0, 0, "sell_bid_invalid"),
+            ("negative_bid", -0.1, 0, "sell_bid_invalid"),
+            ("unit_bid", 1.0, 0, "sell_bid_invalid"),
+            ("above_unit_bid", 1.01, 0, "sell_bid_invalid"),
+            ("future_quote", 0.1, 1, "sell_quote_future"),
+            ("current_quote", 0.1, 0, None),
+        )
+        for name, bid, future_seconds, reason in cases:
+            with self.subTest(case=name):
+                path = test_db_path(f"paper_exit_quote_contract_{name}")
+                self.addCleanup(lambda path=path: path.unlink(missing_ok=True))
+                now = datetime.now(timezone.utc)
+                _guarded_order(path, now=now, observed_high=33.0, model_probability=0.30)
+                insert_orderbook(
+                    "market-exit",
+                    {
+                        "snapshot_key": f"exit-quote-contract-{name}",
+                        "yes_token_id": "yes-exit",
+                        "bids": [{"price": bid, "size": 100}],
+                        "asks": [{"price": 0.11, "size": 100}],
+                        "quote_timestamp": (now + timedelta(seconds=future_seconds)).isoformat(),
+                    },
+                    path=path,
+                )
+
+                result = evaluate_open_paper_exits(apply=True, path=path, now=now)
+                evaluation = result["results"][0]["evaluation"]
+
+                self.assertEqual(result["exited_now"], int(reason is None))
+                self.assertEqual(evaluation["quote_age_seconds"], -future_seconds)
+                if reason:
+                    self.assertIn(reason, evaluation["reasons"])
+                self.assertEqual(
+                    list_paper_orders(path=path)[0]["lifecycle_status"],
+                    "open" if reason else "exited",
+                )
+                with connect(path) as conn:
+                    count = conn.execute("SELECT COUNT(*) FROM fills WHERE order_type='paper_exit'").fetchone()[0]
+                self.assertEqual(count, int(reason is None))
 
     def test_take_profit_does_not_use_non_executable_mid_price(self):
         path = test_db_path("paper_exit_take_profit_ignores_mid")
@@ -265,8 +441,11 @@ def _guarded_order(
         },
         path=path,
     )
-    _upsert_prediction(path, now, observed_high=observed_high)
-    _upsert_decision(path, now, revision, model_probability=model_probability, decision_id="exit-first")
+    prediction_id = _upsert_prediction(path, now, observed_high=observed_high)
+    _upsert_decision(
+        path, now, revision, model_probability=model_probability, decision_id="exit-first",
+        prediction_id=prediction_id,
+    )
     insert_orderbook(
         "market-exit",
         {
@@ -335,6 +514,7 @@ def _upsert_decision(
     *,
     model_probability: float,
     decision_id: str,
+    prediction_id: int | None,
 ) -> int:
     return upsert_signal_decision_record(
         {
@@ -354,6 +534,7 @@ def _upsert_decision(
             "strategy_name": "single_bucket_ev",
             "strategy_revision_id": revision,
             "paper_allowed": False,
+            "evidence_links": {"daily_max_prediction_id": prediction_id} if prediction_id is not None else {},
         },
         path=path,
     )
