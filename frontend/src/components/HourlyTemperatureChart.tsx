@@ -221,20 +221,20 @@ export function HourlyTemperatureChart({
         </div>
       </div>
 
-      <div className="p-2" role="img" aria-label={text(`${cityName} 逐小时温度图`, `${cityName} hourly temperature chart`)}>
+      <div className="p-2" role="group" aria-label={text(`${cityName} 逐小时温度图`, `${cityName} hourly temperature chart`)}>
         <div className="mb-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[10px] text-[#7D8694]">
           {legendButton('china', text('中国实况', 'China live'), <span className="h-2.5 w-2.5 bg-[#EF4444]" />, hasChinaLive)}
-          {legendButton('pws', hasPws ? text('PWS（实时）', 'PWS (live)') : text('PWS（未授权/无数据）', 'PWS (unavailable)'), <span className="h-0 w-0 border-x-[5px] border-b-[9px] border-x-transparent border-b-[#A855F7]" />, hasPws)}
-          {legendButton('metar', text('METAR（本地时）', 'METAR (local)'), <span className="h-2.5 w-2.5 rounded-full bg-[#F97316]" />)}
-          {legendButton('historical', text('历史观测（本地时）', 'Historical (local)'), <span className="h-2.5 w-2.5 rounded-full bg-[#22C55E]" />, hasHistorical)}
-          {legendButton('forecast', text('本系统预报（本地时）', 'WeatherBot forecast (local)'), <span className="h-2.5 w-2.5 rounded-full border border-[#3B82F6]" />)}
+          {hasPws && legendButton('pws', 'PWS', <span className="h-0 w-0 border-x-[5px] border-b-[9px] border-x-transparent border-b-[#A855F7]" />)}
+          {legendButton('metar', 'METAR', <span className="h-2.5 w-2.5 rounded-full bg-[#F97316]" />)}
+          {legendButton('historical', text('历史观测', 'Historical'), <span className="h-2.5 w-2.5 rounded-full bg-[#22C55E]" />, hasHistorical)}
+          {legendButton('forecast', text('预报', 'Forecast'), <span className="h-2.5 w-2.5 rounded-full border border-[#3B82F6]" />)}
           {legendButton('cloud', text('云量 %', 'Cloud %'), <span className="h-2.5 w-3 bg-[#94A3B8]/30" />)}
         </div>
         <div className="relative h-[340px]">
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={rows} margin={{ top: 22, right: 18, bottom: 0, left: -6 }}>
               <CartesianGrid stroke="#2C3445" strokeDasharray="3 3" />
-              <XAxis type="number" dataKey="time_minute" domain={[0, 1380]} ticks={HOUR_TICKS} interval={0} tickFormatter={formatMinute} stroke="#7D8694" fontSize={8} tickLine={false} axisLine={false} minTickGap={0} angle={-45} textAnchor="end" height={52} />
+              <XAxis type="number" dataKey="time_minute" domain={[0, 1380]} ticks={HOUR_TICKS} interval="preserveStartEnd" tickFormatter={formatMinute} stroke="#7D8694" fontSize={9} tickLine={false} axisLine={false} minTickGap={18} height={30} />
               <YAxis yAxisId="temp" domain={temperatureDomain} allowDataOverflow stroke="#7D8694" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}°${unit}`} />
               <YAxis yAxisId="percent" orientation="right" domain={[0, 100]} stroke="#475569" fontSize={10} tickLine={false} axisLine={false} tickFormatter={value => `${Number(value).toFixed(0)}%`} />
               <Tooltip content={<HourlyTooltip dateLabel={dateLabel} unit={unit} />} />

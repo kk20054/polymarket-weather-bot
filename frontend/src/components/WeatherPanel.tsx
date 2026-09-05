@@ -11,7 +11,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { ExternalLink, HelpCircle, History, Save, SlidersHorizontal, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, ExternalLink, HelpCircle, History, Save, SlidersHorizontal, X } from 'lucide-react'
 import { HourlyTemperatureChart, type HourlyChartRow } from './HourlyTemperatureChart'
 import { ForecastRevisionDialog } from './ForecastRevisionDialog'
 import {
@@ -1639,14 +1639,6 @@ export function WeatherPanel({
     window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`)
   }, [selectedDate])
 
-  if (forecasts.length === 0 && citySeries.length === 0 && signals.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center p-4 text-center text-[11px] leading-relaxed text-neutral-600">
-        {tr(language, '该日期暂无城市证据。', 'No city evidence for this date.')}
-      </div>
-    )
-  }
-
   return (
     <div className="weather-panel min-h-full min-w-0 space-y-2 overflow-x-hidden bg-transparent p-3 text-[11px] text-[#CBD2DC]">
       <div className="flex flex-wrap items-center gap-2">
@@ -1663,9 +1655,11 @@ export function WeatherPanel({
           <button
             type="button"
             onClick={() => setSelectedDate(addDateDays(selectedDate || todayDate, -1))}
-            className="px-2 py-1 text-[10px] text-neutral-400 hover:bg-neutral-900 disabled:opacity-30"
+            aria-label={tr(language, '前一天', 'Previous day')}
+            title={tr(language, '前一天', 'Previous day')}
+            className="inline-flex h-8 w-8 items-center justify-center text-neutral-400 hover:bg-neutral-900"
           >
-            {tr(language, '前一天', 'Previous')}
+            <ChevronLeft className="h-4 w-4" />
           </button>
           <input
             type="date"
@@ -1677,9 +1671,11 @@ export function WeatherPanel({
           <button
             type="button"
             onClick={() => setSelectedDate(addDateDays(selectedDate || todayDate, 1))}
-            className="px-2 py-1 text-[10px] text-neutral-400 hover:bg-neutral-900 disabled:opacity-30"
+            aria-label={tr(language, '后一天', 'Next day')}
+            title={tr(language, '后一天', 'Next day')}
+            className="inline-flex h-8 w-8 items-center justify-center text-neutral-400 hover:bg-neutral-900"
           >
-            {tr(language, '后一天', 'Next')}
+            <ChevronRight className="h-4 w-4" />
           </button>
           <button
             type="button"
@@ -1698,7 +1694,7 @@ export function WeatherPanel({
 
       <section className="border border-[#2C3445] bg-[#1B212C]">
         <div className="border-b border-[#2C3445]">
-          <div className="flex gap-1 overflow-x-auto px-2 py-2">
+          <div className="flex gap-1 overflow-x-auto px-2 py-2" role="group" aria-label={tr(language, '天气数据视图', 'Weather data views')}>
             {WORKBENCH_TABS.map(tab => (
               <WorkbenchTabButton
                 key={tab.id}
@@ -1845,7 +1841,8 @@ function WorkbenchTabButton({
     <button
       type="button"
       onClick={onClick}
-      className={`min-w-[120px] shrink-0 border px-2 py-1.5 text-left rounded-none ${
+      aria-pressed={active}
+      className={`min-h-8 shrink-0 border px-2 py-1.5 text-center rounded-none sm:min-w-[100px] sm:text-left ${
         active
           ? 'border-[#2563EB] bg-[#2563EB] text-white'
           : 'border-[#2C3445] bg-[#161A22] text-[#7D8694] hover:bg-[#222A37] hover:text-[#CBD2DC]'
@@ -3215,10 +3212,11 @@ function TemperatureDistributionPanel({
               type="button"
               onClick={() => setSourceDialogOpen(true)}
               className="inline-flex min-h-8 items-center gap-1 border border-[#2C3445] px-2 text-[10px] text-[#CBD2DC] hover:bg-[#222A37]"
-              aria-label={tr(language, '查看 DEB 模型来源与权重', 'View DEB model sources and weights')}
+              aria-label={tr(language, '模型分析', 'Model analysis')}
+              title={tr(language, '查看各模型预测、误差、动态权重与修订轨迹', 'View model forecasts, errors, dynamic weights and revisions')}
             >
               <SlidersHorizontal className="h-3.5 w-3.5" />
-              {tr(language, '模型来源', 'Sources')} {sourceRows.length}
+              {tr(language, '模型分析', 'Model analysis')}
             </button>
           </div>
         </div>

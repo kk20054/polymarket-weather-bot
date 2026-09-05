@@ -5,10 +5,12 @@ import {
   CheckCircle2,
   FlaskConical,
   ListChecks,
+  Moon,
   PauseCircle,
   RefreshCw,
   Settings2,
   ShieldAlert,
+  Sun,
   Wallet,
 } from 'lucide-react'
 import {
@@ -979,6 +981,17 @@ function App() {
     retry: 1,
   })
 
+  const refreshViewMutation = useMutation({
+    mutationFn: () => queryClient.invalidateQueries({
+      type: 'active',
+      predicate: query => [
+        'dashboard', 'hourly-consensus', 'market-buckets', 'signal-decisions',
+        'daily-max-predictions', 'bucket-probabilities', 'model-reprice-events',
+        'paper-orders', 'paper-validation-status', 'scheduler-status', 'production-refresh-status',
+      ].includes(String(query.queryKey[0])),
+    }),
+  })
+
   const contractsQuery = useQuery({
     queryKey: ['settlement-contracts', contractStatus],
     queryFn: () => fetchSettlementContracts(contractStatus, 12),
@@ -1481,11 +1494,13 @@ function App() {
       const poller = pollers[key]
       const runKey = poller?.last_run_at
       if (!poller || !runKey || seenSchedulerRunsRef.current[key] === runKey) continue
+      const previousRun = seenSchedulerRunsRef.current[key]
       seenSchedulerRunsRef.current[key] = runKey
+      if (!previousRun) continue
       shouldRefreshDashboard = true
       shouldRefreshLayer7 = true
       const cityResults = poller.last_result?.city_results ?? []
-      if (cityResults.length > 0) {
+      if (cityResults.some(result => !result.ok)) {
         const successfulResults = cityResults.filter(result => Boolean(result.ok))
         const failedResults = cityResults.filter(result => !result.ok)
         const completed = successfulResults.length
@@ -1495,15 +1510,11 @@ function App() {
           .map(result => `${result.city || result.station_id || 'unknown'}${result.error ? `: ${result.error}` : ''}`)
         showRefreshNotice({
           id: Date.now() + (key === 'metar_poller' ? 100 : key === 'forecast_poller' ? 200 : key === 'china_live_poller' ? 250 : 300),
-          tone: failedResults.length === 0 ? 'success' : 'warning',
-          title: failedResults.length === 0
-            ? `${poller.label} ${uiLanguage === 'zh' ? '更新完成' : 'updated'}`
-            : `${poller.label} ${uiLanguage === 'zh' ? '部分更新失败' : 'partially failed'}`,
+          tone: 'warning',
+          title: `${poller.label} ${uiLanguage === 'zh' ? '部分更新失败' : 'partially failed'}`,
           message: `${completed}/${total} ${uiLanguage === 'zh' ? '个城市完成' : 'cities completed'} · ${durationLabel(poller.last_duration_ms)} · ${relativeTime(runKey)}`,
-          details: failedCities.length > 0
-            ? failedCities
-            : successfulResults.slice(0, 3).map(result => result.city || result.station_id || 'unknown'),
-        }, failedResults.length === 0 ? 5000 : 14000)
+          details: failedCities,
+        }, 14000)
       }
     }
     if (shouldRefreshDashboard) {
@@ -1640,8 +1651,7 @@ function App() {
       <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-neutral-800 px-3 py-1.5 md:flex-nowrap">
         <div className="min-w-[150px] basis-full md:min-w-0 md:flex-1 md:basis-[130px]">
           <div className="flex items-baseline gap-2">
-            <h1 className="text-sm font-semibold tracking-wide text-neutral-100">WeatherBot</h1>
-            <span className="border border-neutral-800 px-1.5 py-0.5 text-[9px] tabular-nums text-neutral-500">{APP_VERSION}</span>
+            <h1 className="text-sm font-semibold text-neutral-100" title={APP_VERSION}>WeatherBot</h1>
           </div>
           <div className="hidden whitespace-nowrap text-[11px] text-neutral-600 sm:block">{t('app.subtitle')}</div>
         </div>
@@ -1659,29 +1669,19 @@ function App() {
             <option value="en">{t('language.en')}</option>
           </select>
         </label>
-        <div className="inline-flex shrink-0 items-center whitespace-nowrap border border-neutral-800 text-[11px]" aria-label={copy.theme}>
-          <button
-            type="button"
-            onClick={() => setThemeMode('light')}
-            className={`px-2 py-1.5 ${themeMode === 'light' ? 'bg-neutral-100 text-black' : 'text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200'}`}
-          >
-            {copy.light}
-          </button>
-          <button
-            type="button"
-            onClick={() => setThemeMode('dark')}
-            className={`border-l border-neutral-800 px-2 py-1.5 ${themeMode === 'dark' ? 'bg-[#2563EB] text-white' : 'text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200'}`}
-          >
-            {copy.dark}
-          </button>
-        </div>
+        <button type="button" onClick={() => setThemeMode(themeMode === 'dark' ? 'light' : 'dark')}
+          className="inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center border border-neutral-700 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-100"
+          aria-label={uiLanguage === 'zh' ? `切换${themeMode === 'dark' ? '浅色' : '深色'}主题` : `Switch to ${themeMode === 'dark' ? 'light' : 'dark'} theme`}
+          title={uiLanguage === 'zh' ? `切换${themeMode === 'dark' ? '浅色' : '深色'}主题` : `Switch to ${themeMode === 'dark' ? 'light' : 'dark'} theme`}>
+          {themeMode === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+        </button>
         <button
           type="button"
           onClick={() => apiAccess.mode === 'local' && setDeveloperSettingsOpen(true)}
           disabled={apiAccess.mode !== 'local'}
           className="inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center border border-neutral-700 text-neutral-400 hover:bg-neutral-900 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-35"
-          aria-label={copy.settings}
-          title={uiLanguage === 'zh' ? '设置与开发者模式' : 'Settings and developer tools'}
+          aria-label={uiLanguage === 'zh' ? '系统设置' : 'System settings'}
+          title={apiAccess.mode !== 'local' ? (uiLanguage === 'zh' ? '连接服务与全局风控，请在本机管理' : 'Manage connections and global risk settings locally') : (uiLanguage === 'zh' ? '系统设置：连接服务与全局风控' : 'System settings: connections and global risk')}
         >
           <Settings2 className="h-3.5 w-3.5" />
         </button>
@@ -1713,11 +1713,13 @@ function App() {
           </button>
         )}
         <button
-          onClick={() => refetch()}
-          className="inline-flex items-center gap-1 whitespace-nowrap border border-neutral-700 px-2 py-1.5 text-[11px] text-neutral-300 hover:bg-neutral-900"
+          onClick={() => refreshViewMutation.mutate()}
+          disabled={refreshViewMutation.isPending}
+          aria-label={uiLanguage === 'zh' ? '刷新看板' : 'Refresh dashboard'}
+          title={uiLanguage === 'zh' ? '重新读取当前天气、盘口、策略与订单，不触发抓取或买入' : 'Reload current weather, quotes, decisions and orders without collecting or trading'}
+          className="inline-flex h-[30px] w-[30px] shrink-0 items-center justify-center border border-neutral-700 text-neutral-300 hover:bg-neutral-900 disabled:opacity-40"
         >
-          <RefreshCw className="h-3.5 w-3.5" />
-          {copy.refresh}
+          <RefreshCw className={`h-3.5 w-3.5 ${refreshViewMutation.isPending ? 'animate-spin' : ''}`} />
         </button>
       </header>
 
@@ -2024,7 +2026,6 @@ function App() {
             decisions={signalDecisionsQuery.data}
             validation={paperValidationStatusQuery.data}
             schedulerRunning={schedulerRunning}
-            onOpenDeveloperSettings={() => apiAccess.mode === 'local' && setDeveloperSettingsOpen(true)}
             readOnly={remoteReadOnly}
             language={uiLanguage}
           />

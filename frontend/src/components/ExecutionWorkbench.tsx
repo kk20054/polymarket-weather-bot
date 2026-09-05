@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { isAxiosError } from 'axios'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ExternalLink, Info, ListChecks, Play, Receipt, Settings2, Square } from 'lucide-react'
+import { HelpHint } from './HelpHint'
 import { createStrategyProfile, executePaperOrders, fetchPaperOrders, fetchStrategyProfiles, runPaperValidationTick, startPaperValidation, stopPaperValidation } from '../api'
 import { EquityChart } from './EquityChart'
 import type {
@@ -18,7 +19,6 @@ interface Props {
   decisions?: SignalDecisionSummary | null
   validation?: PaperValidationStatus | null
   schedulerRunning: boolean
-  onOpenDeveloperSettings: () => void
   readOnly?: boolean
   language?: 'zh' | 'en'
 }
@@ -322,6 +322,7 @@ function DecisionRow({
       <button
         type="button"
         onClick={() => setExpanded(value => !value)}
+        aria-expanded={expanded}
         className="grid w-full grid-cols-[16px_1fr_62px] gap-2 px-3 py-2 text-left hover:bg-neutral-950/70"
       >
         <ChevronDown className={`mt-0.5 h-3.5 w-3.5 text-neutral-600 transition ${expanded ? 'rotate-180' : ''}`} />
@@ -371,8 +372,8 @@ function DecisionRow({
               )}
             </div>
           )}
-          <div className="flex items-center justify-between border border-neutral-800 px-2 py-2 text-[10px] text-neutral-500">
-            <span>{tx(language, '账户将按 Kelly 与风控自动分配', 'The account allocates using Kelly and risk limits')}</span>
+          <div className="flex items-center justify-between px-1 py-1 text-[10px] text-neutral-500" title={tx(language, '账户按 Kelly 与风控分配；成交前重新检查盘口与金额。', 'Allocated using Kelly and risk limits; quotes and size are rechecked before execution.')}>
+            <span>{tx(language, '买入金额', 'Order amount')}</span>
             <span className="tabular-nums text-neutral-300">{tx(language, '建议', 'Suggested')} {money(suggested)}</span>
           </div>
           {!accountActive && <div className="text-[10px] text-amber-300">{tx(language, '请先启动账户，再检查或执行该策略。', 'Start the account before checking or executing this strategy.')}</div>}
@@ -391,7 +392,7 @@ function DecisionRow({
               onClick={() => onExecute(first.decision_id, false)}
               className="min-h-9 border border-cyan-500/40 bg-cyan-500/10 text-[10px] text-cyan-200 hover:bg-cyan-500/15 disabled:opacity-30"
             >
-              {bought ? tx(language, '已买入', 'Bought') : pending ? tx(language, '执行中…', 'Executing…') : expired ? tx(language, '等待更新', 'Waiting for update') : tx(language, '执行买入', 'Execute buy')}
+              {bought ? tx(language, '已买入', 'Bought') : pending ? tx(language, '执行中…', 'Executing…') : expired ? tx(language, '等待更新', 'Waiting for update') : tx(language, '买入', 'Buy')}
             </button>
           </div>
           {eventUrl && (
@@ -522,7 +523,7 @@ function OrderRow({ order, language }: { order: PaperOrderRecord; language: 'zh'
   )
 }
 
-export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation, schedulerRunning, onOpenDeveloperSettings, readOnly = false, language = 'zh' }: Props) {
+export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation, schedulerRunning, readOnly = false, language = 'zh' }: Props) {
   const queryClient = useQueryClient()
   const [view, setView] = useState<'queue' | 'orders'>('queue')
   const [orderFilter, setOrderFilter] = useState<'all' | 'open' | 'closed' | 'unfilled'>('all')
@@ -723,9 +724,6 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
               </span>
             </div>
           </div>
-          <button type="button" onClick={onOpenDeveloperSettings} disabled={readOnly} className="inline-flex min-h-7 items-center gap-1 border border-neutral-800 px-2 text-[10px] text-cyan-500 hover:bg-neutral-950 hover:text-cyan-300 disabled:cursor-not-allowed disabled:opacity-35">
-            <Settings2 className="h-3 w-3" /> {tx(language, '设置', 'Settings')}
-          </button>
         </div>
         {ordersQuery.isError && <div role="alert" className="mt-2 flex items-center justify-between text-[10px] text-amber-400">
           <span>{tx(language, '订单读取失败', 'Orders unavailable')}</span>
@@ -737,12 +735,12 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
           <div className="border border-neutral-800 p-2"><div className="text-neutral-600">{tx(language, '现金 / 持仓市值', 'Cash / positions')}</div><div className="mt-1 tabular-nums text-neutral-200">{money(summary?.cash_available)} / {money(summary?.position_value)}</div></div>
           <div className="border border-neutral-800 p-2"><div className="text-neutral-600">{tx(language, '持仓 / 已结算 / 已保护退出', 'Open / settled / guarded')}</div><div className="mt-1 tabular-nums text-neutral-200">{summary?.open_orders ?? 0} / {summary?.resolved_orders ?? 0} / {summary?.exited_orders ?? 0}</div></div>
         </div>
-        <button type="button" onClick={() => setSettingsOpen(value => !value)} className="mt-2 inline-flex min-h-8 w-full items-center justify-between border border-neutral-800 px-2 text-[10px] text-neutral-400 hover:bg-neutral-950">
+        <button type="button" aria-expanded={settingsOpen} aria-controls="account-strategy-settings" onClick={() => setSettingsOpen(value => !value)} className="mt-2 inline-flex min-h-8 w-full items-center justify-between border border-neutral-800 px-2 text-[10px] text-neutral-400 hover:bg-neutral-950">
           <span className="inline-flex items-center gap-1"><Settings2 className="h-3.5 w-3.5" /> {tx(language, '策略设置', 'Strategy settings')}</span>
           <ChevronDown className={`h-3.5 w-3.5 transition ${settingsOpen ? 'rotate-180' : ''}`} />
         </button>
         {settingsOpen && (
-          <div className="mt-2 space-y-2 border border-neutral-800 bg-neutral-950/60 p-2">
+          <div id="account-strategy-settings" className="mt-2 space-y-2 border-t border-neutral-800 pt-2">
             <div className="grid grid-cols-2 gap-2">
               <label className="text-[9px] text-neutral-500">{tx(language, '本金（USD）', 'Bankroll (USD)')}<input disabled={validationActive || readOnly} type="number" min="1" step="1" value={bankroll} onChange={event => setBankroll(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
               <label className="text-[9px] text-neutral-500">{tx(language, '单笔上限（USD）', 'Max per trade (USD)')}<input disabled={validationActive || readOnly} type="number" min="0.1" step="0.1" value={maxPerTrade} onChange={event => setMaxPerTrade(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
@@ -750,7 +748,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
               <label className="text-[9px] text-neutral-500">{tx(language, '最低优势（%）', 'Minimum edge (%)')}<input disabled={validationActive || readOnly} type="number" min="0" max="50" step="1" value={minEdgePercent} onChange={event => setMinEdgePercent(event.target.value)} className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-right text-[11px] text-neutral-200 disabled:opacity-60" /></label>
             </div>
             <fieldset disabled={validationActive || readOnly} className="space-y-1">
-              <legend className="mb-1 text-[9px] text-neutral-500">{tx(language, '入场策略（单选，避免重复敞口）', 'Entry strategy (single choice to avoid duplicate exposure)')}</legend>
+              <legend className="mb-1 text-[9px] text-neutral-500" title={tx(language, '一次运行选择一种入场策略，避免重复敞口。', 'One entry strategy per run avoids duplicate exposure.')}>{tx(language, '入场策略', 'Entry strategy')}</legend>
               {STRATEGY_OPTIONS.map(option => (
                 <label key={option.key} title={tx(language, option.helpZh, option.helpEn)} className="flex min-h-7 items-center gap-2 border border-neutral-800 px-2 text-[10px] text-neutral-300">
                   <input type="radio" name="paper-entry-strategy" checked={selectedStrategies.includes(option.key)} onChange={() => toggleStrategy(option.key)} />
@@ -758,8 +756,16 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
                 </label>
               ))}
             </fieldset>
-            <label className="block text-[9px] text-neutral-500">{tx(language, '退出方式', 'Exit method')}
+            <label className="block text-[9px] text-neutral-500"><span className="inline-flex items-center">{tx(language, '退出方式', 'Exit method')}
+              <HelpHint label={tx(language, '退出方式说明', 'About exits')}>
+                {exitMode === 'model_guarded_take_profit'
+                  ? tx(language, '按可成交买一价止盈，实况穿桶与模型失效保护仍生效。下次启动生效。', 'Take profit at an executable bid, retaining observed-breach and model guards. Applies on next start.')
+                  : exitMode === 'model_guarded'
+                  ? tx(language, '实测最高温穿桶时退出；仅模型转弱时需连续两次确认。下次启动生效。', 'Exit on an observed breach; model weakness requires two confirmations. Applies on next start.')
+                  : tx(language, '持有至官方结算，不因短期价差或盘中价格波动自动卖出。', 'Hold to official settlement; price fluctuations do not trigger a sale.')}
+              </HelpHint></span>
               <select
+                aria-label={tx(language, '退出方式', 'Exit method')}
                 className="mt-1 h-8 w-full border border-neutral-700 bg-black px-2 text-[10px] text-neutral-200 disabled:opacity-60"
                 value={exitMode}
                 disabled={validationActive || readOnly}
@@ -770,13 +776,6 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
                 <option value="model_guarded_take_profit">{tx(language, '止盈 + 模型失效退出', 'Take profit + model invalidation')}</option>
               </select>
             </label>
-            <div className="text-[9px] leading-relaxed text-neutral-600">
-              {exitMode === 'model_guarded_take_profit'
-                ? tx(language, '按可成交买一价止盈；实况穿桶与模型失效保护仍生效。下次启动生效。', 'Take profit at an executable best bid; observed-breach and model guards remain active. Applies on next start.')
-                : exitMode === 'model_guarded'
-                ? tx(language, '实测最高温穿桶时退出；仅模型转弱时需连续两次确认。下次启动生效。', 'Exit when the observed high breaches the bucket; model weakness requires two confirmations. Applies on next start.')
-                : tx(language, '持有至官方结算，不因短期价差或盘中价格波动自动卖出。', 'Hold to official settlement; short-term spread and price noise never trigger an automatic sell.')}
-            </div>
             {!schedulerRunning && <div className="border border-amber-500/20 bg-amber-500/5 px-2 py-1.5 text-[9px] text-amber-300">{tx(language, '请先启动顶部调度器。', 'Start the scheduler first.')}</div>}
             <button
               type="button"
@@ -809,14 +808,15 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-2">
             <span className="text-[10px] text-neutral-500">{cityKey} · {targetDate}</span>
-            <button
+            {eligibleCount > 1 && <button
               type="button"
               disabled={readOnly || !validationActive || eligibleCount === 0 || executeMutation.isPending}
               onClick={() => executeMutation.mutate({ dryRun: false })}
               className="border border-cyan-500/30 px-2 py-1 text-[10px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-30"
+              title={tx(language, '买入当前城市和日期的全部可执行策略组，每组仍逐一检查成交条件。', 'Buy all eligible groups for this city and date; each group is checked before execution.')}
             >
-              {executeMutation.isPending ? tx(language, '执行中…', 'Executing…') : tx(language, '执行当前策略', 'Execute strategy')}
-            </button>
+              {executeMutation.isPending ? tx(language, '执行中…', 'Executing…') : tx(language, `全部买入 (${eligibleCount})`, `Buy all (${eligibleCount})`)}
+            </button>}
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
             {queue.length ? queue.map(item => (

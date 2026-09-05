@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
+import { HelpHint } from './HelpHint'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
@@ -39,7 +40,7 @@ interface PanelProps {
 
 const NAV_ITEMS: Array<{ key: SettingsSection; label: string; icon: typeof Settings2 }> = [
   { key: 'sources', label: '连接服务', icon: KeyRound },
-  { key: 'strategy', label: '策略设置', icon: SlidersHorizontal },
+  { key: 'strategy', label: '策略与风控', icon: SlidersHorizontal },
 ]
 
 const API_GROUPS: Array<{ label: string; keys: string[] }> = [
@@ -84,14 +85,16 @@ function SettingNumber({ label, description, value, min, max, step, suffix, onCh
   suffix?: string
   onChange: (value: number) => void
 }) {
+  const id = useId()
   return (
-    <label className="grid min-h-14 grid-cols-[minmax(0,1fr)_132px] items-center gap-4 border-b border-neutral-800 py-2.5 last:border-b-0">
-      <span className="min-w-0">
-        <span className="block text-[12px] font-medium text-neutral-200">{label}</span>
-        <span className="mt-0.5 block text-[10px] leading-relaxed text-neutral-500">{description}</span>
-      </span>
+    <div className="grid min-h-12 grid-cols-[minmax(0,1fr)_110px] items-center gap-3 border-b border-neutral-800 py-2 last:border-b-0 sm:grid-cols-[minmax(0,1fr)_132px]">
+      <div className="flex min-w-0 items-center gap-1">
+        <label htmlFor={id} className="text-[12px] font-medium text-neutral-200">{label}</label>
+        <HelpHint label={`${label}说明`}>{description}</HelpHint>
+      </div>
       <span className="relative block">
         <input
+          id={id}
           type="number"
           value={value}
           min={min}
@@ -102,7 +105,7 @@ function SettingNumber({ label, description, value, min, max, step, suffix, onCh
         />
         {suffix && <span className="pointer-events-none absolute right-2 top-2.5 text-[10px] text-neutral-500">{suffix}</span>}
       </span>
-    </label>
+    </div>
   )
 }
 
@@ -359,8 +362,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
           <Settings2 className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <h1 className="truncate text-sm font-semibold text-neutral-100">设置</h1>
-          <div className="text-[10px] text-neutral-500">连接数据服务，管理交易策略</div>
+          <h1 className="truncate text-sm font-semibold text-neutral-100">系统设置</h1>
         </div>
         {onClose && (
           <button type="button" onClick={onClose} className="inline-flex h-8 w-8 items-center justify-center border border-neutral-700 text-neutral-400 hover:bg-neutral-800 hover:text-white" aria-label={standalone ? '返回看板' : '关闭设置'}>
@@ -397,7 +399,6 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <h2 className="text-[13px] font-semibold text-neutral-100">策略与风控</h2>
-                    <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">修改后保存，下一轮信号刷新生效。</p>
                   </div>
                   <button type="button" disabled={!changed} onClick={resetDraft} className="inline-flex min-h-8 items-center gap-1 border border-neutral-700 px-2 text-[10px] text-neutral-300 hover:bg-neutral-800 disabled:opacity-30">
                     <RotateCcw className="h-3.5 w-3.5" /> 放弃更改
@@ -438,8 +439,7 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
                       <div key={name} className="border-b border-neutral-800 py-3 last:border-b-0">
                         <div className="flex items-start justify-between gap-4">
                           <div className="min-w-0">
-                            <div className="text-[12px] font-medium text-neutral-200">{meta.label}</div>
-                            <div className="mt-0.5 text-[10px] leading-relaxed text-neutral-500">{meta.description}</div>
+                            <div className="flex items-center gap-1 text-[12px] font-medium text-neutral-200">{meta.label}<HelpHint label={`${meta.label}说明`}>{meta.description}</HelpHint></div>
                           </div>
                           <Toggle checked={Boolean(parameters.enabled)} label={`启用${meta.label}`} onChange={value => update(['strategies', name, 'enabled'], value)} />
                         </div>
@@ -466,7 +466,6 @@ export function DeveloperSettingsPanel({ themeMode, onClose, standalone = false 
               <div className="mb-5 flex items-start justify-between gap-4">
                 <div>
                   <h2 className="text-[13px] font-semibold text-neutral-100">连接服务</h2>
-                  <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">在这里填写、更新并验证 API。已保存的内容只显示星号，明文不会返回浏览器。</p>
                 </div>
                 {apiSettingsQuery.data && (
                   <div className="shrink-0 border border-neutral-700 px-2 py-1 text-[10px] text-neutral-400">
