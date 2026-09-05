@@ -709,15 +709,10 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {readOnly && (
-        <div className="shrink-0 border-b border-amber-500/25 bg-amber-500/5 px-3 py-2 text-[10px] text-amber-300">
-          {tx(language, '当前为只读数据，恢复实时连接后才可操作。', 'Read-only data. Controls resume when the live connection returns.')}
-        </div>
-      )}
       <div className="shrink-0 border-b border-neutral-800 bg-black/95 px-3 py-2">
         <div className="flex items-start justify-between gap-2">
           <div>
-            <div className="flex items-center gap-2 text-sm font-medium text-neutral-100">
+            <div className="flex items-center gap-2 text-sm font-medium text-neutral-100" title={readOnly ? tx(language, '此连接仅供查看，请在本机管理账户和买入。', 'This connection is read-only. Manage accounts and orders locally.') : undefined}>
               {tx(language, '交易台', 'Trading desk')}
               <span className={`text-[10px] font-normal ${validationActive ? 'text-green-400' : 'text-neutral-500'}`} title={validation?.ends_at ? `${tx(language, '账户截止', 'Account ends')} ${formatTimestamp(validation.ends_at, language)}` : undefined}>
                 {validationActive ? tx(language, '运行中', 'Running') : validation?.status === 'completed' ? tx(language, '已结束', 'Ended') : validation?.status === 'stopped' ? tx(language, '已停止', 'Stopped') : tx(language, '未启动', 'Not started')}
@@ -780,6 +775,7 @@ export function ExecutionWorkbench({ cityKey, targetDate, decisions, validation,
             <button
               type="button"
               disabled={readOnly || validationMutation.isPending || (!validationActive && (!schedulerRunning || selectedStrategies.length === 0))}
+              title={readOnly ? tx(language, '请在本机启动或停止策略', 'Start or stop the strategy locally') : undefined}
               onClick={() => validationMutation.mutate(validationActive ? 'stop' : 'start')}
               className={`inline-flex min-h-9 w-full items-center justify-center gap-1 border text-[10px] disabled:opacity-30 ${validationActive ? 'border-red-500/30 text-red-300 hover:bg-red-500/10' : 'border-green-500/30 bg-green-500/10 text-green-200 hover:bg-green-500/15'}`}
             >

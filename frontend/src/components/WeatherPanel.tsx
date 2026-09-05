@@ -22,6 +22,7 @@ import {
 import type { BucketProbabilitySummary, CityEvidenceDate, CityEvidenceDiffStatsSummary, DashboardEvent, DailyMaxPredictionSummary, DistributionItem, FetchLogRow, HistoricalWeatherPoint, HourlyBiasSourceStats, HourlyBiasStats, HourlyConsensusSummary, HourlySourcePoint, HourlySourceSeries, Layer7QueryState, Layer7ResourceState, MarketBucketSummary, ModelRepriceEvent, ProductionRefreshResult, SignalDecisionRecord, SignalDecisionSummary, WeatherCityPoint, WeatherCitySeries, WeatherForecast, WeatherSignal } from '../types'
 
 interface Props {
+  readOnly?: boolean
   forecasts: WeatherForecast[]
   signals: WeatherSignal[]
   citySeries?: WeatherCitySeries[]
@@ -1377,6 +1378,7 @@ function buildHourlyRows(series?: WeatherCitySeries, selectedDate?: string): Hou
 }
 
 export function WeatherPanel({
+  readOnly = false,
   forecasts,
   signals,
   citySeries = [],
@@ -1721,6 +1723,7 @@ export function WeatherPanel({
               language={language}
             />
             <TemperatureDistributionPanel
+              readOnly={readOnly}
               signal={distributionSignal}
               decision={layerDecision}
               items={probabilityItems}
@@ -2958,6 +2961,7 @@ function EventTimeline({
 }
 
 function TemperatureDistributionPanel({
+  readOnly,
   signal,
   decision,
   items,
@@ -2972,6 +2976,7 @@ function TemperatureDistributionPanel({
   queryState,
   language,
 }: {
+  readOnly: boolean
   signal?: WeatherSignal
   decision?: SignalDecisionRecord
   items: LayerDistributionItem[]
@@ -3070,7 +3075,7 @@ function TemperatureDistributionPanel({
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [sourceDialogOpen])
   useEffect(() => {
-    if (!sourceDialogOpen) return undefined
+    if (!sourceDialogOpen || readOnly) return undefined
     let active = true
     setModelWeightLoading(true)
     setModelWeightMessage('')
@@ -3096,9 +3101,10 @@ function TemperatureDistributionPanel({
     return () => {
       active = false
     }
-  }, [language, sourceDialogOpen])
+  }, [language, sourceDialogOpen, readOnly])
 
   const saveModelWeights = async () => {
+    if (readOnly) return
     setModelWeightSaving(true)
     setModelWeightMessage('')
     try {
@@ -3472,6 +3478,7 @@ function TemperatureDistributionPanel({
                   </div>
                 </div>
                 <div className="ml-auto flex items-center gap-1.5">
+                  {!readOnly && <>
                   <label className="inline-flex h-8 cursor-pointer items-center gap-2 border border-[#2C3445] px-2.5 text-[10px] text-[#CBD5E1] hover:bg-[#222A37]">
                     <input
                       type="checkbox"
@@ -3495,6 +3502,7 @@ function TemperatureDistributionPanel({
                   >
                     <Save className="h-4 w-4" />
                   </button>
+                  </>}
                   <button type="button" onClick={() => setSourceDialogOpen(false)} className="inline-flex h-8 w-8 shrink-0 items-center justify-center border border-[#2C3445] text-[#9AA4B2] hover:bg-[#222A37] hover:text-[#F8FAFC]" aria-label={tr(language, '关闭', 'Close')}>
                     <X className="h-4 w-4" />
                   </button>
@@ -3655,7 +3663,7 @@ function TemperatureDistributionPanel({
                       const modelColor = debModelColor(row.label, index)
                       const weightPct = row.weight === null ? null : Math.max(0, Math.min(100, row.weight * 100))
                       const weightFamily = modelWeightFamilyForLabel(row.label)
-                      const editableWeightPct = weightFamily
+                      const editableWeightPct = !readOnly && weightFamily
                         ? Math.max(0, Math.min(100, (modelWeightMode === 'dynamic' ? Number(row.weight ?? modelWeights[weightFamily]) : modelWeights[weightFamily]) * 100))
                         : null
                       const maeDisplay = row.mae === null ? null : convertDeltaUnit(row.mae, 'C', unit)
@@ -3683,7 +3691,7 @@ function TemperatureDistributionPanel({
                             <div className="flex items-center justify-between gap-2 text-[9px] text-[#7D8694]">
                               <span>{tr(language, '融合权重', 'Blend weight')}</span>
                               {weightFamily && editableWeightPct !== null ? (
-                                <label className="inline-flex h-7 w-[84px] items-center border border-[#303A4C] bg-[#12161D] px-2 focus-within:border-[#3B82F6]" title={modelWeightMode === 'dynamic' ? tr(language, '修改后自动切换为自定义权重', 'Editing switches to custom weights') : undefined}>
+                                <label className="inline-flex h-7 w-[84px] items-center border border-[#303A4C] bg-black px-2 focus-within:border-[#3B82F6]" title={modelWeightMode === 'dynamic' ? tr(language, '修改后自动切换为自定义权重', 'Editing switches to custom weights') : undefined}>
                                   <input
                                     type="text"
                                     inputMode="decimal"

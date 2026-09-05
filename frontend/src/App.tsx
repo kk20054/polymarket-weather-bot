@@ -1982,6 +1982,7 @@ function App() {
                 <RefreshCw className="h-5 w-5 animate-spin" aria-label={uiLanguage === 'zh' ? '加载城市数据' : 'Loading city data'} />
               </div>
             ) : <WeatherPanel
+              readOnly={remoteReadOnly}
               forecasts={forecasts}
               signals={signals}
               citySeries={citySeries}
