@@ -18,6 +18,7 @@
 - Optional `requirements-live.txt` pins official `py-clob-client-v2==1.1.0`. Isolated install/pip check passed, 48 transport tests passed. Production environment was not modified; optional SDK not installed there.
 - Local checks: 13 service/API tests + 43 transport tests passed; 5 SDK tests skipped in production venv (passed isolated). Existing architectural-lock regression passed separately. Frontend build/whitespace check passed; known large-bundle/caniuse warnings remain.
 - Browser verified Shanghai September 7 forecast/DEB/all 11 buckets, scheduler running and current 5-position account, without trading actions.
+- Release: source `c43d082` pushed to main and feature branch; Vercel `dpl_4vi8CGh6DyqHR1xfdzWd4N2AaVkr` READY at 17:33, both custom domains assigned. Public JS `index-C7__FmBH.js` matches the local build; public health 200.
 - `LIVE_TRADING=false`, `LIVE_DRY_RUN=true`, `LIVE_EXECUTION_PRODUCTION_READY=false`. Zero real live orders at audit. No production credentials or real order/allowance/wallet operations used.
 - IMPORTANT: final backend restart was blocked by tool policy before any stop ran. PID 16752 still serves old import-time backend; new live routes NOT loaded. Frontend HMR reflects quote fix. Manual operator restart required; do not claim backend deployment complete.
 
