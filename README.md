@@ -41,7 +41,7 @@
 
 当前浏览器显示调度器正在运行，由用户在两轮工作之间启动；账户仍已结束。调度器运行不等于账户续开，本轮界面与文档调整不启停服务、不创建账户或订单。
 
-Weather.com v3、NWP run、ensemble members 依赖调度器保存；电脑关闭或调度器停止时不会继续抓数。数据/模型共享，但代码仍保留独立 live 闸门及仓位参数；实盘适配器未完成，本项目目前不能声称与实盘完全等价。
+Weather.com v3、NWP run、ensemble members 依赖调度器保存；电脑关闭或调度器停止时不会继续抓数。数据/模型共享，但代码仍保留独立 live 闸门及仓位参数；限价 canary 接口已实现、尚未开放，不能声称已具备完整实盘账户管理。
 
 ## 技术架构
 
@@ -536,7 +536,7 @@ position <= min(bankroll * 5%, max_per_trade_usd)
 - 对采集器增加更长周期的错误预算、退避和数据缺口告警；
 - 固化 truth coverage、预测新鲜度、订单簿新鲜度和重复订单的运行验收；
 - 模拟连续达标后，仅开放 `$1-$2` BUY YES 限价 canary；
-- 实盘仍需独立密钥管理、余额核对、撤单恢复和飞书异常通知。
+- 实盘仍需账户持仓/链上结算核对、完整退出与异常通知验收；限价提交、余额/授权检查、撤单与订单复查已实现。
 
 ## 验证命令
 
@@ -585,3 +585,36 @@ Invoke-RestMethod http://127.0.0.1:8765/api/dashboard
 ### 实盘
 
 `LIVE_TRADING=false` 是默认且必须保持的状态。当前版本尚未达到实盘验收门槛，也不承诺稳定盈利。
+
+后端已提供 **BUY YES / GTC 限价 canary** 实现，生产调度器不会调用它。`live_execution.py` 使用现有 `signal_decisions` 的决策、策略版本和参数哈希，不接受客户端指定概率或价格；`clob_trading.py` 使用官方 V2 SDK 签名、鉴权和提交。
+
+可选依赖独立安装，不影响天气采集和模拟：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-live.txt
+```
+
+钱包参数见 `.env.example`：`POLY_PRIVATE_KEY`、`POLY_API_KEY`、`POLY_API_SECRET`、`POLY_API_PASSPHRASE`、`POLY_FUNDER`、`POLY_SIGNATURE_TYPE`。只配置在本机后端，不能放进前端环境变量、GitHub、Vercel 或聊天。系统不会自动生成 API 凭据、部署钱包、发起授权或转账；签名类型必须与实际钱包相符。
+
+| 本地接口 | 用途 |
+| --- | --- |
+| `GET /api/live/status` | 开关、实现版本、canary 限额和是否配置钱包，不返回密钥 |
+| `POST /api/live/orders/preview` | 传入 `decision_id`、`strategy_revision_id` 和可选 `amount`；通过决策检查后查询余额/盘口，不签名、不提交 |
+| `POST /api/v3/live-order` | 同上，另需 `confirm=true`；当前仍被关闭开关和生产验收锁阻止 |
+| `GET /api/live/orders` | 查询本地记录 |
+| `POST /api/live/orders/{id}/reconcile` | `confirm=true`，查询交易所状态并核对 token、方向、份额和限价 |
+| `POST /api/live/orders/{id}/cancel` | `confirm=true`，撤销指定订单；撤单确认后还需复查是否部分成交 |
+
+这些接口只接受 loopback 客户端和本地主机名，公网不允许访问。预览不是离线演示：配置完整、决策合格时会发起鉴权只读请求。本次开发仅使用隔离测试凭据，未鉴权生产账户、未提交真实订单。
+
+提交前重新检查地区可用性、YES/NO 映射、neg-risk、策略版本、报价新鲜度、优势、tick、最小份额、深度、余额、授权及现有仓位限制。先事务落库预留额度，再签名保存订单 hash，最后单次 POST。超时记为 `unknown` 并继续占用额度，不自动重发；同一决策重复点击不会重复提交。撤单响应不代表零成交，须通过复查才释放额度。
+
+**边界**：此版本不是完整自动实盘系统，尚无自动 SELL、链上成交/结算与账户权益闭环。未解决订单保守占用风险额度；`matched` 不代表链上结算完成。`LIVE_EXECUTION_PRODUCTION_READY=false` 保留，不因安装 SDK 或填入密钥而解锁。
+
+### 公网打不开或未来日期报价未刷新
+
+- Vercel 只托管前端，API 仍通过 Cloudflare Tunnel 连接笔记本。隧道在线但本地 `8765` 服务退出时，公网仍会出现 502；先启动桌面 WeatherBot，再检查 `/api/healthz` 和调度器。
+- “报价未刷新”判断的是订单簿时间，不是市场目标日期。9 月 7 日的市场仍可交易，9 月 6 日抓取的报价也可能已陈旧。顶部刷新只重读数据，持续抓取依赖调度器。
+- 当前项目使用全球版 Gamma/CLOB，不是 `polymarket.us` 的交易接口。两套服务独立；美国站维护不能直接解释全球版盘口状态。地区限制以实际请求出口与官方规则为准，不能通过更换代理规避。
+
+参考：[官方 Python V2 SDK](https://github.com/Polymarket/py-clob-client-v2)、[全球版服务状态](https://status.polymarket.com/)、[Polymarket US API](https://docs.polymarket.us/api-reference/introduction)。

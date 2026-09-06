@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from dataclasses import dataclass
 from typing import Any
 
-from .ai_review import AIReviewer
 from .config import load_config
 from .db import insert_order, log_risk, upsert_signal
 from .notifier import FeishuNotifier
 from .polymarket import PolymarketDataClient, MarketQuote, estimate_buy_fill, round_price_to_tick, validate_order_constraints
 
 
-LIVE_EXECUTION_VERSION = "live-execution-v1-legacy"
+LIVE_EXECUTION_VERSION = "live-execution-v2-canary"
 LIVE_EXECUTION_PRODUCTION_READY = False
 
 
@@ -127,86 +125,15 @@ class LiveExecutor(BaseExecutor):
                     "production_ready": False,
                 },
             )
-        signal_id, quote, order, errors = self._prepare(signal, amount)
-        order["dry_run"] = bool(force_dry_run or cfg.live_dry_run or not cfg.live_trading)
-
-        ai_review = AIReviewer().review(signal_id, signal, quote.raw)
-        if cfg.ai_required_for_live and (not ai_review.get("approve") or float(ai_review.get("confidence") or 0) < 0.5):
-            errors.append("ai_rejected")
-        if not cfg.live_trading:
-            errors.append("live_trading_disabled")
-        if order["amount"] > cfg.live_max_order_usd:
-            errors.append("above_live_max_order_usd")
-        risk_errors = self._risk_errors(order)
-        errors.extend(risk_errors)
-
-        if errors:
-            order["status"] = "dry_run" if order["dry_run"] and errors == ["live_trading_disabled"] else "rejected"
-            order["failure_reason"] = ",".join(errors)
-            order_id = insert_order("live_orders", order)
-            log_risk("live_order_blocked", order["failure_reason"], payload=order)
-            return ExecutionResult(False, self.mode, order["status"], order_id, order["failure_reason"], order)
-
-        if order["dry_run"]:
-            order["status"] = "dry_run"
-            order_id = insert_order("live_orders", order)
-            return ExecutionResult(True, self.mode, "dry_run", order_id, None, order)
-
-        result = self._submit_clob_order(order)
-        order.update(result)
-        order_id = insert_order("live_orders", order)
-        FeishuNotifier().send(
-            "live_order",
-            "WeatherBot 实盘下单",
-            [
-                f"Market: {signal.get('question') or signal.get('market_id')}",
-                f"Limit: ${order['limit_price']:.3f}",
-                f"Amount: ${order['amount']:.2f}",
-                f"Status: {order['status']}",
-            ],
-            order,
+        decision_id = str(signal.get("decision_id") or "")
+        revision_id = str(signal.get("strategy_revision_id") or "")
+        if not decision_id or not revision_id:
+            return ExecutionResult(False, self.mode, "blocked", 0, "revision_bound_decision_required", {})
+        from .live_execution import run_live_operation
+        result = run_live_operation(
+            "execute", decision_id, revision_id, amount=amount, preview=not requested_live_submit,
         )
-        return ExecutionResult(order["status"] in {"submitted", "open"}, self.mode, order["status"], order_id, order.get("failure_reason"), order)
-
-    def _risk_errors(self, order: dict[str, Any]) -> list[str]:
-        # The first implementation keeps hard per-order protection here. Daily
-        # and drawdown limits are persisted in the DB and surfaced for audit; a
-        # follow-up worker can compute them before live enablement.
-        cfg = load_config()
-        errors = []
-        if order["amount"] > cfg.live_daily_max_usd:
-            errors.append("above_live_daily_max_usd")
-        return errors
-
-    def _submit_clob_order(self, order: dict[str, Any]) -> dict[str, Any]:
-        try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import OrderArgs
-            from py_clob_client.order_builder.constants import BUY
-        except Exception as exc:
-            return {"status": "rejected", "failure_reason": f"py_clob_client_missing:{exc}"}
-
-        private_key = os.getenv("POLY_PRIVATE_KEY", "")
-        if not private_key:
-            return {"status": "rejected", "failure_reason": "missing_POLY_PRIVATE_KEY"}
-        try:
-            host = os.getenv("POLY_CLOB_HOST", "https://clob.polymarket.com")
-            chain_id = int(os.getenv("POLY_CHAIN_ID", "137"))
-            client = ClobClient(host, key=private_key, chain_id=chain_id)
-            creds = client.create_or_derive_api_creds()
-            client.set_api_creds(creds)
-            signed = client.create_order(
-                OrderArgs(
-                    price=float(order["limit_price"]),
-                    size=float(order["shares"]),
-                    side=BUY,
-                    token_id=str(order["yes_token_id"]),
-                )
-            )
-            response = client.post_order(signed)
-            return {"status": "submitted", "clob_order_id": str(response.get("orderID") or response.get("id") or ""), "raw_response": response}
-        except Exception as exc:
-            return {"status": "rejected", "failure_reason": f"clob_error:{exc}"}
+        return ExecutionResult(bool(result["ok"]), self.mode, result["status"], int(result.get("order_id") or 0), result.get("reason"), result)
 
 
 def _idempotency_key(mode: str, signal: dict[str, Any], price: float, amount: float) -> str:

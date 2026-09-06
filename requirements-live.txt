@@ -1,0 +1,4 @@
+# Optional only. Never installed by normal startup or the paper runtime.
+# Official Polymarket/py-clob-client-v2 release v1.1.0, 2026-07-17.
+# This adapter pins internal HTTP hooks and the V2 EIP-712 builder API.
+py-clob-client-v2==1.1.0

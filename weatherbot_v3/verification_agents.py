@@ -843,7 +843,7 @@ class PaperExecutionVerificationAgent(VerificationAgent):
                 self.key,
                 "live_execution_architecture",
                 "pass" if LIVE_EXECUTION_PRODUCTION_READY else "fail",
-                f"实盘执行器 {LIVE_EXECUTION_VERSION} 已具备生产风控与预提交幂等。" if LIVE_EXECUTION_PRODUCTION_READY else f"实盘执行器 {LIVE_EXECUTION_VERSION} 尚缺预提交幂等保留、聚合风险预算和 revision-bound 路由。",
+                f"实盘执行器 {LIVE_EXECUTION_VERSION} 已通过生产验收。" if LIVE_EXECUTION_PRODUCTION_READY else f"实盘执行器 {LIVE_EXECUTION_VERSION} 已实现限价 canary 接口，仍待账户全生命周期与实盘验收；保持关闭。",
                 blocks=("live_canary",),
                 evidence={"version": LIVE_EXECUTION_VERSION, "production_ready": LIVE_EXECUTION_PRODUCTION_READY},
                 action="重构 live executor：先原子保留 idempotency，再检查余额/当日额度/持仓/回撤，并只接受 revision-bound 决策。",

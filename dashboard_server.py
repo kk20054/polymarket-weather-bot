@@ -336,8 +336,15 @@ def _require_local_developer_request(request: Request, confirmed: bool) -> None:
 
 
 class LiveOrderUpdate(BaseModel):
-    signal_id: int
-    amount: float | None = None
+    signal_id: int | None = None
+    decision_id: str = ""
+    strategy_revision_id: str = ""
+    amount: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
+    confirm: bool = False
+
+
+class LiveOrderAction(BaseModel):
+    confirm: bool = False
 
 
 class CanaryDryRunUpdate(BaseModel):
@@ -6053,76 +6060,64 @@ async def canary_dry_run(update: CanaryDryRunUpdate):
 
 
 @app.post("/api/v3/live-order")
-async def v3_live_order(update: LiveOrderUpdate):
-    signal = next(
-        (
-            s for s in list_signals(500)
-            if int(s.get("id") or 0) == update.signal_id and not _is_dashboard_position_import(s)
-        ),
-        None,
+async def v3_live_order(update: LiveOrderUpdate, request: Request):
+    _require_local_developer_request(request, update.confirm)
+    if not update.decision_id or not update.strategy_revision_id:
+        return {"ok": False, "status": "blocked", "reason": "revision_bound_decision_required"}
+    from weatherbot_v3.live_execution import run_live_operation
+    return await asyncio.to_thread(
+        run_live_operation, "execute", update.decision_id, update.strategy_revision_id,
+        amount=update.amount, preview=False,
     )
-    if not signal:
-        return {"ok": False, "error": "signal_not_found"}
-    markets = load_markets()
-    backtest_summary = _build_backtest_summary(markets)
-    strategy_readiness = backtest_summary.get("strategy_readiness") or {}
-    if not strategy_readiness.get("live_ready"):
-        payload = {
-            "signal_id": update.signal_id,
-            "market_id": signal.get("market_id"),
-            "question": signal.get("question"),
-            "strategy_readiness": strategy_readiness,
-        }
-        log_event("warning", "v3 live order blocked: strategy not ready", payload)
-        return {
-            "ok": False,
-            "status": "blocked",
-            "reason": "strategy_not_ready",
-            "strategy_readiness": strategy_readiness,
-            "payload": payload,
-        }
-    temperature_fit = _build_temperature_fit(markets)
-    fit_by_city = {row.get("city_key"): row for row in temperature_fit.get("cities", [])}
-    truth_by_city = _truth_city_lookup(_build_truth_health(markets))
-    market_by_city_date = {
-        (market.get("city"), market.get("date")): market
-        for market in markets
-        if market.get("city") and market.get("date")
-    }
-    raw_signal = _read_json_from_text(signal.get("raw_json"), {})
-    _fit, _quality_flags, _strategy, gate = _signal_diagnostics_payload(
-        signal,
-        raw_signal,
-        fit_by_city,
-        market_by_city_date,
-        truth_by_city,
-    )
-    if not gate.get("live_allowed"):
-        payload = {
-            "signal_id": update.signal_id,
-            "market_id": signal.get("market_id"),
-            "question": signal.get("question"),
-            "gate": gate,
-        }
-        log_event("warning", "v3 live order blocked by dashboard gate", payload)
-        return {
-            "ok": False,
-            "status": "blocked",
-            "reason": "dashboard_live_gate",
-            "gate": gate,
-            "payload": payload,
-        }
-    result = LiveExecutor().place_order(signal, update.amount)
-    log_event("info" if result.ok else "warning", f"v3 live order {result.status}: {result.reason or 'ok'}", result.payload)
-    _clear_production_validation_cache()
+
+
+@app.get("/api/live/status")
+async def live_execution_status(request: Request):
+    _require_local_developer_request(request, True)
+    from weatherbot_v3.executor import LIVE_EXECUTION_VERSION
+    cfg = load_v3_config()
     return {
-        "ok": result.ok,
-        "mode": result.mode,
-        "status": result.status,
-        "order_id": result.order_id,
-        "reason": result.reason,
-        "payload": result.payload,
+        "ok": True, "execution_version": LIVE_EXECUTION_VERSION,
+        "enabled": cfg.live_trading, "dry_run": cfg.live_dry_run,
+        "production_ready": LIVE_EXECUTION_PRODUCTION_READY,
+        "order_types": ["BUY_YES_LIMIT_GTC"], "automatic_execution": False,
+        "canary_max_order_usd": cfg.canary_max_order_usd,
+        "max_order_usd": cfg.live_max_order_usd, "daily_max_usd": cfg.live_daily_max_usd,
+        "wallet_configured": bool(env_value("POLY_PRIVATE_KEY")),
     }
+
+
+@app.get("/api/live/orders")
+async def live_execution_orders(request: Request, limit: int = 100):
+    _require_local_developer_request(request, True)
+    from weatherbot_v3.live_execution import list_live_orders
+    return {"ok": True, "orders": await asyncio.to_thread(list_live_orders, limit=limit)}
+
+
+@app.post("/api/live/orders/preview")
+async def live_execution_preview(update: LiveOrderUpdate, request: Request):
+    _require_local_developer_request(request, True)
+    if not update.decision_id or not update.strategy_revision_id:
+        return {"ok": False, "status": "blocked", "reason": "revision_bound_decision_required"}
+    from weatherbot_v3.live_execution import run_live_operation
+    return await asyncio.to_thread(
+        run_live_operation, "execute", update.decision_id, update.strategy_revision_id,
+        amount=update.amount, preview=True,
+    )
+
+
+@app.post("/api/live/orders/{order_id}/reconcile")
+async def live_execution_reconcile(order_id: int, update: LiveOrderAction, request: Request):
+    _require_local_developer_request(request, update.confirm)
+    from weatherbot_v3.live_execution import run_live_operation
+    return await asyncio.to_thread(run_live_operation, "reconcile", order_id)
+
+
+@app.post("/api/live/orders/{order_id}/cancel")
+async def live_execution_cancel(order_id: int, update: LiveOrderAction, request: Request):
+    _require_local_developer_request(request, update.confirm)
+    from weatherbot_v3.live_execution import run_live_operation
+    return await asyncio.to_thread(run_live_operation, "cancel", order_id)
 
 
 @app.post("/api/v3/notify-daily")

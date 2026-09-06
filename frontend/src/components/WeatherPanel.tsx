@@ -568,7 +568,7 @@ function gateReasonLabel(reason: string, language: 'zh' | 'en') {
     edge_below_min: ['概率优势不足', 'Insufficient edge'],
     low_price_tail_bucket: ['低价尾桶受限', 'Low-price tail blocked'],
     insufficient_bias_samples: ['校准样本不足', 'Insufficient calibration'],
-    stale_book: ['盘口已过期', 'Stale orderbook'],
+    stale_book: ['报价未刷新', 'Quote not refreshed'],
     book_timestamp_missing: ['盘口时间缺失', 'Orderbook time missing'],
     crossed_orderbook: ['盘口异常', 'Crossed orderbook'],
     invalid_best_ask: ['卖一无效', 'Invalid best ask'],
@@ -1101,8 +1101,8 @@ function buildAuthoritativeDistributionItems(
     const bucket = bucketByMarket.get(marketKey) ?? bucketByKey.get(bucketKey)
     const decision = decisionByMarket.get(marketKey) ?? decisionByBucket.get(bucketKey)
     const probability = asNumber(item.probability) ?? 0
-    const askValue = asNumber(item.best_ask) ?? asNumber(bucket?.best_ask) ?? asNumber(item.price)
-    const bidValue = asNumber(item.best_bid) ?? asNumber(bucket?.best_bid)
+    const askValue = bucket ? asNumber(bucket.best_ask) : asNumber(item.best_ask)
+    const bidValue = bucket ? asNumber(bucket.best_bid) : asNumber(item.best_bid)
     const ask = askValue ?? 0
     const bid = bidValue ?? 0
     const askAvailable = askValue !== null && ask >= 0 && ask <= 1
@@ -3323,7 +3323,7 @@ function TemperatureDistributionPanel({
                 {completeSetCost === null
                   ? completeSetLastCost === null
                     ? tr(language, '全桶成本 --', 'All-bucket cost --')
-                    : tr(language, `盘口已过期 · 最近全桶 ${(completeSetLastCost * 100).toFixed(1)}¢`, `Book stale · last all-bucket ${(completeSetLastCost * 100).toFixed(1)}¢`)
+                    : tr(language, `报价未刷新 · 最近全桶 ${(completeSetLastCost * 100).toFixed(1)}¢`, `Quote not refreshed · last all-bucket ${(completeSetLastCost * 100).toFixed(1)}¢`)
                   : tr(
                     language,
                     `全桶成本 ${(completeSetCost * 100).toFixed(1)}¢ · ${completeSetGap !== null && completeSetGap > 0 ? '毛价差候选' : '无完整集价差'}`,
@@ -3355,7 +3355,7 @@ function TemperatureDistributionPanel({
                 )
                 const gateReason = item.blocked_reason_primary ?? item.gate_reasons?.[0] ?? ''
                 const quoteState = !quoteFresh
-                  ? tr(language, '盘口过期', 'Stale')
+                  ? tr(language, '报价未刷新', 'Stale quote')
                   : !askAvailable
                     ? tr(language, '暂无卖盘', 'No ask')
                     : !bidAvailable
@@ -3363,6 +3363,7 @@ function TemperatureDistributionPanel({
                       : tr(language, '观察', 'Watch')
                 const title = [
                   item.question || fmtBucketAxisLabel(item, unit),
+                  !quoteFresh ? tr(language, `本地报价已超过新鲜度限制，不表示市场关闭。报价时间：${quoteTimestampMs(item.quote_timestamp) ? new Date(quoteTimestampMs(item.quote_timestamp)!).toLocaleString() : '未知'}`, `The local quote is past its freshness limit; this does not mean the market is closed. Quote time: ${quoteTimestampMs(item.quote_timestamp) ? new Date(quoteTimestampMs(item.quote_timestamp)!).toLocaleString() : 'unknown'}`) : '',
                   `bid/ask ${fallbackMode ? '--' : `${bidAvailable ? fmtPrice(item.bid) : '--'} / ${askAvailable ? fmtPrice(item.ask) : '--'}`}`,
                   edge === null
                     ? ''
