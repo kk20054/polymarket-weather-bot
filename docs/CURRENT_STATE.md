@@ -1,39 +1,32 @@
 # WeatherBot Current State
 
 ## Current Layer
-- Date: 2026-09-05. Scope: dashboard controls/navigation and public-access documentation; released to GitHub and Vercel production.
-- Production DB: `D:\WeatherBot\data\weatherbot_v3.db` (about 60GB), exposed through the repository `data` Junction.
-- Local backend/frontend use `8765/5173`. The browser currently shows the scheduler RUNNING: the user started it between work rounds. This round does not start/stop it; the account remains ended.
-- Last audit's latest persisted decision was `2026-08-16T23:34:58.935698+00:00`; fresh scheduler output has not been re-audited. Scheduler activity does not reopen an ended account.
-- `LIVE_TRADING=false`; the real order adapter is incomplete. UI/documentation changes do not create accounts/orders or change risk thresholds, model weights, permissions or frozen protocols.
+- Date: 2026-09-06. Scope: connectivity/Shanghai September 7 quotes, presentation and local-only live canary infrastructure. No risk/model/protocol changes.
+- Production DB: `D:\WeatherBot\data\weatherbot_v3.db` (~60GB), through repository `data` Junction. Do not scan or delete broadly.
+- Local backend/frontend: `8765/5173`; public Vercel frontend uses Cloudflare Tunnel `api.polywxx.org` to the laptop. Public access stays read-only.
 
-## Latest Evidence
-- Latest cohort `paper-20260809T165308Z-bbfb1434` ended on `2026-08-23T16:53:08.702407+00:00`. Last verified ledger: 13 orders, 11 settled (2 wins, 9 losses; realized PnL `-$4.9111`), zero open, 2 rejected; do not reuse the earlier 6-settled partial result.
-- From August 14 through the last available August 17 decision: 49 cities, 1,712 decisions, 52 gate-passing rows across 14 cities. Repeated candidate rows are not distinct fills.
-- Primary blocks: spread 566, D+0 window 473, absent bid 276, insufficient edge 214, absent ask 70, risk budget below exchange minimum 27, no qualified top bucket 14, minimum size over trade cap 12, observed-high elimination 5, tail bucket 3.
-- Selected revision `spr_13639230b1b3e97631aec4cf3f811749`: paper edge/effective edge 5%, ask minimum 0.05, stale book 300s, spread 500bps, Kelly 0.25, bankroll fraction cap 12.5%; the ended account also capped trades at $2 and daily spend at $10.
-- Dynamic weighting uses first-pair inverse-MAE shrinkage with station/model/location-version/lead calibration. Primary prior excludes GEM/JMA; they remain diagnostic sources. Manual override remains available.
-- Audit found 75 primary-family single-pair calibration cells with zero fitted MAE, 67 with nonzero bias. Fitted zero is not predictive accuracy. Scoring now shares runtime shrinkage/capping, scores the first pair with zero prior correction, and uses only priors available before forecast issuance.
-- Predictive MAE requires `runtime-bias-walk-forward-v2`; legacy scores no longer drive weights or residual spread. No manual artifact regeneration was run; scheduled refresh output still needs verification. Old snapshots remain unchanged; truth availability uses stored `updated_at` and local-day completion, not reconstructed publication history.
-- IMPORTANT: shared revision/data/model does not mean identical eligibility. `base.py` and `core_modal.py` still have separate live maturity, sizing and spread policy. Earlier documentation claiming identical thresholds was inaccurate; this audit did not weaken either path.
+## Incident Evidence
+- At ~17:00 +08 both local ports were closed and no Python process existed. Cloudflared was running; public API returned 502. Service exit cause is not established; no evidence attributes it to a US proxy or Polymarket maintenance.
+- Desktop launcher restored backend PID `16752` at 17:01 (uvicorn ready 17:01:47), frontend, and scheduler (started `2026-09-06T17:02:46.097153+08:00`). Local/public health returned 200.
+- Shanghai September 7: all 11 books last fetched successfully at 16:50, then aged while services stopped. At 17:08 all 11 refreshed: 6 two-sided, 5 genuinely lacking bids. Live /book and Gamma returned 200; 30C market active/accepting orders, bid/ask initially 52/54c and later 53/54c. Future market date does not imply a fresh quote.
+- Backend geoblock read returned `blocked=false,country=HK`: request egress, not user location or eligibility. Global CLOB status operational. Polymarket US uses separate API hosts; US maintenance not verified.
+- At 17:28 existing run `paper-20260905T153105Z-89acc10b` was ACTIVE with 5 orders/5 open/0 settled/0 exits. No account was started or changed by this turn. Scheduler executes collection and existing-run ticks.
 
-## Repairs And Checks
-- Ended/stopped accounts retain their run ID and order history in the API/UI without resuming execution or creating a new account.
-- An explicit YES-token lookup cannot fall back to another outcome's book. Single-order and fill persistence is transactional, including rollback and retry.
-- Exit logic uses the latest snapshot even when its bid is missing, rejects invalid/future quotes, and counts distinct decision-linked predictions rather than unrelated forecast refreshes. Old exit-version counters do not carry into the corrected confirmation rule.
-- UI: one top-bar theme icon and one system-settings entry; right panel keeps only account/strategy settings. Question-mark help replaces persistent explanatory text; batch buy appears only for >=2 eligible groups, under existing gates and local-only write permissions.
-- Refresh rereads the active weather/orderbook/strategy/orders views; it does not collect data, buy or start a strategy. Date arrows, narrow-screen tabs and readable chart ticks remain available; empty dates do not hide navigation.
-- Dashboard order JSON is 153,874 bytes instead of 2,407,770 (93.6% less), retaining 13 orders, PnL and 120 equity points. Full evidence remains available without `compact=true`; SQLite reads leave the API event loop. Settings load on demand; idle polling slows; leaving a city cancels its read requests.
-- UI preserves navigation/account during city loading, provides a mobile city selector, and shows settlement win rate separately from realized PnL. Model Analysis distinguishes historical versus forward MAE with count/method tooltips.
-- Prior backend verification: 8 API tests and 16 calibration/weight/integration tests passed, not rerun this round. Frontend build passed; in-app browser at 1600x1000 and 390x844 checked settings/help, date arrows and all five mobile tabs. Background-success toasts no longer obscure the chart. Public model tabs and 13-order history were verified without writes.
-- UI source `b812d9b` is pushed to `main` and `codex/weatherbot-v6-data-foundation`. Vercel deployment `dpl_69mi5SxaiXzCB2BEAJXrVoaN8vCi`, created 2026-09-05 22:15:54 +08:00, is READY; public JS/CSS match the local build. Both `polywxx.org` and `www.polywxx.org` are assigned.
-- Public frontend `https://www.polywxx.org` proxies GET/HEAD/OPTIONS to local FastAPI via `api.polywxx.org`; health returned 200/read-only. Public model weights are view-only, without inputs/save controls. Writes, scheduler controls and strategy startup remain unavailable; origin token stays server-side and unauthenticated origin returns 401.
+## Implementation And Verification
+- UI now says `报价未刷新` with timestamp help, not expired market. Current book prices precede prediction-snapshot prices; a missing current side never borrows an old quote or Gamma indicative price.
+- Live: revision-bound BUY YES GTC canary, explicit credentials, geography/YES/neg-risk checks, authenticated balance/allowance reads, canonical sizing/effective edge, existing quote/liquidity gates, transactional pre-POST reservation, persisted signed hash, single POST, unknown status, cancel and identity-checked reconciliation.
+- Optional `requirements-live.txt` pins official `py-clob-client-v2==1.1.0`. Isolated install/pip check passed, 48 transport tests passed. Production environment was not modified; optional SDK not installed there.
+- Local checks: 13 service/API tests + 43 transport tests passed; 5 SDK tests skipped in production venv (passed isolated). Existing architectural-lock regression passed separately. Frontend build/whitespace check passed; known large-bundle/caniuse warnings remain.
+- Browser verified Shanghai September 7 forecast/DEB/all 11 buckets, scheduler running and current 5-position account, without trading actions.
+- `LIVE_TRADING=false`, `LIVE_DRY_RUN=true`, `LIVE_EXECUTION_PRODUCTION_READY=false`. Zero real live orders at audit. No production credentials or real order/allowance/wallet operations used.
+- IMPORTANT: final backend restart was blocked by tool policy before any stop ran. PID 16752 still serves old import-time backend; new live routes NOT loaded. Frontend HMR reflects quote fix. Manual operator restart required; do not claim backend deployment complete.
 
-## Remaining Blockers
-- Profitability is not established: this cohort's settled result is negative. Recorded frozen forward CLV was also negative; no historical PnL/model-selection experiment was rerun.
-- More pairs may improve bias estimation; they do not prove improved resolution, win rate, or profit. Inverse-MAE blending remains a heuristic, not direct optimization against the market.
-- Running scheduler is not evidence of fresh calibration, a new account or a new fill; those outputs remain unverified. Earlier UI checks used isolated execution responses, not production writes.
-- Truth entitlement/maturity, the 60GB SQLite store, laptop-dependent public API and incomplete live execution remain limitations. No data was deleted. Build warnings include a large JS chunk and 16 npm dependency advisories (2 low, 3 moderate, 11 high); exploitability was not assessed and no forced dependency upgrades were attempted.
+## Retained Strategy Facts
+- Calibration scoring uses `runtime-bias-walk-forward-v2`; fitted MAE is not predictive accuracy. Legacy scores do not drive weights/residual spread. Prior-only training boundaries/frozen protocols unchanged.
+- Dynamic weighting uses station/model/location-version/lead inverse-MAE shrinkage; primary prior excludes GEM/JMA, retained diagnostically. Manual override remains. Paper/live share models but distinct maturity/sizing gates remain.
+- Earlier ended cohort `paper-20260809T165308Z-bbfb1434`: 13 orders, 11 settled (2 wins/9 losses), realized -$4.9111, 2 rejected. Do not mix it with the new active cohort or claim profitability.
 
-## Next Task
-- Release is complete. Keep the user-started scheduler running; any new account requires explicit operator action. Next maintenance: assess dependency advisories and verify scheduled versioned calibration output separately, without reopening ended cohorts or historical model-selection experiments.
+## Remaining Blockers And Next Task
+- Canary is not a full automated portfolio: no automatic SELL, chain settlement/marked-equity reconciliation or full lifecycle qualification. Matched/unknown/partially cancelled orders conservatively retain exposure. Keep production-ready false.
+- Operator must restart local backend through desktop launcher, then check `/api/live/status` stays disabled and the same paper run survives. Do not create another run or change credentials/settings.
+- No historical model-selection/PnL reruns. Laptop uptime, store size, truth entitlement and prior npm advisories remain separate issues.
