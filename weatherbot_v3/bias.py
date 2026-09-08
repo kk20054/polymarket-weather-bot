@@ -15,6 +15,7 @@ from .db import connect, init_v3_db
 from .forecasts.ensemble import BIAS_MIN_SAMPLE_COUNT, model_family
 from .forecast_time import assess_forecast_run, parse_utc
 from .registry import SETTLEMENT_REGISTRY, forecast_source_matches_profile_location
+from .settlement_temperature import is_noaa_primary
 
 
 DEFAULT_BIAS_TABLE = DATA_DIR / "bias_table.json"
@@ -264,6 +265,26 @@ def _truth_by_date(
                     "exact": True,
                     "truth_available_at": row["updated_at"],
                 }
+        if truth:
+            # Dated rules only exclude mismatched truth; they never supply a value
+            # or make a backfilled observation available earlier in a replay.
+            events = conn.execute(
+                """
+                SELECT target_date, resolution_source, resolution_source_url, raw_json
+                FROM polymarket_events
+                WHERE city = ? AND target_date >= ? AND target_date <= ?
+                """,
+                (city, min(truth), max(truth)),
+            ).fetchall()
+            for event in events:
+                target_date = str(event["target_date"])
+                value = truth.get(target_date)
+                if (
+                    value is not None
+                    and value["basis"] in {"wunderground_daily", "iem_asos_approximation"}
+                    and is_noaa_primary(dict(event))
+                ):
+                    del truth[target_date]
     profile = SETTLEMENT_REGISTRY[city]
     cutoff = datetime.now(timezone.utc)
     if before_date:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -42,6 +43,20 @@ def test_db_path(name: str) -> Path:
 
 
 class PaperExitTests(unittest.TestCase):
+    def test_noaa_half_degree_breach_uses_market_rule_at_exit(self):
+        path = test_db_path("paper_exit_noaa_boundary")
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        now = datetime.now(timezone.utc)
+        _guarded_order(path, now=now, observed_high=32.6, model_probability=0.30)
+        with connect(path) as conn:
+            conn.execute(
+                "UPDATE market_buckets SET raw_json = ? WHERE bucket_key = 'bucket-exit'",
+                (json.dumps({"resolutionSource": "https://www.weather.gov/wrh/timeseries?site=KORD"}),),
+            )
+        result = evaluate_open_paper_exits(apply=True, path=path, now=now)
+        self.assertEqual(result["exited_now"], 1)
+        self.assertEqual(result["results"][0]["evaluation"]["trigger"], "observed_bucket_breach")
+
     def test_strategy_profile_accepts_guarded_exit_and_rejects_unknown_mode(self):
         guarded = validate_parameters({"exit_policy": {"mode": "model_guarded"}})
         self.assertEqual(guarded["exit_policy"]["mode"], "model_guarded")

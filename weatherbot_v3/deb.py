@@ -22,6 +22,7 @@ from .forecast_time import (
     historical_build_requires_explicit_as_of,
 )
 from .registry import forecast_source_matches_profile_location, get_city_profile
+from .settlement_temperature import is_noaa_primary, reported_temperature, settlement_rounding_rule
 
 
 METHOD = "weatherbot-deb-v2"
@@ -50,7 +51,7 @@ GLOBAL_DEB_WEIGHTS = {
 }
 
 MIN_BUCKET_PROBABILITY = 1e-9
-PROBABILITY_CONTRACT_VERSION = "gaussian-cdf-normalized-v2"
+PROBABILITY_CONTRACT_VERSION = "gaussian-cdf-rule-aligned-v3"
 
 
 def normal_cdf(value: float, mu: float, sigma: float, sigma_floor: float | None = None) -> float:
@@ -139,6 +140,7 @@ def bucket_probabilities(
             "bucket_low": None if math.isinf(low) and low < 0 else low,
             "bucket_high": None if math.isinf(high) and high > 0 else high,
             "bucket_unit": prediction_unit,
+            "settlement_rounding_rule": settlement_rounding_rule(bucket, _clean_unit(bucket.get("unit") or prediction_unit)),
             "probability_before_observed_floor": probability_before_floor,
             "observed_floor_excluded": floor_excluded,
             "probability_raw": probability,
@@ -189,7 +191,7 @@ def bucket_probabilities(
         "sigma_floor": floor,
         "sigma_floor_applied": sigma_safe != float(sigma or 0.0),
         "observed_floor": _optional_float(observed_floor),
-        "observed_floor_settlement_value": _observed_settlement_value(observed_floor, prediction_unit),
+        "observed_floor_settlement_value": _observed_settlement_value(observed_floor, prediction_unit, buckets[0] if buckets else None),
         "observed_floor_applied_to_distribution": excluded_by_observed_floor > 0,
         "observed_floor_excluded_bucket_count": excluded_by_observed_floor,
         "normalized": bool(normalize and items and raw_sum > 0),
@@ -1198,6 +1200,30 @@ def _bucket_bounds_in_prediction_unit(bucket: dict[str, Any], prediction_unit: s
     low_raw = _optional_float(bucket.get("bucket_low"))
     high_raw = _optional_float(bucket.get("bucket_high"))
     direction = str(bucket.get("bucket_direction") or "").lower()
+    if is_noaa_primary(bucket):
+        # Market labels are whole source-reported degrees, not latent intervals.
+        # This also closes the half-degree gaps at Fahrenheit range/tail edges.
+        low_raw = None if low_raw is not None and low_raw <= -900 else low_raw
+        high_raw = None if high_raw is not None and high_raw >= 900 else high_raw
+        value = _optional_float(bucket.get("bucket_value"))
+        if direction in {"or_below", "below", "under", "at_or_below"}:
+            endpoint = high_raw if high_raw is not None else low_raw if low_raw is not None else value
+            if endpoint is None:
+                return None
+            return -math.inf, convert_temp(endpoint + 0.5, bucket_unit, prediction_unit)
+        if direction in {"or_above", "above", "over", "at_or_above"}:
+            endpoint = low_raw if low_raw is not None else high_raw if high_raw is not None else value
+            if endpoint is None:
+                return None
+            return convert_temp(endpoint - 0.5, bucket_unit, prediction_unit), math.inf
+        if low_raw is None and high_raw is None:
+            low_raw = high_raw = value
+        if low_raw is None or high_raw is None:
+            return None
+        return (
+            convert_temp(min(low_raw, high_raw) - 0.5, bucket_unit, prediction_unit),
+            convert_temp(max(low_raw, high_raw) + 0.5, bucket_unit, prediction_unit),
+        )
     truncates_celsius = bucket_unit == "C"
 
     if direction in {"or_below", "below", "under", "at_or_below"}:
@@ -1237,13 +1263,11 @@ def _bucket_bounds_in_prediction_unit(bucket: dict[str, Any], prediction_unit: s
     return low, high
 
 
-def _observed_settlement_value(observed_floor: float | None, unit: str) -> float | None:
+def _observed_settlement_value(observed_floor: float | None, unit: str, bucket: dict[str, Any] | None = None) -> float | None:
     value = _optional_float(observed_floor)
     if value is None:
         return None
-    if _clean_unit(unit) == "C":
-        return float(math.floor(value + 1e-9))
-    return float(math.floor(value + 0.5 + 1e-9))
+    return reported_temperature(value, _clean_unit(unit), bucket or {})
 
 
 def _bucket_excluded_by_observed_floor(
@@ -1260,7 +1284,7 @@ def _bucket_excluded_by_observed_floor(
 
     bucket_unit = _clean_unit(bucket.get("unit") or prediction_unit)
     observed_in_bucket_unit = convert_temp(float(observed_floor), prediction_unit, bucket_unit)
-    observed_settlement_value = _observed_settlement_value(observed_in_bucket_unit, bucket_unit)
+    observed_settlement_value = _observed_settlement_value(observed_in_bucket_unit, bucket_unit, bucket)
     if observed_settlement_value is None:
         return False
 

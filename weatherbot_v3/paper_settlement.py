@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from .db import apply_paper_settlement_record, connect, list_paper_orders, list_settlements
+from .deb import bucket_bounds_in_prediction_unit
 from .polymarket import PolymarketDataClient
 from .registry import get_city_profile
+from .settlement_temperature import is_noaa_primary, reported_temperature
 
 
 SETTLEMENT_VERSION = "paper-settlement-v1"
@@ -97,6 +99,15 @@ def truth_outcome_for_order(order: dict[str, Any], *, path: Path | None = None) 
     if profile is None or not target_date:
         return {"available": False, "reason": "city_or_target_date_missing"}
     with connect(path) as conn:
+        market = conn.execute(
+            "SELECT bucket_lower_c, bucket_upper_c, is_tail, bucket_label, raw_json FROM polymarket_markets WHERE market_id = ?",
+            (str(order.get("market_id") or ""),),
+        ).fetchone()
+        bucket = dict(market) if market else _market_bucket_for_order(conn, order)
+        if is_noaa_primary(bucket):
+            # A local fetch failure does not authorize the rule's WU fallback.
+            # Gamma may settle the binary outcome without supplying a temperature.
+            return {"available": False, "exact": False, "reason": "noaa_settlement_truth_unavailable"}
         if city == "hong-kong":
             row = conn.execute(
                 "SELECT high_c, source_url FROM truth_hko_daily WHERE date_local = ? AND high_c IS NOT NULL",
@@ -118,11 +129,6 @@ def truth_outcome_for_order(order: dict[str, Any], *, path: Path | None = None) 
                 (str(profile.station_id or "").upper(), target_date),
             ).fetchone()
             truth = ({"actual_c": float(row["high_c"]), "provider": "iem_asos_approximation", "station": profile.station_id, "exact": False, "source_url": row["source_url"]} if row else None)
-        market = conn.execute(
-            "SELECT bucket_lower_c, bucket_upper_c, is_tail, bucket_label FROM polymarket_markets WHERE market_id = ?",
-            (str(order.get("market_id") or ""),),
-        ).fetchone()
-        bucket = dict(market) if market else _market_bucket_for_order(conn, order)
     if truth is None:
         return {"available": False, "reason": "settlement_truth_missing"}
     if not bucket:
@@ -132,6 +138,9 @@ def truth_outcome_for_order(order: dict[str, Any], *, path: Path | None = None) 
 
 
 def bucket_contains_celsius(actual_c: float, bucket: dict[str, Any]) -> bool:
+    if is_noaa_primary(bucket) and (bucket.get("bucket_low") is not None or bucket.get("bucket_high") is not None):
+        bounds = bucket_bounds_in_prediction_unit(bucket, "C")
+        return bounds is not None and bounds[0] <= actual_c < bounds[1]
     lower = _number(bucket.get("bucket_lower_c"))
     upper = _number(bucket.get("bucket_upper_c"))
     if lower is None and upper is None:
@@ -140,7 +149,7 @@ def bucket_contains_celsius(actual_c: float, bucket: dict[str, Any]) -> bool:
         direction = str(bucket.get("bucket_direction") or "exact").lower()
         low = _number(bucket.get("bucket_low"))
         high = _number(bucket.get("bucket_high"))
-        resolved_value = math.floor(actual) if unit == "C" else round(actual)
+        resolved_value = reported_temperature(actual, unit, bucket)
         if direction in {"or_below", "below", "at_or_below"}:
             bound = high if high is not None else low
             return bound is not None and resolved_value <= bound
@@ -247,7 +256,7 @@ def _store_market_payload(market_id: str, payload: dict[str, Any], path: Path | 
 def _market_bucket_for_order(conn, order: dict[str, Any]) -> dict[str, Any]:
     row = conn.execute(
         """
-        SELECT unit, bucket_direction, bucket_low, bucket_high, bucket_label
+        SELECT unit, bucket_direction, bucket_low, bucket_high, bucket_label, raw_json
         FROM market_buckets
         WHERE market_id = ? OR bucket_key = ?
         ORDER BY id DESC LIMIT 1
