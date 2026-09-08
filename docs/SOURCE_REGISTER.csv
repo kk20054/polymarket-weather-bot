@@ -1,6 +1,7 @@
 source_id,role,authority,url_or_path,cached_evidence,last_verified_at,refresh_rule,runtime_use,notes
 polywx_reference,UI and field-density benchmark,reference only,https://www.polywx.xyz/,audits/polywx-benchmark-2026-07-17-1312,2026-07-17,refresh after 14 days or a visible contract change,false,Never write PolyWX display values into trading truth
 polymarket_gamma,market and event metadata,official,https://gamma-api.polymarket.com,SQLite polymarket_events and market_buckets,,verify before market-contract changes,true,Rules station date buckets and market URL
+noaa_wrh_display_rounding,source display integer mapping,official,https://www.weather.gov/source/wrh/timeseries/obs.js?v202601121730,weatherbot_v3/settlement_temperature.py,2026-09-08,verify when dated market source or WRH display changes,true,Math.round air_temp_set_1 in metric and English modes; not a licensed historical truth API
 polymarket_clob,quotes orderbook and execution constraints,official,https://clob.polymarket.com,SQLite orderbook snapshots,,verify before execution-contract changes,true,Live remains disabled
 awc_metar,current airport observations,official,https://aviationweather.gov/api/data/metar,SQLite metar_reports,,verify when API or parser contract changes,true,Intraday evidence not final WU settlement truth
 iem_asos,METAR archive and settlement approximation,official archive,https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py,D:/WeatherBot/data/iem_asos_raw,,verify when archive parser changes,true,Approximation only unless rule evidence says otherwise
