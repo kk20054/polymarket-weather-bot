@@ -56,6 +56,102 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+.dashboard-startup {
+  display: grid;
+  min-height: 100vh;
+  min-height: 100dvh;
+  place-items: center;
+  padding: 32px 24px;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.dashboard-startup-content {
+  width: min(100%, 300px);
+}
+
+.dashboard-startup-brand {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.dashboard-startup-weather {
+  flex: 0 0 42px;
+  color: #38bdf8;
+}
+
+.dashboard-startup-brand h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+
+.dashboard-startup-brand p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dashboard-startup-track {
+  position: relative;
+  height: 2px;
+  margin: 28px 0 14px;
+  overflow: hidden;
+  background: var(--border);
+}
+
+.dashboard-startup-track span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 38%;
+  background: #38bdf8;
+  animation: dashboard-startup-scan 1.8s ease-in-out infinite;
+}
+
+.dashboard-startup-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.dashboard-startup-retry {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 114px;
+  min-height: 36px;
+  margin-top: 20px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  font-size: 12px;
+}
+
+.dashboard-startup-retry:hover:not(:disabled) { background: var(--card-hover); }
+.dashboard-startup-retry:focus-visible { outline: 2px solid #38bdf8; outline-offset: 3px; }
+.dashboard-startup-retry:disabled { opacity: 0.6; cursor: wait; }
+.polywx-light.dashboard-startup { --muted: #64748b; }
+.polywx-dark.dashboard-startup { --muted: #929ead; }
+.polywx-light .dashboard-startup-weather { color: #0284c7; }
+
+@keyframes dashboard-startup-scan {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(370%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-startup-track span { animation: none; left: 31%; }
+}
+
 .polywx-light {
   --background: #ffffff;
   --foreground: #111827;

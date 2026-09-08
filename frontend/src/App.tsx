@@ -41,6 +41,7 @@ import {
   verifySettlementContractsBulk,
 } from './api'
 import { DataReadinessPanel } from './components/DataReadinessPanel'
+import { DashboardStartup } from './components/DashboardStartup'
 const DeveloperSettingsDrawer = lazy(() => import('./components/DeveloperSettingsDrawer').then(module => ({ default: module.DeveloperSettingsDrawer })))
 import { ExecutionWorkbench } from './components/ExecutionWorkbench'
 import { ModelDatasetPanel } from './components/ModelDatasetPanel'
@@ -973,7 +974,7 @@ function App() {
     }
   }
 
-  const { data, isLoading, isPlaceholderData, error, refetch, dataUpdatedAt } = useQuery({
+  const { data, isLoading, isFetching, isPlaceholderData, error, refetch, dataUpdatedAt } = useQuery({
     queryKey: ['dashboard', selectedCity],
     queryFn: ({ signal }) => fetchDashboard(selectedCity, signal),
     placeholderData: keepPreviousData,
@@ -1618,30 +1619,11 @@ function App() {
   }, [themeMode])
 
   if (isLoading) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-black text-neutral-300">
-        <div className="text-center">
-          <div className="mx-auto mb-4 h-9 w-9 animate-spin border-2 border-neutral-800 border-t-green-400" />
-          <div className="text-xs text-neutral-500">正在连接本地看板 API...</div>
-        </div>
-      </div>
-    )
+    return <DashboardStartup theme={themeMode} language={uiLanguage} />
   }
 
   if (!data) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-black text-neutral-300">
-        <div className="max-w-md border border-red-500/30 bg-red-500/5 p-5 text-center">
-          <div className="mb-2 text-sm text-red-300">后端未连接</div>
-          <p className="mb-4 text-[12px] leading-relaxed text-neutral-500">
-            请确认 dashboard_server 正在运行于 http://127.0.0.1:8765，然后刷新页面。
-          </p>
-          <button onClick={() => refetch()} className="border border-neutral-700 px-3 py-1.5 text-xs text-neutral-200">
-            重试
-          </button>
-        </div>
-      </div>
-    )
+    return <DashboardStartup theme={themeMode} language={uiLanguage} failed retrying={isFetching} onRetry={() => { void refetch() }} />
   }
 
   const remoteReadOnly = apiAccess.mode === 'snapshot' || apiAccess.mode === 'unknown' || !apiAccess.writable
